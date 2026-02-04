@@ -18,6 +18,15 @@ from io import BytesIO
 import secrets
 import string
 
+
+def escape_markdown(text):
+    """Escapa caracteres especiales de Markdown para evitar errores de parsing"""
+    if not text:
+        return text
+    # Caracteres que necesitan escape en MarkdownV2
+    escape_chars = r'_*[]()~>#+-=|{}.!'
+    return ''.join('\\' + char if char in escape_chars else char for char in str(text))
+
 # Configuración de logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -40,12 +49,12 @@ OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 
 # Datos bancarios para pagos
 DATOS_BANCARIOS = """
-💳 **DATOS PARA TRANSFERENCIA**
+💳 <b>DATOS PARA TRANSFERENCIA</b>
 
-**Titular:** Destak E.I.R.L.
-**RUT:** 76.698.480-0
-**Banco:** Banco Santander
-**Cuenta Corriente:** 69104312
+<b>Titular:</b> Destak E.I.R.L.
+<b>RUT:</b> 76.698.480-0
+<b>Banco:</b> Banco Santander
+<b>Cuenta Corriente:</b> 69104312
 
 📸 Envía el comprobante como imagen después de transferir.
 """
@@ -585,7 +594,7 @@ def buscar_profesionales(query):
         archivo = buscar_archivo_excel_drive()
         
         if not archivo:
-            return "❌ No se pudo acceder a la base de datos de profesionales.\n\n💡 **Posibles causas:**\n• La carpeta INBESTU no está compartida con el bot\n• No existe el archivo 'BD Grupo Laboral' en la carpeta\n• Error de permisos en Google Drive\n\nContacta al administrador."
+            return "❌ No se pudo acceder a la base de datos de profesionales.\n\n💡 <b>Posibles causas:</b>\n• La carpeta INBESTU no está compartida con el bot\n• No existe el archivo 'BD Grupo Laboral' en la carpeta\n• Error de permisos en Google Drive\n\nContacta al administrador."
         
         df = pd.read_excel(archivo, engine='openpyxl')
         df.columns = df.columns.str.strip().str.lower()
@@ -659,7 +668,7 @@ Determina el encabezado según coincidencias:
 
 Lista profesionales (máximo 10):
 
-**[Número]. [Nombre]**
+<b>[Número]. [Nombre]</b>
 🎯 Área: [profesión]
 💼 Expertise: [expertise - 1 línea]
 📊 Estado: [Contratado/Independiente/Cesante]
@@ -691,7 +700,7 @@ Responde en español, claro y profesional."""
         logger.error(f"Error buscando profesionales: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return f"❌ Error al buscar profesionales: {str(e)}\n\n**Detalles técnicos:** {type(e).__name__}\n\nPor favor, intenta de nuevo o contacta al administrador."
+        return f"❌ Error al buscar profesionales: {str(e)}\n\n<b>Detalles técnicos:</b> {type(e).__name__}\n\nPor favor, intenta de nuevo o contacta al administrador."
 
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
@@ -714,10 +723,10 @@ def generar_resumen_usuarios(dias=1):
 {contexto[:6000]}
 Estructura:
 📊 RESUMEN {'DIARIO' if dias == 1 else 'SEMANAL'} - {datetime.now().strftime('%d/%m/%Y')}
-**📌 Temas Principales** (4-5 bullets)
-**💡 Insights** (3-4 bullets)
-**🎯 Destacados**
-**📚 Próximos Pasos**
+<b>📌 Temas Principales</b> (4-5 bullets)
+<b>💡 Insights</b> (3-4 bullets)
+<b>🎯 Destacados</b>
+<b>📚 Próximos Pasos</b>
 Total: {len(mensajes)} mensajes
 Máximo 350 palabras."""
     try:
@@ -737,7 +746,7 @@ def generar_resumen_admins(dias=1):
     if not resumen_base:
         return None
     analisis = analizar_participacion_usuarios(dias)
-    seccion_admin = "\n\n" + "="*50 + "\n👑 **SECCIÓN ADMINISTRADORES**\n" + "="*50 + "\n\n**📊 MÉTRICAS**\n\n"
+    seccion_admin = "\n\n" + "="*50 + "\n👑 <b>SECCIÓN ADMINISTRADORES</b>\n" + "="*50 + "\n\n<b>📊 MÉTRICAS</b>\n\n"
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
@@ -746,9 +755,9 @@ def generar_resumen_admins(dias=1):
     c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
     usuarios_activos = c.fetchone()[0]
     conn.close()
-    seccion_admin += f"• Total: {total_msgs}\n• Usuarios: {usuarios_activos}\n\n**🌟 DESTACADOS**\n\n"
+    seccion_admin += f"• Total: {total_msgs}\n• Usuarios: {usuarios_activos}\n\n<b>🌟 DESTACADOS</b>\n\n"
     for user in analisis[:10]:
-        seccion_admin += f"{user['nivel']} **{user['nombre']}**\n   • {user['total_mensajes']} mensajes\n   • 💡 {user['sugerencia']}\n\n"
+        seccion_admin += f"{user['nivel']} <b>{user['nombre']}</b>\n   • {user['total_mensajes']} mensajes\n   • 💡 {user['sugerencia']}\n\n"
     return resumen_base + seccion_admin
 
 # ==================== RECORDATORIOS Y ENGAGEMENT (MEJORADOS) ====================
@@ -779,13 +788,13 @@ async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
         
         if dias_restantes == 5:
             mensaje = f"""
-🔔 **Hola {nombre}!**
+🔔 <b>Hola {nombre}!</b>
 
-Te escribo para recordarte que en **5 días** vence tu acceso al Bot Cofradía.
+Te escribo para recordarte que en <b>5 días</b> vence tu acceso al Bot Cofradía.
 
-💡 **¿Por qué renovar?**
+💡 <b>¿Por qué renovar?</b>
 
-Este bot es un **servicio opcional y voluntario** que hemos creado para la comunidad. Tu suscripción no solo te da acceso a herramientas poderosas, sino que nos permite:
+Este bot es un <b>servicio opcional y voluntario</b> que hemos creado para la comunidad. Tu suscripción no solo te da acceso a herramientas poderosas, sino que nos permite:
 
 ✅ Mantener servidores activos 24/7
 ✅ Pagar el servicio de IA (Gemini API)
@@ -793,7 +802,7 @@ Este bot es un **servicio opcional y voluntario** que hemos creado para la comun
 ✅ Ofrecer soporte técnico continuo
 ✅ Mejorar constantemente la experiencia
 
-**Tu aporte hace posible que Cofradía siga creciendo.** 🌱
+<b>Tu aporte hace posible que Cofradía siga creciendo.</b> 🌱
 
 Si decides renovar, estarás invirtiendo en una herramienta que te ahorra tiempo y te mantiene conectado con la comunidad.
 
@@ -804,24 +813,24 @@ Gracias por ser parte de Cofradía. 🙏
         
         elif dias_restantes == 3:
             mensaje = f"""
-⭐ **{nombre}, quedan 3 días!**
+⭐ <b>{nombre}, quedan 3 días!</b>
 
-Quiero recordarte el **valor real** que el Bot Cofradía te ofrece:
+Quiero recordarte el <b>valor real</b> que el Bot Cofradía te ofrece:
 
-🔍 **Búsqueda inteligente con IA** - Encuentra info en segundos
-🧠 **Búsqueda semántica** - Por significado, no solo palabras
-💼 **Búsqueda de empleos** - LinkedIn, Indeed, Laborum integrados
-👥 **Búsqueda de profesionales** - Encuentra expertos en Cofradía
-📊 **Análisis visuales** - Gráficos profesionales estilo Google
-📝 **Resúmenes automáticos** - Mantente al día sin esfuerzo
+🔍 <b>Búsqueda inteligente con IA</b> - Encuentra info en segundos
+🧠 <b>Búsqueda semántica</b> - Por significado, no solo palabras
+💼 <b>Búsqueda de empleos</b> - LinkedIn, Indeed, Laborum integrados
+👥 <b>Búsqueda de profesionales</b> - Encuentra expertos en Cofradía
+📊 <b>Análisis visuales</b> - Gráficos profesionales estilo Google
+📝 <b>Resúmenes automáticos</b> - Mantente al día sin esfuerzo
 
-**¿Cuánto vale tu tiempo?**
+<b>¿Cuánto vale tu tiempo?</b>
 
-Si el bot te ahorra **30 minutos al día** = **15 horas al mes**
-A $10.000/hora = **$150.000 de valor**
-Tu inversión: Solo **${precio_mensual:,}/mes**
+Si el bot te ahorra <b>30 minutos al día</b> = <b>15 horas al mes</b>
+A $10.000/hora = <b>$150.000 de valor</b>
+Tu inversión: Solo <b>${precio_mensual:,}/mes</b>
 
-**💰 ROI: 7,500% de retorno**
+<b>💰 ROI: 7,500% de retorno</b>
 
 Tu aporte permite:
 • Pagar servidores ($15 USD/mes)
@@ -829,7 +838,7 @@ Tu aporte permite:
 • Almacenamiento ($10 USD/mes)
 • Actualizaciones constantes
 
-**Es voluntario, pero es valioso.** 🎯
+<b>Es voluntario, pero es valioso.</b> 🎯
 
 Usa /renovar para continuar.
 """
@@ -839,54 +848,54 @@ Usa /renovar para continuar.
             no_usados_texto = ", ".join(no_usados) if no_usados else "todos"
             
             mensaje = f"""
-⚠️ **{nombre}, ¡MAÑANA vence tu acceso!**
+⚠️ <b>{nombre}, ¡MAÑANA vence tu acceso!</b>
 
-Quiero ser **totalmente transparente** contigo:
+Quiero ser <b>totalmente transparente</b> contigo:
 
-**Este bot es 100% opcional y voluntario.** No estás obligado a renovar.
+<b>Este bot es 100% opcional y voluntario.</b> No estás obligado a renovar.
 
-**PERO...**
+<b>PERO...</b>
 
 Si has encontrado valor en usar el bot, tu renovación hace posible que sigamos mejorándolo para TODA la comunidad Cofradía.
 
-**Tu historial:**
-✅ **Servicios usados:** {servicios_usados_texto}
-⏳ **Te faltan por probar:** {no_usados_texto}
+<b>Tu historial:</b>
+✅ <b>Servicios usados:</b> {servicios_usados_texto}
+⏳ <b>Te faltan por probar:</b> {no_usados_texto}
 
-**¿Qué financia tu suscripción?**
+<b>¿Qué financia tu suscripción?</b>
 
 Cada mes invertimos en:
-• **$15 USD** - Servidor Render (24/7)
-• **$20 USD** - API de Gemini (IA avanzada)
-• **$10 USD** - Almacenamiento y bases de datos
-• **Horas** - Desarrollo y soporte
+• <b>$15 USD</b> - Servidor Render (24/7)
+• <b>$20 USD</b> - API de Gemini (IA avanzada)
+• <b>$10 USD</b> - Almacenamiento y bases de datos
+• <b>Horas</b> - Desarrollo y soporte
 
-**Total: ~$45 USD/mes de costos reales**
+<b>Total: ~$45 USD/mes de costos reales</b>
 
 Con 23 usuarios pagando = Cubrimos costos básicos
 Más usuarios = Más mejoras para todos
 
-**Tu aporte sí importa.** 💪
+<b>Tu aporte sí importa.</b> 💪
 
-**Beneficios de renovar HOY:**
+<b>Beneficios de renovar HOY:</b>
 ✅ Sin interrupciones en el servicio
 ✅ Mantienes tu historial de búsquedas
 ✅ Acceso inmediato a nuevas funciones
 ✅ Apoyas el crecimiento de Cofradía
 
-**Precio:** ${precio_mensual:,}/mes
-**Valor que recibes:** Incalculable
+<b>Precio:</b> ${precio_mensual:,}/mes
+<b>Valor que recibes:</b> Incalculable
 
-⏰ **Renueva ahora:** /renovar
+⏰ <b>Renueva ahora:</b> /renovar
 
 Si decides no renovar, está bien. Seguirás siendo parte de Cofradía, solo sin acceso al bot.
 
 Pero si lo renuevas, estarás invirtiendo en:
-1. **Tu productividad** personal
-2. **Tu tiempo** valioso
-3. **Tu comunidad** profesional
+1. <b>Tu productividad</b> personal
+2. <b>Tu tiempo</b> valioso
+3. <b>Tu comunidad</b> profesional
 
-**¿Qué eliges?** La decisión es tuya. 🤝
+<b>¿Qué eliges?</b> La decisión es tuya. 🤝
 
 Gracias por considerarlo. 🙏
 """
@@ -923,11 +932,11 @@ async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
         servicios_usados = json.loads(servicios_str)
         
         mensajes_engagement = [
-            f"👋 **Hola {nombre}!**\n\n¿Sabías que puedes usar /buscar_ia para encontrar conversaciones por significado?\n\nPruébalo! 🧠",
-            f"💼 **{nombre}, ¿buscas empleo?**\n\nUsa /empleo o /buscar_profesional para encontrar oportunidades! 🚀",
-            f"📊 **{nombre}, usa /graficos** para ver análisis visuales del grupo! 📈",
-            f"⏰ **Tip:** Usa /resumen para mantenerte al día en 2 minutos! ⚡",
-            f"🎯 **{nombre}:** Servicios usados: {', '.join(servicios_usados) if servicios_usados else 'Ninguno'}. Usa /ayuda! 💡"
+            f"👋 <b>Hola {nombre}!</b>\n\n¿Sabías que puedes usar /buscar_ia para encontrar conversaciones por significado?\n\nPruébalo! 🧠",
+            f"💼 <b>{nombre}, ¿buscas empleo?</b>\n\nUsa /empleo o /buscar_profesional para encontrar oportunidades! 🚀",
+            f"📊 <b>{nombre}, usa /graficos</b> para ver análisis visuales del grupo! 📈",
+            f"⏰ <b>Tip:</b> Usa /resumen para mantenerte al día en 2 minutos! ⚡",
+            f"🎯 <b>{nombre}:</b> Servicios usados: {', '.join(servicios_usados) if servicios_usados else 'Ninguno'}. Usa /ayuda! 💡"
         ]
         
         mensaje = mensajes_engagement[num_msg % len(mensajes_engagement)]
@@ -952,24 +961,24 @@ async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
 
 def requiere_suscripcion(func):
     """Decorador para verificar suscripción activa"""
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, <b>kwargs):
         user_id = update.effective_user.id
         
         if not verificar_suscripcion_activa(user_id):
             dias_restantes = obtener_dias_restantes(user_id)
             if dias_restantes > 0:
                 await update.message.reply_text(
-                    f"⏰ Tu suscripción vence en **{dias_restantes} días**.\n\nUsa /renovar para extenderla.",
+                    f"⏰ Tu suscripción vence en </b>{dias_restantes} días<b>.\n\nUsa /renovar para extenderla.",
                     parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(
-                    "❌ **Tu suscripción ha expirado.**\n\nPara seguir usando el bot, renueva con /renovar",
+                    "❌ </b>Tu suscripción ha expirado.**\n\nPara seguir usando el bot, renueva con /renovar",
                     parse_mode='Markdown'
                 )
             return
         
-        return await func(update, context, *args, **kwargs)
+        return await func(update, context, *args, <b>kwargs)
     
     return wrapper
 
@@ -979,73 +988,73 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     mensaje_bienvenida = f"""
-👋 **¡Bienvenido {user.first_name} a Bot Cofradía Premium!**
+👋 </b>¡Bienvenido {user.first_name} a Bot Cofradía Premium!<b>
 
 Soy tu asistente inteligente para la comunidad.
 
-📍 **¿DÓNDE USAR LOS COMANDOS?**
+📍 </b>¿DÓNDE USAR LOS COMANDOS?<b>
 
-🔓 **EN EL GRUPO COFRADÍA:**
-   • `/buscar [palabra]` - Buscar en historial
-   • `/buscar_ia [frase]` - Búsqueda semántica IA
-   • `/empleo cargo:X ubicacion:Y` - Buscar empleos
-   • `/graficos` - Estadísticas visuales del grupo
-   • `/resumen` - Resumen del día
-   • `/estadisticas` - Números del grupo
-   • `@bot [pregunta]` - Consultar a la IA
+🔓 </b>EN EL GRUPO COFRADÍA:<b>
+   • /buscar [palabra] - Buscar en historial
+   • /buscar_ia [frase] - Búsqueda semántica IA
+   • /empleo cargo:X ubicacion:Y - Buscar empleos
+   • /graficos - Estadísticas visuales del grupo
+   • /resumen - Resumen del día
+   • /estadisticas - Números del grupo
+   • @bot [pregunta] - Consultar a la IA
    
-🔒 **EN PRIVADO (solo tú y yo):**
-   • `/registrarse` - Activar tu cuenta (primera vez)
-   • `/renovar` - Renovar suscripción
-   • `/mi_cuenta` - Ver estado de tu cuenta
-   • **Enviar comprobante** - Foto de transferencia
+🔒 </b>EN PRIVADO (solo tú y yo):<b>
+   • /registrarse - Activar tu cuenta (primera vez)
+   • /renovar - Renovar suscripción
+   • /mi_cuenta - Ver estado de tu cuenta
+   • </b>Enviar comprobante<b> - Foto de transferencia
    
-💡 **EJEMPLOS DE USO:**
-   ✓ `/buscar networking`
-   ✓ `/buscar_ia cómo conseguir financiamiento`
-   ✓ `/empleo cargo:Gerente ubicacion:Santiago`
-   ✓ `@bot ¿qué es blockchain?`
+💡 </b>EJEMPLOS DE USO:<b>
+   ✓ /buscar networking
+   ✓ /buscar_ia cómo conseguir financiamiento
+   ✓ /empleo cargo:Gerente ubicacion:Santiago
+   ✓ @bot ¿qué es blockchain?
    
-📖 Usa `/ayuda` para ver todos los comandos disponibles.
+📖 Usa /ayuda para ver todos los comandos disponibles.
 
-¡Comienza registrándote con `/registrarse` en el grupo! ✨
+¡Comienza registrándote con /registrarse en el grupo! ✨
 """
     
     await update.message.reply_text(mensaje_bienvenida, parse_mode='Markdown')
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ayuda = """
-🤖 **Bot Cofradía - Guía Completa**
+🤖 </b>Bot Cofradía - Guía Completa<b>
 
-**🔍 Búsqueda:**
+</b>🔍 Búsqueda:<b>
 /buscar [palabra] - Búsqueda tradicional
 /buscar_ia [frase] - Búsqueda semántica IA
 
-**💼 Empleos y Profesionales:**
+</b>💼 Empleos y Profesionales:<b>
 /empleo cargo:[...] ubicacion:[...] - Buscar empleos
 /buscar_profesional [área/expertise] - Buscar profesionales
 
-**📊 Análisis:**
+</b>📊 Análisis:<b>
 /graficos - Gráficos profesionales
 /estadisticas - Números del grupo
 /categorias - Distribución
 
-**📝 Resúmenes:**
+</b>📝 Resúmenes:<b>
 /resumen - Resumen del día
 /resumen_semanal - Resumen semanal
 
-**💳 Suscripción:**
+</b>💳 Suscripción:<b>
 /registrarse - Activar cuenta
 /renovar - Renovar suscripción
 /activar [código] - Usar código
 /mi_cuenta - Ver estado
 
-**👑 Admin (solo dueño):**
+</b>👑 Admin (solo dueño):<b>
 /generar_codigo - Crear códigos
 /precios - Configurar precios
 /pagos_pendientes - Revisar pagos
 
-**💬 IA:**
+</b>💬 IA:<b>
 Menciona @bot [pregunta]
 """
     await update.message.reply_text(texto_ayuda, parse_mode='Markdown')
@@ -1060,7 +1069,7 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     if verificar_suscripcion_activa(user.id):
         dias = obtener_dias_restantes(user.id)
         await update.message.reply_text(
-            f"✅ Ya estás registrado. Tu suscripción vence en **{dias} días**.",
+            f"✅ Ya estás registrado. Tu suscripción vence en </b>{dias} días<b>.",
             parse_mode='Markdown'
         )
         return
@@ -1070,17 +1079,17 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     registrar_usuario_suscripcion(user.id, user.first_name, user.username or "sin_username", es_admin)
     
-    mensaje_grupo = f"✅ **{user.first_name}** registrado! Inicia conversación conmigo en privado (/start) para activar todas las funciones."
+    mensaje_grupo = f"✅ </b>{user.first_name}<b> registrado! Inicia conversación conmigo en privado (/start) para activar todas las funciones."
     
-    await update.message.reply_text(mensaje_grupo, parse_mode='Markdown')
+    await update.message.reply_text(mensaje_grupo, parse_mode='HTML')
     
     try:
         mensaje_privado = f"""
-👋 **¡Bienvenido {user.first_name}!**
+👋 </b>¡Bienvenido {user.first_name}!<b>
 
 Has activado tu cuenta en el Bot Cofradía. 🎉
 
-**Ahora puedes:**
+</b>Ahora puedes:<b>
 🔍 Buscar información con IA
 👥 Buscar profesionales en la comunidad
 💼 Encontrar empleos
@@ -1091,7 +1100,7 @@ Usa /ayuda para ver todos los comandos.
 
 ¡Empieza a explorar! 🚀
 """
-        await context.bot.send_message(chat_id=user.id, text=mensaje_privado, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=user.id, text=mensaje_privado, parse_mode='HTML')
     except:
         pass
 
@@ -1108,7 +1117,7 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     mensaje = f"""
-💳 **RENOVACIÓN DE SUSCRIPCIÓN**
+💳 </b>RENOVACIÓN DE SUSCRIPCIÓN**
 
 Selecciona tu plan:
 """
@@ -1122,9 +1131,9 @@ Selecciona tu plan:
             precio_normal = next((p[1] for p in precios if p[0] == 30), 2000)
             ahorro = f" (Ahorras ${int((precio_normal * 12) - precio):,})"
         
-        mensaje += f"\n💎 **{nombre}** - ${precio:,}{ahorro}"
+        mensaje += f"\n💎 <b>{nombre}</b> - ${precio:,}{ahorro}"
     
-    await update.message.reply_text(mensaje, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text(mensaje, reply_markup=reply_markup, parse_mode='HTML')
 
 async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1136,16 +1145,16 @@ async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre_plan = next((p[2] for p in precios if p[0] == dias), "Plan")
     
     mensaje = f"""
-✅ **Plan seleccionado:** {nombre_plan}
-💰 **Precio:** ${precio:,}
-⏳ **Duración:** {dias} días
+✅ <b>Plan seleccionado:</b> {nombre_plan}
+💰 <b>Precio:</b> ${precio:,}
+⏳ <b>Duración:</b> {dias} días
 
 {DATOS_BANCARIOS}
 
-Después de transferir, envíame el comprobante como **imagen**.
+Después de transferir, envíame el comprobante como <b>imagen</b>.
 """
     
-    await query.edit_message_text(mensaje, parse_mode='Markdown')
+    await query.edit_message_text(mensaje, parse_mode='HTML')
     
     context.user_data['plan_seleccionado'] = dias
     context.user_data['precio'] = precio
@@ -1205,7 +1214,7 @@ Responde SOLO JSON."""
         
         import re
         response_text = response.text.strip()
-        response_text = re.sub(r'```json\s*|\s*```', '', response_text)
+        response_text = re.sub(r'`json\s*|\s*`', '', response_text)
         
         try:
             datos_ocr = json.loads(response_text)
@@ -1215,22 +1224,22 @@ Responde SOLO JSON."""
         if not datos_ocr.get("legible", False) or datos_ocr.get("calidad_imagen") == "mala":
             await msg_procesando.delete()
             await update.message.reply_text(
-                "❌ **Imagen no clara**\n\nEnvía una foto más nítida. 📸",
+                "❌ <b>Imagen no clara</b>\n\nEnvía una foto más nítida. 📸",
                 parse_mode='Markdown'
             )
             return
         
-        analisis = "🤖 **ANÁLISIS AUTOMÁTICO**\n\n"
+        analisis = "🤖 <b>ANÁLISIS AUTOMÁTICO</b>\n\n"
         
         if datos_ocr.get("monto_correcto"):
-            analisis += f"✅ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Correcto)\n"
+            analisis += f"✅ <b>Monto:</b> ${datos_ocr.get('monto_detectado', 'N/A')} (Correcto)\n"
         else:
-            analisis += f"⚠️ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Esperado: ${precio:,})\n"
+            analisis += f"⚠️ <b>Monto:</b> ${datos_ocr.get('monto_detectado', 'N/A')} (Esperado: ${precio:,})\n"
         
         if datos_ocr.get("cuenta_correcta"):
-            analisis += f"✅ **Cuenta:** {datos_ocr.get('cuenta_detectada', 'N/A')} (Correcta)\n"
+            analisis += f"✅ <b>Cuenta:</b> {datos_ocr.get('cuenta_detectada', 'N/A')} (Correcta)\n"
         else:
-            analisis += f"⚠️ **Cuenta:** {datos_ocr.get('cuenta_detectada', 'N/A')}\n"
+            analisis += f"⚠️ <b>Cuenta:</b> {datos_ocr.get('cuenta_detectada', 'N/A')}\n"
         
         await msg_procesando.delete()
         await update.message.reply_text(
@@ -1241,7 +1250,7 @@ Responde SOLO JSON."""
     except Exception as e:
         logger.error(f"Error en OCR: {e}")
         await msg_procesando.delete()
-        analisis = "⚠️ **Revisión manual**\n\nEl administrador revisará tu comprobante."
+        analisis = "⚠️ <b>Revisión manual</b>\n\nEl administrador revisará tu comprobante."
         await update.message.reply_text(analisis, parse_mode='Markdown')
         datos_ocr = {"observaciones": f"Error: {str(e)}"}
     
@@ -1269,10 +1278,10 @@ Responde SOLO JSON."""
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     caption_dueño = f"""
-💳 **PAGO #{pago_id}**
+💳 <b>PAGO #{pago_id}</b>
 
 👤 {user.first_name} (@{user.username or 'sin_username'})
-📱 ID: `{user.id}`
+📱 ID: {user.id}
 💎 Plan: {nombre_plan} ({dias} días)
 💰 Precio: ${precio:,}
 
@@ -1287,7 +1296,7 @@ Responde SOLO JSON."""
             photo=file_id,
             caption=caption_dueño,
             reply_markup=reply_markup,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     except Exception as e:
         logger.error(f"Error notificando al dueño: {e}")
@@ -1326,12 +1335,12 @@ async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAUL
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"✅ **¡PAGO APROBADO!**\n\nCódigo: `{codigo}`\n\nActívalo: /activar {codigo}\n\n¡Gracias! 🎉",
+                text=f"✅ <b>¡PAGO APROBADO!</b>\n\nCódigo: {codigo}\n\nActívalo: /activar {codigo}\n\n¡Gracias! 🎉",
                 parse_mode='Markdown'
             )
             
             await query.edit_message_caption(
-                f"{query.message.caption}\n\n✅ **APROBADO**\nCódigo: `{codigo}`",
+                f"{query.message.caption}\n\n✅ <b>APROBADO</b>\nCódigo: {codigo}",
                 parse_mode='Markdown'
             )
             
@@ -1349,7 +1358,7 @@ async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAUL
                 parse_mode='Markdown'
             )
             
-            await query.edit_message_caption(f"{query.message.caption}\n\n❌ **RECHAZADO**", parse_mode='Markdown')
+            await query.edit_message_caption(f"{query.message.caption}\n\n❌ <b>RECHAZADO</b>", parse_mode='Markdown')
         except:
             pass
     
@@ -1361,7 +1370,7 @@ async def activar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
     
     if not context.args:
         await update.message.reply_text(
-            "❌ Uso: /activar [código]\n\nEjemplo: `/activar COF-ABCD-1234-EFGH`",
+            "❌ Uso: /activar [código]\n\nEjemplo: /activar COF-ABCD-1234-EFGH",
             parse_mode='Markdown'
         )
         return
@@ -1398,21 +1407,21 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado_emoji = "✅" if estado == 'activo' and dias_restantes > 0 else "❌"
     
     mensaje = f"""
-👤 **MI CUENTA**
+👤 <b>MI CUENTA</b>
 
 {estado_emoji} Estado: {'Activo' if estado == 'activo' and dias_restantes > 0 else 'Expirado'}
 {'👑 Administrador' if es_admin else ''}
 
-⏳ Días restantes: **{max(0, dias_restantes)}**
+⏳ Días restantes: <b>{max(0, dias_restantes)}</b>
 📅 Vence: {fecha_exp_dt.strftime('%d/%m/%Y')}
 
-**Servicios usados:**
+<b>Servicios usados:</b>
 {', '.join(servicios) if servicios else 'Ninguno aún'}
 
 Usa /renovar para extender.
 """
     
-    await update.message.reply_text(mensaje, parse_mode='Markdown')
+    await update.message.reply_text(mensaje, parse_mode='HTML')
 
 # ==================== COMANDOS ADMIN ====================
 
@@ -1435,7 +1444,7 @@ async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text("👑 **GENERAR CÓDIGO**\n\nSelecciona:", reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text("👑 <b>GENERAR CÓDIGO</b>\n\nSelecciona:", reply_markup=reply_markup, parse_mode='Markdown')
 
 async def callback_generar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback generar código"""
@@ -1452,7 +1461,7 @@ async def callback_generar_codigo(update: Update, context: ContextTypes.DEFAULT_
     codigo = generar_codigo_activacion(dias, precio)
     
     await query.edit_message_text(
-        f"✅ **CÓDIGO GENERADO**\n\n`{codigo}`\n\n📋 Duración: {dias} días\n💰 Precio: ${precio:,}\n⏰ Válido: 30 días",
+        f"✅ <b>CÓDIGO GENERADO</b>\n\n{codigo}`\n\n📋 Duración: {dias} días\n💰 Precio: ${precio:,}\n⏰ Válido: 30 días",
         parse_mode='Markdown'
     )
 
@@ -1466,7 +1475,7 @@ async def precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     precios = obtener_precios()
     
-    mensaje = "💰 **PRECIOS**\n\n"
+    mensaje = "💰 <b>PRECIOS</b>\n\n"
     for dias, precio, nombre in precios:
         mensaje += f"• {nombre} ({dias} días): ${precio:,}\n"
     
@@ -1518,7 +1527,7 @@ async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("✅ No hay pagos.")
         return
     
-    mensaje = "💳 **PAGOS RECIENTES**\n\n"
+    mensaje = "💳 <b>PAGOS RECIENTES</b>\n\n"
     
     for pago_id, nombre, dias, precio, fecha, estado in pagos:
         emoji = "⏳" if estado == 'pendiente' else ("✅" if estado == 'aprobado' else "❌")
@@ -1540,10 +1549,10 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not resultados:
         await update.message.reply_text(f"❌ No encontré: *{query}*", parse_mode='Markdown')
         return
-    respuesta = f"🔍 **Búsqueda:** {query}\n\n"
+    respuesta = f"🔍 <b>Búsqueda:</b> {query}\n\n"
     for nombre, mensaje, fecha in resultados:
         mensaje_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
-        respuesta += f"👤 **{nombre}** ({fecha}):\n{mensaje_corto}\n\n"
+        respuesta += f"👤 <b>{nombre}</b> ({fecha}):\n{mensaje_corto}\n\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 @requiere_suscripcion
@@ -1559,10 +1568,10 @@ async def buscar_semantica_comando(update: Update, context: ContextTypes.DEFAULT
     if not resultados:
         await update.message.reply_text("❌ Sin resultados", parse_mode='Markdown')
         return
-    respuesta = f"🧠 **Búsqueda IA:** {query}\n\n"
+    respuesta = f"🧠 <b>Búsqueda IA:</b> {query}\n\n"
     for nombre, mensaje, fecha in resultados:
         mensaje_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
-        respuesta += f"👤 **{nombre}** ({fecha}):\n{mensaje_corto}\n\n"
+        respuesta += f"👤 <b>{nombre}</b> ({fecha}):\n{mensaje_corto}\n\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 @requiere_suscripcion
@@ -1592,7 +1601,7 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
     
     if not context.args:
         await update.message.reply_text(
-            "❌ **Uso:** /buscar_profesional [área]\n\n**Ejemplos:**\n• diseñador gráfico\n• contador\n• abogado laboral",
+            "❌ <b>Uso:</b> /buscar_profesional [área]\n\n<b>Ejemplos:</b>\n• diseñador gráfico\n• contador\n• abogado laboral",
             parse_mode='Markdown'
         )
         return
@@ -1616,7 +1625,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 Generando...")
     stats = obtener_estadisticas_graficos(dias=7)
     imagen_buffer = generar_grafico_visual(stats)
-    await update.message.reply_photo(photo=imagen_buffer, caption="📊 **Análisis Visual**")
+    await update.message.reply_photo(photo=imagen_buffer, caption="📊 <b>Análisis Visual</b>")
 
 @requiere_suscripcion
 async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1651,13 +1660,13 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     hoy_count = c.fetchone()[0]
     conn.close()
     respuesta = f"""
-📊 **ESTADÍSTICAS**
+📊 <b>ESTADÍSTICAS</b>
 
 📝 Total: {total:,}
 👥 Usuarios: {usuarios}
 🕐 Hoy: {hoy_count}
 """
-    await update.message.reply_text(respuesta, parse_mode='Markdown')
+    await update.message.reply_text(respuesta, parse_mode='HTML')
 
 @requiere_suscripcion
 async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1673,12 +1682,12 @@ async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not categorias:
         await update.message.reply_text("❌ No hay datos")
         return
-    respuesta = "🏷️ **CATEGORÍAS**\n\n"
+    respuesta = "🏷️ <b>CATEGORÍAS</b>\n\n"
     total = sum([c[1] for c in categorias])
     for cat, count in categorias:
         porcentaje = (count / total) * 100
         barra = '█' * int(porcentaje / 5)
-        respuesta += f"**{cat}:** {barra} {count} ({porcentaje:.1f}%)\n"
+        respuesta += f"<b>{cat}:</b> {barra} {count} ({porcentaje:.1f}%)\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 # ==================== HANDLERS AUXILIARES ====================
@@ -1741,9 +1750,9 @@ async def resumen_automatico(context: ContextTypes.DEFAULT_TYPE):
             continue
         try:
             if es_admin:
-                mensaje = f"👑 **RESUMEN DIARIO - ADMIN**\n\n{resumen_admins}"
+                mensaje = f"👑 <b>RESUMEN DIARIO - ADMIN</b>\n\n{resumen_admins}"
             else:
-                mensaje = f"📧 **RESUMEN DIARIO**\n\n{resumen_usuarios}"
+                mensaje = f"📧 <b>RESUMEN DIARIO</b>\n\n{resumen_usuarios}"
             if len(mensaje) > 4000:
                 partes = [mensaje[i:i+4000] for i in range(0, len(mensaje), 4000)]
                 for parte in partes:
