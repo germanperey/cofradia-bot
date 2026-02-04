@@ -484,10 +484,227 @@ def analizar_participacion_usuarios(dias=7):
         analisis.append({'nombre': nombre, 'total_mensajes': total_msg, 'dias_activos': dias_act, 'promedio_diario': round(promedio_diario, 1), 'categorias_variadas': categorias, 'nivel': nivel, 'sugerencia': sugerencia})
     return analisis
 
+# ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
+
+def buscar_archivo_excel_drive():
+    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive"""
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.service_account import Credentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            logger.error("GOOGLE_DRIVE_CREDS no configurado")
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        
+        service = build('drive', 'v3', credentials=creds)
+        
+        # Buscar carpeta INBESTU
+        carpeta_query = "name='INBESTU' and mimeType='application/vnd.google-apps.folder'"
+        carpetas = service.files().list(q=carpeta_query, fields='files(id, name)').execute()
+        
+        if not carpetas.get('files'):
+            logger.error("Carpeta INBESTU no encontrada")
+            return None
+        
+        carpeta_id = carpetas['files'][0]['id']
+        
+        # Buscar archivos que empiecen con "BD Grupo Laboral"
+        archivo_query = f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false"
+        archivos = service.files().list(
+            q=archivo_query,
+            fields='files(id, name)',
+            orderBy='name desc'
+        ).execute()
+        
+        if not archivos.get('files'):
+            logger.error("No se encontró archivo BD Grupo Laboral")
+            return None
+        
+        # Tomar el archivo más reciente (número mayor al final)
+        archivo_mas_reciente = archivos['files'][0]
+        logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
+        
+        # Descargar archivo
+        import io
+        request = service.files().get_media(fileId=archivo_mas_reciente['id'])
+        fh = io.BytesIO()
+        from googleapiclient.http import MediaIoBaseDownload
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        return fh
+        
+    except Exception as e:
+        logger.error(f"Error buscando archivo en Drive: {e}")
+        return None
+
+def buscar_profesionales(query):
+    """Busca profesionales en el Excel usando IA semántica avanzada"""
+    try:
+        import pandas as pd
+        
+        # Obtener archivo de Drive
+        archivo = buscar_archivo_excel_drive()
+        
+        if not archivo:
+            return "❌ No se pudo acceder a la base de datos de profesionales.\n\n💡 **Posibles causas:**\n• La carpeta INBESTU no está compartida con el bot\n• No existe el archivo 'BD Grupo Laboral' en la carpeta\n• Error de permisos en Google Drive\n\nContacta al administrador."
+        
+        # Leer Excel
+        df = pd.read_excel(archivo, engine='openpyxl')
+        
+        # Normalizar nombres de columnas
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # Construir contexto detallado para Gemini
+        profesionales_lista = []
+        
+        for idx, row in df.iterrows():
+            # Obtener datos con múltiples variantes de nombres de columna
+            nombre = str(row.get('nombre completo', row.get('nombre', 'N/A'))).strip()
+            profesion = str(row.get('profesión', row.get('profesion', row.get('área', row.get('area', 'N/A'))))).strip()
+            expertise = str(row.get('expertise', row.get('experiencia', row.get('especialidad', 'N/A')))).strip()
+            email = str(row.get('email', row.get('correo', row.get('e-mail', 'N/A')))).strip()
+            telefono = str(row.get('teléfono', row.get('telefono', row.get('celular', row.get('fono', 'N/A'))))).strip()
+            estado = str(row.get('estado', row.get('situación', row.get('situacion', row.get('disponibilidad', 'N/A'))))).strip()
+            trabajos = str(row.get('trabajos', row.get('descripción', row.get('descripcion', row.get('experiencia laboral', 'N/A'))))).strip()
+            
+            # Saltar filas vacías
+            if nombre == 'N/A' or nombre == 'nan' or not nombre or nombre == '':
+                continue
+            
+            profesional = {
+                'id': idx + 1,
+                'nombre': nombre,
+                'profesion': profesion,
+                'expertise': expertise,
+                'email': email,
+                'telefono': telefono,
+                'estado': estado,
+                'trabajos': trabajos
+            }
+            
+            profesionales_lista.append(profesional)
+        
+        if not profesionales_lista:
+            return "❌ No se encontraron profesionales en la base de datos.\n\nPor favor, verifica que el archivo Excel contenga datos válidos."
+        
+        # Construir texto para análisis semántico
+        profesionales_texto = ""
+        for prof in profesionales_lista:
+            profesionales_texto += f"""
+ID: {prof['id']}
+Nombre: {prof['nombre']}
+Profesión/Área: {prof['profesion']}
+Expertise: {prof['expertise']}
+Estado: {prof['estado']}
+Email: {prof['email']}
+Teléfono: {prof['telefono']}
+Trabajos: {prof['trabajos']}
+---
+"""
+        
+        # Usar Gemini para búsqueda semántica avanzada
+        prompt = f"""Eres un asistente experto en búsqueda semántica de profesionales en la comunidad Cofradía.
+
+CONSULTA DEL USUARIO: "{query}"
+
+BASE DE DATOS DE PROFESIONALES (Total: {len(profesionales_lista)} profesionales):
+{profesionales_texto[:12000]}
+
+INSTRUCCIONES DE BÚSQUEDA SEMÁNTICA:
+
+1. **PRIORIDAD DE COINCIDENCIAS:**
+   - EXACTA: Coincidencia directa con profesión/expertise (Score: 10/10)
+   - ALTA: Profesión relacionada o expertise similar (Score: 7-9/10)
+   - MEDIA: Experiencia tangencial o transferible (Score: 5-6/10)
+   - BAJA: Habilidades complementarias (Score: 3-4/10)
+
+2. **ANÁLISIS SEMÁNTICO:**
+   - Si buscan "abogado laboral" pero encuentras "abogado" sin área específica → INCLUIR (coincidencia ALTA)
+   - Si buscan "diseñador gráfico" y hay "diseñador UX" → INCLUIR (coincidencia ALTA)
+   - Si buscan "contador" y hay "auditor" → INCLUIR (coincidencia MEDIA)
+   - Si buscan "desarrollador Python" y hay "ingeniero de software" → INCLUIR (coincidencia ALTA)
+
+3. **FLEXIBILIDAD:**
+   - Considera sinónimos y términos relacionados
+   - Evalúa experiencia laboral aunque no coincida título exacto
+   - Prioriza por relevancia pero incluye aproximaciones útiles
+
+4. **CANTIDAD:**
+   - Selecciona hasta **10 profesionales** máximo
+   - Ordena de mayor a menor relevancia
+   - Si hay menos de 5 coincidencias exactas, incluye aproximaciones
+
+5. **FORMATO DE RESPUESTA:**
+
+Primero, determina el nivel de coincidencia general:
+- Si hay 5+ coincidencias EXACTAS o ALTAS → Usar encabezado: "✅ **PROFESIONALES QUE COINCIDEN CON TU BÚSQUEDA:**"
+- Si hay principalmente coincidencias MEDIAS → Usar: "🔍 **LOS PROFESIONALES DE COFRADÍA QUE MEJOR SE AJUSTAN A TU BÚSQUEDA SON LOS SIGUIENTES:**"
+- Si solo hay coincidencias BAJAS → Usar: "💡 **PROFESIONALES RELACIONADOS QUE PODRÍAN AYUDARTE:**"
+
+Luego, lista los profesionales (máximo 10):
+
+**[Número]. [Nombre Completo]**
+🎯 **Área:** [profesión/área]
+💼 **Expertise:** [expertise - máximo 1 línea]
+📊 **Estado:** [Contratado/Independiente/Cesante]
+📧 **Email:** [email]
+📱 **Teléfono:** [teléfono]
+💡 **Experiencia:** [trabajos - máximo 2 líneas, lo más relevante]
+⭐ **Relevancia:** [EXACTA/ALTA/MEDIA/BAJA] - [breve justificación en 1 línea]
+
+---
+
+**REGLAS IMPORTANTES:**
+- Cada profesional debe estar numerado (1-10)
+- SIEMPRE incluir email y teléfono
+- Ser conciso pero informativo
+- Si un campo dice "N/A" o "nan" o está vacío, usa "No especificado"
+- Al final, agregar: "💬 *Para más información, contacta directamente a los profesionales.*"
+
+**SI NO ENCUENTRAS COINCIDENCIAS RAZONABLES:**
+Responde:
+"❌ No se encontraron profesionales en Cofradía que coincidan con: **{query}**
+
+💡 **Sugerencias:**
+- Intenta buscar con términos más generales
+- Describe la necesidad de otra forma
+- Usa palabras clave más amplias
+
+**Ejemplos:**
+- En vez de 'ingeniero civil estructural' prueba 'ingeniero civil'
+- En vez de 'diseñador UI/UX senior' prueba 'diseñador digital'
+- En vez de términos muy específicos, usa la profesión general"
+
+Responde en español, de forma clara, profesional y útil."""
+
+        response = model.generate_content(prompt)
+        resultado = response.text
+        
+        # Agregar nota al final si no está
+        if "contacta directamente" not in resultado.lower():
+            resultado += "\n\n💬 *Para más información, contacta directamente a los profesionales.*"
+        
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"Error buscando profesionales: {e}")
+        return f"❌ Error al buscar profesionales: {str(e)}\n\n**Detalles técnicos:** {type(e).__name__}\n\nPor favor, intenta de nuevo o contacta al administrador."
+
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+    fecha_inicio = (datetime.now() - timedelta(dias=dias)).strftime("%Y-%m-%d")
     c.execute("SELECT first_name, message, categoria FROM mensajes WHERE fecha >= ? ORDER BY fecha", (fecha_inicio,))
     mensajes = c.fetchall()
     if not mensajes:
@@ -542,10 +759,10 @@ def generar_resumen_admins(dias=1):
         seccion_admin += f"{user['nivel']} **{user['nombre']}**\n   • {user['total_mensajes']} mensajes\n   • 💡 {user['sugerencia']}\n\n"
     return resumen_base + seccion_admin
 
-# ==================== RECORDATORIOS Y ENGAGEMENT ====================
+# ==================== RECORDATORIOS Y ENGAGEMENT (MEJORADOS) ====================
 
 async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
-    """Envía recordatorios de renovación (5, 3, 1 día antes)"""
+    """Envía recordatorios de renovación persuasivos (5, 3, 1 día antes)"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     
@@ -563,65 +780,128 @@ async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
         dias_restantes = (fecha_exp - datetime.now()).days
         
         servicios_usados = json.loads(servicios_str)
-        todos_servicios = ['búsqueda', 'búsqueda_ia', 'empleos', 'gráficos', 'resumen', 'exportar']
+        todos_servicios = ['búsqueda', 'búsqueda_ia', 'buscar_profesional', 'empleos', 'gráficos', 'resumen']
         no_usados = [s for s in todos_servicios if s not in servicios_usados]
         
         mensaje = ""
         
+        # 5 días antes - Mensaje amigable y recordatorio
         if dias_restantes == 5:
             mensaje = f"""
 🔔 **Hola {nombre}!**
 
-Te recuerdo que en **5 días** vence tu acceso al Bot Cofradía.
+Te escribo para recordarte que en **5 días** vence tu acceso al Bot Cofradía.
 
-Para seguir disfrutando de todas las funcionalidades que te ayudan día a día en el grupo, no olvides renovar tu suscripción.
+💡 **¿Por qué renovar?**
 
-¡Seguimos conectados! 🚀
+Este bot es un **servicio opcional y voluntario** que hemos creado para la comunidad. Tu suscripción no solo te da acceso a herramientas poderosas, sino que nos permite:
+
+✅ Mantener servidores activos 24/7
+✅ Pagar el servicio de IA (Gemini API)
+✅ Desarrollar nuevas funcionalidades
+✅ Ofrecer soporte técnico continuo
+✅ Mejorar constantemente la experiencia
+
+**Tu aporte hace posible que Cofradía siga creciendo.** 🌱
+
+Si decides renovar, estarás invirtiendo en una herramienta que te ahorra tiempo y te mantiene conectado con la comunidad.
+
+💳 Usa /renovar cuando estés listo. ¡Sin presiones!
+
+Gracias por ser parte de Cofradía. 🙏
 """
         
+        # 3 días antes - Mostrar valor y ROI
         elif dias_restantes == 3:
             mensaje = f"""
-⭐ **{nombre}, quedan solo 3 días!**
+⭐ **{nombre}, quedan 3 días!**
 
-El Bot Cofradía te ha estado ayudando con:
+Quiero recordarte el **valor real** que el Bot Cofradía te ofrece:
 
-🔍 **Búsqueda inteligente** - Encuentra info al instante
-🧠 **IA semántica** - Búsquedas por significado
-💼 **Empleos** - Ofertas de LinkedIn, Indeed, Laborum
-📊 **Análisis visual** - Gráficos profesionales
-📝 **Resúmenes diarios** - Mantente al día sin esfuerzo
+🔍 **Búsqueda inteligente con IA** - Encuentra info en segundos
+🧠 **Búsqueda semántica** - Por significado, no solo palabras
+💼 **Búsqueda de empleos** - LinkedIn, Indeed, Laborum integrados
+👥 **Búsqueda de profesionales** - Encuentra expertos en Cofradía
+📊 **Análisis visuales** - Gráficos profesionales estilo Google
+📝 **Resúmenes automáticos** - Mantente al día sin esfuerzo
 
-¿Imaginas el grupo sin estas herramientas? 
+**¿Cuánto vale tu tiempo?**
 
-💰 Renueva por solo **${precio_mensual:,}** mensuales y sigue optimizando tu tiempo.
+Si el bot te ahorra **30 minutos al día** = **15 horas al mes**
+A $10.000/hora = **$150.000 de valor**
+Tu inversión: Solo **${precio_mensual:,}/mes**
 
-Usa /renovar para ver las opciones.
+**💰 ROI: 7,500% de retorno** (¡increíble!)
+
+Además, tu aporte permite:
+- Pagar servidores en la nube ($15 USD/mes)
+- Licencia de IA Gemini ($20 USD/mes)
+- Almacenamiento de datos ($10 USD/mes)
+- Actualizaciones constantes
+
+**Es voluntario, pero es valioso.** 🎯
+
+Este es un servicio **opcional** que puedes elegir mantener o no. Pero si lo renuevas, seguirás teniendo acceso a todas estas herramientas que hacen tu vida más fácil.
+
+Usa /renovar para continuar. Vale la pena.
 """
         
+        # 1 día antes - Urgencia + valor emocional + transparencia
         elif dias_restantes == 1:
             servicios_usados_texto = ", ".join(servicios_usados) if servicios_usados else "ninguno aún"
             no_usados_texto = ", ".join(no_usados) if no_usados else "todos"
             
             mensaje = f"""
-⚠️ **{nombre}, ¡ÚLTIMO DÍA!**
+⚠️ **{nombre}, ¡MAÑANA vence tu acceso!**
 
-Tu suscripción vence **MAÑANA**.
+Quiero ser **totalmente transparente** contigo:
 
-**Servicios que has usado:**
-{servicios_usados_texto}
+**Este bot es 100% opcional y voluntario.** No estás obligado a renovar.
 
-**Aún te faltan por probar:**
-{no_usados_texto}
+**PERO...**
 
-**Beneficios de renovar:**
-✅ Acceso ilimitado a todas las funciones
-✅ Resúmenes diarios automáticos
-✅ Búsqueda inteligente sin límites
-✅ Soporte prioritario
+Si has encontrado valor en usar el bot, tu renovación hace posible que sigamos mejorándolo para TODA la comunidad Cofradía.
 
-💳 **Precio:** ${precio_mensual:,}/mes (¡menos que un café diario!)
+**Tu historial:**
+✅ **Servicios usados:** {servicios_usados_texto}
+⏳ **Te faltan por probar:** {no_usados_texto}
 
-Usa /renovar AHORA y no pierdas el acceso.
+**¿Qué financia tu suscripción?**
+
+Cada mes invertimos en:
+- **$15 USD** - Servidor Render (24/7)
+- **$20 USD** - API de Gemini (IA avanzada)
+- **$10 USD** - Almacenamiento y bases de datos
+- **Horas** - Desarrollo y soporte
+
+**Total: ~$45 USD/mes de costos reales**
+
+Con 23 usuarios pagando = Cubrimos costos básicos
+Más usuarios = Más mejoras para todos
+
+**Tu aporte sí importa.** 💪
+
+**Beneficios de renovar HOY:**
+✅ Sin interrupciones en el servicio
+✅ Mantienes tu historial de búsquedas
+✅ Acceso inmediato a nuevas funciones
+✅ Apoyas el crecimiento de la comunidad Cofradía
+
+**Precio:** ${precio_mensual:,}/mes
+**Valor que recibes:** Incalculable
+
+⏰ **Renueva ahora:** /renovar
+
+Si decides no renovar, está perfectamente bien. Seguirás siendo parte de Cofradía, solo sin acceso a las funciones del bot.
+
+Pero si lo renuevas, estarás invirtiendo en:
+1. **Tu productividad** personal
+2. **Tu tiempo** valioso
+3. **Tu comunidad** profesional
+
+**¿Qué eliges?** La decisión es tuya. 🤝
+
+Gracias por considerarlo. 🙏
 """
         
         if mensaje:
@@ -666,13 +946,14 @@ Por ejemplo: `/buscar_ia consejos para emprendedores` encuentra todas las conver
 Pruébalo y descubre todo el conocimiento del grupo. 🧠
 """,
             f"""
-💼 **{nombre}, ¿buscas empleo?**
+💼 **{nombre}, ¿buscas empleo o necesitas contratar?**
 
-El Bot Cofradía puede buscar ofertas en LinkedIn, Indeed y Laborum por ti.
+El Bot Cofradía tiene dos funciones poderosas:
 
-Usa: `/empleo cargo:desarrollador ubicacion:Santiago renta:1.5-2M`
+1️⃣ **Buscar empleos:** `/empleo cargo:desarrollador ubicacion:Santiago renta:1.5-2M`
+2️⃣ **Buscar profesionales:** `/buscar_profesional diseñador gráfico`
 
-¡Encuentra tu próxima oportunidad sin salir del grupo! 🚀
+¡Encuentra oportunidades o expertos sin salir del grupo! 🚀
 """,
             f"""
 📊 **{nombre}, ¿quieres ver cómo está el grupo?**
@@ -700,9 +981,9 @@ Usa /resumen y recibirás un resumen completo con:
             f"""
 🎯 **{nombre}, maximiza tu experiencia:**
 
-Servicios que **SÍ has usado:** {', '.join(servicios_usados) if servicios_usados else 'Ninguno aún'}
+**Servicios que SÍ has usado:** {', '.join(servicios_usados) if servicios_usados else 'Ninguno aún'}
 
-Servicios que te **FALTAN probar:** {', '.join([s for s in ['búsqueda', 'búsqueda_ia', 'empleos', 'gráficos', 'resumen'] if s not in servicios_usados])}
+**Servicios que te FALTAN probar:** {', '.join([s for s in ['búsqueda', 'búsqueda_ia', 'buscar_profesional', 'empleos', 'gráficos', 'resumen'] if s not in servicios_usados])}
 
 Usa /ayuda para ver todo lo que puedes hacer. 💡
 """
@@ -774,8 +1055,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar [palabra] - Búsqueda tradicional
 /buscar_ia [frase] - Búsqueda semántica IA
 
-**💼 Empleos:**
-/empleo cargo:[...] ubicacion:[...] renta:[...]
+**💼 Empleos y Profesionales:**
+/empleo cargo:[...] ubicacion:[...] renta:[...] - Buscar empleos
+/buscar_profesional [área/expertise] - Buscar profesionales en Cofradía
 
 **📊 Análisis:**
 /graficos - Gráficos profesionales
@@ -835,6 +1117,7 @@ Has activado tu cuenta en el Bot Cofradía. 🎉
 
 **Ahora puedes:**
 🔍 Buscar información con IA
+👥 Buscar profesionales en la comunidad
 💼 Encontrar empleos
 📊 Ver análisis del grupo
 📝 Recibir resúmenes diarios
@@ -924,15 +1207,10 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     file = await context.bot.get_file(photo.file_id)
     
     # Descargar imagen temporalmente
-    import requests
     image_bytes = requests.get(file.file_path).content
     
     # Analizar con Gemini Vision (OCR)
     try:
-        # Convertir bytes a base64
-        import base64
-        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-        
         # Crear prompt para análisis OCR
         prompt_ocr = f"""Analiza este comprobante de transferencia bancaria y extrae los siguientes datos:
 
@@ -979,7 +1257,6 @@ RESPONDE SOLO CON EL JSON, sin explicaciones adicionales."""
         vision_model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Preparar la imagen para Gemini
-        import PIL.Image
         from io import BytesIO
         image = PIL.Image.open(BytesIO(image_bytes))
         
@@ -1139,7 +1416,6 @@ RESPONDE SOLO CON EL JSON, sin explicaciones adicionales."""
         )
     except Exception as e:
         logger.error(f"Error notificando al dueño: {e}")
-
 
 async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja aprobación/rechazo de pagos"""
@@ -1473,6 +1749,38 @@ async def buscar_empleo_comando(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(resultados, parse_mode='Markdown')
 
 @requiere_suscripcion
+async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Busca profesionales en la base de datos de Cofradía"""
+    registrar_servicio_usado(update.effective_user.id, 'buscar_profesional')
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Uso:** /buscar_profesional [área o expertise]\n\n"
+            "**Ejemplos:**\n"
+            "• `/buscar_profesional diseñador gráfico`\n"
+            "• `/buscar_profesional contador con experiencia`\n"
+            "• `/buscar_profesional desarrollador Python`\n"
+            "• `/buscar_profesional abogado laboral`\n"
+            "• `/buscar_profesional marketing digital`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    query = ' '.join(context.args)
+    
+    await update.message.reply_text("🔍 Buscando profesionales en la base de datos de Cofradía...")
+    
+    resultados = buscar_profesionales(query)
+    
+    # Enviar resultado (puede ser largo, dividir si es necesario)
+    if len(resultados) > 4000:
+        partes = [resultados[i:i+4000] for i in range(0, len(resultados), 4000)]
+        for parte in partes:
+            await update.message.reply_text(parte, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(resultados, parse_mode='Markdown')
+
+@requiere_suscripcion
 async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registrar_servicio_usado(update.effective_user.id, 'gráficos')
     await update.message.reply_text("📊 Generando...")
@@ -1575,6 +1883,7 @@ async def responder_con_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for nombre, msg, fecha in resultados:
             contexto += f"- {nombre}: {msg}\n"
     prompt = f"""Asistente de "Cofradía de Networking". Responde amigable y útil.
+
 PREGUNTA: {pregunta}
 {contexto}
 Responde en español, máximo 3 párrafos."""
@@ -1645,6 +1954,7 @@ def main():
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_semantica_comando))
     application.add_handler(CommandHandler("empleo", buscar_empleo_comando))
+    application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("graficos", graficos_comando))
     application.add_handler(CommandHandler("resumen", resumen_comando))
     application.add_handler(CommandHandler("resumen_semanal", resumen_semanal_comando))
