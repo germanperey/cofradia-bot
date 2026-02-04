@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 # ==================== CONFIGURACIÓN ====================
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+# Modelo principal para texto
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+# Modelo para visión (OCR, análisis de imágenes)
+vision_model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 # ID del dueño del bot (se configura en variables de entorno)
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
@@ -489,10 +494,9 @@ def analizar_participacion_usuarios(dias=7):
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
 def buscar_archivo_excel_drive():
-    """Busca archivo en Google Drive usando autenticación JWT manual (sin oauth2client)"""
+    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando SOLO requests"""
     try:
-        import jwt
-        import time
+        from oauth2client.service_account import ServiceAccountCredentials
         import io
         
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
@@ -500,39 +504,16 @@ def buscar_archivo_excel_drive():
             logger.error("GOOGLE_DRIVE_CREDS no configurado")
             return None
         
+        # Configurar credenciales
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
         creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         
-        # Crear JWT manualmente
-        now = int(time.time())
-        payload = {
-            'iss': creds_dict['client_email'],
-            'scope': 'https://www.googleapis.com/auth/drive.readonly',
-            'aud': 'https://oauth2.googleapis.com/token',
-            'exp': now + 3600,
-            'iat': now
-        }
-        
-        # Firmar JWT
-        private_key = creds_dict['private_key']
-        encoded_jwt = jwt.encode(payload, private_key, algorithm='RS256')
-        
-        # Intercambiar JWT por access token
-        token_url = 'https://oauth2.googleapis.com/token'
-        token_data = {
-            'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-            'assertion': encoded_jwt
-        }
-        
-        token_response = requests.post(token_url, data=token_data)
-        
-        if token_response.status_code != 200:
-            logger.error(f"Error obteniendo token: {token_response.status_code}")
-            return None
-        
-        access_token = token_response.json()['access_token']
+        # Obtener token de acceso
+        access_token = creds.get_access_token().access_token
         headers = {'Authorization': f'Bearer {access_token}'}
         
-        # PASO 1: Buscar carpeta INBESTU
+        # PASO 1: Buscar carpeta INBESTU usando requests directo
         search_url = "https://www.googleapis.com/drive/v3/files"
         params_carpeta = {
             'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'",
@@ -554,7 +535,7 @@ def buscar_archivo_excel_drive():
         carpeta_id = carpetas[0]['id']
         logger.info(f"Carpeta encontrada: {carpetas[0]['name']}")
         
-        # PASO 2: Buscar archivos Excel
+        # PASO 2: Buscar archivos Excel en la carpeta usando requests directo
         params_archivos = {
             'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
             'fields': 'files(id, name)',
@@ -573,24 +554,25 @@ def buscar_archivo_excel_drive():
             logger.error("No se encontró archivo BD Grupo Laboral")
             return None
         
+        # Tomar el archivo más reciente
         archivo_mas_reciente = archivos[0]
         logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
         
-        # PASO 3: Descargar archivo
+        # PASO 3: Descargar archivo usando requests directo
         file_id = archivo_mas_reciente['id']
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
         
         response_download = requests.get(download_url, headers=headers)
         
         if response_download.status_code == 200:
-            logger.info(f"Archivo descargado: {len(response_download.content)} bytes")
+            logger.info(f"Archivo descargado exitosamente: {len(response_download.content)} bytes")
             return io.BytesIO(response_download.content)
         else:
-            logger.error(f"Error descargando: {response_download.status_code}")
+            logger.error(f"Error descargando archivo: {response_download.status_code}")
             return None
         
     except Exception as e:
-        logger.error(f"Error en Drive: {e}")
+        logger.error(f"Error buscando archivo en Drive: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
@@ -996,13 +978,40 @@ def requiere_suscripcion(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    await update.message.reply_text(
-        f"👋 **¡Bienvenido {user.first_name}!**\n\n"
-        f"Soy el Bot Cofradía, tu asistente inteligente.\n\n"
-        f"Para empezar, usa /registrarse en el grupo.\n\n"
-        f"Luego podrás usar todas las funciones disponibles. ✨",
-        parse_mode='Markdown'
-    )
+    mensaje_bienvenida = f"""
+👋 **¡Bienvenido {user.first_name} a Bot Cofradía Premium!**
+
+Soy tu asistente inteligente para la comunidad.
+
+📍 **¿DÓNDE USAR LOS COMANDOS?**
+
+🔓 **EN EL GRUPO COFRADÍA:**
+   • `/buscar [palabra]` - Buscar en historial
+   • `/buscar_ia [frase]` - Búsqueda semántica IA
+   • `/empleo cargo:X ubicacion:Y` - Buscar empleos
+   • `/graficos` - Estadísticas visuales del grupo
+   • `/resumen` - Resumen del día
+   • `/estadisticas` - Números del grupo
+   • `@bot [pregunta]` - Consultar a la IA
+   
+🔒 **EN PRIVADO (solo tú y yo):**
+   • `/registrarse` - Activar tu cuenta (primera vez)
+   • `/renovar` - Renovar suscripción
+   • `/mi_cuenta` - Ver estado de tu cuenta
+   • **Enviar comprobante** - Foto de transferencia
+   
+💡 **EJEMPLOS DE USO:**
+   ✓ `/buscar networking`
+   ✓ `/buscar_ia cómo conseguir financiamiento`
+   ✓ `/empleo cargo:Gerente ubicacion:Santiago`
+   ✓ `@bot ¿qué es blockchain?`
+   
+📖 Usa `/ayuda` para ver todos los comandos disponibles.
+
+¡Comienza registrándote con `/registrarse` en el grupo! ✨
+"""
+    
+    await update.message.reply_text(mensaje_bienvenida, parse_mode='Markdown')
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ayuda = """
@@ -1747,6 +1756,37 @@ async def resumen_automatico(context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MAIN ====================
 
+
+
+async def post_init(application):
+    """Configura los comandos del bot para que aparezcan con /"""
+    from telegram import BotCommand
+    
+    commands = [
+        BotCommand("start", "🚀 Iniciar bot"),
+        BotCommand("ayuda", "📖 Ver todos los comandos"),
+        BotCommand("registrarse", "✅ Activar cuenta (90 días gratis)"),
+        BotCommand("buscar", "🔍 Buscar en historial del grupo"),
+        BotCommand("buscar_ia", "🤖 Búsqueda semántica con IA"),
+        BotCommand("empleo", "💼 Buscar ofertas de empleo"),
+        BotCommand("graficos", "📊 Ver gráficos y estadísticas"),
+        BotCommand("estadisticas", "📈 Ver números del grupo"),
+        BotCommand("categorias", "📂 Ver distribución por categorías"),
+        BotCommand("resumen", "📝 Resumen del día"),
+        BotCommand("resumen_semanal", "📅 Resumen de la semana"),
+        BotCommand("mi_cuenta", "👤 Ver estado de tu cuenta"),
+        BotCommand("renovar", "🔄 Renovar suscripción"),
+        BotCommand("activar", "🎟️ Usar código de activación"),
+    ]
+    
+    await application.bot.set_my_commands(commands)
+    logger.info("✅ Comandos del bot configurados")
+
+
+async def keep_alive(context: ContextTypes.DEFAULT_TYPE):
+    """Mantiene el bot activo enviando pings cada 10 minutos"""
+    logger.info("💓 Keep-alive ping - bot activo")
+
 def main():
     init_db()
     TOKEN = os.environ.get('TOKEN_BOT')
@@ -1754,10 +1794,14 @@ def main():
         logger.error("❌ TOKEN_BOT no configurado")
         return
     
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     job_queue = application.job_queue
     job_queue.run_daily(resumen_automatico, time=time(hour=20, minute=0), name='resumen_diario')
+    
+    # Mantener bot activo (cada 10 minutos)
+    job_queue.run_repeating(keep_alive, interval=600, first=10)
+    logger.info('✅ Keep-alive activado')
     job_queue.run_daily(enviar_recordatorios, time=time(hour=10, minute=0), name='recordatorios')
     job_queue.run_daily(enviar_mensajes_engagement, time=time(hour=15, minute=0), name='engagement')
     
