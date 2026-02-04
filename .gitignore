@@ -1,0 +1,6 @@
+mensajes.db
+*.pyc
+__pycache__/
+.env
+*.png
+credentials.json
