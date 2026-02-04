@@ -18,6 +18,11 @@ from io import BytesIO
 import secrets
 import string
 
+# ==================== FUNCIÓN HELPER PARA FORMATO CLP ====================
+def formato_clp(monto):
+    """Formatea monto en pesos chilenos con separador de miles con punto"""
+    return f"${monto:,}".replace(",", ".")
+
 # Configuración de logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -691,7 +696,7 @@ Responde en español, claro y profesional."""
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    fecha_inicio = (datetime.now() - timedelta(dias=dias)).strftime("%Y-%m-%d")
+    fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
     c.execute("SELECT first_name, message, categoria FROM mensajes WHERE fecha >= ? ORDER BY fecha", (fecha_inicio,))
     mensajes = c.fetchall()
     if not mensajes:
@@ -814,7 +819,7 @@ Quiero recordarte el <b>valor real</b> que el Bot Cofradía te ofrece:
 
 Si el bot te ahorra <b>30 minutos al día</b> = <b>15 horas al mes</b>
 A $10.000/hora = <b>$150.000 de valor</b>
-Tu inversión: Solo <b>${precio_mensual:,}/mes</b>
+Tu inversión: Solo <b>{formato_clp(precio_mensual)}/mes</b>
 
 <b>💰 ROI: 7,500% de retorno</b>
 
@@ -869,7 +874,7 @@ Más usuarios = Más mejoras para todos
 ✅ Acceso inmediato a nuevas funciones
 ✅ Apoyas el crecimiento de Cofradía
 
-<b>Precio:</b> ${precio_mensual:,}/mes
+<b>Precio:</b> {formato_clp(precio_mensual)}/mes
 <b>Valor que recibes:</b> Incalculable
 
 ⏰ <b>Renueva ahora:</b> /renovar
@@ -982,40 +987,122 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto_ayuda = """
-🤖 **Bot Cofradía - Guía Completa**
+    # Comandos diferentes para grupo vs privado
+    es_privado = update.effective_chat.type == 'private'
+    es_owner = update.effective_user.id == OWNER_ID
+    
+    if es_privado and es_owner:
+        # Admin ve TODO en privado
+        texto_ayuda = """
+🤖 <b>Bot Cofradía - Panel Admin</b>
 
-**🔍 Búsqueda:**
+<b>🔍 Búsqueda:</b>
 /buscar [palabra] - Búsqueda tradicional
 /buscar_ia [frase] - Búsqueda semántica IA
 
-**💼 Empleos y Profesionales:**
+<b>💼 Empleos:</b>
 /empleo cargo:[...] ubicacion:[...] - Buscar empleos
-/buscar_profesional [área/expertise] - Buscar profesionales
 
-**📊 Análisis:**
+<b>📊 Análisis:</b>
 /graficos - Gráficos profesionales
 /estadisticas - Números del grupo
-/categorias - Distribución
+/categorias - Distribución por temas
+/top_usuarios - Ranking de activos
+/mi_perfil - Tu perfil personal
 
-**📝 Resúmenes:**
+<b>📝 Resúmenes:</b>
 /resumen - Resumen del día
 /resumen_semanal - Resumen semanal
+/resumen_mes - Resumen mensual
+/resumen_semestre - Resumen semestral
+/resumen_usuario @nombre - Perfil de usuario
 
-**💳 Suscripción:**
+<b>💳 Suscripción:</b>
 /registrarse - Activar cuenta
 /renovar - Renovar suscripción
 /activar [código] - Usar código
 /mi_cuenta - Ver estado
 
-**👑 Admin (solo dueño):**
+<b>👑 Admin:</b>
 /generar_codigo - Crear códigos
-/precios - Configurar precios
+/precios - Ver/configurar precios
+/set_precio - Cambiar precios
 /pagos_pendientes - Revisar pagos
 
-**💬 IA:**
+<b>💬 IA:</b>
 Menciona @bot [pregunta]
 """
+    elif es_privado:
+        # Usuario normal en privado (solo lo básico)
+        texto_ayuda = """
+🤖 <b>Bot Cofradía - Chat Privado</b>
+
+Usa estos comandos en el <b>grupo Cofradía</b>:
+
+<b>🔍 Búsqueda:</b>
+/buscar [palabra]
+/buscar_ia [frase]
+
+<b>💼 Empleos:</b>
+/empleo cargo:X ubicacion:Y
+
+<b>📊 Análisis:</b>
+/graficos
+/estadisticas
+/top_usuarios
+/mi_perfil
+
+<b>📝 Resúmenes:</b>
+/resumen
+/resumen_semanal
+/resumen_usuario @nombre
+
+<b>💳 Tu cuenta:</b>
+/mi_cuenta - Ver tu suscripción
+/activar [código] - Activar código
+
+<b>💬 IA:</b>
+Menciona @bot en el grupo
+
+💡 <b>Nota:</b> La mayoría de comandos funcionan en el grupo, no aquí.
+"""
+    else:
+        # En el grupo (público, sin mencionar renovar ni precios)
+        texto_ayuda = """
+🤖 <b>Bot Cofradía - Comandos del Grupo</b>
+
+<b>🔍 Búsqueda:</b>
+/buscar [palabra] - Buscar en historial
+/buscar_ia [frase] - Búsqueda semántica con IA
+
+<b>💼 Empleos:</b>
+/empleo cargo:[...] ubicacion:[...] - Buscar ofertas
+
+<b>📊 Análisis:</b>
+/graficos - Visualizaciones profesionales
+/estadisticas - Números del grupo
+/categorias - Distribución por temas
+/top_usuarios - Ranking de más activos 🏆
+/mi_perfil - Tu perfil y estadísticas 👤
+
+<b>📝 Resúmenes:</b>
+/resumen - Resumen del día
+/resumen_semanal - Resumen de la semana
+/resumen_mes - Resumen mensual 📅
+/resumen_semestre - Resumen semestral 📊
+/resumen_usuario @nombre - Ver perfil de usuario
+
+<b>💳 Cuenta:</b>
+/registrarse - Activar cuenta (3 meses gratis)
+/mi_cuenta - Ver tu estado
+/activar [código] - Usar código de activación
+
+<b>💬 IA:</b>
+Menciona @bot [tu pregunta]
+
+💡 <b>¡Participa para subir en el ranking!</b>
+"""
+    
     await update.message.reply_text(texto_ayuda, parse_mode='HTML')
 
 async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1069,7 +1156,7 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for dias, precio, nombre in precios:
         keyboard.append([InlineKeyboardButton(
-            f"{nombre} ({dias} días) - ${precio:,}",
+            f"{nombre} ({dias} días) - {formato_clp(precio)}",
             callback_data=f"plan_{dias}"
         )])
     
@@ -1085,12 +1172,12 @@ Selecciona tu plan:
         ahorro = ""
         if dias == 180:
             precio_normal = next((p[1] for p in precios if p[0] == 30), 2000)
-            ahorro = f" (Ahorras ${int((precio_normal * 6) - precio):,})"
+            ahorro = f" (Ahorras {formato_clp(int((precio_normal * 6) - precio))})"
         elif dias == 365:
             precio_normal = next((p[1] for p in precios if p[0] == 30), 2000)
-            ahorro = f" (Ahorras ${int((precio_normal * 12) - precio):,})"
+            ahorro = f" (Ahorras {formato_clp(int((precio_normal * 12) - precio))})"
         
-        mensaje += f"\n💎 **{nombre}** - ${precio:,}{ahorro}"
+        mensaje += f"\n💎 **{nombre}** - {formato_clp(precio)}{ahorro}"
     
     await update.message.reply_text(mensaje, reply_markup=reply_markup, parse_mode='HTML')
 
@@ -1105,7 +1192,7 @@ async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     mensaje = f"""
 ✅ <b>Plan seleccionado:</b> {nombre_plan}
-💰 <b>Precio:</b> ${precio:,}
+💰 <b>Precio:</b> {formato_clp(precio)}
 ⏳ <b>Duración:</b> {dias} días
 
 {DATOS_BANCARIOS}
@@ -1143,7 +1230,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
         prompt_ocr = f"""Analiza este comprobante de transferencia bancaria.
 
 DATOS ESPERADOS:
-- Monto: ${precio:,} CLP
+- Monto: {formato_clp(precio)} CLP
 - Cuenta: 69104312
 - Banco: Santander
 - Titular: Destak E.I.R.L.
@@ -1193,7 +1280,7 @@ Responde SOLO JSON."""
         if datos_ocr.get("monto_correcto"):
             analisis += f"✅ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Correcto)\n"
         else:
-            analisis += f"⚠️ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Esperado: ${precio:,})\n"
+            analisis += f"⚠️ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Esperado: {formato_clp(precio)})\n"
         
         if datos_ocr.get("cuenta_correcta"):
             analisis += f"✅ **Cuenta:** {datos_ocr.get('cuenta_detectada', 'N/A')} (Correcta)\n"
@@ -1242,7 +1329,7 @@ Responde SOLO JSON."""
 👤 {user.first_name} (@{user.username or 'sin_username'})
 📱 ID: {user.id}
 💎 Plan: {nombre_plan} ({dias} días)
-💰 Precio: ${precio:,}
+💰 Precio: {formato_clp(precio)}
 
 {analisis}
 
@@ -1397,7 +1484,7 @@ async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = []
     for dias, precio, nombre in precios:
         keyboard.append([InlineKeyboardButton(
-            f"{nombre} ({dias} días) - ${precio:,}",
+            f"{nombre} ({dias} días) - {formato_clp(precio)}",
             callback_data=f"gencodigo_{dias}"
         )])
     
@@ -1420,7 +1507,7 @@ async def callback_generar_codigo(update: Update, context: ContextTypes.DEFAULT_
     codigo = generar_codigo_activacion(dias, precio)
     
     await query.edit_message_text(
-        f"✅ **CÓDIGO GENERADO**\n\n`{codigo}`\n\n📋 Duración: {dias} días\n💰 Precio: ${precio:,}\n⏰ Válido: 30 días",
+        f"✅ **CÓDIGO GENERADO**\n\n`{codigo}`\n\n📋 Duración: {dias} días\n💰 Precio: {formato_clp(precio)}\n⏰ Válido: 30 días",
         parse_mode='HTML'
     )
 
@@ -1436,7 +1523,7 @@ async def precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     mensaje = "💰 **PRECIOS**\n\n"
     for dias, precio, nombre in precios:
-        mensaje += f"• {nombre} ({dias} días): ${precio:,}\n"
+        mensaje += f"• {nombre} ({dias} días): {formato_clp(precio)}\n"
     
     mensaje += "\n📝 /set_precio [dias] [precio]"
     
@@ -1460,7 +1547,7 @@ async def set_precio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         actualizar_precio(dias, precio)
         
-        await update.message.reply_text(f"✅ Precio actualizado: {dias} días = ${precio:,}", parse_mode='HTML')
+        await update.message.reply_text(f"✅ Precio actualizado: {dias} días = {formato_clp(precio)}", parse_mode='HTML')
     except:
         await update.message.reply_text("❌ Error.")
 
@@ -1490,7 +1577,7 @@ async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT
     
     for pago_id, nombre, dias, precio, fecha, estado in pagos:
         emoji = "⏳" if estado == 'pendiente' else ("✅" if estado == 'aprobado' else "❌")
-        mensaje += f"{emoji} #{pago_id} - {nombre}\n   {dias} días - ${precio:,} - {estado}\n\n"
+        mensaje += f"{emoji} #{pago_id} - {nombre}\n   {dias} días - {formato_clp(precio)} - {estado}\n\n"
     
     await update.message.reply_text(mensaje, parse_mode='HTML')
 
@@ -1724,6 +1811,34 @@ async def resumen_automatico(context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MAIN ====================
 
+
+async def post_init(application):
+    """Configura los comandos del bot - solo comandos del GRUPO"""
+    from telegram import BotCommand
+    
+    # Solo comandos que se usan EN EL GRUPO (sin renovar, sin precios)
+    commands = [
+        BotCommand("ayuda", "📖 Ver comandos disponibles"),
+        BotCommand("registrarse", "✅ Activar cuenta (3 meses gratis)"),
+        BotCommand("buscar", "🔍 Buscar en historial"),
+        BotCommand("buscar_ia", "🤖 Búsqueda con IA"),
+        BotCommand("empleo", "💼 Buscar empleos"),
+        BotCommand("graficos", "📊 Ver gráficos"),
+        BotCommand("estadisticas", "📈 Ver números"),
+        BotCommand("categorias", "📂 Distribución"),
+        BotCommand("top_usuarios", "🏆 Ranking"),
+        BotCommand("mi_perfil", "👤 Tu perfil"),
+        BotCommand("resumen", "📝 Del día"),
+        BotCommand("resumen_semanal", "📅 Semanal"),
+        BotCommand("resumen_mes", "📆 Mensual"),
+        BotCommand("resumen_usuario", "👥 Ver perfil usuario"),
+        BotCommand("mi_cuenta", "💳 Tu suscripción"),
+        BotCommand("activar", "🎟️ Código"),
+    ]
+    
+    await application.bot.set_my_commands(commands)
+    logger.info("✅ Comandos del bot configurados")
+
 def main():
     init_db()
     TOKEN = os.environ.get('TOKEN_BOT')
@@ -1731,7 +1846,7 @@ def main():
         logger.error("❌ TOKEN_BOT no configurado")
         return
     
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     job_queue = application.job_queue
     job_queue.run_daily(resumen_automatico, time=time(hour=20, minute=0), name='resumen_diario')
