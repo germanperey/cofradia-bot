@@ -489,60 +489,75 @@ def analizar_participacion_usuarios(dias=7):
 def buscar_archivo_excel_drive():
     """Busca el archivo más reciente de BD Grupo Laboral en Google Drive"""
     try:
-        from googleapiclient.discovery import build
-        from google.oauth2.service_account import Credentials
+        import gspread
+        from oauth2client.service_account import ServiceAccountCredentials
+        import io
+        import tempfile
         
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
         if not creds_json:
             logger.error("GOOGLE_DRIVE_CREDS no configurado")
             return None
         
+        # Configurar credenciales
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
         creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
         
-        service = build('drive', 'v3', credentials=creds)
-        
-        # Buscar carpeta INBESTU
-        carpeta_query = "name='INBESTU' and mimeType='application/vnd.google-apps.folder'"
-        carpetas = service.files().list(q=carpeta_query, fields='files(id, name)').execute()
-        
-        if not carpetas.get('files'):
-            logger.error("Carpeta INBESTU no encontrada")
+        # Buscar todos los archivos en Drive
+        try:
+            # Listar archivos que contengan "BD Grupo Laboral"
+            files = []
+            # Usar el cliente HTTP subyacente de gspread para buscar archivos
+            from googleapiclient.discovery import build
+            service = build('drive', 'v3', credentials=creds)
+            
+            # Buscar carpeta INBESTU
+            carpeta_query = "name='INBESTU' and mimeType='application/vnd.google-apps.folder'"
+            carpetas = service.files().list(q=carpeta_query, fields='files(id, name)').execute()
+            
+            if not carpetas.get('files'):
+                logger.error("Carpeta INBESTU no encontrada")
+                return None
+            
+            carpeta_id = carpetas['files'][0]['id']
+            
+            # Buscar archivos Excel en la carpeta
+            archivo_query = f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false"
+            archivos = service.files().list(
+                q=archivo_query,
+                fields='files(id, name)',
+                orderBy='name desc'
+            ).execute()
+            
+            if not archivos.get('files'):
+                logger.error("No se encontró archivo BD Grupo Laboral")
+                return None
+            
+            # Tomar el archivo más reciente
+            archivo_mas_reciente = archivos['files'][0]
+            logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
+            
+            # Descargar archivo usando requests
+            file_id = archivo_mas_reciente['id']
+            export_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            
+            # Obtener token de acceso
+            access_token = creds.get_access_token().access_token
+            headers = {'Authorization': f'Bearer {access_token}'}
+            
+            response = requests.get(export_url, headers=headers)
+            
+            if response.status_code == 200:
+                return io.BytesIO(response.content)
+            else:
+                logger.error(f"Error descargando archivo: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error específico: {e}")
             return None
-        
-        carpeta_id = carpetas['files'][0]['id']
-        
-        # Buscar archivos que empiecen con "BD Grupo Laboral"
-        archivo_query = f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false"
-        archivos = service.files().list(
-            q=archivo_query,
-            fields='files(id, name)',
-            orderBy='name desc'
-        ).execute()
-        
-        if not archivos.get('files'):
-            logger.error("No se encontró archivo BD Grupo Laboral")
-            return None
-        
-        # Tomar el archivo más reciente
-        archivo_mas_reciente = archivos['files'][0]
-        logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
-        
-        # Descargar archivo
-        import io
-        request = service.files().get_media(fileId=archivo_mas_reciente['id'])
-        fh = io.BytesIO()
-        from googleapiclient.http import MediaIoBaseDownload
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        
-        fh.seek(0)
-        return fh
         
     except Exception as e:
         logger.error(f"Error buscando archivo en Drive: {e}")
