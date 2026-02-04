@@ -486,29 +486,207 @@ def analizar_participacion_usuarios(dias=7):
 
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
-# ==================== BÚSQUEDA DE PROFESIONALES (DESHABILITADO TEMPORALMENTE) ====================
-# NOTA: Esta función requiere configuración adicional de Google Drive
-# Se habilitará en una actualización futura
+# ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
 def buscar_archivo_excel_drive():
-    """Función deshabilitada temporalmente - requiere configuración de Google Drive"""
-    logger.warning("Búsqueda en Drive deshabilitada temporalmente")
-    return None
+    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando SOLO requests"""
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        import io
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            logger.error("GOOGLE_DRIVE_CREDS no configurado")
+            return None
+        
+        # Configurar credenciales
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        
+        # Obtener token de acceso
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        # PASO 1: Buscar carpeta INBESTU usando requests directo
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params_carpeta = {
+            'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'",
+            'fields': 'files(id, name)'
+        }
+        
+        response_carpeta = requests.get(search_url, headers=headers, params=params_carpeta)
+        
+        if response_carpeta.status_code != 200:
+            logger.error(f"Error buscando carpeta: {response_carpeta.status_code}")
+            return None
+        
+        carpetas = response_carpeta.json().get('files', [])
+        
+        if not carpetas:
+            logger.error("Carpeta INBESTU no encontrada")
+            return None
+        
+        carpeta_id = carpetas[0]['id']
+        logger.info(f"Carpeta encontrada: {carpetas[0]['name']}")
+        
+        # PASO 2: Buscar archivos Excel en la carpeta usando requests directo
+        params_archivos = {
+            'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
+            'fields': 'files(id, name)',
+            'orderBy': 'name desc'
+        }
+        
+        response_archivos = requests.get(search_url, headers=headers, params=params_archivos)
+        
+        if response_archivos.status_code != 200:
+            logger.error(f"Error buscando archivos: {response_archivos.status_code}")
+            return None
+        
+        archivos = response_archivos.json().get('files', [])
+        
+        if not archivos:
+            logger.error("No se encontró archivo BD Grupo Laboral")
+            return None
+        
+        # Tomar el archivo más reciente
+        archivo_mas_reciente = archivos[0]
+        logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
+        
+        # PASO 3: Descargar archivo usando requests directo
+        file_id = archivo_mas_reciente['id']
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        
+        response_download = requests.get(download_url, headers=headers)
+        
+        if response_download.status_code == 200:
+            logger.info(f"Archivo descargado exitosamente: {len(response_download.content)} bytes")
+            return io.BytesIO(response_download.content)
+        else:
+            logger.error(f"Error descargando archivo: {response_download.status_code}")
+            return None
+        
+    except Exception as e:
+        logger.error(f"Error buscando archivo en Drive: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
 
 def buscar_profesionales(query):
-    """Búsqueda de profesionales - temporalmente deshabilitada"""
-    return """
-🚧 **FUNCIÓN EN MANTENIMIENTO**
-
-La búsqueda de profesionales en la base de datos está temporalmente deshabilitada mientras optimizamos el sistema.
-
-💡 **Mientras tanto puedes:**
-• Usar /buscar para buscar en el historial del grupo
-• Usar /buscar_ia para búsqueda semántica
-• Contactar directamente al administrador
-
-Volverá pronto con mejoras. 🚀
+    """Busca profesionales en el Excel usando IA semántica avanzada"""
+    try:
+        import pandas as pd
+        
+        archivo = buscar_archivo_excel_drive()
+        
+        if not archivo:
+            return "❌ No se pudo acceder a la base de datos de profesionales.\n\n💡 **Posibles causas:**\n• La carpeta INBESTU no está compartida con el bot\n• No existe el archivo 'BD Grupo Laboral' en la carpeta\n• Error de permisos en Google Drive\n\nContacta al administrador."
+        
+        df = pd.read_excel(archivo, engine='openpyxl')
+        df.columns = df.columns.str.strip().str.lower()
+        
+        profesionales_lista = []
+        
+        for idx, row in df.iterrows():
+            nombre = str(row.get('nombre completo', row.get('nombre', 'N/A'))).strip()
+            profesion = str(row.get('profesión', row.get('profesion', row.get('área', row.get('area', 'N/A'))))).strip()
+            expertise = str(row.get('expertise', row.get('experiencia', row.get('especialidad', 'N/A')))).strip()
+            email = str(row.get('email', row.get('correo', row.get('e-mail', 'N/A')))).strip()
+            telefono = str(row.get('teléfono', row.get('telefono', row.get('celular', row.get('fono', 'N/A'))))).strip()
+            estado = str(row.get('estado', row.get('situación', row.get('situacion', row.get('disponibilidad', 'N/A'))))).strip()
+            trabajos = str(row.get('trabajos', row.get('descripción', row.get('descripcion', row.get('experiencia laboral', 'N/A'))))).strip()
+            
+            if nombre == 'N/A' or nombre == 'nan' or not nombre or nombre == '':
+                continue
+            
+            profesional = {
+                'id': idx + 1,
+                'nombre': nombre,
+                'profesion': profesion,
+                'expertise': expertise,
+                'email': email,
+                'telefono': telefono,
+                'estado': estado,
+                'trabajos': trabajos
+            }
+            
+            profesionales_lista.append(profesional)
+        
+        if not profesionales_lista:
+            return "❌ No se encontraron profesionales en la base de datos.\n\nPor favor, verifica que el archivo Excel contenga datos válidos."
+        
+        profesionales_texto = ""
+        for prof in profesionales_lista:
+            profesionales_texto += f"""
+ID: {prof['id']}
+Nombre: {prof['nombre']}
+Profesión/Área: {prof['profesion']}
+Expertise: {prof['expertise']}
+Estado: {prof['estado']}
+Email: {prof['email']}
+Teléfono: {prof['telefono']}
+Trabajos: {prof['trabajos']}
+---
 """
+        
+        prompt = f"""Eres un asistente experto en búsqueda semántica de profesionales en la comunidad Cofradía.
+
+CONSULTA DEL USUARIO: "{query}"
+
+BASE DE DATOS DE PROFESIONALES (Total: {len(profesionales_lista)} profesionales):
+{profesionales_texto[:12000]}
+
+INSTRUCCIONES DE BÚSQUEDA SEMÁNTICA:
+
+1. PRIORIDAD DE COINCIDENCIAS:
+   - EXACTA: Coincidencia directa (Score: 10/10)
+   - ALTA: Profesión relacionada (Score: 7-9/10)
+   - MEDIA: Experiencia tangencial (Score: 5-6/10)
+   - BAJA: Habilidades complementarias (Score: 3-4/10)
+
+2. CANTIDAD: Selecciona hasta 10 profesionales máximo
+
+3. FORMATO DE RESPUESTA:
+Determina el encabezado según coincidencias:
+- 5+ EXACTAS/ALTAS: "✅ PROFESIONALES QUE COINCIDEN CON TU BÚSQUEDA:"
+- Principalmente MEDIAS: "🔍 LOS PROFESIONALES DE COFRADÍA QUE MEJOR SE AJUSTAN A TU BÚSQUEDA SON LOS SIGUIENTES:"
+- Solo BAJAS: "💡 PROFESIONALES RELACIONADOS QUE PODRÍAN AYUDARTE:"
+
+Lista profesionales (máximo 10):
+
+**[Número]. [Nombre]**
+🎯 Área: [profesión]
+💼 Expertise: [expertise - 1 línea]
+📊 Estado: [Contratado/Independiente/Cesante]
+📧 Email: [email]
+📱 Teléfono: [teléfono]
+💡 Experiencia: [trabajos - 2 líneas máximo]
+⭐ Relevancia: [EXACTA/ALTA/MEDIA/BAJA] - [justificación breve]
+
+---
+
+Al final: "💬 Para más información, contacta directamente a los profesionales."
+
+SI NO HAY COINCIDENCIAS:
+"❌ No se encontraron profesionales en Cofradía que coincidan con: {query}
+
+💡 Intenta términos más generales."
+
+Responde en español, claro y profesional."""
+
+        response = model.generate_content(prompt)
+        resultado = response.text
+        
+        if "contacta directamente" not in resultado.lower():
+            resultado += "\n\n💬 *Para más información, contacta directamente a los profesionales.*"
+        
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"Error buscando profesionales: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return f"❌ Error al buscar profesionales: {str(e)}\n\n**Detalles técnicos:** {type(e).__name__}\n\nPor favor, intenta de nuevo o contacta al administrador."
 
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
@@ -811,8 +989,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar [palabra] - Búsqueda tradicional
 /buscar_ia [frase] - Búsqueda semántica IA
 
-**💼 Empleos:**
+**💼 Empleos y Profesionales:**
 /empleo cargo:[...] ubicacion:[...] - Buscar empleos
+/buscar_profesional [área/expertise] - Buscar profesionales
 
 **📊 Análisis:**
 /graficos - Gráficos profesionales
@@ -836,8 +1015,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **💬 IA:**
 Menciona @bot [pregunta]
-
-🚧 *Búsqueda de profesionales: Próximamente*
 """
     await update.message.reply_text(texto_ayuda, parse_mode='Markdown')
 
@@ -1571,7 +1748,7 @@ def main():
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_semantica_comando))
     application.add_handler(CommandHandler("empleo", buscar_empleo_comando))
-    # application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))  # Temporalmente deshabilitado
+    application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("graficos", graficos_comando))
     application.add_handler(CommandHandler("resumen", resumen_comando))
     application.add_handler(CommandHandler("resumen_semanal", resumen_semanal_comando))
