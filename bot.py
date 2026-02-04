@@ -486,200 +486,29 @@ def analizar_participacion_usuarios(dias=7):
 
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
+# ==================== BÚSQUEDA DE PROFESIONALES (DESHABILITADO TEMPORALMENTE) ====================
+# NOTA: Esta función requiere configuración adicional de Google Drive
+# Se habilitará en una actualización futura
+
 def buscar_archivo_excel_drive():
-    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando PyDrive2"""
-    try:
-        from pydrive2.auth import ServiceAccountCredentials
-        from pydrive2.drive import GoogleDrive
-        import io
-        
-        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
-        if not creds_json:
-            logger.error("GOOGLE_DRIVE_CREDS no configurado")
-            return None
-        
-        # Guardar credenciales temporalmente
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(creds_json)
-            temp_creds_file = f.name
-        
-        try:
-            # Autenticar con PyDrive2
-            gauth = ServiceAccountCredentials(temp_creds_file)
-            drive = GoogleDrive(gauth)
-            
-            # PASO 1: Buscar carpeta INBESTU
-            carpetas = drive.ListFile({
-                'q': "title='INBESTU' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-            }).GetList()
-            
-            if not carpetas:
-                logger.error("Carpeta INBESTU no encontrada")
-                return None
-            
-            carpeta_id = carpetas[0]['id']
-            logger.info(f"Carpeta encontrada: {carpetas[0]['title']}")
-            
-            # PASO 2: Buscar archivos Excel en la carpeta
-            archivos = drive.ListFile({
-                'q': f"title contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
-                'orderBy': 'title desc'
-            }).GetList()
-            
-            if not archivos:
-                logger.error("No se encontró archivo BD Grupo Laboral")
-                return None
-            
-            # Tomar el archivo más reciente (primero en la lista ordenada descendente)
-            archivo = archivos[0]
-            logger.info(f"Archivo encontrado: {archivo['title']}")
-            
-            # PASO 3: Descargar archivo
-            contenido = archivo.GetContentString(mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            
-            # Si GetContentString no funciona, intentar con GetContentFile
-            if not contenido:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                    archivo.GetContentFile(tmp.name)
-                    with open(tmp.name, 'rb') as f:
-                        contenido = f.read()
-                    os.unlink(tmp.name)
-            
-            logger.info(f"Archivo descargado exitosamente: {len(contenido) if isinstance(contenido, bytes) else len(contenido.encode())} bytes")
-            
-            # Retornar como BytesIO
-            if isinstance(contenido, str):
-                return io.BytesIO(contenido.encode())
-            else:
-                return io.BytesIO(contenido)
-            
-        finally:
-            # Limpiar archivo temporal de credenciales
-            try:
-                os.unlink(temp_creds_file)
-            except:
-                pass
-        
-    except Exception as e:
-        logger.error(f"Error buscando archivo en Drive: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
+    """Función deshabilitada temporalmente - requiere configuración de Google Drive"""
+    logger.warning("Búsqueda en Drive deshabilitada temporalmente")
+    return None
 
 def buscar_profesionales(query):
-    """Busca profesionales en el Excel usando IA semántica avanzada"""
-    try:
-        import pandas as pd
-        
-        archivo = buscar_archivo_excel_drive()
-        
-        if not archivo:
-            return "❌ No se pudo acceder a la base de datos de profesionales."
-        
-        df = pd.read_excel(archivo, engine='openpyxl')
-        df.columns = df.columns.str.strip().str.lower()
-        
-        profesionales_lista = []
-        
-        for idx, row in df.iterrows():
-            nombre = str(row.get('nombre completo', row.get('nombre', 'N/A'))).strip()
-            profesion = str(row.get('profesión', row.get('profesion', row.get('área', row.get('area', 'N/A'))))).strip()
-            expertise = str(row.get('expertise', row.get('experiencia', row.get('especialidad', 'N/A')))).strip()
-            email = str(row.get('email', row.get('correo', row.get('e-mail', 'N/A')))).strip()
-            telefono = str(row.get('teléfono', row.get('telefono', row.get('celular', row.get('fono', 'N/A'))))).strip()
-            estado = str(row.get('estado', row.get('situación', row.get('situacion', row.get('disponibilidad', 'N/A'))))).strip()
-            trabajos = str(row.get('trabajos', row.get('descripción', row.get('descripcion', row.get('experiencia laboral', 'N/A'))))).strip()
-            
-            if nombre == 'N/A' or nombre == 'nan' or not nombre or nombre == '':
-                continue
-            
-            profesional = {
-                'id': idx + 1,
-                'nombre': nombre,
-                'profesion': profesion,
-                'expertise': expertise,
-                'email': email,
-                'telefono': telefono,
-                'estado': estado,
-                'trabajos': trabajos
-            }
-            
-            profesionales_lista.append(profesional)
-        
-        if not profesionales_lista:
-            return "❌ No se encontraron profesionales en la base de datos."
-        
-        profesionales_texto = ""
-        for prof in profesionales_lista:
-            profesionales_texto += f"""
-ID: {prof['id']}
-Nombre: {prof['nombre']}
-Profesión/Área: {prof['profesion']}
-Expertise: {prof['expertise']}
-Estado: {prof['estado']}
-Email: {prof['email']}
-Teléfono: {prof['telefono']}
-Trabajos: {prof['trabajos']}
----
+    """Búsqueda de profesionales - temporalmente deshabilitada"""
+    return """
+🚧 **FUNCIÓN EN MANTENIMIENTO**
+
+La búsqueda de profesionales en la base de datos está temporalmente deshabilitada mientras optimizamos el sistema.
+
+💡 **Mientras tanto puedes:**
+• Usar /buscar para buscar en el historial del grupo
+• Usar /buscar_ia para búsqueda semántica
+• Contactar directamente al administrador
+
+Volverá pronto con mejoras. 🚀
 """
-        
-        prompt = f"""Eres un asistente experto en búsqueda semántica de profesionales en la comunidad Cofradía.
-
-CONSULTA DEL USUARIO: "{query}"
-
-BASE DE DATOS DE PROFESIONALES (Total: {len(profesionales_lista)} profesionales):
-{profesionales_texto[:12000]}
-
-INSTRUCCIONES DE BÚSQUEDA SEMÁNTICA:
-
-1. PRIORIDAD DE COINCIDENCIAS:
-   - EXACTA: Coincidencia directa (Score: 10/10)
-   - ALTA: Profesión relacionada (Score: 7-9/10)
-   - MEDIA: Experiencia tangencial (Score: 5-6/10)
-   - BAJA: Habilidades complementarias (Score: 3-4/10)
-
-2. CANTIDAD: Selecciona hasta 10 profesionales máximo
-
-3. FORMATO DE RESPUESTA:
-Determina el encabezado según coincidencias:
-- 5+ EXACTAS/ALTAS: "✅ PROFESIONALES QUE COINCIDEN CON TU BÚSQUEDA:"
-- Principalmente MEDIAS: "🔍 LOS PROFESIONALES DE COFRADÍA QUE MEJOR SE AJUSTAN A TU BÚSQUEDA SON LOS SIGUIENTES:"
-- Solo BAJAS: "💡 PROFESIONALES RELACIONADOS QUE PODRÍAN AYUDARTE:"
-
-Lista profesionales (máximo 10):
-
-**[Número]. [Nombre]**
-🎯 Área: [profesión]
-💼 Expertise: [expertise - 1 línea]
-📊 Estado: [Contratado/Independiente/Cesante]
-📧 Email: [email]
-📱 Teléfono: [teléfono]
-💡 Experiencia: [trabajos - 2 líneas máximo]
-⭐ Relevancia: [EXACTA/ALTA/MEDIA/BAJA] - [justificación breve]
-
----
-
-Al final: "💬 Para más información, contacta directamente a los profesionales."
-
-SI NO HAY COINCIDENCIAS:
-"❌ No se encontraron profesionales en Cofradía que coincidan con: {query}
-
-💡 Intenta términos más generales."
-
-Responde en español, claro y profesional."""
-
-        response = model.generate_content(prompt)
-        resultado = response.text
-        
-        if "contacta directamente" not in resultado.lower():
-            resultado += "\n\n💬 *Para más información, contacta directamente a los profesionales.*"
-        
-        return resultado
-        
-    except Exception as e:
-        logger.error(f"Error buscando profesionales: {e}")
-        return f"❌ Error al buscar profesionales: {str(e)}"
 
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
@@ -982,9 +811,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar [palabra] - Búsqueda tradicional
 /buscar_ia [frase] - Búsqueda semántica IA
 
-**💼 Empleos y Profesionales:**
+**💼 Empleos:**
 /empleo cargo:[...] ubicacion:[...] - Buscar empleos
-/buscar_profesional [área/expertise] - Buscar profesionales
 
 **📊 Análisis:**
 /graficos - Gráficos profesionales
@@ -1008,6 +836,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **💬 IA:**
 Menciona @bot [pregunta]
+
+🚧 *Búsqueda de profesionales: Próximamente*
 """
     await update.message.reply_text(texto_ayuda, parse_mode='Markdown')
 
@@ -1741,7 +1571,7 @@ def main():
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_semantica_comando))
     application.add_handler(CommandHandler("empleo", buscar_empleo_comando))
-    application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
+    # application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))  # Temporalmente deshabilitado
     application.add_handler(CommandHandler("graficos", graficos_comando))
     application.add_handler(CommandHandler("resumen", resumen_comando))
     application.add_handler(CommandHandler("resumen_semanal", resumen_semanal_comando))
