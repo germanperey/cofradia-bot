@@ -487,9 +487,10 @@ def analizar_participacion_usuarios(dias=7):
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
 def buscar_archivo_excel_drive():
-    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando SOLO requests"""
+    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando PyDrive2"""
     try:
-        from oauth2client.service_account import ServiceAccountCredentials
+        from pydrive2.auth import ServiceAccountCredentials
+        from pydrive2.drive import GoogleDrive
         import io
         
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
@@ -497,72 +498,68 @@ def buscar_archivo_excel_drive():
             logger.error("GOOGLE_DRIVE_CREDS no configurado")
             return None
         
-        # Configurar credenciales
-        scope = ['https://www.googleapis.com/auth/drive.readonly']
-        creds_dict = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        # Guardar credenciales temporalmente
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(creds_json)
+            temp_creds_file = f.name
         
-        # Obtener token de acceso
-        access_token = creds.get_access_token().access_token
-        headers = {'Authorization': f'Bearer {access_token}'}
-        
-        # PASO 1: Buscar carpeta INBESTU usando requests directo
-        search_url = "https://www.googleapis.com/drive/v3/files"
-        params_carpeta = {
-            'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'",
-            'fields': 'files(id, name)'
-        }
-        
-        response_carpeta = requests.get(search_url, headers=headers, params=params_carpeta)
-        
-        if response_carpeta.status_code != 200:
-            logger.error(f"Error buscando carpeta: {response_carpeta.status_code}")
-            return None
-        
-        carpetas = response_carpeta.json().get('files', [])
-        
-        if not carpetas:
-            logger.error("Carpeta INBESTU no encontrada")
-            return None
-        
-        carpeta_id = carpetas[0]['id']
-        logger.info(f"Carpeta encontrada: {carpetas[0]['name']}")
-        
-        # PASO 2: Buscar archivos Excel en la carpeta usando requests directo
-        params_archivos = {
-            'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
-            'fields': 'files(id, name)',
-            'orderBy': 'name desc'
-        }
-        
-        response_archivos = requests.get(search_url, headers=headers, params=params_archivos)
-        
-        if response_archivos.status_code != 200:
-            logger.error(f"Error buscando archivos: {response_archivos.status_code}")
-            return None
-        
-        archivos = response_archivos.json().get('files', [])
-        
-        if not archivos:
-            logger.error("No se encontró archivo BD Grupo Laboral")
-            return None
-        
-        # Tomar el archivo más reciente
-        archivo_mas_reciente = archivos[0]
-        logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
-        
-        # PASO 3: Descargar archivo usando requests directo
-        file_id = archivo_mas_reciente['id']
-        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-        
-        response_download = requests.get(download_url, headers=headers)
-        
-        if response_download.status_code == 200:
-            logger.info(f"Archivo descargado exitosamente: {len(response_download.content)} bytes")
-            return io.BytesIO(response_download.content)
-        else:
-            logger.error(f"Error descargando archivo: {response_download.status_code}")
-            return None
+        try:
+            # Autenticar con PyDrive2
+            gauth = ServiceAccountCredentials(temp_creds_file)
+            drive = GoogleDrive(gauth)
+            
+            # PASO 1: Buscar carpeta INBESTU
+            carpetas = drive.ListFile({
+                'q': "title='INBESTU' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            }).GetList()
+            
+            if not carpetas:
+                logger.error("Carpeta INBESTU no encontrada")
+                return None
+            
+            carpeta_id = carpetas[0]['id']
+            logger.info(f"Carpeta encontrada: {carpetas[0]['title']}")
+            
+            # PASO 2: Buscar archivos Excel en la carpeta
+            archivos = drive.ListFile({
+                'q': f"title contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
+                'orderBy': 'title desc'
+            }).GetList()
+            
+            if not archivos:
+                logger.error("No se encontró archivo BD Grupo Laboral")
+                return None
+            
+            # Tomar el archivo más reciente (primero en la lista ordenada descendente)
+            archivo = archivos[0]
+            logger.info(f"Archivo encontrado: {archivo['title']}")
+            
+            # PASO 3: Descargar archivo
+            contenido = archivo.GetContentString(mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            
+            # Si GetContentString no funciona, intentar con GetContentFile
+            if not contenido:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                    archivo.GetContentFile(tmp.name)
+                    with open(tmp.name, 'rb') as f:
+                        contenido = f.read()
+                    os.unlink(tmp.name)
+            
+            logger.info(f"Archivo descargado exitosamente: {len(contenido) if isinstance(contenido, bytes) else len(contenido.encode())} bytes")
+            
+            # Retornar como BytesIO
+            if isinstance(contenido, str):
+                return io.BytesIO(contenido.encode())
+            else:
+                return io.BytesIO(contenido)
+            
+        finally:
+            # Limpiar archivo temporal de credenciales
+            try:
+                os.unlink(temp_creds_file)
+            except:
+                pass
         
     except Exception as e:
         logger.error(f"Error buscando archivo en Drive: {e}")
