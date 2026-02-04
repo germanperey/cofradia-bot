@@ -489,9 +489,10 @@ def analizar_participacion_usuarios(dias=7):
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
 def buscar_archivo_excel_drive():
-    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando SOLO requests"""
+    """Busca archivo en Google Drive usando autenticación JWT manual (sin oauth2client)"""
     try:
-        from oauth2client.service_account import ServiceAccountCredentials
+        import jwt
+        import time
         import io
         
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
@@ -499,16 +500,39 @@ def buscar_archivo_excel_drive():
             logger.error("GOOGLE_DRIVE_CREDS no configurado")
             return None
         
-        # Configurar credenciales
-        scope = ['https://www.googleapis.com/auth/drive.readonly']
         creds_dict = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         
-        # Obtener token de acceso
-        access_token = creds.get_access_token().access_token
+        # Crear JWT manualmente
+        now = int(time.time())
+        payload = {
+            'iss': creds_dict['client_email'],
+            'scope': 'https://www.googleapis.com/auth/drive.readonly',
+            'aud': 'https://oauth2.googleapis.com/token',
+            'exp': now + 3600,
+            'iat': now
+        }
+        
+        # Firmar JWT
+        private_key = creds_dict['private_key']
+        encoded_jwt = jwt.encode(payload, private_key, algorithm='RS256')
+        
+        # Intercambiar JWT por access token
+        token_url = 'https://oauth2.googleapis.com/token'
+        token_data = {
+            'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion': encoded_jwt
+        }
+        
+        token_response = requests.post(token_url, data=token_data)
+        
+        if token_response.status_code != 200:
+            logger.error(f"Error obteniendo token: {token_response.status_code}")
+            return None
+        
+        access_token = token_response.json()['access_token']
         headers = {'Authorization': f'Bearer {access_token}'}
         
-        # PASO 1: Buscar carpeta INBESTU usando requests directo
+        # PASO 1: Buscar carpeta INBESTU
         search_url = "https://www.googleapis.com/drive/v3/files"
         params_carpeta = {
             'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'",
@@ -530,7 +554,7 @@ def buscar_archivo_excel_drive():
         carpeta_id = carpetas[0]['id']
         logger.info(f"Carpeta encontrada: {carpetas[0]['name']}")
         
-        # PASO 2: Buscar archivos Excel en la carpeta usando requests directo
+        # PASO 2: Buscar archivos Excel
         params_archivos = {
             'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
             'fields': 'files(id, name)',
@@ -549,25 +573,24 @@ def buscar_archivo_excel_drive():
             logger.error("No se encontró archivo BD Grupo Laboral")
             return None
         
-        # Tomar el archivo más reciente
         archivo_mas_reciente = archivos[0]
         logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
         
-        # PASO 3: Descargar archivo usando requests directo
+        # PASO 3: Descargar archivo
         file_id = archivo_mas_reciente['id']
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
         
         response_download = requests.get(download_url, headers=headers)
         
         if response_download.status_code == 200:
-            logger.info(f"Archivo descargado exitosamente: {len(response_download.content)} bytes")
+            logger.info(f"Archivo descargado: {len(response_download.content)} bytes")
             return io.BytesIO(response_download.content)
         else:
-            logger.error(f"Error descargando archivo: {response_download.status_code}")
+            logger.error(f"Error descargando: {response_download.status_code}")
             return None
         
     except Exception as e:
-        logger.error(f"Error buscando archivo en Drive: {e}")
+        logger.error(f"Error en Drive: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
