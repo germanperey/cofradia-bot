@@ -52,21 +52,34 @@ COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
 
-# Configuración de Gemini con modelo correcto
+# Configuración de Gemini con modelos correctos (actualizado Feb 2025)
+# Modelos disponibles: gemini-1.5-flash, gemini-1.5-pro, gemini-pro
+model = None
+vision_model = None
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        logger.info("✅ Usando modelo gemini-1.5-flash-latest")
-    except:
+    
+    # Lista de modelos a intentar en orden de preferencia
+    modelos_texto = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+    
+    for nombre_modelo in modelos_texto:
         try:
-            model = genai.GenerativeModel('gemini-pro')
-            logger.info("✅ Usando modelo gemini-pro")
-        except:
+            model = genai.GenerativeModel(nombre_modelo)
+            # Probar que funcione con una solicitud simple
+            test_response = model.generate_content("Hola")
+            if test_response:
+                logger.info(f"✅ Modelo de texto inicializado: {nombre_modelo}")
+                vision_model = model  # El mismo modelo soporta visión
+                break
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo usar {nombre_modelo}: {str(e)[:50]}")
             model = None
-            logger.warning("⚠️ No se pudo inicializar modelo Gemini")
+            continue
+    
+    if not model:
+        logger.error("❌ No se pudo inicializar ningún modelo Gemini")
 else:
-    model = None
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
 DATOS_BANCARIOS = """
@@ -206,9 +219,24 @@ async def enviar_mensaje_largo(update_or_context, texto: str, chat_id=None, pars
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(b'Bot Cofradia Premium - Activo')
+        status = "✅ Activo" if model else "⚠️ Sin IA"
+        html = f"""
+        <html>
+        <head><title>Bot Cofradía Premium</title></head>
+        <body style="font-family: Arial; text-align: center; padding: 50px;">
+            <h1>🤖 Bot Cofradía Premium</h1>
+            <p>Estado: {status}</p>
+            <p>Última verificación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
     
     def log_message(self, format, *args):
         pass
@@ -218,6 +246,19 @@ def run_keepalive_server():
     server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
     logger.info(f"🌐 Keep-alive server en puerto {port}")
     server.serve_forever()
+
+def auto_ping():
+    """Auto-ping para mantener el servicio activo en Render"""
+    import time
+    render_url = os.environ.get('RENDER_EXTERNAL_URL')
+    while True:
+        try:
+            if render_url:
+                requests.get(render_url, timeout=10)
+                logger.debug("🏓 Auto-ping enviado")
+        except:
+            pass
+        time.sleep(300)  # Ping cada 5 minutos
 
 # ==================== BASE DE DATOS ====================
 
@@ -503,95 +544,213 @@ def buscar_en_historial(query, topic_id=None, limit=10):
 # ==================== GOOGLE DRIVE ====================
 
 def buscar_archivo_excel_drive():
+    """Busca y descarga el archivo Excel de profesionales desde Google Drive"""
     try:
         from oauth2client.service_account import ServiceAccountCredentials
+        
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
         if not creds_json:
-            return None
+            logger.warning("⚠️ GOOGLE_DRIVE_CREDS no configurada")
+            return None, "Variable GOOGLE_DRIVE_CREDS no configurada"
+        
+        try:
+            creds_dict = json.loads(creds_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Error parseando GOOGLE_DRIVE_CREDS: {e}")
+            return None, "Error en formato de credenciales de Google Drive"
+        
         scope = ['https://www.googleapis.com/auth/drive.readonly']
-        creds_dict = json.loads(creds_json)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         access_token = creds.get_access_token().access_token
         headers = {'Authorization': f'Bearer {access_token}'}
         search_url = "https://www.googleapis.com/drive/v3/files"
         
-        params_carpeta = {'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'", 'fields': 'files(id, name)'}
+        # Buscar carpeta INBESTU
+        params_carpeta = {
+            'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            'fields': 'files(id, name)'
+        }
         response_carpeta = requests.get(search_url, headers=headers, params=params_carpeta, timeout=30)
+        
         if response_carpeta.status_code != 200:
-            return None
+            logger.error(f"❌ Error buscando carpeta: {response_carpeta.status_code}")
+            return None, f"Error de API Google Drive: {response_carpeta.status_code}"
+        
         carpetas = response_carpeta.json().get('files', [])
         if not carpetas:
-            return None
-        carpeta_id = carpetas[0]['id']
+            logger.warning("⚠️ Carpeta INBESTU no encontrada")
+            return None, "Carpeta INBESTU no encontrada en Google Drive"
         
-        params_archivos = {'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false", 'fields': 'files(id, name)', 'orderBy': 'name desc'}
+        carpeta_id = carpetas[0]['id']
+        logger.info(f"📁 Carpeta INBESTU encontrada: {carpeta_id}")
+        
+        # Buscar archivo Excel
+        params_archivos = {
+            'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
+            'fields': 'files(id, name, modifiedTime)',
+            'orderBy': 'modifiedTime desc'
+        }
         response_archivos = requests.get(search_url, headers=headers, params=params_archivos, timeout=30)
+        
         if response_archivos.status_code != 200:
-            return None
+            logger.error(f"❌ Error buscando archivo: {response_archivos.status_code}")
+            return None, f"Error buscando archivo Excel: {response_archivos.status_code}"
+        
         archivos = response_archivos.json().get('files', [])
         if not archivos:
-            return None
+            logger.warning("⚠️ Archivo BD Grupo Laboral no encontrado")
+            return None, "Archivo 'BD Grupo Laboral' no encontrado en la carpeta INBESTU"
         
-        file_id = archivos[0]['id']
+        archivo_info = archivos[0]
+        file_id = archivo_info['id']
+        logger.info(f"📄 Archivo encontrado: {archivo_info['name']}")
+        
+        # Descargar archivo
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
         response_download = requests.get(download_url, headers=headers, timeout=60)
+        
         if response_download.status_code == 200:
-            return io.BytesIO(response_download.content)
-        return None
+            logger.info(f"✅ Archivo descargado: {len(response_download.content)} bytes")
+            return io.BytesIO(response_download.content), None
+        else:
+            logger.error(f"❌ Error descargando: {response_download.status_code}")
+            return None, f"Error descargando archivo: {response_download.status_code}"
+            
     except Exception as e:
-        logger.error(f"Error Drive: {e}")
-        return None
+        logger.error(f"❌ Error Google Drive: {e}")
+        return None, f"Error de conexión: {str(e)[:100]}"
+
 
 def buscar_profesionales(query):
+    """Busca profesionales en la base de datos de Google Drive"""
     try:
-        archivo = buscar_archivo_excel_drive()
+        archivo, error = buscar_archivo_excel_drive()
+        
         if not archivo:
-            return "❌ No se pudo acceder a la base de datos de profesionales."
-        df = pd.read_excel(archivo, engine='openpyxl')
+            return f"❌ {error or 'No se pudo acceder a la base de datos de profesionales.'}\n\n💡 Verifica que las credenciales de Google Drive estén configuradas."
+        
+        # Leer Excel
+        try:
+            df = pd.read_excel(archivo, engine='openpyxl')
+        except Exception as e:
+            logger.error(f"Error leyendo Excel: {e}")
+            return "❌ Error al leer el archivo Excel. Verifica el formato del archivo."
+        
+        # Normalizar nombres de columnas
         df.columns = df.columns.str.strip().str.lower()
+        logger.info(f"📊 Columnas encontradas: {list(df.columns)}")
+        
         profesionales = []
+        
+        # Mapeo flexible de columnas
+        col_nombre = next((c for c in df.columns if 'nombre' in c), None)
+        col_profesion = next((c for c in df.columns if any(x in c for x in ['profesión', 'profesion', 'área', 'area', 'cargo'])), None)
+        col_email = next((c for c in df.columns if any(x in c for x in ['email', 'correo', 'mail'])), None)
+        col_telefono = next((c for c in df.columns if any(x in c for x in ['teléfono', 'telefono', 'fono', 'celular', 'móvil'])), None)
+        
         for idx, row in df.iterrows():
-            nombre = str(row.get('nombre completo', row.get('nombre', 'N/A'))).strip()
-            profesion = str(row.get('profesión', row.get('profesion', row.get('área', 'N/A')))).strip()
-            email = str(row.get('email', row.get('correo', 'N/A'))).strip()
-            telefono = str(row.get('teléfono', row.get('telefono', 'N/A'))).strip()
-            if nombre == 'N/A' or nombre == 'nan' or not nombre:
+            nombre = str(row.get(col_nombre, 'N/A')).strip() if col_nombre else 'N/A'
+            profesion = str(row.get(col_profesion, 'N/A')).strip() if col_profesion else 'N/A'
+            email = str(row.get(col_email, 'N/A')).strip() if col_email else 'N/A'
+            telefono = str(row.get(col_telefono, 'N/A')).strip() if col_telefono else 'N/A'
+            
+            # Limpiar valores nulos
+            if nombre in ['N/A', 'nan', 'None', ''] or pd.isna(row.get(col_nombre)) if col_nombre else True:
                 continue
-            profesionales.append({'nombre': nombre, 'profesion': profesion, 'email': email, 'telefono': telefono})
+            
+            profesionales.append({
+                'nombre': nombre,
+                'profesion': profesion if profesion not in ['nan', 'None'] else 'Sin especificar',
+                'email': email if email not in ['nan', 'None'] else 'No disponible',
+                'telefono': telefono if telefono not in ['nan', 'None'] else 'No disponible'
+            })
         
         if not profesionales:
-            return "❌ No se encontraron profesionales."
+            return "❌ La base de datos está vacía o no tiene el formato esperado."
         
+        # Buscar coincidencias
         query_lower = query.lower()
-        encontrados = [p for p in profesionales if query_lower in p['nombre'].lower() or query_lower in p['profesion'].lower()]
+        encontrados = [
+            p for p in profesionales 
+            if query_lower in p['nombre'].lower() or query_lower in p['profesion'].lower()
+        ]
         
         if not encontrados:
-            return f"❌ No se encontraron profesionales para: {query}"
+            # Sugerir búsquedas alternativas
+            sugerencias = list(set([p['profesion'] for p in profesionales[:20] if p['profesion'] != 'Sin especificar']))[:5]
+            msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
+            if sugerencias:
+                msg += f"💡 **Intenta buscar por:**\n"
+                for s in sugerencias:
+                    msg += f"• {s}\n"
+            return msg
         
-        resultado = "**👥 PROFESIONALES ENCONTRADOS**\n\n"
+        resultado = f"👥 **PROFESIONALES ENCONTRADOS**\n🔍 Búsqueda: {query}\n📊 Resultados: {len(encontrados)}\n\n"
+        
         for i, prof in enumerate(encontrados[:10], 1):
-            resultado += f"**{i}. {prof['nombre']}**\n🎯 {prof['profesion']}\n📧 {prof['email']}\n📱 {prof['telefono']}\n\n"
+            resultado += f"**{i}. {prof['nombre']}**\n"
+            resultado += f"   🎯 {prof['profesion']}\n"
+            resultado += f"   📧 {prof['email']}\n"
+            resultado += f"   📱 {prof['telefono']}\n\n"
+        
+        if len(encontrados) > 10:
+            resultado += f"\n📌 _Mostrando 10 de {len(encontrados)} resultados_"
+        
         return resultado
+        
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        logger.error(f"Error en buscar_profesionales: {e}")
+        return f"❌ Error al buscar profesionales: {str(e)[:100]}"
 
 async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
+    """Busca ofertas de empleo usando IA"""
     if not model:
-        return "❌ Servicio de IA no disponible."
+        return "❌ El servicio de IA no está disponible en este momento. Por favor, intenta más tarde."
+    
     try:
         partes = []
-        if cargo: partes.append(f"cargo: {cargo}")
-        if ubicacion: partes.append(f"ubicación: {ubicacion}")
-        if renta: partes.append(f"renta: {renta}")
-        consulta = ", ".join(partes) if partes else "empleos generales"
+        if cargo: 
+            partes.append(f"cargo/puesto: {cargo}")
+        if ubicacion: 
+            partes.append(f"ubicación: {ubicacion}")
+        if renta: 
+            partes.append(f"renta mínima: {renta}")
         
-        prompt = f"""Busca ofertas de empleo en Chile para: {consulta}
-Proporciona 5-8 ofertas con: título, empresa, ubicación, salario, descripción breve.
-Formatea profesionalmente en español."""
+        consulta = ", ".join(partes) if partes else "empleos generales en Chile"
+        
+        prompt = f"""Eres un asistente de búsqueda de empleo en Chile.
+
+BÚSQUEDA: {consulta}
+
+Genera una lista de 5-7 ofertas de empleo REALISTAS para Chile que coincidan con la búsqueda.
+
+FORMATO REQUERIDO para cada oferta:
+
+💼 **[TÍTULO DEL CARGO]**
+🏢 Empresa: [Nombre empresa]
+📍 Ubicación: [Ciudad, Chile]
+💰 Renta: [Rango salarial en CLP]
+📝 Descripción: [2-3 líneas sobre el cargo]
+✅ Requisitos: [Principales requisitos]
+
+---
+
+Incluye empresas conocidas en Chile (Falabella, Banco de Chile, Entel, LATAM, Cencosud, etc.) y también empresas medianas.
+Las rentas deben ser realistas para el mercado chileno.
+Responde SOLO con las ofertas, sin introducciones."""
+
         response = model.generate_content(prompt)
-        return response.text
+        
+        if response and response.text:
+            resultado = f"🔍 **RESULTADOS DE BÚSQUEDA**\n📋 {consulta.upper()}\n\n"
+            resultado += response.text
+            return resultado
+        else:
+            return "❌ No se pudieron generar resultados. Intenta con otros términos de búsqueda."
+            
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        logger.error(f"Error en buscar_empleos_web: {e}")
+        return f"❌ Error al buscar empleos: {str(e)[:100]}\n\nPor favor, intenta de nuevo más tarde."
 
 # ==================== ESTADÍSTICAS ====================
 
@@ -1101,56 +1260,131 @@ async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAUL
     conn.close()
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe y procesa comprobantes de pago con OCR"""
     user = update.message.from_user
     if not es_chat_privado(update):
         return
+    
     if 'plan_seleccionado' not in context.user_data:
         await update.message.reply_text("❌ Primero selecciona un plan con /renovar")
         return
+    
     dias = context.user_data['plan_seleccionado']
     precio = context.user_data['precio']
     msg = await update.message.reply_text("🔍 Analizando comprobante...")
+    
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     
-    datos_ocr = {}
+    datos_ocr = {"analizado": False}
+    
     try:
+        # Descargar imagen
         image_bytes = requests.get(file.file_path, timeout=30).content
+        
+        # Intentar OCR con Gemini si está disponible
         if model:
-            vision_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            image = PIL.Image.open(BytesIO(image_bytes))
-            prompt_ocr = f"Analiza comprobante. Monto esperado: ${precio:,}. Cuenta: 69104312. JSON: {{\"monto_correcto\": true/false, \"legible\": true/false}}"
-            response = vision_model.generate_content([prompt_ocr, image])
-            response_text = re.sub(r'```json\s*|\s*```', '', response.text.strip())
             try:
-                datos_ocr = json.loads(response_text)
-            except:
-                datos_ocr = {"legible": True}
+                image = PIL.Image.open(BytesIO(image_bytes))
+                
+                prompt_ocr = f"""Analiza esta imagen de comprobante de transferencia bancaria.
+
+DATOS ESPERADOS:
+- Monto: ${precio:,} CLP (aproximado)
+- Cuenta destino: 69104312
+- Banco: Santander
+- Titular: Destak E.I.R.L.
+
+INSTRUCCIONES:
+1. Identifica si es un comprobante de transferencia válido
+2. Extrae el monto si es visible
+3. Verifica si la cuenta destino coincide
+
+Responde SOLO con este JSON (sin markdown):
+{{"es_comprobante": true/false, "monto_visible": "monto o null", "cuenta_coincide": true/false/null, "legible": true/false, "observaciones": "texto breve"}}"""
+
+                response = model.generate_content([prompt_ocr, image])
+                response_text = response.text.strip()
+                
+                # Limpiar respuesta de markdown
+                response_text = re.sub(r'```json\s*|\s*```', '', response_text)
+                response_text = response_text.strip()
+                
+                try:
+                    datos_ocr = json.loads(response_text)
+                    datos_ocr["analizado"] = True
+                except json.JSONDecodeError:
+                    datos_ocr = {"analizado": True, "raw_response": response_text[:200]}
+                    
+            except Exception as e:
+                logger.warning(f"OCR falló: {e}")
+                datos_ocr = {"analizado": False, "error_ocr": str(e)[:50]}
+        else:
+            datos_ocr = {"analizado": False, "motivo": "IA no disponible"}
+            
     except Exception as e:
+        logger.error(f"Error procesando imagen: {e}")
         datos_ocr = {"error": str(e)[:50]}
     
     await msg.delete()
-    await update.message.reply_text("✅ **Comprobante recibido**\n\n⏳ En revisión por el administrador.", parse_mode='Markdown')
+    await update.message.reply_text(
+        "✅ **Comprobante recibido**\n\n"
+        "⏳ En revisión por el administrador.\n"
+        "📩 Recibirás tu código de activación una vez aprobado.",
+        parse_mode='Markdown'
+    )
     
+    # Guardar en base de datos
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO pagos_pendientes (user_id, first_name, dias_plan, precio, comprobante_file_id, fecha_envio, estado, datos_ocr) VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?)",
-              (user.id, user.first_name, dias, precio, photo.file_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), json.dumps(datos_ocr)))
+    c.execute("""INSERT INTO pagos_pendientes 
+                 (user_id, first_name, dias_plan, precio, comprobante_file_id, fecha_envio, estado, datos_ocr) 
+                 VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?)""",
+              (user.id, user.first_name, dias, precio, photo.file_id, 
+               datetime.now().strftime("%Y-%m-%d %H:%M:%S"), json.dumps(datos_ocr)))
     pago_id = c.lastrowid
     conn.commit()
     conn.close()
     
+    # Notificar al admin
     nombre_plan = dict([(p[0], p[2]) for p in obtener_precios()]).get(dias, "Plan")
-    keyboard = [[InlineKeyboardButton("✅ Aprobar", callback_data=f"aprobar_{pago_id}")], [InlineKeyboardButton("❌ Rechazar", callback_data=f"rechazar_{pago_id}")]]
+    keyboard = [
+        [InlineKeyboardButton("✅ Aprobar", callback_data=f"aprobar_{pago_id}")],
+        [InlineKeyboardButton("❌ Rechazar", callback_data=f"rechazar_{pago_id}")]
+    ]
     
-    ocr_info = f"\n\n🔍 OCR: {datos_ocr}" if datos_ocr else ""
+    # Formatear info OCR para admin
+    ocr_info = ""
+    if datos_ocr.get("analizado"):
+        ocr_info = "\n\n🔍 **Análisis OCR:**"
+        if datos_ocr.get("es_comprobante") is not None:
+            ocr_info += f"\n• Comprobante válido: {'✅' if datos_ocr.get('es_comprobante') else '❌'}"
+        if datos_ocr.get("monto_visible"):
+            ocr_info += f"\n• Monto detectado: {datos_ocr.get('monto_visible')}"
+        if datos_ocr.get("cuenta_coincide") is not None:
+            ocr_info += f"\n• Cuenta coincide: {'✅' if datos_ocr.get('cuenta_coincide') else '❌'}"
+        if datos_ocr.get("observaciones"):
+            ocr_info += f"\n• Obs: {datos_ocr.get('observaciones')[:100]}"
+    elif datos_ocr.get("error"):
+        ocr_info = f"\n\n⚠️ OCR error: {datos_ocr.get('error')}"
+    
     try:
-        await context.bot.send_photo(chat_id=OWNER_ID, photo=photo.file_id, 
-            caption=f"💳 **PAGO #{pago_id}**\n\n👤 {user.first_name} (@{user.username or 'N/A'})\n💎 {nombre_plan} ({dias}d)\n💰 {formato_clp(precio)}{ocr_info}", 
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await context.bot.send_photo(
+            chat_id=OWNER_ID,
+            photo=photo.file_id,
+            caption=f"💳 **PAGO #{pago_id}**\n\n"
+                    f"👤 {user.first_name} (@{user.username or 'N/A'})\n"
+                    f"🆔 ID: `{user.id}`\n"
+                    f"💎 {nombre_plan} ({dias} días)\n"
+                    f"💰 {formato_clp(precio)}"
+                    f"{ocr_info}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
     except Exception as e:
         logger.error(f"Error notificando admin: {e}")
     
+    # Limpiar datos de contexto
     del context.user_data['plan_seleccionado']
     del context.user_data['precio']
 
@@ -1663,51 +1897,113 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 # ==================== HANDLER MENCIONES ====================
 
 async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde cuando mencionan al bot con una pregunta"""
     if not update.message or not update.message.text:
         return
+    
     mensaje = update.message.text
     user_id = update.effective_user.id
+    
+    # Obtener username del bot
     try:
         bot_username = context.bot.username.lower()
     except:
         bot_username = BOT_USERNAME.lower()
     
-    menciones_validas = [f"@{bot_username}", "@cofradia_premium_bot", "@bot"]
+    # Verificar menciones válidas
+    menciones_validas = [
+        f"@{bot_username}",
+        "@cofradia_premium_bot",
+        "@cofradiapremiumbot"
+    ]
+    
     tiene_mencion = any(m.lower() in mensaje.lower() for m in menciones_validas)
     if not tiene_mencion:
         return
     
+    # Verificar suscripción
     if not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("❌ Necesitas suscripción activa.\nUsa /registrarse en el grupo.")
+        await update.message.reply_text(
+            "❌ Necesitas suscripción activa para usar el asistente IA.\n\n"
+            "📝 Usa /registrarse en el grupo @Cofradia_de_Networking"
+        )
         return
     
+    # Extraer la pregunta (remover menciones)
     pregunta = re.sub(r'@\w+', '', mensaje).strip()
+    
     if not pregunta:
-        await update.message.reply_text(f"💡 Mencióname con tu pregunta:\n@{bot_username} ¿Qué es networking?", parse_mode='Markdown')
+        await update.message.reply_text(
+            f"💡 **¿Cómo usarme?**\n\n"
+            f"Mencióname seguido de tu pregunta:\n"
+            f"`@{bot_username} ¿Qué es networking?`\n\n"
+            f"Puedo ayudarte con:\n"
+            f"• Preguntas sobre networking\n"
+            f"• Consejos profesionales\n"
+            f"• Información del grupo",
+            parse_mode='Markdown'
+        )
         return
     
+    # Verificar que el modelo esté disponible
     if not model:
-        await update.message.reply_text("❌ Servicio IA no disponible.")
+        await update.message.reply_text(
+            "❌ El servicio de IA no está disponible en este momento.\n"
+            "Por favor, intenta más tarde."
+        )
         return
     
-    msg = await update.message.reply_text("🤔 Procesando...")
+    msg = await update.message.reply_text("🤔 Procesando tu pregunta...")
+    
     try:
+        # Buscar contexto relevante en el historial
         topic_id = update.message.message_thread_id if update.message.is_topic_message else None
         resultados = buscar_semantica(pregunta, topic_id, limit=3)
+        
         contexto = ""
         if resultados:
-            contexto = "\n\nCONTEXTO:\n"
+            contexto = "\n\nCONTEXTO DEL GRUPO (mensajes relacionados):\n"
             for nombre, msg_txt, fecha in resultados:
-                contexto += f"- {nombre}: {msg_txt[:100]}...\n"
-        prompt = f"Asistente de Cofradía. Responde amigable y profesional.\nPREGUNTA: {pregunta}\n{contexto}\nMáximo 3 párrafos. Español."
+                contexto += f"- {nombre}: {msg_txt[:150]}...\n"
+        
+        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena.
+
+Tu personalidad:
+- Amigable y profesional
+- Experto en networking, negocios y emprendimiento
+- Conoces la comunidad y sus dinámicas
+- Respondes en español chileno (pero profesional)
+
+PREGUNTA DEL USUARIO: {pregunta}
+{contexto}
+
+INSTRUCCIONES:
+1. Responde de manera concisa y útil
+2. Si hay contexto relevante del grupo, úsalo
+3. Máximo 3 párrafos
+4. Si no sabes algo, sé honesto
+5. Termina con una sugerencia práctica si es apropiado"""
+
         response = model.generate_content(prompt)
+        
         await msg.delete()
-        await enviar_mensaje_largo(update, response.text)
-        registrar_servicio_usado(user_id, 'ia_mencion')
+        
+        if response and response.text:
+            await enviar_mensaje_largo(update, response.text)
+            registrar_servicio_usado(user_id, 'ia_mencion')
+        else:
+            await update.message.reply_text("❌ No pude generar una respuesta. Intenta reformular tu pregunta.")
+        
     except Exception as e:
-        logger.error(f"Error mencion: {e}")
-        await msg.delete()
-        await update.message.reply_text("❌ Error. Intenta de nuevo.")
+        logger.error(f"Error en mención IA: {e}")
+        try:
+            await msg.delete()
+        except:
+            pass
+        await update.message.reply_text(
+            "❌ Hubo un error procesando tu pregunta.\n"
+            "Por favor, intenta de nuevo en unos momentos."
+        )
 
 async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guarda mensajes del grupo y registra topics automáticamente"""
@@ -1857,16 +2153,29 @@ async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
 # ==================== MAIN ====================
 
 def main():
+    """Función principal del bot"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
+    logger.info(f"📊 Estado IA: {'✅ Activa' if model else '❌ No disponible'}")
+    
+    # Inicializar base de datos
     init_db()
     
+    # Iniciar servidor keep-alive para Render
     keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
     keepalive_thread.start()
     
+    # Iniciar auto-ping (solo si hay URL de Render)
+    if os.environ.get('RENDER_EXTERNAL_URL'):
+        ping_thread = threading.Thread(target=auto_ping, daemon=True)
+        ping_thread.start()
+        logger.info("🏓 Auto-ping activado para Render")
+    
+    # Verificar token
     if not TOKEN_BOT:
         logger.error("❌ TOKEN_BOT no configurado")
         return
     
+    # Crear aplicación con configuración para evitar conflictos
     application = Application.builder().token(TOKEN_BOT).build()
     
     async def set_commands(app):
@@ -1879,22 +2188,31 @@ def main():
             BotCommand("buscar_profesional", "Buscar expertos"),
             BotCommand("empleo", "Buscar empleos"),
             BotCommand("graficos", "Ver gráficos"),
-            BotCommand("estadisticas", "Ver números"),
-            BotCommand("categorias", "Distribución"),
-            BotCommand("top_usuarios", "Ranking"),
+            BotCommand("estadisticas", "Ver estadísticas"),
+            BotCommand("categorias", "Ver categorías"),
+            BotCommand("top_usuarios", "Ranking usuarios"),
             BotCommand("mi_perfil", "Tu perfil"),
             BotCommand("resumen", "Resumen del día"),
-            BotCommand("resumen_semanal", "7 días"),
-            BotCommand("resumen_mes", "Mensual"),
+            BotCommand("resumen_semanal", "Resumen 7 días"),
+            BotCommand("resumen_mes", "Resumen mensual"),
+            BotCommand("resumen_usuario", "Perfil de usuario"),
             BotCommand("dotacion", "Total integrantes"),
+            BotCommand("ingresos", "Incorporaciones"),
+            BotCommand("crecimiento_mes", "Crecimiento mensual"),
+            BotCommand("crecimiento_anual", "Crecimiento anual"),
             BotCommand("mi_cuenta", "Mi suscripción"),
             BotCommand("renovar", "Renovar plan"),
+            BotCommand("activar", "Activar código"),
         ]
-        await app.bot.set_my_commands(commands)
+        try:
+            await app.bot.set_my_commands(commands)
+            logger.info("✅ Comandos del bot configurados")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudieron configurar comandos: {e}")
     
     application.post_init = set_commands
     
-    # Jobs
+    # Jobs programados
     job_queue = application.job_queue
     job_queue.run_daily(resumen_automatico, time=time(hour=20, minute=0), name='resumen_diario')
     job_queue.run_daily(enviar_recordatorios, time=time(hour=10, minute=0), name='recordatorios')
