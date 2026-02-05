@@ -1369,22 +1369,41 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c = conn.cursor()
         dias = 7  # Últimos 7 días
         
+        # Primero verificar si hay datos
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes")
+            total_general = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes")
+            total_general = c.fetchone()[0]
+        
+        if total_general == 0:
+            conn.close()
+            await msg.edit_text(
+                "📊 **No hay datos para mostrar**\n\n"
+                "La base de datos está vacía. Los gráficos estarán disponibles cuando el bot "
+                "comience a guardar mensajes del grupo.\n\n"
+                "💡 Los mensajes se guardan automáticamente mientras el bot está activo en @Cofradia_de_Networking",
+                parse_mode='Markdown'
+            )
+            return
+        
         # Obtener estadísticas
         if DATABASE_URL:
             # PostgreSQL
-            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days'
-                        GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (dias,))
+            c.execute("""SELECT DATE(fecha) as date, COUNT(*) as count FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
             por_dia = c.fetchall()
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days'
-                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (dias,))
+            c.execute("""SELECT first_name, COUNT(*) as count FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""")
             usuarios_activos = c.fetchall()
             
-            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days' AND categoria IS NOT NULL
-                        GROUP BY categoria ORDER BY COUNT(*) DESC""", (dias,))
+            c.execute("""SELECT categoria, COUNT(*) as count FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days' AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC""")
             por_categoria = c.fetchall()
         else:
             # SQLite
@@ -1415,7 +1434,13 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
         
         if not por_dia and not usuarios_activos:
-            await msg.edit_text("📊 No hay suficientes datos para generar gráficos.\n\nEl grupo necesita más actividad.")
+            await msg.edit_text(
+                "📊 **No hay datos de los últimos 7 días**\n\n"
+                f"Total mensajes en BD: {total_general}\n"
+                "Los mensajes más recientes aparecerán pronto.\n\n"
+                "💡 Usa /estadisticas para ver datos históricos.",
+                parse_mode='Markdown'
+            )
             return
         
         # Crear gráfico
@@ -1425,7 +1450,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Gráfico 1: Mensajes por día
         ax1 = axes[0, 0]
         if por_dia:
-            fechas = [d[0][-5:] if len(d[0]) > 5 else d[0] for d in por_dia]
+            fechas = [d[0][-5:] if len(str(d[0])) > 5 else str(d[0]) for d in por_dia]
             valores = [d[1] for d in por_dia]
             ax1.bar(fechas, valores, color='#3498db', alpha=0.8)
             ax1.set_title('📈 Mensajes por Día')
@@ -1439,7 +1464,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Gráfico 2: Usuarios más activos
         ax2 = axes[0, 1]
         if usuarios_activos:
-            nombres = [u[0][:10] for u in usuarios_activos[:8]]
+            nombres = [str(u[0])[:10] if u[0] else 'Anon' for u in usuarios_activos[:8]]
             mensajes = [u[1] for u in usuarios_activos[:8]]
             colors = plt.cm.viridis([i/len(nombres) for i in range(len(nombres))])
             ax2.barh(nombres, mensajes, color=colors)
@@ -1452,7 +1477,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Gráfico 3: Categorías
         ax3 = axes[1, 0]
         if por_categoria:
-            categorias = [c[0] for c in por_categoria[:6]]
+            categorias = [str(c[0]) for c in por_categoria[:6]]
             cantidades = [c[1] for c in por_categoria[:6]]
             ax3.pie(cantidades, labels=categorias, autopct='%1.1f%%', startangle=90)
             ax3.set_title('🏷️ Categorías de Mensajes')
@@ -1497,7 +1522,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error en graficos_comando: {e}")
-        await msg.edit_text(f"❌ Error generando gráficos: {str(e)[:100]}")
+        await msg.edit_text(f"❌ Error generando gráficos.\n\nDetalle: {str(e)[:100]}")
 
 
 @requiere_suscripcion
@@ -1892,7 +1917,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ==================== HANDLER MENCIONES ====================
 
 async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde cuando mencionan al bot"""
+    """Responde cuando mencionan al bot - con IA mejorada"""
     if not update.message or not update.message.text:
         return
     
@@ -1929,13 +1954,41 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
         return
     
-    msg = await update.message.reply_text("🧠 Procesando...")
+    msg = await update.message.reply_text("🧠 Procesando tu consulta...")
     
     try:
-        prompt = f"""Usuario {user_name} pregunta: "{pregunta}"
+        # Buscar contexto en el historial del grupo
+        contexto_grupo = ""
+        resultados = buscar_en_historial(pregunta, limit=5)
+        if resultados:
+            contexto_grupo = "\n\nINFORMACIÓN RELACIONADA DEL GRUPO:\n"
+            for nombre, texto, fecha in resultados[:3]:
+                contexto_grupo += f"- {nombre}: {texto[:150]}...\n"
+        
+        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena.
 
-Responde de forma útil, concisa y profesional.
-Máximo 3 párrafos."""
+PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
+{contexto_grupo}
+
+INSTRUCCIONES:
+1. Si la pregunta es sobre SERVICIOS (electricistas, gasfiter, abogados, etc.):
+   - Explica que no tienes acceso a internet para buscar proveedores específicos
+   - Sugiere usar /buscar_profesional [profesión] para buscar en la base de datos del grupo
+   - Recomienda preguntar en el grupo si alguien conoce un buen profesional
+
+2. Si la pregunta es sobre EMPLEOS:
+   - Sugiere usar /empleo cargo:[nombre] para ver ofertas reales
+
+3. Si la pregunta es sobre el GRUPO o sus MIEMBROS:
+   - Usa la información del contexto si está disponible
+   - Sugiere usar /buscar_ia [tema] para buscar en el historial
+
+4. Para PREGUNTAS GENERALES:
+   - Responde de forma útil y concisa con tu conocimiento
+   - Sé profesional pero cercano
+
+IMPORTANTE: No inventes información específica sobre proveedores de servicios chilenos.
+Responde en máximo 3 párrafos."""
 
         respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
         
@@ -1945,7 +1998,13 @@ Máximo 3 párrafos."""
             await enviar_mensaje_largo(update, respuesta)
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
-            await update.message.reply_text("❌ No pude generar respuesta. Intenta de nuevo.")
+            await update.message.reply_text(
+                "❌ No pude generar respuesta.\n\n"
+                "💡 **Comandos útiles:**\n"
+                "• /buscar_profesional [profesión] - Buscar en BD del grupo\n"
+                "• /empleo cargo:[nombre] - Ver empleos reales\n"
+                "• /buscar_ia [tema] - Buscar en historial"
+            )
             
     except Exception as e:
         logger.error(f"Error en mención: {e}")
@@ -1953,7 +2012,7 @@ Máximo 3 párrafos."""
             await msg.delete()
         except:
             pass
-        await update.message.reply_text("❌ Error procesando tu pregunta.")
+        await update.message.reply_text("❌ Error procesando tu pregunta. Intenta de nuevo.")
 
 
 async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2012,6 +2071,699 @@ async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+
+# ==================== COMANDOS DE ESTADÍSTICAS ====================
+
+@requiere_suscripcion
+async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /estadisticas - Estadísticas generales del grupo"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes")
+            total_msgs = c.fetchone()['total']
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes")
+            total_usuarios = c.fetchone()['total']
+            
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+            suscriptores = c.fetchone()['total']
+            
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
+            msgs_hoy = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes")
+            total_msgs = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes")
+            total_usuarios = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+            suscriptores = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
+            msgs_hoy = c.fetchone()[0]
+        
+        conn.close()
+        
+        mensaje = f"""
+📊 **ESTADÍSTICAS DEL GRUPO**
+
+📝 **Mensajes totales:** {total_msgs:,}
+👥 **Usuarios únicos:** {total_usuarios:,}
+✅ **Suscriptores activos:** {suscriptores:,}
+📅 **Mensajes hoy:** {msgs_hoy:,}
+
+💡 Usa /graficos para ver gráficos visuales.
+"""
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        registrar_servicio_usado(update.effective_user.id, 'estadisticas')
+        
+    except Exception as e:
+        logger.error(f"Error en estadisticas: {e}")
+        await update.message.reply_text("❌ Error obteniendo estadísticas")
+
+
+@requiere_suscripcion
+async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /top_usuarios - Ranking de participación"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 15""")
+            top = c.fetchall()
+            top = [(r['first_name'], r['msgs']) for r in top]
+        else:
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 15""")
+            top = c.fetchall()
+        
+        conn.close()
+        
+        if not top:
+            await update.message.reply_text("📊 No hay suficientes datos aún.")
+            return
+        
+        mensaje = "🏆 **TOP USUARIOS MÁS ACTIVOS**\n\n"
+        medallas = ['🥇', '🥈', '🥉'] + ['🏅'] * 12
+        
+        for i, (nombre, msgs) in enumerate(top):
+            mensaje += f"{medallas[i]} **{nombre}**: {msgs} mensajes\n"
+        
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        registrar_servicio_usado(update.effective_user.id, 'top_usuarios')
+        
+    except Exception as e:
+        logger.error(f"Error en top_usuarios: {e}")
+        await update.message.reply_text("❌ Error obteniendo ranking")
+
+
+@requiere_suscripcion
+async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /categorias - Ver categorías de mensajes"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY total DESC""")
+            cats = [(r['categoria'], r['total']) for r in c.fetchall()]
+        else:
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY total DESC""")
+            cats = c.fetchall()
+        
+        conn.close()
+        
+        if not cats:
+            await update.message.reply_text("📊 No hay categorías registradas aún.")
+            return
+        
+        mensaje = "🏷️ **CATEGORÍAS DE MENSAJES**\n\n"
+        emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
+                  'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+        
+        for cat, total in cats:
+            emoji = emojis.get(cat, '📌')
+            mensaje += f"{emoji} **{cat}**: {total} mensajes\n"
+        
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error en categorias: {e}")
+        await update.message.reply_text("❌ Error obteniendo categorías")
+
+
+@requiere_suscripcion
+async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mi_perfil - Tu perfil de actividad"""
+    user = update.effective_user
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE user_id = %s", (user.id,))
+            total_msgs = c.fetchone()['total']
+            
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE user_id = %s AND categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY total DESC LIMIT 3""", (user.id,))
+            top_cats = [(r['categoria'], r['total']) for r in c.fetchall()]
+            
+            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = %s", (user.id,))
+            sus = c.fetchone()
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE user_id = ?", (user.id,))
+            total_msgs = c.fetchone()[0]
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE user_id = ? AND categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 3""", (user.id,))
+            top_cats = c.fetchall()
+            
+            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = ?", (user.id,))
+            sus = c.fetchone()
+        
+        conn.close()
+        
+        mensaje = f"👤 **MI PERFIL**\n\n"
+        mensaje += f"📛 **Nombre:** {user.first_name}\n"
+        mensaje += f"📝 **Mensajes totales:** {total_msgs}\n"
+        
+        if top_cats:
+            mensaje += f"\n📊 **Tus temas favoritos:**\n"
+            for cat, total in top_cats:
+                mensaje += f"  • {cat}: {total}\n"
+        
+        if sus:
+            dias = obtener_dias_restantes(user.id)
+            mensaje += f"\n⏰ **Días restantes:** {dias}\n"
+        
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error en mi_perfil: {e}")
+        await update.message.reply_text("❌ Error obteniendo perfil")
+
+
+# ==================== COMANDOS DE RESUMEN ====================
+
+@requiere_suscripcion
+async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /resumen - Resumen del día"""
+    msg = await update.message.reply_text("📝 Generando resumen del día...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT first_name, message FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE 
+                        ORDER BY fecha DESC LIMIT 50""")
+            mensajes = [(r['first_name'], r['message']) for r in c.fetchall()]
+            
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
+            total = c.fetchone()['total']
+            
+            c.execute("""SELECT COUNT(DISTINCT user_id) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE""")
+            usuarios = c.fetchone()['total']
+        else:
+            c.execute("""SELECT first_name, message FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') 
+                        ORDER BY fecha DESC LIMIT 50""")
+            mensajes = c.fetchall()
+            
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
+            total = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
+            usuarios = c.fetchone()[0]
+        
+        conn.close()
+        
+        if total == 0:
+            await msg.edit_text("📝 No hay mensajes hoy para resumir.")
+            return
+        
+        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        
+        if ia_disponible and mensajes:
+            contexto = "\n".join([f"- {m[0]}: {m[1][:100]}" for m in mensajes[:20]])
+            
+            prompt = f"""Resume brevemente la actividad de hoy en el grupo Cofradía de Networking.
+
+MENSAJES DEL DÍA:
+{contexto}
+
+Genera un resumen breve (máximo 5 puntos) de:
+- Temas principales discutidos
+- Participantes destacados
+- Información relevante compartida
+
+Sé conciso y directo."""
+
+            resumen = llamar_groq(prompt, max_tokens=500, temperature=0.3)
+            
+            if resumen:
+                mensaje = f"📝 **RESUMEN DEL DÍA**\n📅 {fecha_hoy}\n\n"
+                mensaje += f"📊 **Actividad:** {total} mensajes de {usuarios} usuarios\n\n"
+                mensaje += resumen
+                await msg.edit_text(mensaje, parse_mode='Markdown')
+                registrar_servicio_usado(update.effective_user.id, 'resumen')
+                return
+        
+        mensaje = f"📝 **RESUMEN DEL DÍA**\n📅 {fecha_hoy}\n\n"
+        mensaje += f"📊 **Actividad:** {total} mensajes de {usuarios} usuarios\n\n"
+        mensaje += "💡 _No hay suficiente actividad para generar un resumen detallado._"
+        await msg.edit_text(mensaje, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error en resumen: {e}")
+        await msg.edit_text("❌ Error generando resumen")
+
+
+@requiere_suscripcion
+async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /resumen_semanal - Resumen de 7 días"""
+    msg = await update.message.reply_text("📝 Generando resumen semanal...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+            total = c.fetchone()['total']
+            
+            c.execute("""SELECT COUNT(DISTINCT user_id) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+            usuarios = c.fetchone()['total']
+            
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
+            top = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+        else:
+            fecha_inicio = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            total = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            usuarios = c.fetchone()[0]
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""", (fecha_inicio,))
+            top = c.fetchall()
+        
+        conn.close()
+        
+        mensaje = f"📅 **RESUMEN SEMANAL**\n\n"
+        mensaje += f"📝 **Total mensajes:** {total}\n"
+        mensaje += f"👥 **Usuarios activos:** {usuarios}\n"
+        mensaje += f"📈 **Promedio diario:** {total/7:.0f} mensajes\n\n"
+        
+        if top:
+            mensaje += "🏆 **Top 5 más activos:**\n"
+            for i, (nombre, msgs) in enumerate(top, 1):
+                mensaje += f"  {i}. {nombre}: {msgs} msgs\n"
+        
+        await msg.edit_text(mensaje, parse_mode='Markdown')
+        registrar_servicio_usado(update.effective_user.id, 'resumen_semanal')
+        
+    except Exception as e:
+        logger.error(f"Error en resumen_semanal: {e}")
+        await msg.edit_text("❌ Error generando resumen")
+
+
+@requiere_suscripcion
+async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /resumen_mes - Resumen mensual"""
+    msg = await update.message.reply_text("📝 Generando resumen mensual...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        # Verificar si hay datos
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes")
+            total_general = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes")
+            total_general = c.fetchone()[0]
+        
+        if total_general == 0:
+            conn.close()
+            await msg.edit_text(
+                "📆 **RESUMEN MENSUAL**\n\n"
+                "📊 No hay mensajes guardados en la base de datos.\n\n"
+                "Los mensajes del grupo se guardan automáticamente mientras el bot está activo.\n\n"
+                "💡 Espera unas horas o días para que se acumulen datos.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        if DATABASE_URL:
+            c.execute("""SELECT COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
+            total = c.fetchone()['total']
+            
+            c.execute("""SELECT COUNT(DISTINCT user_id) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
+            usuarios = c.fetchone()['total']
+            
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 10""")
+            top = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+            
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '30 days' AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY total DESC LIMIT 5""")
+            cats = [(r['categoria'], r['total']) for r in c.fetchall()]
+        else:
+            fecha_inicio = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            total = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            usuarios = c.fetchone()[0]
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio,))
+            top = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 5""", (fecha_inicio,))
+            cats = c.fetchall()
+        
+        conn.close()
+        
+        if total == 0:
+            await msg.edit_text(
+                "📆 **RESUMEN MENSUAL (30 días)**\n\n"
+                f"📊 No hay mensajes de los últimos 30 días.\n"
+                f"📈 Total histórico en BD: {total_general} mensajes\n\n"
+                "💡 Los datos aparecerán cuando haya más actividad reciente.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        mensaje = f"📆 **RESUMEN MENSUAL (30 días)**\n\n"
+        mensaje += f"📝 **Total mensajes:** {total:,}\n"
+        mensaje += f"👥 **Usuarios activos:** {usuarios}\n"
+        mensaje += f"📈 **Promedio diario:** {total/30:.0f} mensajes\n\n"
+        
+        if top:
+            mensaje += "🏆 **Top 10 más activos:**\n"
+            for i, item in enumerate(top, 1):
+                nombre = item[0] if isinstance(item, tuple) else item['first_name']
+                msgs = item[1] if isinstance(item, tuple) else item['msgs']
+                mensaje += f"  {i}. {nombre}: {msgs}\n"
+        
+        if cats:
+            mensaje += "\n🏷️ **Categorías principales:**\n"
+            for item in cats:
+                cat = item[0] if isinstance(item, tuple) else item['categoria']
+                count = item[1] if isinstance(item, tuple) else item['total']
+                mensaje += f"  • {cat}: {count}\n"
+        
+        await msg.edit_text(mensaje, parse_mode='Markdown')
+        registrar_servicio_usado(update.effective_user.id, 'resumen_mes')
+        
+    except Exception as e:
+        logger.error(f"Error en resumen_mes: {e}")
+        await msg.edit_text(f"❌ Error generando resumen.\n\nDetalle: {str(e)[:100]}")
+
+
+# ==================== COMANDOS DE RRHH ====================
+
+@requiere_suscripcion
+async def dotacion_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /dotacion - Total de integrantes"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM suscripciones")
+            total = c.fetchone()['total']
+            
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+            activos = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM suscripciones")
+            total = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+            activos = c.fetchone()[0]
+        
+        conn.close()
+        
+        mensaje = f"""
+👥 **DOTACIÓN DEL GRUPO**
+
+📊 **Total registrados:** {total}
+✅ **Suscripciones activas:** {activos}
+❌ **Inactivos/Expirados:** {total - activos}
+"""
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error en dotacion: {e}")
+        await update.message.reply_text("❌ Error obteniendo dotación")
+
+
+# ==================== COMANDO BUSCAR PROFESIONAL (GOOGLE DRIVE) ====================
+
+@requiere_suscripcion
+async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_profesional - Buscar en base de datos de Google Drive"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Uso:** /buscar_profesional [profesión o nombre]\n\n"
+            "**Ejemplos:**\n"
+            "• `/buscar_profesional abogado`\n"
+            "• `/buscar_profesional contador`\n"
+            "• `/buscar_profesional diseñador`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    query = ' '.join(context.args)
+    msg = await update.message.reply_text(f"🔍 Buscando profesionales: _{query}_...", parse_mode='Markdown')
+    
+    # Buscar en Google Drive
+    resultado = buscar_profesionales(query)
+    
+    await msg.delete()
+    await enviar_mensaje_largo(update, resultado)
+    registrar_servicio_usado(update.effective_user.id, 'buscar_profesional')
+
+
+def buscar_profesionales(query):
+    """Busca profesionales en la base de datos de Google Drive"""
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return (
+                "❌ **Base de datos de profesionales no configurada**\n\n"
+                "La conexión a Google Drive no está activa.\n\n"
+                "💡 **Alternativas:**\n"
+                "• Pregunta en el grupo si alguien conoce un profesional\n"
+                "• Usa /buscar_ia [profesión] para buscar en el historial del grupo\n"
+                "• Contacta al administrador para configurar Google Drive"
+            )
+        
+        try:
+            creds_dict = json.loads(creds_json)
+        except json.JSONDecodeError:
+            logger.error("Error parseando GOOGLE_DRIVE_CREDS JSON")
+            return "❌ Error en credenciales de Google Drive. Contacta al administrador."
+        
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        
+        try:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            access_token = creds.get_access_token().access_token
+        except Exception as e:
+            logger.error(f"Error obteniendo token Google Drive: {e}")
+            return "❌ Error de autenticación con Google Drive."
+        
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        # Buscar archivos Excel
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            'fields': 'files(id, name)'
+        }
+        
+        response = requests.get(search_url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"Error Google Drive API: {response.status_code} - {response.text[:100]}")
+            return "❌ Error conectando con Google Drive."
+        
+        archivos = response.json().get('files', [])
+        
+        if not archivos:
+            return (
+                "❌ **No se encontró base de datos de profesionales**\n\n"
+                "No hay archivos Excel en el Google Drive configurado.\n\n"
+                "💡 El administrador debe subir un archivo Excel con los profesionales."
+            )
+        
+        # Descargar el primer archivo Excel encontrado
+        file_id = archivos[0]['id']
+        file_name = archivos[0]['name']
+        logger.info(f"Leyendo archivo: {file_name}")
+        
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        
+        response = requests.get(download_url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            return "❌ Error descargando base de datos."
+        
+        # Leer Excel
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
+        df.columns = df.columns.str.strip().str.lower()
+        
+        logger.info(f"Columnas encontradas: {list(df.columns)}")
+        
+        # Mapeo de columnas más flexible
+        col_nombre = next((c for c in df.columns if any(x in c for x in ['nombre', 'name', 'integrante', 'miembro'])), None)
+        col_profesion = next((c for c in df.columns if any(x in c for x in ['profesión', 'profesion', 'área', 'area', 'cargo', 'rubro', 'especialidad', 'ocupación', 'ocupacion'])), None)
+        col_email = next((c for c in df.columns if any(x in c for x in ['email', 'correo', 'mail', 'e-mail'])), None)
+        col_telefono = next((c for c in df.columns if any(x in c for x in ['teléfono', 'telefono', 'fono', 'celular', 'móvil', 'movil', 'whatsapp'])), None)
+        col_empresa = next((c for c in df.columns if any(x in c for x in ['empresa', 'company', 'compañía', 'organización', 'organizacion'])), None)
+        
+        if not col_nombre:
+            return f"❌ No se encontró columna de nombres en el Excel.\n\nColumnas disponibles: {', '.join(df.columns)}"
+        
+        profesionales = []
+        for _, row in df.iterrows():
+            nombre = str(row.get(col_nombre, '')).strip() if col_nombre else ''
+            profesion = str(row.get(col_profesion, '')).strip() if col_profesion else ''
+            email = str(row.get(col_email, '')).strip() if col_email else ''
+            telefono = str(row.get(col_telefono, '')).strip() if col_telefono else ''
+            empresa = str(row.get(col_empresa, '')).strip() if col_empresa else ''
+            
+            if nombre and nombre.lower() not in ['nan', 'none', '', 'null']:
+                profesionales.append({
+                    'nombre': nombre,
+                    'profesion': profesion if profesion.lower() not in ['nan', 'none', '', 'null'] else 'No especificada',
+                    'email': email if email.lower() not in ['nan', 'none', '', 'null'] else '',
+                    'telefono': telefono if telefono.lower() not in ['nan', 'none', '', 'null'] else '',
+                    'empresa': empresa if empresa.lower() not in ['nan', 'none', '', 'null'] else ''
+                })
+        
+        if not profesionales:
+            return "❌ La base de datos está vacía o no tiene formato válido."
+        
+        # Buscar coincidencias con scoring
+        query_lower = query.lower()
+        query_words = query_lower.split()
+        
+        encontrados = []
+        for p in profesionales:
+            score = 0
+            nombre_lower = p['nombre'].lower()
+            profesion_lower = p['profesion'].lower()
+            empresa_lower = p['empresa'].lower()
+            
+            # Coincidencia exacta en profesión = 100 puntos
+            if query_lower in profesion_lower:
+                score += 100
+            # Coincidencia exacta en nombre = 80 puntos
+            if query_lower in nombre_lower:
+                score += 80
+            # Coincidencia en empresa = 60 puntos
+            if query_lower in empresa_lower:
+                score += 60
+            # Coincidencia de palabras individuales = 20 puntos cada una
+            for word in query_words:
+                if len(word) > 2:
+                    if word in profesion_lower:
+                        score += 20
+                    if word in nombre_lower:
+                        score += 15
+            
+            if score > 0:
+                encontrados.append((p, score))
+        
+        # Ordenar por score
+        encontrados.sort(key=lambda x: x[1], reverse=True)
+        encontrados = [e[0] for e in encontrados]
+        
+        if not encontrados:
+            profesiones = list(set([p['profesion'] for p in profesionales if p['profesion'] != 'No especificada']))[:10]
+            msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
+            msg += f"📊 Total en base de datos: {len(profesionales)} profesionales\n\n"
+            if profesiones:
+                msg += "💡 **Algunas profesiones disponibles:**\n"
+                for p in sorted(profesiones)[:10]:
+                    msg += f"• {p}\n"
+            return msg
+        
+        resultado = f"👥 **PROFESIONALES ENCONTRADOS**\n"
+        resultado += f"🔍 Búsqueda: _{query}_\n"
+        resultado += f"📊 Resultados: {len(encontrados)} de {len(profesionales)}\n"
+        resultado += "━" * 25 + "\n\n"
+        
+        for i, prof in enumerate(encontrados[:10], 1):
+            resultado += f"**{i}. {prof['nombre']}**\n"
+            resultado += f"   🎯 {prof['profesion']}\n"
+            if prof['empresa']:
+                resultado += f"   🏢 {prof['empresa']}\n"
+            if prof['email']:
+                resultado += f"   📧 {prof['email']}\n"
+            if prof['telefono']:
+                resultado += f"   📱 {prof['telefono']}\n"
+            resultado += "\n"
+        
+        if len(encontrados) > 10:
+            resultado += f"📌 _Mostrando 10 de {len(encontrados)} resultados_"
+        
+        return resultado
+        
+    except ImportError:
+        return "❌ Módulo oauth2client no instalado."
+    except Exception as e:
+        logger.error(f"Error buscar_profesionales: {e}")
+        return f"❌ Error buscando profesionales.\n\nDetalle: {str(e)[:100]}"
 
 
 # ==================== MAIN ====================
@@ -2084,17 +2836,36 @@ def main():
     
     application.post_init = setup_commands
     
-    # Handlers
+    # Handlers básicos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ayuda", ayuda))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
     application.add_handler(CommandHandler("renovar", renovar_comando))
     application.add_handler(CommandHandler("activar", activar_codigo_comando))
+    
+    # Handlers de búsqueda
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
-    application.add_handler(CommandHandler("graficos", graficos_comando))
+    application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("empleo", empleo_comando))
+    
+    # Handlers de estadísticas
+    application.add_handler(CommandHandler("graficos", graficos_comando))
+    application.add_handler(CommandHandler("estadisticas", estadisticas_comando))
+    application.add_handler(CommandHandler("top_usuarios", top_usuarios_comando))
+    application.add_handler(CommandHandler("categorias", categorias_comando))
+    application.add_handler(CommandHandler("mi_perfil", mi_perfil_comando))
+    
+    # Handlers de resumen
+    application.add_handler(CommandHandler("resumen", resumen_comando))
+    application.add_handler(CommandHandler("resumen_semanal", resumen_semanal_comando))
+    application.add_handler(CommandHandler("resumen_mes", resumen_mes_comando))
+    
+    # Handlers de RRHH
+    application.add_handler(CommandHandler("dotacion", dotacion_comando))
+    
+    # Handlers admin
     application.add_handler(CommandHandler("cobros_admin", cobros_admin_comando))
     application.add_handler(CommandHandler("generar_codigo", generar_codigo_comando))
     
