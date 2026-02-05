@@ -60,9 +60,14 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 # ==================== CONFIGURACIÓN DE GEMINI (OCR) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
+# ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
+RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
+JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
+
 # Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
 gemini_disponible = False
+jsearch_disponible = False
 db_disponible = False
 
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
@@ -96,6 +101,13 @@ if GEMINI_API_KEY:
     logger.info("✅ Gemini API Key configurada (OCR disponible)")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada - OCR no disponible")
+
+# Verificar JSearch (RapidAPI)
+if RAPIDAPI_KEY:
+    jsearch_disponible = True
+    logger.info("✅ RapidAPI Key configurada (JSearch empleos reales)")
+else:
+    logger.warning("⚠️ RAPIDAPI_KEY no configurada - empleos reales no disponibles")
 
 # Verificar Database URL
 if DATABASE_URL:
@@ -808,86 +820,193 @@ def buscar_en_historial(query, topic_id=None, limit=10):
         return []
 
 
-# ==================== BÚSQUEDA DE EMPLEOS MEJORADA ====================
+# ==================== BÚSQUEDA DE EMPLEOS REALES CON JSEARCH ====================
 
-async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
-    """Busca ofertas de empleo usando IA + links a portales reales"""
-    if not ia_disponible:
-        return "❌ El servicio de IA no está disponible en este momento."
+def buscar_empleos_jsearch(query: str, ubicacion: str = "Chile", num_pages: int = 1) -> list:
+    """Busca empleos REALES usando JSearch API (Google for Jobs)"""
+    if not RAPIDAPI_KEY or not jsearch_disponible:
+        return None
     
     try:
-        partes = []
-        busqueda_texto = ""
+        headers = {
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
+        }
         
-        if cargo:
-            partes.append(f"cargo: {cargo}")
-            busqueda_texto = cargo
-        if ubicacion:
-            partes.append(f"ubicación: {ubicacion}")
-            if busqueda_texto:
-                busqueda_texto += f" {ubicacion}"
-            else:
-                busqueda_texto = ubicacion
-        if renta:
-            partes.append(f"renta mínima: {renta}")
+        # Construir query de búsqueda
+        search_query = f"{query} in {ubicacion}"
         
-        consulta = ", ".join(partes) if partes else "empleos generales en Chile"
-        if not busqueda_texto:
-            busqueda_texto = "empleo Chile"
+        params = {
+            "query": search_query,
+            "page": "1",
+            "num_pages": str(num_pages),
+            "date_posted": "month"  # Empleos del último mes
+        }
         
-        # Crear links de búsqueda para portales reales
-        busqueda_encoded = urllib.parse.quote(busqueda_texto)
+        response = requests.get(JSEARCH_URL, headers=headers, params=params, timeout=15)
         
-        links_portales = f"""
-🔗 **BUSCAR EN PORTALES REALES:**
+        if response.status_code == 200:
+            data = response.json()
+            empleos = data.get('data', [])
+            logger.info(f"✅ JSearch encontró {len(empleos)} empleos para: {query}")
+            return empleos
+        else:
+            logger.error(f"❌ Error JSearch API: {response.status_code} - {response.text[:100]}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error en JSearch: {str(e)[:100]}")
+        return None
 
-• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={busqueda_encoded}&location=Chile)
-• [Trabajando.com](https://www.trabajando.cl/empleos?q={busqueda_encoded})
-• [Laborum](https://www.laborum.cl/empleos-busqueda.html?q={busqueda_encoded})
-• [Indeed Chile](https://cl.indeed.com/jobs?q={busqueda_encoded})
-• [Computrabajo](https://www.computrabajo.cl/trabajo-de-{busqueda_encoded.replace('%20', '-').lower()})
-• [Bumeran](https://www.bumeran.cl/empleos-busqueda.html?q={busqueda_encoded})
+
+async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
+    """Busca empleos - primero intenta JSearch (reales), luego fallback a IA"""
+    
+    busqueda_texto = cargo or "empleo"
+    ubicacion_busqueda = ubicacion or "Chile"
+    
+    # Intentar buscar empleos REALES con JSearch
+    if jsearch_disponible:
+        empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
+        
+        if empleos and len(empleos) > 0:
+            # Formatear empleos reales
+            fecha_actual = datetime.now().strftime("%d/%m/%Y")
+            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
+            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
+            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado += f"📅 Fecha: {fecha_actual}\n"
+            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado += "━" * 30 + "\n\n"
+            
+            for i, empleo in enumerate(empleos[:8], 1):
+                titulo = empleo.get('job_title', 'Sin título')
+                empresa = empleo.get('employer_name', 'Empresa no especificada')
+                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
+                
+                # Sueldo
+                min_salary = empleo.get('job_min_salary')
+                max_salary = empleo.get('job_max_salary')
+                salary_period = empleo.get('job_salary_period', '')
+                
+                if min_salary and max_salary:
+                    sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
+                    if salary_period:
+                        sueldo += f" ({salary_period})"
+                elif min_salary:
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                else:
+                    sueldo = "No especificado"
+                
+                # Tipo de empleo
+                tipo = empleo.get('job_employment_type', 'No especificado')
+                if tipo == 'FULLTIME':
+                    tipo = 'Tiempo completo'
+                elif tipo == 'PARTTIME':
+                    tipo = 'Medio tiempo'
+                elif tipo == 'CONTRACTOR':
+                    tipo = 'Contrato'
+                
+                # Link de postulación
+                link = empleo.get('job_apply_link', '')
+                
+                # Fecha de publicación
+                posted = empleo.get('job_posted_at_datetime_utc', '')
+                if posted:
+                    try:
+                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        if dias_atras == 0:
+                            fecha_str = "Hoy"
+                        elif dias_atras == 1:
+                            fecha_str = "Ayer"
+                        else:
+                            fecha_str = f"Hace {dias_atras} días"
+                    except:
+                        fecha_str = ""
+                else:
+                    fecha_str = ""
+                
+                resultado += f"**{i}. {titulo}**\n"
+                resultado += f"🏢 {empresa}\n"
+                resultado += f"📍 {ubicacion_job}\n"
+                resultado += f"💰 {sueldo}\n"
+                resultado += f"📋 {tipo}"
+                if fecha_str:
+                    resultado += f" • {fecha_str}"
+                resultado += "\n"
+                
+                if link:
+                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
+                
+                resultado += "\n"
+            
+            resultado += "━" * 30 + "\n"
+            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
+            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            
+            return resultado
+    
+    # FALLBACK: Si JSearch no está disponible o no encontró resultados
+    # Crear links de búsqueda para portales reales
+    busqueda_encoded = urllib.parse.quote(busqueda_texto)
+    busqueda_laborum = busqueda_texto.replace(" ", "-").lower()
+    
+    links_portales = f"""
+🔗 **BUSCA EN ESTOS PORTALES:**
+
+• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={busqueda_encoded}&location=Chile)
+• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q={busqueda_encoded})
+• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-{busqueda_laborum}.html)
+• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q={busqueda_encoded}&l=Chile)
+• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q={busqueda_encoded})
 """
+
+    if not ia_disponible:
+        return f"🔍 **BÚSQUEDA DE EMPLEO**\n📋 Criterios: _{busqueda_texto}_\n{links_portales}\n\n💡 Haz clic en los links para ver ofertas reales."
+    
+    try:
+        consulta = f"cargo: {cargo}" if cargo else "empleos generales"
+        if ubicacion:
+            consulta += f", ubicación: {ubicacion}"
         
-        prompt = f"""Genera 5 ofertas de empleo REALISTAS para Chile basadas en esta búsqueda: {consulta}
+        prompt = f"""Genera 5 ejemplos de ofertas laborales REALISTAS para Chile.
 
-FORMATO EXACTO para cada oferta:
+BÚSQUEDA: {consulta}
 
+REGLAS:
+1. Sueldos MENSUALES LÍQUIDOS en pesos chilenos
+2. Empresas REALES chilenas
+3. Si el cargo no existe exactamente, muestra CARGOS SIMILARES
+
+FORMATO:
 💼 **[CARGO]**
-🏢 Empresa: [Nombre de empresa chilena real]
+🏢 Empresa: [Nombre]
 📍 Ubicación: [Ciudad], Chile
-💰 Renta: $[X.XXX.XXX] - $[X.XXX.XXX] líquidos
+💰 Sueldo: $X.XXX.XXX - $X.XXX.XXX mensuales
 📋 Modalidad: [Presencial/Híbrido/Remoto]
-📝 Requisitos: [3 requisitos principales separados por coma]
 
 ---
 
-REGLAS:
-- Usa empresas REALES chilenas (Falabella, LATAM, BCI, Entel, Cencosud, etc.)
-- Rentas realistas del mercado chileno actual
-- NO incluyas links (se agregarán después)
-- NO incluyas introducciones ni despedidas
-- Solo las 5 ofertas formateadas"""
+Solo las 5 ofertas, sin introducciones."""
 
-        respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.7)
+        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
         
         if respuesta:
-            fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **BÚSQUEDA DE EMPLEO**\n"
-            resultado += f"📋 Criterios: _{consulta}_\n"
-            resultado += f"📅 Fecha: {fecha_actual}\n"
+            resultado = f"🔎 **SUGERENCIAS DE EMPLEO (IA)**\n"
+            resultado += f"📋 Búsqueda: _{consulta}_\n"
             resultado += "━" * 30 + "\n\n"
             resultado += respuesta
             resultado += "\n\n" + "━" * 30
+            resultado += "\n⚠️ _Estas son sugerencias de IA. Para ofertas reales:_\n"
             resultado += links_portales
-            resultado += "\n💡 _Las ofertas son ejemplos generados por IA. Usa los links de arriba para ver vacantes reales y postular._"
             return resultado
         else:
-            return f"❌ No se pudieron generar resultados.\n{links_portales}\n💡 Usa los links de arriba para buscar directamente."
+            return f"🔍 **BÚSQUEDA DE EMPLEO**\n{links_portales}\n💡 Usa los links para buscar directamente."
             
     except Exception as e:
         logger.error(f"Error en buscar_empleos_web: {e}")
-        return "❌ Error al buscar empleos. Intenta de nuevo."
+        return f"❌ Error al buscar.\n{links_portales}"
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -1038,10 +1157,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ━━━ **BÁSICOS** ━━━
 /start - Iniciar bot
 /ayuda - Ver esta ayuda
-/registrarse - Activar cuenta (en grupo)
+/registrarse - Activar cuenta (usar en @Cofradia_de_Networking)
 /mi_cuenta - Ver tu suscripción
 /renovar - Renovar plan
-/activar - Usar código de activación
+/activar [código] - Usar código de activación
 
 ━━━ **BÚSQUEDA** ━━━
 /buscar [texto] - Buscar en historial
@@ -1068,7 +1187,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /crecimiento_mes - Crecimiento mensual
 /crecimiento_anual - Crecimiento anual
 
-💡 **TIP:** Mencióname en el grupo con tu pregunta:
+💡 **TIP:** Mencióname en el grupo @Cofradia_de_Networking con tu pregunta:
 `@Cofradia_Premium_Bot ¿tu pregunta?`
 """
     await update.message.reply_text(texto, parse_mode='Markdown')
@@ -1105,8 +1224,6 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"""
 ✅ **¡@{user.username or user.first_name} estás registrado!**
 
-🎁 Tienes **{DIAS_PRUEBA_GRATIS} días GRATIS** de prueba.
-
 🚀 Ya puedes usar tu bot asistente.
 📱 Inicia un chat privado conmigo: @Cofradia_Premium_Bot
 💡 Escríbeme: /start
@@ -1117,8 +1234,9 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=user.id,
                 text=f"🎉 **¡Bienvenido/a {user.first_name}!**\n\n"
-                     f"Tu cuenta está activa por {DIAS_PRUEBA_GRATIS} días.\n"
-                     f"Usa /ayuda para ver los comandos disponibles.",
+                     f"Tu cuenta está activa.\n"
+                     f"Usa /ayuda para ver los comandos disponibles.\n"
+                     f"Usa /mi_cuenta para ver el estado de tu suscripción.",
                 parse_mode='Markdown'
             )
         except:
@@ -1238,43 +1356,234 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @requiere_suscripcion
-async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /buscar_ia - Búsqueda inteligente con IA"""
-    if not context.args:
-        await update.message.reply_text("❌ Uso: /buscar_ia [tu consulta]")
-        return
+async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /graficos - Muestra gráficos de actividad del grupo"""
+    msg = await update.message.reply_text("📊 Generando gráficos...")
     
-    if not ia_disponible:
-        await update.message.reply_text("❌ El servicio de IA no está disponible.")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        dias = 7  # Últimos 7 días
+        
+        # Obtener estadísticas
+        if DATABASE_URL:
+            # PostgreSQL
+            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days'
+                        GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (dias,))
+            por_dia = c.fetchall()
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days'
+                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (dias,))
+            usuarios_activos = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days' AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC""", (dias,))
+            por_categoria = c.fetchall()
+        else:
+            # SQLite
+            fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio,))
+            por_dia = c.fetchall()
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio,))
+            usuarios_activos = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC""", (fecha_inicio,))
+            por_categoria = c.fetchall()
+        
+        conn.close()
+        
+        # Convertir resultados
+        if DATABASE_URL:
+            por_dia = [(str(r['date']), r['count']) for r in por_dia] if por_dia else []
+            usuarios_activos = [(r['first_name'], r['count']) for r in usuarios_activos] if usuarios_activos else []
+            por_categoria = [(r['categoria'], r['count']) for r in por_categoria] if por_categoria else []
+        else:
+            por_dia = [(r[0], r[1]) for r in por_dia] if por_dia else []
+            usuarios_activos = [(r[0], r[1]) for r in usuarios_activos] if usuarios_activos else []
+            por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
+        
+        if not por_dia and not usuarios_activos:
+            await msg.edit_text("📊 No hay suficientes datos para generar gráficos.\n\nEl grupo necesita más actividad.")
+            return
+        
+        # Crear gráfico
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle('📊 ESTADÍSTICAS COFRADÍA - Últimos 7 días', fontsize=14, fontweight='bold')
+        
+        # Gráfico 1: Mensajes por día
+        ax1 = axes[0, 0]
+        if por_dia:
+            fechas = [d[0][-5:] if len(d[0]) > 5 else d[0] for d in por_dia]
+            valores = [d[1] for d in por_dia]
+            ax1.bar(fechas, valores, color='#3498db', alpha=0.8)
+            ax1.set_title('📈 Mensajes por Día')
+            ax1.set_xlabel('Fecha')
+            ax1.set_ylabel('Mensajes')
+            ax1.tick_params(axis='x', rotation=45)
+        else:
+            ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+            ax1.set_title('📈 Mensajes por Día')
+        
+        # Gráfico 2: Usuarios más activos
+        ax2 = axes[0, 1]
+        if usuarios_activos:
+            nombres = [u[0][:10] for u in usuarios_activos[:8]]
+            mensajes = [u[1] for u in usuarios_activos[:8]]
+            colors = plt.cm.viridis([i/len(nombres) for i in range(len(nombres))])
+            ax2.barh(nombres, mensajes, color=colors)
+            ax2.set_title('👥 Usuarios Más Activos')
+            ax2.set_xlabel('Mensajes')
+        else:
+            ax2.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+            ax2.set_title('👥 Usuarios Más Activos')
+        
+        # Gráfico 3: Categorías
+        ax3 = axes[1, 0]
+        if por_categoria:
+            categorias = [c[0] for c in por_categoria[:6]]
+            cantidades = [c[1] for c in por_categoria[:6]]
+            ax3.pie(cantidades, labels=categorias, autopct='%1.1f%%', startangle=90)
+            ax3.set_title('🏷️ Categorías de Mensajes')
+        else:
+            ax3.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+            ax3.set_title('🏷️ Categorías de Mensajes')
+        
+        # Gráfico 4: Resumen
+        ax4 = axes[1, 1]
+        ax4.axis('off')
+        total_mensajes = sum([d[1] for d in por_dia]) if por_dia else 0
+        total_usuarios = len(usuarios_activos)
+        promedio = total_mensajes / dias if dias > 0 else 0
+        
+        resumen_texto = f"""
+        📊 RESUMEN
+        
+        📝 Total mensajes: {total_mensajes}
+        👥 Usuarios activos: {total_usuarios}
+        📈 Promedio diario: {promedio:.1f}
+        📅 Período: {dias} días
+        """
+        ax4.text(0.1, 0.5, resumen_texto, fontsize=12, verticalalignment='center',
+                fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        
+        plt.tight_layout()
+        
+        # Guardar y enviar
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        plt.close()
+        
+        await msg.delete()
+        await update.message.reply_photo(
+            photo=buf,
+            caption="📊 **Estadísticas de los últimos 7 días**\n\nUsa /estadisticas para ver más detalles.",
+            parse_mode='Markdown'
+        )
+        
+        registrar_servicio_usado(update.effective_user.id, 'graficos')
+        
+    except Exception as e:
+        logger.error(f"Error en graficos_comando: {e}")
+        await msg.edit_text(f"❌ Error generando gráficos: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_ia - Búsqueda inteligente en el historial del grupo con IA"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Uso:** /buscar_ia [tu consulta]\n\n"
+            "**Ejemplo:** `/buscar_ia aniversario`\n\n"
+            "Este comando busca en el historial del grupo y usa IA para analizar los resultados.",
+            parse_mode='Markdown'
+        )
         return
     
     consulta = ' '.join(context.args)
-    msg = await update.message.reply_text("🧠 Analizando tu consulta...")
+    msg = await update.message.reply_text("🔍 Buscando en el historial del grupo...")
     
+    # Buscar en el historial del grupo
     topic_id = update.message.message_thread_id if hasattr(update.message, 'message_thread_id') else None
-    resultados = buscar_en_historial(consulta, topic_id, limit=5)
+    resultados = buscar_en_historial(consulta, topic_id, limit=15)
     
-    contexto = ""
-    if resultados:
-        contexto = "\n\nMENSAJES RELACIONADOS DEL GRUPO:\n"
-        for nombre, texto, fecha in resultados:
-            contexto += f"- {nombre}: {texto[:200]}...\n"
+    if not resultados:
+        await msg.edit_text(
+            f"❌ No se encontraron mensajes relacionados con: **{consulta}**\n\n"
+            f"💡 Intenta con otras palabras clave.",
+            parse_mode='Markdown'
+        )
+        return
     
-    prompt = f"""Consulta del usuario: {consulta}
-{contexto}
+    # Si no hay IA disponible, mostrar resultados sin análisis
+    if not ia_disponible:
+        await msg.delete()
+        mensaje = f"🔍 **RESULTADOS PARA:** _{consulta}_\n"
+        mensaje += f"📊 Encontrados: {len(resultados)} mensajes\n\n"
+        
+        for nombre, texto, fecha in resultados[:10]:
+            fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
+            texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
+            mensaje += f"👤 **{nombre}** ({fecha_str})\n{texto_corto}\n\n"
+        
+        await enviar_mensaje_largo(update, mensaje)
+        registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
+        return
+    
+    # Preparar contexto con los mensajes encontrados
+    await msg.edit_text("🧠 Analizando resultados con IA...")
+    
+    contexto_mensajes = ""
+    for i, (nombre, texto, fecha) in enumerate(resultados, 1):
+        fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
+        contexto_mensajes += f"{i}. {nombre} ({fecha_str}): {texto[:300]}\n\n"
+    
+    prompt = f"""Eres el asistente de Cofradía de Networking. El usuario busca información sobre: "{consulta}"
 
-Proporciona una respuesta útil basándote en el contexto si es relevante.
-Responde de forma concisa y práctica."""
+MENSAJES ENCONTRADOS EN EL HISTORIAL DEL GRUPO:
+{contexto_mensajes}
 
-    respuesta = llamar_groq(prompt, max_tokens=800)
+INSTRUCCIONES:
+1. Analiza los mensajes encontrados y extrae la información relevante sobre "{consulta}"
+2. Resume los puntos más importantes mencionados por los miembros
+3. Si hay fechas, eventos o datos específicos, destácalos
+4. Menciona quiénes aportaron información relevante
+5. Si los mensajes no son relevantes para la búsqueda, indícalo honestamente
+
+Responde de forma organizada y útil. NO inventes información que no esté en los mensajes."""
+
+    respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.3)
     
     await msg.delete()
     
     if respuesta:
-        await enviar_mensaje_largo(update, f"🤖 **Respuesta IA:**\n\n{respuesta}")
+        mensaje_final = f"🔍 **BÚSQUEDA:** _{consulta}_\n"
+        mensaje_final += f"📊 **Mensajes analizados:** {len(resultados)}\n"
+        mensaje_final += "━" * 25 + "\n\n"
+        mensaje_final += respuesta
+        
+        await enviar_mensaje_largo(update, mensaje_final)
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
     else:
-        await update.message.reply_text("❌ No pude generar una respuesta. Intenta de nuevo.")
+        # Fallback: mostrar resultados sin IA
+        mensaje = f"🔍 **RESULTADOS PARA:** _{consulta}_\n\n"
+        for nombre, texto, fecha in resultados[:8]:
+            texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
+            mensaje += f"👤 **{nombre}**\n{texto_corto}\n\n"
+        
+        await enviar_mensaje_largo(update, mensaje)
 
 
 @requiere_suscripcion
@@ -1712,6 +2021,7 @@ def main():
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
     logger.info(f"📊 Groq IA: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
+    logger.info(f"💼 JSearch (empleos reales): {'✅' if jsearch_disponible else '❌'}")
     logger.info(f"🗄️ Base de datos: {'Supabase' if DATABASE_URL else 'SQLite local'}")
     
     # Inicializar BD
@@ -1744,6 +2054,7 @@ def main():
             BotCommand("mi_cuenta", "Ver suscripción"),
             BotCommand("buscar", "Buscar en historial"),
             BotCommand("buscar_ia", "Búsqueda con IA"),
+            BotCommand("graficos", "Ver gráficos"),
             BotCommand("empleo", "Buscar empleos"),
             BotCommand("renovar", "Renovar plan"),
             BotCommand("activar", "Usar código"),
@@ -1757,6 +2068,7 @@ def main():
                     BotCommand("registrarse", "Activar cuenta"),
                     BotCommand("buscar", "Buscar"),
                     BotCommand("buscar_ia", "Búsqueda IA"),
+                    BotCommand("graficos", "Ver gráficos"),
                     BotCommand("empleo", "Buscar empleos"),
                     BotCommand("ayuda", "Ver comandos"),
                 ]
@@ -1781,6 +2093,7 @@ def main():
     application.add_handler(CommandHandler("activar", activar_codigo_comando))
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
+    application.add_handler(CommandHandler("graficos", graficos_comando))
     application.add_handler(CommandHandler("empleo", empleo_comando))
     application.add_handler(CommandHandler("cobros_admin", cobros_admin_comando))
     application.add_handler(CommandHandler("generar_codigo", generar_codigo_comando))
