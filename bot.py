@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bot Cofradía Premium - Versión Completa Corregida
+Bot Cofradía Premium - Versión con Groq AI
 Desarrollado para @Cofradia_de_Networking
 """
 
@@ -14,6 +14,7 @@ import sqlite3
 import secrets
 import string
 import threading
+import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, time
 from collections import Counter
@@ -33,9 +34,6 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler
 )
 
-import google.generativeai as genai
-from google.oauth2.service_account import Credentials
-
 # ==================== CONFIGURACIÓN DE LOGGING ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -45,42 +43,94 @@ logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURACIÓN GLOBAL ====================
 
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
 
-# Configuración de Gemini con modelos correctos (actualizado Feb 2025)
-# Modelos disponibles: gemini-1.5-flash, gemini-1.5-pro, gemini-pro
-model = None
-vision_model = None
+# ==================== CONFIGURACIÓN DE GROQ AI ====================
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Modelo más potente y gratuito
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    
-    # Lista de modelos a intentar en orden de preferencia
-    modelos_texto = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
-    
-    for nombre_modelo in modelos_texto:
-        try:
-            model = genai.GenerativeModel(nombre_modelo)
-            # Probar que funcione con una solicitud simple
-            test_response = model.generate_content("Hola")
-            if test_response:
-                logger.info(f"✅ Modelo de texto inicializado: {nombre_modelo}")
-                vision_model = model  # El mismo modelo soporta visión
-                break
-        except Exception as e:
-            logger.warning(f"⚠️ No se pudo usar {nombre_modelo}: {str(e)[:50]}")
-            model = None
-            continue
-    
-    if not model:
-        logger.error("❌ No se pudo inicializar ningún modelo Gemini")
+# Variable global para indicar si la IA está disponible
+ia_disponible = False
+
+if GROQ_API_KEY:
+    # Probar conexión con Groq
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        test_payload = {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": "Hola"}],
+            "max_tokens": 10
+        }
+        response = requests.post(GROQ_API_URL, headers=headers, json=test_payload, timeout=10)
+        if response.status_code == 200:
+            ia_disponible = True
+            logger.info(f"✅ Groq AI inicializado correctamente (modelo: {GROQ_MODEL})")
+        else:
+            logger.error(f"❌ Error conectando con Groq: {response.status_code} - {response.text[:100]}")
+    except Exception as e:
+        logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
 else:
-    logger.warning("⚠️ GEMINI_API_KEY no configurada")
+    logger.warning("⚠️ GROQ_API_KEY no configurada")
+
+
+def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Llama a la API de Groq y retorna la respuesta"""
+    if not GROQ_API_KEY:
+        return None
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena. Responde siempre en español, de forma profesional pero amigable."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+        
+        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data['choices'][0]['message']['content']
+        else:
+            logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error llamando Groq: {str(e)[:100]}")
+        return None
+
+
+def analizar_imagen_ocr(image_bytes: bytes, prompt_ocr: str) -> dict:
+    """Analiza una imagen usando Groq (nota: Groq no soporta visión directa, usamos descripción)"""
+    # Groq no soporta análisis de imágenes directamente
+    # Retornamos un análisis básico
+    return {
+        "analizado": False,
+        "motivo": "Análisis visual no disponible con Groq",
+        "requiere_revision_manual": True
+    }
 
 DATOS_BANCARIOS = """
 💳 **DATOS PARA TRANSFERENCIA**
@@ -462,30 +512,34 @@ def actualizar_precio(dias, nuevo_precio):
 # ==================== FUNCIONES DE IA ====================
 
 def categorizar_mensaje(mensaje):
-    if not model:
+    """Categoriza un mensaje usando Groq AI"""
+    if not ia_disponible:
         return 'Otros'
     try:
-        prompt = f"""Clasifica en UNA categoría:
-Categorías: Networking, Negocios, Tecnología, Marketing, Eventos, Emprendimiento, Consultas, Recursos, Empleos, Social, Otros
+        prompt = f"""Clasifica el siguiente mensaje en UNA sola categoría.
+Categorías disponibles: Networking, Negocios, Tecnología, Marketing, Eventos, Emprendimiento, Consultas, Recursos, Empleos, Social, Otros
+
 Mensaje: "{mensaje[:300]}"
-Responde SOLO la categoría."""
-        response = model.generate_content(prompt)
-        categoria = response.text.strip()
-        categorias_validas = ['Networking', 'Negocios', 'Tecnología', 'Marketing', 'Eventos', 
-                             'Emprendimiento', 'Consultas', 'Recursos', 'Empleos', 'Social', 'Otros']
-        for cat in categorias_validas:
-            if cat.lower() in categoria.lower():
-                return cat
+
+Responde ÚNICAMENTE con el nombre de la categoría, nada más."""
+        
+        respuesta = llamar_groq(prompt, max_tokens=20, temperature=0.3)
+        
+        if respuesta:
+            categoria = respuesta.strip()
+            categorias_validas = ['Networking', 'Negocios', 'Tecnología', 'Marketing', 'Eventos', 
+                                 'Emprendimiento', 'Consultas', 'Recursos', 'Empleos', 'Social', 'Otros']
+            for cat in categorias_validas:
+                if cat.lower() in categoria.lower():
+                    return cat
         return 'Otros'
     except:
         return 'Otros'
 
 def generar_embedding(texto):
-    try:
-        result = genai.embed_content(model="models/embedding-001", content=texto, task_type="retrieval_document")
-        return json.dumps(result['embedding'])
-    except:
-        return None
+    """Genera un embedding simple basado en palabras clave (sin API externa)"""
+    # Groq no tiene API de embeddings, usamos búsqueda por palabras clave
+    return None
 
 def guardar_mensaje(user_id, username, first_name, message, topic_id=None):
     conn = get_db_connection()
@@ -501,29 +555,52 @@ def guardar_mensaje(user_id, username, first_name, message, topic_id=None):
     conn.close()
 
 def buscar_semantica(query, topic_id=None, limit=5):
+    """Búsqueda semántica usando palabras clave (sin embeddings)"""
     try:
-        query_result = genai.embed_content(model="models/embedding-001", content=query, task_type="retrieval_query")
-        query_embedding = query_result['embedding']
         conn = get_db_connection()
         c = conn.cursor()
-        if topic_id:
-            c.execute("SELECT first_name, message, fecha, embedding FROM mensajes WHERE embedding IS NOT NULL AND topic_id = ?", (topic_id,))
-        else:
-            c.execute("SELECT first_name, message, fecha, embedding FROM mensajes WHERE embedding IS NOT NULL")
-        resultados = c.fetchall()
+        
+        # Extraer palabras clave de la consulta (más de 3 caracteres)
+        palabras = [p.lower() for p in query.split() if len(p) > 3]
+        
+        if not palabras:
+            palabras = [query.lower()]
+        
+        # Construir búsqueda por múltiples palabras
+        resultados_totales = []
+        
+        for palabra in palabras:
+            palabra_like = f'%{palabra}%'
+            if topic_id:
+                c.execute("""SELECT first_name, message, fecha FROM mensajes 
+                             WHERE LOWER(message) LIKE ? AND topic_id = ?
+                             ORDER BY fecha DESC LIMIT ?""", (palabra_like, topic_id, limit * 2))
+            else:
+                c.execute("""SELECT first_name, message, fecha FROM mensajes 
+                             WHERE LOWER(message) LIKE ?
+                             ORDER BY fecha DESC LIMIT ?""", (palabra_like, limit * 2))
+            resultados_totales.extend(c.fetchall())
+        
         conn.close()
-        similitudes = []
-        for nombre, mensaje, fecha, emb_str in resultados:
-            if emb_str:
-                try:
-                    emb = json.loads(emb_str)
-                    similitud = sum(a * b for a, b in zip(query_embedding, emb))
-                    similitudes.append((similitud, nombre, mensaje, fecha))
-                except:
-                    continue
-        similitudes.sort(reverse=True)
-        return [(n, m, f) for _, n, m, f in similitudes[:limit]]
-    except:
+        
+        # Eliminar duplicados y ordenar por relevancia (cantidad de palabras coincidentes)
+        vistos = set()
+        resultados_unicos = []
+        for nombre, mensaje, fecha in resultados_totales:
+            key = (nombre, mensaje)
+            if key not in vistos:
+                vistos.add(key)
+                # Calcular relevancia
+                relevancia = sum(1 for p in palabras if p in mensaje.lower())
+                resultados_unicos.append((relevancia, nombre, mensaje, fecha))
+        
+        # Ordenar por relevancia descendente
+        resultados_unicos.sort(reverse=True, key=lambda x: x[0])
+        
+        return [(n, m, f) for _, n, m, f in resultados_unicos[:limit]]
+        
+    except Exception as e:
+        logger.error(f"Error en buscar_semantica: {e}")
         return []
 
 def buscar_en_historial(query, topic_id=None, limit=10):
@@ -703,8 +780,8 @@ def buscar_profesionales(query):
         return f"❌ Error al buscar profesionales: {str(e)[:100]}"
 
 async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
-    """Busca ofertas de empleo usando IA"""
-    if not model:
+    """Busca ofertas de empleo usando Groq AI"""
+    if not ia_disponible:
         return "❌ El servicio de IA no está disponible en este momento. Por favor, intenta más tarde."
     
     try:
@@ -739,11 +816,11 @@ Incluye empresas conocidas en Chile (Falabella, Banco de Chile, Entel, LATAM, Ce
 Las rentas deben ser realistas para el mercado chileno.
 Responde SOLO con las ofertas, sin introducciones."""
 
-        response = model.generate_content(prompt)
+        respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.7)
         
-        if response and response.text:
+        if respuesta:
             resultado = f"🔍 **RESULTADOS DE BÚSQUEDA**\n📋 {consulta.upper()}\n\n"
-            resultado += response.text
+            resultado += respuesta
             return resultado
         else:
             return "❌ No se pudieron generar resultados. Intenta con otros términos de búsqueda."
@@ -853,7 +930,7 @@ def generar_resumen_usuarios(dias=1):
         por_topic[topic_id]['categorias'][cat] += 1
     
     # Construir contexto para la IA organizado por topics
-    if model:
+    if ia_disponible:
         try:
             contexto_topics = ""
             resumen_stats = ""
@@ -891,7 +968,7 @@ DATOS DEL PERÍODO:
 ESTADÍSTICAS POR TEMA:{resumen_stats}
 
 CONTENIDO POR TEMA:
-{contexto_topics[:8000]}
+{contexto_topics[:6000]}
 
 FORMATO REQUERIDO:
 
@@ -926,9 +1003,11 @@ INSTRUCCIONES:
 5. Máximo 500 palabras total
 6. Usa español profesional chileno"""
 
-            response = model.generate_content(prompt)
+            respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.7)
             conn.close()
-            return response.text
+            
+            if respuesta:
+                return respuesta
             
         except Exception as e:
             logger.error(f"Error generando resumen con IA: {e}")
@@ -1260,7 +1339,7 @@ async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAUL
     conn.close()
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe y procesa comprobantes de pago con OCR"""
+    """Recibe y procesa comprobantes de pago"""
     user = update.message.from_user
     if not es_chat_privado(update):
         return
@@ -1271,60 +1350,18 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     dias = context.user_data['plan_seleccionado']
     precio = context.user_data['precio']
-    msg = await update.message.reply_text("🔍 Analizando comprobante...")
+    msg = await update.message.reply_text("🔍 Procesando comprobante...")
     
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     
-    datos_ocr = {"analizado": False}
-    
-    try:
-        # Descargar imagen
-        image_bytes = requests.get(file.file_path, timeout=30).content
-        
-        # Intentar OCR con Gemini si está disponible
-        if model:
-            try:
-                image = PIL.Image.open(BytesIO(image_bytes))
-                
-                prompt_ocr = f"""Analiza esta imagen de comprobante de transferencia bancaria.
-
-DATOS ESPERADOS:
-- Monto: ${precio:,} CLP (aproximado)
-- Cuenta destino: 69104312
-- Banco: Santander
-- Titular: Destak E.I.R.L.
-
-INSTRUCCIONES:
-1. Identifica si es un comprobante de transferencia válido
-2. Extrae el monto si es visible
-3. Verifica si la cuenta destino coincide
-
-Responde SOLO con este JSON (sin markdown):
-{{"es_comprobante": true/false, "monto_visible": "monto o null", "cuenta_coincide": true/false/null, "legible": true/false, "observaciones": "texto breve"}}"""
-
-                response = model.generate_content([prompt_ocr, image])
-                response_text = response.text.strip()
-                
-                # Limpiar respuesta de markdown
-                response_text = re.sub(r'```json\s*|\s*```', '', response_text)
-                response_text = response_text.strip()
-                
-                try:
-                    datos_ocr = json.loads(response_text)
-                    datos_ocr["analizado"] = True
-                except json.JSONDecodeError:
-                    datos_ocr = {"analizado": True, "raw_response": response_text[:200]}
-                    
-            except Exception as e:
-                logger.warning(f"OCR falló: {e}")
-                datos_ocr = {"analizado": False, "error_ocr": str(e)[:50]}
-        else:
-            datos_ocr = {"analizado": False, "motivo": "IA no disponible"}
-            
-    except Exception as e:
-        logger.error(f"Error procesando imagen: {e}")
-        datos_ocr = {"error": str(e)[:50]}
+    # Nota: Groq no soporta análisis de imágenes
+    # El comprobante se envía directamente al admin para revisión manual
+    datos_ocr = {
+        "analizado": False, 
+        "motivo": "Revisión manual requerida",
+        "precio_esperado": precio
+    }
     
     await msg.delete()
     await update.message.reply_text(
@@ -1945,8 +1982,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Verificar que el modelo esté disponible
-    if not model:
+    # Verificar que la IA esté disponible
+    if not ia_disponible:
         await update.message.reply_text(
             "❌ El servicio de IA no está disponible en este momento.\n"
             "Por favor, intenta más tarde."
@@ -1984,12 +2021,12 @@ INSTRUCCIONES:
 4. Si no sabes algo, sé honesto
 5. Termina con una sugerencia práctica si es apropiado"""
 
-        response = model.generate_content(prompt)
+        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
         
         await msg.delete()
         
-        if response and response.text:
-            await enviar_mensaje_largo(update, response.text)
+        if respuesta:
+            await enviar_mensaje_largo(update, respuesta)
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text("❌ No pude generar una respuesta. Intenta reformular tu pregunta.")
@@ -2155,7 +2192,7 @@ async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Función principal del bot"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
-    logger.info(f"📊 Estado IA: {'✅ Activa' if model else '❌ No disponible'}")
+    logger.info(f"📊 Estado IA (Groq): {'✅ Activa' if ia_disponible else '❌ No disponible'}")
     
     # Inicializar base de datos
     init_db()
