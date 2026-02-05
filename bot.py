@@ -92,45 +92,83 @@ else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada - OCR no disponible")
 
 
-def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Llama a la API de Groq y retorna la respuesta"""
+def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7, reintentos: int = 3) -> str:
+    """Llama a la API de Groq y retorna la respuesta con reintentos automáticos"""
     if not GROQ_API_KEY:
+        logger.warning("⚠️ Intento de llamar Groq sin API Key configurada")
         return None
     
-    try:
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": GROQ_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena. Responde siempre en español, de forma profesional pero amigable."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        
-        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data['choices'][0]['message']['content']
-        else:
-            logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-            return None
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": """Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena de alto nivel.
+
+Tu personalidad:
+- Profesional, amigable y cercano
+- Experto en networking, negocios, emprendimiento y desarrollo profesional
+- Conoces el mercado laboral chileno
+- Respondes siempre en español, de forma clara y útil
+- Eres conciso pero completo en tus respuestas
+- Agregas valor real con cada interacción"""
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+    
+    for intento in range(reintentos):
+        try:
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
             
-    except Exception as e:
-        logger.error(f"Error llamando Groq: {str(e)[:100]}")
-        return None
+            if response.status_code == 200:
+                data = response.json()
+                respuesta = data['choices'][0]['message']['content']
+                if respuesta and len(respuesta.strip()) > 0:
+                    return respuesta.strip()
+                else:
+                    logger.warning(f"Groq devolvió respuesta vacía (intento {intento + 1})")
+                    
+            elif response.status_code == 429:
+                # Rate limit - esperar y reintentar
+                logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
+                import time
+                time.sleep(2 * (intento + 1))
+                
+            elif response.status_code >= 500:
+                # Error del servidor - reintentar
+                logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
+                import time
+                time.sleep(1)
+                
+            else:
+                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout Groq (intento {intento + 1})")
+            continue
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"Error conexión Groq (intento {intento + 1})")
+            import time
+            time.sleep(1)
+            continue
+        except Exception as e:
+            logger.error(f"Error inesperado Groq: {str(e)[:100]}")
+            return None
+    
+    logger.error(f"Groq falló después de {reintentos} intentos")
+    return None
 
 
 def analizar_imagen_ocr(image_bytes: bytes, precio_esperado: int) -> dict:
@@ -823,7 +861,7 @@ def buscar_archivo_excel_drive():
 
 
 def buscar_profesionales(query):
-    """Busca profesionales en la base de datos de Google Drive"""
+    """Busca profesionales en la base de datos de Google Drive con búsqueda inteligente"""
     try:
         archivo, error = buscar_archivo_excel_drive()
         
@@ -840,71 +878,144 @@ def buscar_profesionales(query):
         # Normalizar nombres de columnas
         df.columns = df.columns.str.strip().str.lower()
         logger.info(f"📊 Columnas encontradas: {list(df.columns)}")
+        logger.info(f"📊 Total filas en Excel: {len(df)}")
         
         profesionales = []
         
-        # Mapeo flexible de columnas
-        col_nombre = next((c for c in df.columns if 'nombre' in c), None)
-        col_profesion = next((c for c in df.columns if any(x in c for x in ['profesión', 'profesion', 'área', 'area', 'cargo'])), None)
-        col_email = next((c for c in df.columns if any(x in c for x in ['email', 'correo', 'mail'])), None)
-        col_telefono = next((c for c in df.columns if any(x in c for x in ['teléfono', 'telefono', 'fono', 'celular', 'móvil'])), None)
+        # Mapeo flexible de columnas - buscar en todas las variantes posibles
+        col_nombre = next((c for c in df.columns if any(x in c for x in ['nombre', 'name', 'integrante', 'miembro'])), None)
+        col_profesion = next((c for c in df.columns if any(x in c for x in ['profesión', 'profesion', 'área', 'area', 'cargo', 'ocupación', 'ocupacion', 'especialidad', 'rubro'])), None)
+        col_email = next((c for c in df.columns if any(x in c for x in ['email', 'correo', 'mail', 'e-mail'])), None)
+        col_telefono = next((c for c in df.columns if any(x in c for x in ['teléfono', 'telefono', 'fono', 'celular', 'móvil', 'movil', 'whatsapp', 'contacto'])), None)
+        col_empresa = next((c for c in df.columns if any(x in c for x in ['empresa', 'company', 'organización', 'organizacion', 'trabajo'])), None)
+        col_linkedin = next((c for c in df.columns if any(x in c for x in ['linkedin', 'link', 'perfil'])), None)
+        
+        logger.info(f"📊 Columnas mapeadas - Nombre: {col_nombre}, Profesión: {col_profesion}, Email: {col_email}, Tel: {col_telefono}")
         
         for idx, row in df.iterrows():
-            nombre = str(row.get(col_nombre, 'N/A')).strip() if col_nombre else 'N/A'
-            profesion = str(row.get(col_profesion, 'N/A')).strip() if col_profesion else 'N/A'
-            email = str(row.get(col_email, 'N/A')).strip() if col_email else 'N/A'
-            telefono = str(row.get(col_telefono, 'N/A')).strip() if col_telefono else 'N/A'
-            
-            # Limpiar valores nulos
-            if nombre in ['N/A', 'nan', 'None', ''] or pd.isna(row.get(col_nombre)) if col_nombre else True:
+            try:
+                nombre = str(row.get(col_nombre, '')).strip() if col_nombre else ''
+                profesion = str(row.get(col_profesion, '')).strip() if col_profesion else ''
+                email = str(row.get(col_email, '')).strip() if col_email else ''
+                telefono = str(row.get(col_telefono, '')).strip() if col_telefono else ''
+                empresa = str(row.get(col_empresa, '')).strip() if col_empresa else ''
+                linkedin = str(row.get(col_linkedin, '')).strip() if col_linkedin else ''
+                
+                # Limpiar valores nulos/inválidos
+                def limpiar(valor):
+                    if not valor or valor.lower() in ['nan', 'none', 'n/a', 'null', '-', '']:
+                        return ''
+                    return valor
+                
+                nombre = limpiar(nombre)
+                if not nombre:
+                    continue
+                
+                profesion = limpiar(profesion) or 'Sin especificar'
+                email = limpiar(email) or 'No disponible'
+                telefono = limpiar(telefono) or 'No disponible'
+                empresa = limpiar(empresa)
+                linkedin = limpiar(linkedin)
+                
+                profesionales.append({
+                    'nombre': nombre,
+                    'profesion': profesion,
+                    'email': email,
+                    'telefono': telefono,
+                    'empresa': empresa,
+                    'linkedin': linkedin
+                })
+            except Exception as e:
                 continue
-            
-            profesionales.append({
-                'nombre': nombre,
-                'profesion': profesion if profesion not in ['nan', 'None'] else 'Sin especificar',
-                'email': email if email not in ['nan', 'None'] else 'No disponible',
-                'telefono': telefono if telefono not in ['nan', 'None'] else 'No disponible'
-            })
+        
+        logger.info(f"📊 Profesionales cargados: {len(profesionales)}")
         
         if not profesionales:
-            return "❌ La base de datos está vacía o no tiene el formato esperado."
+            return "❌ La base de datos está vacía o no tiene el formato esperado.\n\n💡 El archivo debe tener columnas como: Nombre, Profesión/Área, Email, Teléfono"
         
-        # Buscar coincidencias
-        query_lower = query.lower()
-        encontrados = [
-            p for p in profesionales 
-            if query_lower in p['nombre'].lower() or query_lower in p['profesion'].lower()
-        ]
+        # Búsqueda inteligente - múltiples criterios
+        query_lower = query.lower().strip()
+        palabras_busqueda = [p for p in query_lower.split() if len(p) > 2]
+        
+        def calcular_relevancia(prof):
+            """Calcula relevancia de coincidencia"""
+            score = 0
+            texto_completo = f"{prof['nombre']} {prof['profesion']} {prof['empresa']}".lower()
+            
+            # Coincidencia exacta en profesión = máximo puntaje
+            if query_lower in prof['profesion'].lower():
+                score += 100
+            
+            # Coincidencia exacta en nombre
+            if query_lower in prof['nombre'].lower():
+                score += 80
+            
+            # Coincidencia exacta en empresa
+            if prof['empresa'] and query_lower in prof['empresa'].lower():
+                score += 60
+            
+            # Coincidencia parcial por palabras
+            for palabra in palabras_busqueda:
+                if palabra in texto_completo:
+                    score += 20
+            
+            return score
+        
+        # Buscar y ordenar por relevancia
+        encontrados = []
+        for prof in profesionales:
+            relevancia = calcular_relevancia(prof)
+            if relevancia > 0:
+                encontrados.append((relevancia, prof))
+        
+        # Ordenar por relevancia descendente
+        encontrados.sort(key=lambda x: x[0], reverse=True)
+        encontrados = [p for _, p in encontrados]
         
         if not encontrados:
-            # Sugerir búsquedas alternativas
-            sugerencias = list(set([p['profesion'] for p in profesionales[:20] if p['profesion'] != 'Sin especificar']))[:5]
+            # Sugerir búsquedas alternativas basadas en profesiones únicas
+            profesiones_unicas = list(set([p['profesion'] for p in profesionales if p['profesion'] != 'Sin especificar']))
+            sugerencias = profesiones_unicas[:8]
+            
             msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
             if sugerencias:
-                msg += f"💡 **Intenta buscar por:**\n"
+                msg += f"💡 **Profesiones disponibles en la base de datos:**\n"
                 for s in sugerencias:
                     msg += f"• {s}\n"
+                msg += f"\n📊 Total de profesionales registrados: {len(profesionales)}"
             return msg
         
-        resultado = f"👥 **PROFESIONALES ENCONTRADOS**\n🔍 Búsqueda: {query}\n📊 Resultados: {len(encontrados)}\n\n"
+        # Formatear resultados
+        resultado = f"👥 **PROFESIONALES ENCONTRADOS**\n"
+        resultado += f"🔍 Búsqueda: _{query}_\n"
+        resultado += f"📊 Resultados: {len(encontrados)}\n"
+        resultado += "━" * 25 + "\n\n"
         
         for i, prof in enumerate(encontrados[:10], 1):
             resultado += f"**{i}. {prof['nombre']}**\n"
             resultado += f"   🎯 {prof['profesion']}\n"
+            if prof['empresa']:
+                resultado += f"   🏢 {prof['empresa']}\n"
             resultado += f"   📧 {prof['email']}\n"
-            resultado += f"   📱 {prof['telefono']}\n\n"
+            resultado += f"   📱 {prof['telefono']}\n"
+            if prof['linkedin']:
+                resultado += f"   🔗 {prof['linkedin']}\n"
+            resultado += "\n"
         
         if len(encontrados) > 10:
-            resultado += f"\n📌 _Mostrando 10 de {len(encontrados)} resultados_"
+            resultado += f"━" * 25 + "\n"
+            resultado += f"📌 _Mostrando 10 de {len(encontrados)} resultados_"
         
         return resultado
         
     except Exception as e:
         logger.error(f"Error en buscar_profesionales: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return f"❌ Error al buscar profesionales: {str(e)[:100]}"
 
 async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
-    """Busca ofertas de empleo usando Groq AI"""
+    """Busca ofertas de empleo usando Groq AI - Experiencia WOW"""
     if not ia_disponible:
         return "❌ El servicio de IA no está disponible en este momento. Por favor, intenta más tarde."
     
@@ -919,35 +1030,58 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         
         consulta = ", ".join(partes) if partes else "empleos generales en Chile"
         
-        prompt = f"""Eres un asistente de búsqueda de empleo en Chile.
+        prompt = f"""Eres un headhunter profesional experto en el mercado laboral chileno. 
+Tu misión es generar ofertas de empleo REALISTAS y ATRACTIVAS.
 
-BÚSQUEDA: {consulta}
+🎯 BÚSQUEDA DEL USUARIO: {consulta}
 
-Genera una lista de 5-7 ofertas de empleo REALISTAS para Chile que coincidan con la búsqueda.
+Genera exactamente 6 ofertas de empleo que cumplan estos criterios:
+- Empresas REALES y conocidas en Chile (Falabella, LATAM, BCI, Entel, Cencosud, SMU, Walmart Chile, Bupa, Copec, CCU, Arauco, CMPC, Enel, Colbún, Antofagasta Minerals, Codelco, etc.)
+- También incluye empresas medianas/startups chilenas
+- Rentas REALISTAS según el mercado chileno actual (2024-2025)
+- Requisitos acordes al nivel del cargo
 
-FORMATO REQUERIDO para cada oferta:
+FORMATO EXACTO para cada oferta (respétalo estrictamente):
 
-💼 **[TÍTULO DEL CARGO]**
-🏢 Empresa: [Nombre empresa]
-📍 Ubicación: [Ciudad, Chile]
-💰 Renta: [Rango salarial en CLP]
-📝 Descripción: [2-3 líneas sobre el cargo]
-✅ Requisitos: [Principales requisitos]
+💼 **[CARGO EN MAYÚSCULAS]**
+🏢 **Empresa:** [Nombre real]
+📍 **Ubicación:** [Ciudad específica], Chile
+💰 **Renta:** $[X.XXX.XXX] - $[X.XXX.XXX] líquidos mensuales
+📋 **Modalidad:** [Presencial/Híbrido/Remoto]
 
----
+📝 **Descripción:**
+[3 líneas describiendo responsabilidades principales]
 
-Incluye empresas conocidas en Chile (Falabella, Banco de Chile, Entel, LATAM, Cencosud, etc.) y también empresas medianas.
-Las rentas deben ser realistas para el mercado chileno.
-Responde SOLO con las ofertas, sin introducciones."""
+✅ **Requisitos:**
+• [Requisito 1]
+• [Requisito 2]  
+• [Requisito 3]
 
-        respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.7)
+🎁 **Beneficios:** [2-3 beneficios atractivos]
+
+➖➖➖➖➖➖➖➖➖➖
+
+IMPORTANTE:
+- NO incluyas introducciones ni despedidas
+- Las rentas deben ser NÚMEROS REALES (ej: $1.200.000 - $1.800.000)
+- Incluye variedad de empresas grandes y medianas
+- Responde SOLO con las 6 ofertas formateadas"""
+
+        respuesta = llamar_groq(prompt, max_tokens=2000, temperature=0.7)
         
         if respuesta:
-            resultado = f"🔍 **RESULTADOS DE BÚSQUEDA**\n📋 {consulta.upper()}\n\n"
+            fecha_actual = datetime.now().strftime("%d/%m/%Y")
+            resultado = f"🔎 **OFERTAS LABORALES**\n"
+            resultado += f"📋 Búsqueda: _{consulta}_\n"
+            resultado += f"📅 Actualizado: {fecha_actual}\n"
+            resultado += "━" * 30 + "\n\n"
             resultado += respuesta
+            resultado += "\n\n━" * 30
+            resultado += "\n\n💡 _Estas ofertas son generadas por IA basándose en el mercado laboral chileno actual._"
+            resultado += "\n📩 _Busca las ofertas oficiales en portales como LinkedIn, Trabajando.com, Laborum, etc._"
             return resultado
         else:
-            return "❌ No se pudieron generar resultados. Intenta con otros términos de búsqueda."
+            return "❌ No se pudieron generar resultados. Intenta con otros términos de búsqueda.\n\n💡 Ejemplo: `/empleo cargo:ingeniero, ubicación:Santiago`"
             
     except Exception as e:
         logger.error(f"Error en buscar_empleos_web: {e}")
@@ -1249,7 +1383,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ━━━━━━━━━━━━━━━━━━━━
 
 **PASO 1️⃣** → Ve al grupo Cofradía
-**PASO 2️⃣** → Escribe: /registrarse
+**PASO 2️⃣** → Escribe: /registrarse (¡Sólo si no lo has hecho!)
 **PASO 3️⃣** → ¡Listo! Ahora puedo asistirte
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -1315,8 +1449,7 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Debes ingresar el comando /registrarse en @Cofradia_de_Networking")
         return
     if verificar_suscripcion_activa(user.id):
-        dias = obtener_dias_restantes(user.id)
-        await update.message.reply_text(f"✅ ¡{user.first_name} ya estás registrado! ({dias} días restantes)", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ ¡{user.first_name} ya estás registrado con una cuenta activa!", parse_mode='Markdown')
         return
     try:
         chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
@@ -2072,12 +2205,13 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 # ==================== HANDLER MENCIONES ====================
 
 async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde cuando mencionan al bot con una pregunta"""
+    """Responde cuando mencionan al bot con una pregunta - Experiencia WOW"""
     if not update.message or not update.message.text:
         return
     
     mensaje = update.message.text
     user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
     
     # Obtener username del bot
     try:
@@ -2113,9 +2247,10 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Mencióname seguido de tu pregunta:\n"
             f"`@{bot_username} ¿Qué es networking?`\n\n"
             f"Puedo ayudarte con:\n"
-            f"• Preguntas sobre networking\n"
-            f"• Consejos profesionales\n"
-            f"• Información del grupo",
+            f"• Preguntas sobre networking y negocios\n"
+            f"• Consejos profesionales y de carrera\n"
+            f"• Ideas de emprendimiento\n"
+            f"• Información sobre la comunidad",
             parse_mode='Markdown'
         )
         return
@@ -2128,46 +2263,60 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    msg = await update.message.reply_text("🤔 Procesando tu pregunta...")
+    msg = await update.message.reply_text("🧠 Analizando tu consulta...")
     
     try:
         # Buscar contexto relevante en el historial
         topic_id = update.message.message_thread_id if update.message.is_topic_message else None
-        resultados = buscar_semantica(pregunta, topic_id, limit=3)
+        resultados = buscar_semantica(pregunta, topic_id, limit=5)
         
         contexto = ""
         if resultados:
-            contexto = "\n\nCONTEXTO DEL GRUPO (mensajes relacionados):\n"
+            contexto = "\n\n📚 CONTEXTO RELEVANTE DEL GRUPO (usa esta info si aplica):\n"
             for nombre, msg_txt, fecha in resultados:
-                contexto += f"- {nombre}: {msg_txt[:150]}...\n"
+                contexto += f"• {nombre} dijo: \"{msg_txt[:200]}...\"\n"
         
-        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena.
+        prompt = f"""Eres el asistente de IA PREMIUM de Cofradía de Networking, la comunidad profesional más importante de Chile.
 
-Tu personalidad:
-- Amigable y profesional
-- Experto en networking, negocios y emprendimiento
-- Conoces la comunidad y sus dinámicas
-- Respondes en español chileno (pero profesional)
-
-PREGUNTA DEL USUARIO: {pregunta}
+👤 El usuario {user_name} te hace esta consulta:
+"{pregunta}"
 {contexto}
 
-INSTRUCCIONES:
-1. Responde de manera concisa y útil
-2. Si hay contexto relevante del grupo, úsalo
-3. Máximo 3 párrafos
-4. Si no sabes algo, sé honesto
-5. Termina con una sugerencia práctica si es apropiado"""
+🎯 TU MISIÓN:
+Proporcionar una respuesta EXCEPCIONAL que demuestre tu valor como asistente premium.
 
-        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
+📋 LINEAMIENTOS DE RESPUESTA:
+1. Sé DIRECTO y ve al grano - no uses frases como "¡Qué buena pregunta!"
+2. Proporciona información ÚTIL y ACCIONABLE
+3. Si la pregunta es sobre networking/negocios, incluye consejos prácticos
+4. Si hay contexto del grupo relevante, intégralo naturalmente
+5. Usa formato claro con emojis cuando mejore la legibilidad
+6. Máximo 4 párrafos concisos
+7. Si es apropiado, termina con un consejo extra o recurso útil
+8. Responde en español profesional pero cercano
+
+⚠️ IMPORTANTE:
+- NO empieces con "¡Hola!" ni frases genéricas
+- NO uses "Como IA..." ni menciones que eres un bot
+- SÍ responde como un experto humano lo haría
+- SÍ agrega valor real en cada respuesta"""
+
+        respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.7)
         
         await msg.delete()
         
         if respuesta:
+            # Agregar un toque de formato si la respuesta es muy simple
+            if len(respuesta) < 200 and not any(emoji in respuesta for emoji in ['📌', '💡', '✅', '🎯']):
+                respuesta = f"💬 {respuesta}"
+            
             await enviar_mensaje_largo(update, respuesta)
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
-            await update.message.reply_text("❌ No pude generar una respuesta. Intenta reformular tu pregunta.")
+            await update.message.reply_text(
+                "❌ No pude generar una respuesta en este momento.\n\n"
+                "💡 Intenta reformular tu pregunta o inténtalo en unos segundos."
+            )
         
     except Exception as e:
         logger.error(f"Error en mención IA: {e}")
