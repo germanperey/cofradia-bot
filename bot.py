@@ -80,6 +80,30 @@ DATOS_BANCARIOS = """
 📸 Envía el comprobante como imagen después de transferir.
 """
 
+# ==================== CONFIGURACIÓN DE TOPICS/TEMAS DEL GRUPO ====================
+# Mapeo de topic_id a nombre del tema (actualizar según los topics reales del grupo)
+# Para obtener los IDs, revisa los mensajes guardados en la BD o usa el message_thread_id
+TOPICS_COFRADIA = {
+    # topic_id: ("Nombre del Tema", "Emoji")
+    # Estos son ejemplos, debes actualizarlos con los IDs reales de tu grupo
+    None: ("General", "💬"),  # Mensajes sin topic (chat general)
+    # Agregar aquí los topics reales del grupo Cofradía:
+    # 123: ("Ofertas Laborales", "💼"),
+    # 124: ("Networking", "🤝"),
+    # 125: ("Emprendimiento", "🚀"),
+    # 126: ("Tecnología", "💻"),
+    # 127: ("Eventos", "📅"),
+    # 128: ("Recursos", "📚"),
+    # 129: ("Presentaciones", "👋"),
+    # 130: ("Cumpleaños y Efemérides", "🎂"),
+}
+
+def obtener_nombre_topic(topic_id):
+    """Obtiene el nombre legible de un topic"""
+    if topic_id in TOPICS_COFRADIA:
+        return TOPICS_COFRADIA[topic_id]
+    return (f"Tema #{topic_id}", "📌")
+
 # Estilos de gráficos
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (14, 10)
@@ -554,44 +578,203 @@ def generar_grafico_visual(stats):
     return buffer
 
 def generar_resumen_usuarios(dias=1):
+    """Genera resumen ejecutivo diferenciado por Topics/Temas del grupo"""
     conn = get_db_connection()
     c = conn.cursor()
     fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
-    c.execute("SELECT first_name, message, categoria FROM mensajes WHERE fecha >= ? ORDER BY fecha", (fecha_inicio,))
+    
+    # Obtener mensajes con su topic_id
+    c.execute("""SELECT first_name, message, categoria, topic_id, fecha 
+                 FROM mensajes WHERE fecha >= ? 
+                 ORDER BY topic_id, fecha""", (fecha_inicio,))
     mensajes = c.fetchall()
+    
     if not mensajes:
         conn.close()
         return None
     
-    por_categoria = {}
-    for nombre, msg, cat in mensajes:
+    # Agrupar mensajes por Topic/Tema
+    por_topic = {}
+    for nombre, msg, cat, topic_id, fecha in mensajes:
+        if topic_id not in por_topic:
+            por_topic[topic_id] = {
+                'mensajes': [],
+                'categorias': {},
+                'participantes': set()
+            }
+        por_topic[topic_id]['mensajes'].append({
+            'autor': nombre,
+            'mensaje': msg,
+            'categoria': cat or 'Otros',
+            'fecha': fecha
+        })
+        por_topic[topic_id]['participantes'].add(nombre)
+        
+        # Contar por categoría dentro del topic
         cat = cat or 'Otros'
-        if cat not in por_categoria:
-            por_categoria[cat] = []
-        por_categoria[cat].append(f"{nombre}: {msg}")
+        if cat not in por_topic[topic_id]['categorias']:
+            por_topic[topic_id]['categorias'][cat] = 0
+        por_topic[topic_id]['categorias'][cat] += 1
     
+    # Construir contexto para la IA organizado por topics
     if model:
         try:
-            contexto = ""
-            for cat, msgs in por_categoria.items():
-                contexto += f"\n[{cat}]\n" + "\n".join(msgs[:5]) + "\n"
+            contexto_topics = ""
+            resumen_stats = ""
+            
+            for topic_id, data in por_topic.items():
+                nombre_topic, emoji = obtener_nombre_topic(topic_id)
+                num_msgs = len(data['mensajes'])
+                num_participantes = len(data['participantes'])
+                
+                # Estadísticas del topic
+                resumen_stats += f"\n{emoji} **{nombre_topic}**: {num_msgs} msgs, {num_participantes} participantes"
+                
+                # Contenido del topic (máximo 10 mensajes por topic para el contexto)
+                contexto_topics += f"\n\n{'='*40}\n{emoji} TEMA: {nombre_topic.upper()}\n{'='*40}\n"
+                
+                for msg_data in data['mensajes'][:10]:
+                    contexto_topics += f"- {msg_data['autor']}: {msg_data['mensaje'][:200]}\n"
+                
+                # Categorías principales del topic
+                if data['categorias']:
+                    cats_ordenadas = sorted(data['categorias'].items(), key=lambda x: x[1], reverse=True)[:3]
+                    contexto_topics += f"Temas principales: {', '.join([c[0] for c in cats_ordenadas])}\n"
             
             periodo = "DIARIO" if dias == 1 else ("SEMANAL" if dias == 7 else f"ÚLTIMOS {dias} DÍAS")
-            prompt = f"""Genera un resumen profesional:
-{contexto[:6000]}
+            
+            prompt = f"""Eres el asistente de Cofradía de Networking, una comunidad profesional chilena.
 
-📊 RESUMEN {periodo} - {datetime.now().strftime('%d/%m/%Y')}
-**📌 Temas** (4-5 bullets)
-**💡 Insights** (3-4 bullets)
-Total: {len(mensajes)} mensajes. Máximo 350 palabras."""
+Genera un RESUMEN EJECUTIVO de la actividad del grupo, organizado por cada TEMA/SUBGRUPO.
+
+DATOS DEL PERÍODO:
+- Fecha: {datetime.now().strftime('%d/%m/%Y')}
+- Total mensajes: {len(mensajes)}
+- Topics activos: {len(por_topic)}
+
+ESTADÍSTICAS POR TEMA:{resumen_stats}
+
+CONTENIDO POR TEMA:
+{contexto_topics[:8000]}
+
+FORMATO REQUERIDO:
+
+📊 **RESUMEN {periodo} - COFRADÍA DE NETWORKING**
+📅 {datetime.now().strftime('%d/%m/%Y')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Para CADA tema/subgrupo activo, genera una sección con:
+
+[EMOJI] **NOMBRE DEL TEMA**
+📝 Resumen ejecutivo (2-3 oraciones)
+🔑 Puntos clave: (2-3 bullets)
+👥 Participantes destacados
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📈 **INSIGHTS GENERALES**
+• (3-4 observaciones transversales)
+
+🎯 **OPORTUNIDADES DETECTADAS**
+• (2-3 oportunidades de networking o negocio)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 Total: {len(mensajes)} mensajes | {len(por_topic)} temas activos
+
+INSTRUCCIONES:
+1. Sé conciso y ejecutivo
+2. Destaca información accionable
+3. Menciona nombres de participantes cuando sea relevante
+4. Identifica oportunidades de conexión entre miembros
+5. Máximo 500 palabras total
+6. Usa español profesional chileno"""
+
             response = model.generate_content(prompt)
             conn.close()
             return response.text
-        except:
-            pass
+            
+        except Exception as e:
+            logger.error(f"Error generando resumen con IA: {e}")
+    
+    # Resumen básico sin IA
+    conn.close()
+    resumen_basico = f"📊 **RESUMEN {'DIARIO' if dias == 1 else 'SEMANAL'}** - {datetime.now().strftime('%d/%m/%Y')}\n\n"
+    resumen_basico += f"📝 Total mensajes: {len(mensajes)}\n"
+    resumen_basico += f"📁 Temas activos: {len(por_topic)}\n\n"
+    
+    for topic_id, data in por_topic.items():
+        nombre_topic, emoji = obtener_nombre_topic(topic_id)
+        resumen_basico += f"{emoji} **{nombre_topic}**: {len(data['mensajes'])} msgs\n"
+    
+    return resumen_basico
+
+
+def generar_resumen_admins(dias=1):
+    """Genera resumen ampliado para administradores con métricas adicionales"""
+    resumen_base = generar_resumen_usuarios(dias)
+    
+    if not resumen_base:
+        return None
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+    
+    # Estadísticas adicionales para admins
+    c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+    total_msgs = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+    usuarios_activos = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+    suscriptores = c.fetchone()[0]
+    
+    # Top usuarios del período
+    c.execute("""SELECT first_name, COUNT(*) as total 
+                 FROM mensajes WHERE fecha >= ? 
+                 GROUP BY user_id ORDER BY total DESC LIMIT 5""", (fecha_inicio,))
+    top_usuarios = c.fetchall()
+    
+    # Usuarios nuevos del período
+    c.execute("""SELECT COUNT(*) FROM suscripciones 
+                 WHERE fecha_registro >= ?""", (fecha_inicio,))
+    nuevos = c.fetchone()[0]
+    
+    # Próximos vencimientos (7 días)
+    fecha_limite = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""SELECT COUNT(*) FROM suscripciones 
+                 WHERE estado = 'activo' AND fecha_expiracion <= ?""", (fecha_limite,))
+    por_vencer = c.fetchone()[0]
     
     conn.close()
-    return f"📊 **RESUMEN** - {datetime.now().strftime('%d/%m/%Y')}\n\n📝 Total: {len(mensajes)} mensajes\n📁 Categorías: {', '.join(por_categoria.keys())}"
+    
+    # Sección exclusiva admin
+    seccion_admin = f"""
+
+{'='*50}
+👑 **SECCIÓN EXCLUSIVA ADMIN**
+{'='*50}
+
+📊 **MÉTRICAS DEL PERÍODO:**
+• Total mensajes: {total_msgs}
+• Usuarios activos: {usuarios_activos}
+• Suscriptores totales: {suscriptores}
+• Nuevos registros: {nuevos}
+• Por vencer (7 días): {por_vencer}
+
+🏆 **TOP 5 PARTICIPANTES:**
+"""
+    
+    for i, (nombre, total) in enumerate(top_usuarios, 1):
+        medalla = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1]
+        seccion_admin += f"{medalla} {nombre}: {total} msgs\n"
+    
+    if por_vencer > 0:
+        seccion_admin += f"\n⚠️ **ATENCIÓN:** {por_vencer} usuario(s) por vencer esta semana"
+    
+    return resumen_base + seccion_admin
 # ==================== DECORADOR ====================
 
 def requiere_suscripcion(func):
@@ -1364,25 +1547,64 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
 # ==================== JOBS PROGRAMADOS ====================
 
 async def resumen_automatico(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("⏰ Resumen automático...")
+    """Envía resúmenes diarios automáticos a las 20:00 - diferenciado para usuarios y admins"""
+    logger.info("⏰ Ejecutando resumen automático diario...")
     try:
-        resumen = generar_resumen_usuarios(dias=1)
-        if not resumen:
+        # Generar ambos tipos de resumen
+        resumen_usuarios = generar_resumen_usuarios(dias=1)
+        resumen_admins = generar_resumen_admins(dias=1)
+        
+        if not resumen_usuarios:
+            logger.info("No hay mensajes para resumir hoy")
             return
+        
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT user_id, first_name, es_admin FROM suscripciones WHERE estado = 'activo'")
         usuarios = c.fetchall()
         conn.close()
+        
+        enviados_usuarios = 0
+        enviados_admins = 0
+        
         for user_id, nombre, es_admin in usuarios:
+            # Verificar que la suscripción siga activa
             if not verificar_suscripcion_activa(user_id):
                 continue
+            
             try:
-                await context.bot.send_message(chat_id=user_id, text=f"📧 **RESUMEN DIARIO**\n\n{resumen}", parse_mode='Markdown')
-            except:
-                pass
+                if es_admin and resumen_admins:
+                    # Enviar resumen completo con sección admin
+                    mensaje = f"👑 **RESUMEN DIARIO - ADMIN**\n\n{resumen_admins}"
+                    enviados_admins += 1
+                else:
+                    # Enviar resumen estándar para usuarios
+                    mensaje = f"📧 **RESUMEN DIARIO - COFRADÍA**\n\n{resumen_usuarios}"
+                    enviados_usuarios += 1
+                
+                # Dividir mensaje si es muy largo
+                if len(mensaje) > 4000:
+                    partes = [mensaje[i:i+4000] for i in range(0, len(mensaje), 4000)]
+                    for parte in partes:
+                        await context.bot.send_message(
+                            chat_id=user_id, 
+                            text=parte, 
+                            parse_mode='Markdown'
+                        )
+                else:
+                    await context.bot.send_message(
+                        chat_id=user_id, 
+                        text=mensaje, 
+                        parse_mode='Markdown'
+                    )
+                    
+            except Exception as e:
+                logger.warning(f"No se pudo enviar resumen a {nombre} ({user_id}): {e}")
+        
+        logger.info(f"✅ Resúmenes enviados: {enviados_usuarios} usuarios, {enviados_admins} admins")
+        
     except Exception as e:
-        logger.error(f"Error resumen: {e}")
+        logger.error(f"Error en resumen automático: {e}")
 
 async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ Recordatorios...")
