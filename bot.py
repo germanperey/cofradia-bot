@@ -99,10 +99,71 @@ TOPICS_COFRADIA = {
 }
 
 def obtener_nombre_topic(topic_id):
-    """Obtiene el nombre legible de un topic"""
-    if topic_id in TOPICS_COFRADIA:
-        return TOPICS_COFRADIA[topic_id]
+    """Obtiene el nombre legible de un topic desde la BD"""
+    if topic_id is None:
+        topic_id = 0
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT nombre, emoji FROM topics_grupo WHERE topic_id = ?", (topic_id,))
+    resultado = c.fetchone()
+    conn.close()
+    
+    if resultado:
+        return (resultado[0], resultado[1])
     return (f"Tema #{topic_id}", "📌")
+
+
+def registrar_topic(topic_id, nombre_sugerido=None):
+    """Registra un nuevo topic detectado automáticamente"""
+    if topic_id is None:
+        return
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Verificar si ya existe
+    c.execute("SELECT topic_id FROM topics_grupo WHERE topic_id = ?", (topic_id,))
+    if c.fetchone():
+        # Incrementar contador de mensajes
+        c.execute("UPDATE topics_grupo SET mensajes_count = mensajes_count + 1 WHERE topic_id = ?", (topic_id,))
+    else:
+        # Registrar nuevo topic
+        nombre = nombre_sugerido or f"Tema #{topic_id}"
+        c.execute("""INSERT INTO topics_grupo (topic_id, nombre, emoji, fecha_detectado, mensajes_count) 
+                     VALUES (?, ?, '📌', ?, 1)""",
+                  (topic_id, nombre, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        logger.info(f"📌 Nuevo topic detectado: {topic_id} - {nombre}")
+    
+    conn.commit()
+    conn.close()
+
+
+def obtener_todos_topics():
+    """Obtiene todos los topics registrados"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""SELECT topic_id, nombre, emoji, mensajes_count 
+                 FROM topics_grupo 
+                 WHERE activo = 1 
+                 ORDER BY mensajes_count DESC""")
+    topics = c.fetchall()
+    conn.close()
+    return topics
+
+
+def actualizar_topic(topic_id, nombre=None, emoji=None):
+    """Actualiza el nombre o emoji de un topic"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    if nombre:
+        c.execute("UPDATE topics_grupo SET nombre = ? WHERE topic_id = ?", (nombre, topic_id))
+    if emoji:
+        c.execute("UPDATE topics_grupo SET emoji = ? WHERE topic_id = ?", (emoji, topic_id))
+    
+    conn.commit()
+    conn.close()
 
 # Estilos de gráficos
 sns.set_style("whitegrid")
@@ -199,11 +260,27 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS precios_planes
                  (dias INTEGER PRIMARY KEY, precio INTEGER, nombre_plan TEXT)''')
     
+    # Nueva tabla para topics/temas del grupo
+    c.execute('''CREATE TABLE IF NOT EXISTS topics_grupo
+                 (topic_id INTEGER PRIMARY KEY,
+                  nombre TEXT,
+                  emoji TEXT DEFAULT '📌',
+                  descripcion TEXT,
+                  fecha_detectado TEXT,
+                  mensajes_count INTEGER DEFAULT 0,
+                  activo INTEGER DEFAULT 1)''')
+    
     c.execute("SELECT COUNT(*) FROM precios_planes")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO precios_planes VALUES (30, 2000, 'Mensual')")
         c.execute("INSERT INTO precios_planes VALUES (180, 10500, 'Semestral')")
         c.execute("INSERT INTO precios_planes VALUES (365, 20000, 'Anual')")
+    
+    # Insertar topic General (None/0) si no existe
+    c.execute("SELECT COUNT(*) FROM topics_grupo WHERE topic_id = 0")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO topics_grupo (topic_id, nombre, emoji, descripcion, fecha_detectado) VALUES (0, 'General', '💬', 'Chat general del grupo', ?)",
+                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
     
     conn.commit()
     conn.close()
@@ -1382,12 +1459,20 @@ async def cobros_admin_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     mensaje = """
 🤖 **CÓDIGOS ADMIN**
 
+💰 **COBROS Y CÓDIGOS:**
 /generar_codigo – Crea Códigos
 /precios – Ver precios
 /set_precio – Modificar precios
 /pagos_pendientes – Ver pagos
+
+📅 **VENCIMIENTOS:**
 /vencimientos – Próximos vencimientos
-/vencimientos_mes – Por mes
+/vencimientos_mes – Por mes (1 al 12)
+
+📋 **TOPICS/TEMAS:**
+/ver_topics – Ver todos los topics
+/set_topic [id] [nombre] – Renombrar topic
+/set_topic_emoji [id] [emoji] – Cambiar emoji
 """
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
@@ -1486,6 +1571,95 @@ async def vencimientos_mes_comando(update: Update, context: ContextTypes.DEFAULT
             mensaje += f"📌 {nombre}\n"
         mensaje += f"\n📊 Total: {len(vencimientos)}"
     await update.message.reply_text(mensaje, parse_mode='Markdown')
+
+# ==================== COMANDOS DE GESTIÓN DE TOPICS (ADMIN) ====================
+
+async def ver_topics_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /ver_topics - Ver todos los topics detectados (solo admin)"""
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    topics = obtener_todos_topics()
+    
+    if not topics:
+        await update.message.reply_text("📭 No hay topics registrados aún.\n\nLos topics se detectan automáticamente cuando hay actividad en el grupo.")
+        return
+    
+    mensaje = "📋 **TOPICS/TEMAS DEL GRUPO**\n\n"
+    mensaje += "```\n"
+    mensaje += f"{'ID':<8} {'Nombre':<20} {'Msgs':<8} {'Emoji'}\n"
+    mensaje += "-" * 45 + "\n"
+    
+    for topic_id, nombre, emoji, msgs_count in topics:
+        nombre_corto = nombre[:18] + ".." if len(nombre) > 20 else nombre
+        mensaje += f"{topic_id:<8} {nombre_corto:<20} {msgs_count:<8} {emoji}\n"
+    
+    mensaje += "```\n"
+    mensaje += f"\n📊 **Total:** {len(topics)} topics\n\n"
+    mensaje += "💡 **Para renombrar:** `/set_topic [id] [nombre]`\n"
+    mensaje += "💡 **Para cambiar emoji:** `/set_topic_emoji [id] [emoji]`"
+    
+    await update.message.reply_text(mensaje, parse_mode='Markdown')
+
+
+async def set_topic_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_topic - Renombrar un topic (solo admin)"""
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ **Uso:** /set_topic [topic_id] [nuevo nombre]\n\n"
+            "**Ejemplo:** `/set_topic 123 Ofertas Laborales`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        topic_id = int(context.args[0])
+        nuevo_nombre = ' '.join(context.args[1:])
+        
+        actualizar_topic(topic_id, nombre=nuevo_nombre)
+        
+        await update.message.reply_text(
+            f"✅ Topic #{topic_id} renombrado a: **{nuevo_nombre}**",
+            parse_mode='Markdown'
+        )
+    except ValueError:
+        await update.message.reply_text("❌ El ID del topic debe ser un número")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_topic_emoji - Cambiar emoji de un topic (solo admin)"""
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ **Uso:** /set_topic_emoji [topic_id] [emoji]\n\n"
+            "**Ejemplo:** `/set_topic_emoji 123 💼`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        topic_id = int(context.args[0])
+        nuevo_emoji = context.args[1]
+        
+        actualizar_topic(topic_id, emoji=nuevo_emoji)
+        
+        await update.message.reply_text(
+            f"✅ Emoji del topic #{topic_id} cambiado a: {nuevo_emoji}",
+            parse_mode='Markdown'
+        )
+    except ValueError:
+        await update.message.reply_text("❌ El ID del topic debe ser un número")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
 # ==================== HANDLER MENCIONES ====================
 
 async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1536,12 +1710,20 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error. Intenta de nuevo.")
 
 async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda mensajes del grupo y registra topics automáticamente"""
     if not update.message or not update.message.text:
         return
     if es_chat_privado(update):
         return
+    
     user = update.message.from_user
     topic_id = update.message.message_thread_id if update.message.is_topic_message else None
+    
+    # Registrar el topic si es nuevo
+    if topic_id:
+        registrar_topic(topic_id)
+    
+    # Guardar el mensaje
     guardar_mensaje(user.id, user.username or "sin_username", user.first_name or "Anónimo", update.message.text, topic_id)
 
 # ==================== JOBS PROGRAMADOS ====================
@@ -1760,6 +1942,11 @@ def main():
     application.add_handler(CommandHandler("pagos_pendientes", pagos_pendientes_comando))
     application.add_handler(CommandHandler("vencimientos", vencimientos_comando))
     application.add_handler(CommandHandler("vencimientos_mes", vencimientos_mes_comando))
+    
+    # Handlers admin - Topics
+    application.add_handler(CommandHandler("ver_topics", ver_topics_comando))
+    application.add_handler(CommandHandler("set_topic", set_topic_comando))
+    application.add_handler(CommandHandler("set_topic_emoji", set_topic_emoji_comando))
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(callback_plan, pattern='^plan_'))
