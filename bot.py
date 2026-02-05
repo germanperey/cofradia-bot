@@ -1,10 +1,17 @@
 import os
+import re
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes, CallbackQueryHandler
 import google.generativeai as genai
 import requests
 import PIL.Image
+import pandas as pd
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from io import BytesIO
 import base64
 import sqlite3
 from datetime import datetime, timedelta, time
@@ -14,7 +21,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-from io import BytesIO
 import secrets
 import string
 
@@ -36,10 +42,10 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# ID del dueño del bot (se configura en variables de entorno)
+# ID del dueño del bot
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 
-# Datos bancarios para pagos
+# Datos bancarios
 DATOS_BANCARIOS = """
 💳 **DATOS PARA TRANSFERENCIA**
 
@@ -56,74 +62,62 @@ sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (12, 8)
 plt.rcParams['font.size'] = 10
 
+# ==================== KEEP-ALIVE SERVER ====================
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot Cofradia Premium - Activo')
+    
+    def log_message(self, format, *args):
+        pass
+
+def run_keepalive_server():
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
+    logger.info(f"🌐 Keep-alive server en puerto {port}")
+    server.serve_forever()
+
 # ==================== BASE DE DATOS ====================
 
 def init_db():
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     
-    # Tabla de mensajes
     c.execute('''CREATE TABLE IF NOT EXISTS mensajes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  username TEXT,
-                  first_name TEXT,
-                  message TEXT,
-                  topic_id INTEGER,
-                  fecha TEXT,
-                  embedding TEXT,
-                  categoria TEXT)''')
+                  user_id INTEGER, username TEXT, first_name TEXT,
+                  message TEXT, topic_id INTEGER, fecha TEXT,
+                  embedding TEXT, categoria TEXT)''')
     
-    # Tabla de resúmenes
     c.execute('''CREATE TABLE IF NOT EXISTS resumenes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  fecha TEXT,
-                  tipo TEXT,
-                  resumen TEXT,
-                  mensajes_count INTEGER)''')
+                  fecha TEXT, tipo TEXT, resumen TEXT, mensajes_count INTEGER)''')
     
-    # Tabla de suscripciones
     c.execute('''CREATE TABLE IF NOT EXISTS suscripciones
-                 (user_id INTEGER PRIMARY KEY,
-                  first_name TEXT,
-                  username TEXT,
-                  es_admin INTEGER DEFAULT 0,
-                  fecha_registro TEXT,
-                  fecha_expiracion TEXT,
-                  estado TEXT DEFAULT 'activo',
+                 (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT,
+                  es_admin INTEGER DEFAULT 0, fecha_registro TEXT,
+                  fecha_expiracion TEXT, estado TEXT DEFAULT 'activo',
                   mensajes_engagement INTEGER DEFAULT 0,
                   ultimo_mensaje_engagement TEXT,
                   servicios_usados TEXT DEFAULT '[]')''')
     
-    # Tabla de códigos de activación
     c.execute('''CREATE TABLE IF NOT EXISTS codigos_activacion
-                 (codigo TEXT PRIMARY KEY,
-                  dias_validez INTEGER,
-                  precio INTEGER,
-                  fecha_creacion TEXT,
-                  fecha_expiracion TEXT,
-                  usado INTEGER DEFAULT 0,
-                  usado_por INTEGER,
-                  fecha_uso TEXT)''')
+                 (codigo TEXT PRIMARY KEY, dias_validez INTEGER, precio INTEGER,
+                  fecha_creacion TEXT, fecha_expiracion TEXT,
+                  usado INTEGER DEFAULT 0, usado_por INTEGER, fecha_uso TEXT)''')
     
-    # Tabla de pagos pendientes
     c.execute('''CREATE TABLE IF NOT EXISTS pagos_pendientes
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  first_name TEXT,
-                  dias_plan INTEGER,
-                  precio INTEGER,
-                  comprobante_file_id TEXT,
-                  fecha_envio TEXT,
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+                  first_name TEXT, dias_plan INTEGER, precio INTEGER,
+                  comprobante_file_id TEXT, fecha_envio TEXT,
                   estado TEXT DEFAULT 'pendiente')''')
     
-    # Tabla de precios
     c.execute('''CREATE TABLE IF NOT EXISTS precios_planes
-                 (dias INTEGER PRIMARY KEY,
-                  precio INTEGER,
-                  nombre_plan TEXT)''')
+                 (dias INTEGER PRIMARY KEY, precio INTEGER, nombre_plan TEXT)''')
     
-    # Insertar precios por defecto
     c.execute("SELECT COUNT(*) FROM precios_planes")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO precios_planes VALUES (30, 2000, 'Mensual')")
@@ -135,14 +129,11 @@ def init_db():
 
 # ==================== FUNCIONES DE SUSCRIPCIÓN ====================
 
-def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False):
-    """Registra usuario con 3 meses gratis"""
+def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False, dias_gratis=90):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     fecha_registro = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fecha_expiracion = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
-    
+    fecha_expiracion = (datetime.now() + timedelta(days=dias_gratis)).strftime("%Y-%m-%d %H:%M:%S")
     c.execute("""INSERT OR REPLACE INTO suscripciones 
                  (user_id, first_name, username, es_admin, fecha_registro, fecha_expiracion, estado, mensajes_engagement, ultimo_mensaje_engagement, servicios_usados) 
                  VALUES (?, ?, ?, ?, ?, ?, 'activo', 0, ?, '[]')""",
@@ -151,116 +142,82 @@ def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False)
     conn.close()
 
 def verificar_suscripcion_activa(user_id):
-    """Verifica si el usuario tiene suscripción activa"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     c.execute("SELECT fecha_expiracion, estado FROM suscripciones WHERE user_id = ?", (user_id,))
     resultado = c.fetchone()
     conn.close()
-    
     if not resultado:
         return False
-    
     fecha_exp, estado = resultado
-    
     if estado != 'activo':
         return False
-    
     fecha_expiracion = datetime.strptime(fecha_exp, "%Y-%m-%d %H:%M:%S")
-    
     return datetime.now() < fecha_expiracion
 
 def obtener_dias_restantes(user_id):
-    """Obtiene días restantes de suscripción"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
     resultado = c.fetchone()
     conn.close()
-    
     if not resultado:
         return 0
-    
     fecha_exp = datetime.strptime(resultado[0], "%Y-%m-%d %H:%M:%S")
     dias = (fecha_exp - datetime.now()).days
-    
     return max(0, dias)
 
 def generar_codigo_activacion(dias, precio):
-    """Genera código único de activación"""
     caracteres = string.ascii_uppercase + string.digits
     codigo = ''.join(secrets.choice(caracteres) for _ in range(12))
     codigo = f"COF-{codigo[:4]}-{codigo[4:8]}-{codigo[8:]}"
-    
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fecha_expiracion = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute("""INSERT INTO codigos_activacion 
-                 (codigo, dias_validez, precio, fecha_creacion, fecha_expiracion, usado, usado_por, fecha_uso) 
-                 VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)""",
+    c.execute("""INSERT INTO codigos_activacion VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)""",
               (codigo, dias, precio, fecha_creacion, fecha_expiracion))
     conn.commit()
     conn.close()
-    
     return codigo
 
 def validar_y_usar_codigo(user_id, codigo):
-    """Valida y aplica código de activación"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     c.execute("SELECT dias_validez, fecha_expiracion, usado FROM codigos_activacion WHERE codigo = ?", (codigo,))
     resultado = c.fetchone()
-    
     if not resultado:
         conn.close()
         return False, "❌ Código inválido."
-    
     dias_validez, fecha_exp_codigo, usado = resultado
-    
     if usado:
         conn.close()
         return False, "❌ Este código ya fue utilizado."
-    
     fecha_exp = datetime.strptime(fecha_exp_codigo, "%Y-%m-%d %H:%M:%S")
     if datetime.now() > fecha_exp:
         conn.close()
         return False, "❌ Código expirado."
-    
     c.execute("UPDATE codigos_activacion SET usado = 1, usado_por = ?, fecha_uso = ? WHERE codigo = ?",
               (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), codigo))
-    
     c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
     resultado_user = c.fetchone()
-    
     if resultado_user:
         fecha_exp_actual = datetime.strptime(resultado_user[0], "%Y-%m-%d %H:%M:%S")
         if fecha_exp_actual < datetime.now():
             nueva_fecha = datetime.now() + timedelta(days=dias_validez)
         else:
             nueva_fecha = fecha_exp_actual + timedelta(days=dias_validez)
-        
         c.execute("UPDATE suscripciones SET fecha_expiracion = ?, estado = 'activo' WHERE user_id = ?",
                   (nueva_fecha.strftime("%Y-%m-%d %H:%M:%S"), user_id))
-    
     conn.commit()
     conn.close()
-    
     return True, f"✅ ¡Código activado! Tu suscripción se extendió por {dias_validez} días."
 
 def registrar_servicio_usado(user_id, servicio):
-    """Registra qué servicios ha usado el usuario"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     c.execute("SELECT servicios_usados FROM suscripciones WHERE user_id = ?", (user_id,))
     resultado = c.fetchone()
-    
     if resultado:
         servicios = json.loads(resultado[0])
         if servicio not in servicios:
@@ -268,11 +225,9 @@ def registrar_servicio_usado(user_id, servicio):
             c.execute("UPDATE suscripciones SET servicios_usados = ? WHERE user_id = ?",
                       (json.dumps(servicios), user_id))
             conn.commit()
-    
     conn.close()
 
 def obtener_precios():
-    """Obtiene los precios configurados"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT dias, precio, nombre_plan FROM precios_planes ORDER BY dias")
@@ -281,7 +236,6 @@ def obtener_precios():
     return precios
 
 def actualizar_precio(dias, nuevo_precio):
-    """Actualiza precio de un plan"""
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("UPDATE precios_planes SET precio = ? WHERE dias = ?", (nuevo_precio, dias))
@@ -372,7 +326,6 @@ async def buscar_empleos_web(cargo=None, industria=None, area=None, ubicacion=No
         if ubicacion: partes.append(f"ubicación: {ubicacion}")
         if rango_renta: partes.append(f"renta: {rango_renta}")
         consulta = ", ".join(partes) if partes else "empleos"
-        
         prompt = f"""Busca ofertas en LinkedIn, Indeed y Laborum para: {consulta}
 Proporciona 5-8 opciones con: título, empresa, ubicación, salario, link, descripción breve.
 Formatea profesionalmente en español."""
@@ -385,33 +338,30 @@ def obtener_estadisticas_graficos(dias=7):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
-    c.execute("SELECT DATE(fecha), COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY fecha", (fecha_inicio,))
-    mensajes_por_dia = c.fetchall()
-    c.execute("SELECT first_name, COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY user_id, first_name ORDER BY COUNT(*) DESC LIMIT 10", (fecha_inicio,))
+    c.execute("""SELECT DATE(fecha) as dia, COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY dia ORDER BY dia""", (fecha_inicio,))
+    por_dia = c.fetchall()
+    c.execute("""SELECT first_name, COUNT(*) as total FROM mensajes WHERE fecha >= ? GROUP BY user_id, first_name ORDER BY total DESC LIMIT 10""", (fecha_inicio,))
     usuarios_activos = c.fetchall()
-    c.execute("SELECT categoria, COUNT(*) FROM mensajes WHERE fecha >= ? AND categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC", (fecha_inicio,))
+    c.execute("""SELECT categoria, COUNT(*) FROM mensajes WHERE fecha >= ? AND categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC""", (fecha_inicio,))
     por_categoria = c.fetchall()
-    c.execute("SELECT CAST(strftime('%H', fecha) AS INTEGER), COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY strftime('%H', fecha) ORDER BY strftime('%H', fecha)", (fecha_inicio,))
+    c.execute("""SELECT CAST(strftime('%H', fecha) AS INTEGER) as hora, COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY hora ORDER BY hora""", (fecha_inicio,))
     por_hora = c.fetchall()
     conn.close()
-    return {'mensajes_por_dia': mensajes_por_dia, 'usuarios_activos': usuarios_activos, 'por_categoria': por_categoria, 'por_hora': por_hora}
+    return {'por_dia': por_dia, 'usuarios_activos': usuarios_activos, 'por_categoria': por_categoria, 'por_hora': por_hora}
 
 def generar_grafico_visual(stats):
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('📊 Análisis - Cofradía de Networking', fontsize=18, fontweight='bold', y=0.98)
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('📊 ANÁLISIS VISUAL - COFRADÍA', fontsize=16, fontweight='bold', y=0.98)
     
-    if stats['mensajes_por_dia']:
-        dias = [d[0] for d in stats['mensajes_por_dia']]
-        valores = [d[1] for d in stats['mensajes_por_dia']]
-        ax1.plot(dias, valores, marker='o', linewidth=3, color='#1f77b4', markersize=8)
-        ax1.fill_between(range(len(dias)), valores, alpha=0.3, color='#1f77b4')
-        ax1.set_title('📅 Actividad Diaria', fontsize=14, fontweight='bold', pad=15)
-        ax1.set_xlabel('Fecha', fontsize=11)
-        ax1.set_ylabel('Mensajes', fontsize=11)
+    if stats['por_dia']:
+        dias = [d[0][-5:] for d in stats['por_dia']]
+        valores = [d[1] for d in stats['por_dia']]
+        ax1.fill_between(range(len(dias)), valores, alpha=0.3, color='#2E86AB')
+        ax1.plot(range(len(dias)), valores, marker='o', linewidth=2, color='#2E86AB', markersize=8)
+        ax1.set_title('📈 Mensajes por Día', fontsize=14, fontweight='bold', pad=15)
+        ax1.set_xticks(range(len(dias)))
+        ax1.set_xticklabels(dias, rotation=45)
         ax1.grid(True, alpha=0.3)
-        ax1.tick_params(axis='x', rotation=45)
-        for i, v in enumerate(valores):
-            ax1.text(i, v + max(valores)*0.02, str(v), ha='center', va='bottom', fontweight='bold')
     
     if stats['usuarios_activos']:
         usuarios = [u[0][:15] for u in stats['usuarios_activos'][:8]]
@@ -431,10 +381,6 @@ def generar_grafico_visual(stats):
         colores_pastel = plt.cm.Set3(range(len(categorias)))
         wedges, texts, autotexts = ax3.pie(valores_cat, labels=categorias, autopct='%1.1f%%', colors=colores_pastel, startangle=90, textprops={'fontsize': 10, 'fontweight': 'bold'})
         ax3.set_title('🏷️ Distribución por Categorías', fontsize=14, fontweight='bold', pad=15)
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_fontsize(10)
-            autotext.set_fontweight('bold')
     
     if stats['por_hora']:
         horas = list(range(24))
@@ -448,10 +394,6 @@ def generar_grafico_visual(stats):
         ax4.set_ylabel('Mensajes', fontsize=11)
         ax4.set_xticks(range(0, 24, 2))
         ax4.grid(True, alpha=0.3, axis='y')
-        for bar in bars:
-            height = bar.get_height()
-            if height > 0:
-                ax4.text(bar.get_x() + bar.get_width()/2., height, f'{int(height)}', ha='center', va='bottom', fontsize=8, fontweight='bold')
     
     plt.tight_layout()
     buffer = BytesIO()
@@ -468,7 +410,6 @@ def analizar_participacion_usuarios(dias=7):
                  FROM mensajes WHERE fecha >= ? GROUP BY user_id, first_name ORDER BY COUNT(*) DESC""", (fecha_inicio,))
     usuarios = c.fetchall()
     conn.close()
-    
     analisis = []
     for user_id, nombre, total_msg, dias_act, categorias in usuarios:
         promedio_diario = total_msg / max(dias_act, 1)
@@ -492,107 +433,53 @@ def analizar_participacion_usuarios(dias=7):
 
 # ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
 
-# ==================== BÚSQUEDA DE PROFESIONALES EN GOOGLE DRIVE ====================
-
 def buscar_archivo_excel_drive():
-    """Busca el archivo más reciente de BD Grupo Laboral en Google Drive usando SOLO requests"""
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         import io
-        
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
         if not creds_json:
             logger.error("GOOGLE_DRIVE_CREDS no configurado")
             return None
-        
-        # Configurar credenciales
         scope = ['https://www.googleapis.com/auth/drive.readonly']
         creds_dict = json.loads(creds_json)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        
-        # Obtener token de acceso
         access_token = creds.get_access_token().access_token
         headers = {'Authorization': f'Bearer {access_token}'}
-        
-        # PASO 1: Buscar carpeta INBESTU usando requests directo
         search_url = "https://www.googleapis.com/drive/v3/files"
-        params_carpeta = {
-            'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'",
-            'fields': 'files(id, name)'
-        }
-        
+        params_carpeta = {'q': "name='INBESTU' and mimeType='application/vnd.google-apps.folder'", 'fields': 'files(id, name)'}
         response_carpeta = requests.get(search_url, headers=headers, params=params_carpeta)
-        
         if response_carpeta.status_code != 200:
-            logger.error(f"Error buscando carpeta: {response_carpeta.status_code}")
             return None
-        
         carpetas = response_carpeta.json().get('files', [])
-        
         if not carpetas:
-            logger.error("Carpeta INBESTU no encontrada")
             return None
-        
         carpeta_id = carpetas[0]['id']
-        logger.info(f"Carpeta encontrada: {carpetas[0]['name']}")
-        
-        # PASO 2: Buscar archivos Excel en la carpeta usando requests directo
-        params_archivos = {
-            'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false",
-            'fields': 'files(id, name)',
-            'orderBy': 'name desc'
-        }
-        
+        params_archivos = {'q': f"name contains 'BD Grupo Laboral' and '{carpeta_id}' in parents and trashed=false", 'fields': 'files(id, name)', 'orderBy': 'name desc'}
         response_archivos = requests.get(search_url, headers=headers, params=params_archivos)
-        
         if response_archivos.status_code != 200:
-            logger.error(f"Error buscando archivos: {response_archivos.status_code}")
             return None
-        
         archivos = response_archivos.json().get('files', [])
-        
         if not archivos:
-            logger.error("No se encontró archivo BD Grupo Laboral")
             return None
-        
-        # Tomar el archivo más reciente
-        archivo_mas_reciente = archivos[0]
-        logger.info(f"Archivo encontrado: {archivo_mas_reciente['name']}")
-        
-        # PASO 3: Descargar archivo usando requests directo
-        file_id = archivo_mas_reciente['id']
+        file_id = archivos[0]['id']
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-        
         response_download = requests.get(download_url, headers=headers)
-        
         if response_download.status_code == 200:
-            logger.info(f"Archivo descargado exitosamente: {len(response_download.content)} bytes")
             return io.BytesIO(response_download.content)
-        else:
-            logger.error(f"Error descargando archivo: {response_download.status_code}")
-            return None
-        
+        return None
     except Exception as e:
         logger.error(f"Error buscando archivo en Drive: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return None
 
 def buscar_profesionales(query):
-    """Busca profesionales en el Excel usando IA semántica avanzada"""
     try:
-        import pandas as pd
-        
         archivo = buscar_archivo_excel_drive()
-        
         if not archivo:
-            return "❌ No se pudo acceder a la base de datos de profesionales.\n\n💡 **Posibles causas:**\n• La carpeta INBESTU no está compartida con el bot\n• No existe el archivo 'BD Grupo Laboral' en la carpeta\n• Error de permisos en Google Drive\n\nContacta al administrador."
-        
+            return "❌ No se pudo acceder a la base de datos de profesionales.\n\nContacta al administrador."
         df = pd.read_excel(archivo, engine='openpyxl')
         df.columns = df.columns.str.strip().str.lower()
-        
         profesionales_lista = []
-        
         for idx, row in df.iterrows():
             nombre = str(row.get('nombre completo', row.get('nombre', 'N/A'))).strip()
             profesion = str(row.get('profesión', row.get('profesion', row.get('área', row.get('area', 'N/A'))))).strip()
@@ -601,98 +488,31 @@ def buscar_profesionales(query):
             telefono = str(row.get('teléfono', row.get('telefono', row.get('celular', row.get('fono', 'N/A'))))).strip()
             estado = str(row.get('estado', row.get('situación', row.get('situacion', row.get('disponibilidad', 'N/A'))))).strip()
             trabajos = str(row.get('trabajos', row.get('descripción', row.get('descripcion', row.get('experiencia laboral', 'N/A'))))).strip()
-            
-            if nombre == 'N/A' or nombre == 'nan' or not nombre or nombre == '':
+            if nombre == 'N/A' or nombre == 'nan' or not nombre:
                 continue
-            
-            profesional = {
-                'id': idx + 1,
-                'nombre': nombre,
-                'profesion': profesion,
-                'expertise': expertise,
-                'email': email,
-                'telefono': telefono,
-                'estado': estado,
-                'trabajos': trabajos
-            }
-            
-            profesionales_lista.append(profesional)
-        
+            profesionales_lista.append({'id': idx + 1, 'nombre': nombre, 'profesion': profesion, 'expertise': expertise, 'email': email, 'telefono': telefono, 'estado': estado, 'trabajos': trabajos})
         if not profesionales_lista:
-            return "❌ No se encontraron profesionales en la base de datos.\n\nPor favor, verifica que el archivo Excel contenga datos válidos."
-        
+            return "❌ No se encontraron profesionales."
         profesionales_texto = ""
         for prof in profesionales_lista:
-            profesionales_texto += f"""
-ID: {prof['id']}
-Nombre: {prof['nombre']}
-Profesión/Área: {prof['profesion']}
-Expertise: {prof['expertise']}
-Estado: {prof['estado']}
-Email: {prof['email']}
-Teléfono: {prof['telefono']}
-Trabajos: {prof['trabajos']}
----
-"""
-        
-        prompt = f"""Eres un asistente experto en búsqueda semántica de profesionales en la comunidad Cofradía.
-
-CONSULTA DEL USUARIO: "{query}"
-
-BASE DE DATOS DE PROFESIONALES (Total: {len(profesionales_lista)} profesionales):
+            profesionales_texto += f"\nID: {prof['id']}\nNombre: {prof['nombre']}\nProfesión: {prof['profesion']}\nExpertise: {prof['expertise']}\nEstado: {prof['estado']}\nEmail: {prof['email']}\nTeléfono: {prof['telefono']}\n---\n"
+        prompt = f"""Busca profesionales para: "{query}"
+BASE DE DATOS ({len(profesionales_lista)} profesionales):
 {profesionales_texto[:12000]}
-
-INSTRUCCIONES DE BÚSQUEDA SEMÁNTICA:
-
-1. PRIORIDAD DE COINCIDENCIAS:
-   - EXACTA: Coincidencia directa (Score: 10/10)
-   - ALTA: Profesión relacionada (Score: 7-9/10)
-   - MEDIA: Experiencia tangencial (Score: 5-6/10)
-   - BAJA: Habilidades complementarias (Score: 3-4/10)
-
-2. CANTIDAD: Selecciona hasta 10 profesionales máximo
-
-3. FORMATO DE RESPUESTA:
-Determina el encabezado según coincidencias:
-- 5+ EXACTAS/ALTAS: "✅ PROFESIONALES QUE COINCIDEN CON TU BÚSQUEDA:"
-- Principalmente MEDIAS: "🔍 LOS PROFESIONALES DE COFRADÍA QUE MEJOR SE AJUSTAN A TU BÚSQUEDA SON LOS SIGUIENTES:"
-- Solo BAJAS: "💡 PROFESIONALES RELACIONADOS QUE PODRÍAN AYUDARTE:"
-
-Lista profesionales (máximo 10):
-
+Lista máximo 10 profesionales relevantes con formato:
 **[Número]. [Nombre]**
 🎯 Área: [profesión]
-💼 Expertise: [expertise - 1 línea]
-📊 Estado: [Contratado/Independiente/Cesante]
 📧 Email: [email]
 📱 Teléfono: [teléfono]
-💡 Experiencia: [trabajos - 2 líneas máximo]
-⭐ Relevancia: [EXACTA/ALTA/MEDIA/BAJA] - [justificación breve]
-
+⭐ Relevancia: [justificación]
 ---
-
-Al final: "💬 Para más información, contacta directamente a los profesionales."
-
-SI NO HAY COINCIDENCIAS:
-"❌ No se encontraron profesionales en Cofradía que coincidan con: {query}
-
-💡 Intenta términos más generales."
-
-Responde en español, claro y profesional."""
-
+Al final: "💬 Contacta directamente a los profesionales."
+"""
         response = model.generate_content(prompt)
-        resultado = response.text
-        
-        if "contacta directamente" not in resultado.lower():
-            resultado += "\n\n💬 *Para más información, contacta directamente a los profesionales.*"
-        
-        return resultado
-        
+        return response.text
     except Exception as e:
         logger.error(f"Error buscando profesionales: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return f"❌ Error al buscar profesionales: {str(e)}\n\n**Detalles técnicos:** {type(e).__name__}\n\nPor favor, intenta de nuevo o contacta al administrador."
+        return f"❌ Error: {str(e)}"
 
 def generar_resumen_usuarios(dias=1):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
@@ -711,21 +531,18 @@ def generar_resumen_usuarios(dias=1):
     contexto = ""
     for cat, msgs in por_categoria.items():
         contexto += f"\n[{cat}]\n" + "\n".join(msgs[:5]) + "\n"
-    prompt = f"""Resumen profesional de conversaciones:
+    prompt = f"""Resumen profesional:
 {contexto[:6000]}
-Estructura:
 📊 RESUMEN {'DIARIO' if dias == 1 else 'SEMANAL'} - {datetime.now().strftime('%d/%m/%Y')}
-**📌 Temas Principales** (4-5 bullets)
+**📌 Temas** (4-5 bullets)
 **💡 Insights** (3-4 bullets)
 **🎯 Destacados**
-**📚 Próximos Pasos**
-Total: {len(mensajes)} mensajes
-Máximo 350 palabras."""
+Total: {len(mensajes)} mensajes. Máximo 350 palabras."""
     try:
         response = model.generate_content(prompt)
         resumen = response.text
-        fecha_actual = datetime.now().strftime("%Y-%m-%d")
-        c.execute("INSERT INTO resumenes (fecha, tipo, resumen, mensajes_count) VALUES (?, ?, ?, ?)", (fecha_actual, 'usuario', resumen, len(mensajes)))
+        c.execute("INSERT INTO resumenes (fecha, tipo, resumen, mensajes_count) VALUES (?, ?, ?, ?)", 
+                  (datetime.now().strftime("%Y-%m-%d"), 'usuario', resumen, len(mensajes)))
         conn.commit()
         conn.close()
         return resumen
@@ -738,7 +555,7 @@ def generar_resumen_admins(dias=1):
     if not resumen_base:
         return None
     analisis = analizar_participacion_usuarios(dias)
-    seccion_admin = "\n\n" + "="*50 + "\n👑 **SECCIÓN ADMINISTRADORES**\n" + "="*50 + "\n\n**📊 MÉTRICAS**\n\n"
+    seccion_admin = "\n\n" + "="*50 + "\n👑 **SECCIÓN ADMIN**\n" + "="*50 + "\n\n"
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
@@ -749,755 +566,303 @@ def generar_resumen_admins(dias=1):
     conn.close()
     seccion_admin += f"• Total: {total_msgs}\n• Usuarios: {usuarios_activos}\n\n**🌟 DESTACADOS**\n\n"
     for user in analisis[:10]:
-        seccion_admin += f"{user['nivel']} **{user['nombre']}**\n   • {user['total_mensajes']} mensajes\n   • 💡 {user['sugerencia']}\n\n"
+        seccion_admin += f"{user['nivel']} **{user['nombre']}**: {user['total_mensajes']} msgs\n"
     return resumen_base + seccion_admin
-
-# ==================== RECORDATORIOS Y ENGAGEMENT (MEJORADOS) ====================
-
-async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
-    """Envía recordatorios de renovación persuasivos"""
-    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""SELECT user_id, first_name, fecha_expiracion, servicios_usados 
-                 FROM suscripciones 
-                 WHERE estado = 'activo'""")
-    usuarios = c.fetchall()
-    conn.close()
-    
-    precios = obtener_precios()
-    precio_mensual = next((p[1] for p in precios if p[0] == 30), 2000)
-    
-    for user_id, nombre, fecha_exp_str, servicios_str in usuarios:
-        fecha_exp = datetime.strptime(fecha_exp_str, "%Y-%m-%d %H:%M:%S")
-        dias_restantes = (fecha_exp - datetime.now()).days
-        
-        servicios_usados = json.loads(servicios_str)
-        todos_servicios = ['búsqueda', 'búsqueda_ia', 'buscar_profesional', 'empleos', 'gráficos', 'resumen']
-        no_usados = [s for s in todos_servicios if s not in servicios_usados]
-        
-        mensaje = ""
-        
-        if dias_restantes == 5:
-            mensaje = f"""
-🔔 **Hola {nombre}!**
-
-Te escribo para recordarte que en **5 días** vence tu acceso al Bot Cofradía.
-
-💡 **¿Por qué renovar?**
-
-Este bot es un **servicio opcional y voluntario** que hemos creado para la comunidad. Tu suscripción no solo te da acceso a herramientas poderosas, sino que nos permite:
-
-✅ Mantener servidores activos 24/7
-✅ Pagar el servicio de IA (Gemini API)
-✅ Desarrollar nuevas funcionalidades
-✅ Ofrecer soporte técnico continuo
-✅ Mejorar constantemente la experiencia
-
-**Tu aporte hace posible que Cofradía siga creciendo.** 🌱
-
-Si decides renovar, estarás invirtiendo en una herramienta que te ahorra tiempo y te mantiene conectado con la comunidad.
-
-💳 Usa /renovar cuando estés listo. ¡Sin presiones!
-
-Gracias por ser parte de Cofradía. 🙏
-"""
-        
-        elif dias_restantes == 3:
-            mensaje = f"""
-⭐ **{nombre}, quedan 3 días!**
-
-Quiero recordarte el **valor real** que el Bot Cofradía te ofrece:
-
-🔍 **Búsqueda inteligente con IA** - Encuentra info en segundos
-🧠 **Búsqueda semántica** - Por significado, no solo palabras
-💼 **Búsqueda de empleos** - LinkedIn, Indeed, Laborum integrados
-👥 **Búsqueda de profesionales** - Encuentra expertos en Cofradía
-📊 **Análisis visuales** - Gráficos profesionales estilo Google
-📝 **Resúmenes automáticos** - Mantente al día sin esfuerzo
-
-**¿Cuánto vale tu tiempo?**
-
-Si el bot te ahorra **30 minutos al día** = **15 horas al mes**
-A $10.000/hora = **$150.000 de valor**
-Tu inversión: Solo **${precio_mensual:,}/mes**
-
-**💰 ROI: 7,500% de retorno**
-
-Tu aporte permite:
-• Pagar servidores ($15 USD/mes)
-• Licencia de IA Gemini ($20 USD/mes)
-• Almacenamiento ($10 USD/mes)
-• Actualizaciones constantes
-
-**Es voluntario, pero es valioso.** 🎯
-
-Usa /renovar para continuar.
-"""
-        
-        elif dias_restantes == 1:
-            servicios_usados_texto = ", ".join(servicios_usados) if servicios_usados else "ninguno aún"
-            no_usados_texto = ", ".join(no_usados) if no_usados else "todos"
-            
-            mensaje = f"""
-⚠️ **{nombre}, ¡MAÑANA vence tu acceso!**
-
-Quiero ser **totalmente transparente** contigo:
-
-**Este bot es 100% opcional y voluntario.** No estás obligado a renovar.
-
-**PERO...**
-
-Si has encontrado valor en usar el bot, tu renovación hace posible que sigamos mejorándolo para TODA la comunidad Cofradía.
-
-**Tu historial:**
-✅ **Servicios usados:** {servicios_usados_texto}
-⏳ **Te faltan por probar:** {no_usados_texto}
-
-**¿Qué financia tu suscripción?**
-
-Cada mes invertimos en:
-• **$15 USD** - Servidor Render (24/7)
-• **$20 USD** - API de Gemini (IA avanzada)
-• **$10 USD** - Almacenamiento y bases de datos
-• **Horas** - Desarrollo y soporte
-
-**Total: ~$45 USD/mes de costos reales**
-
-Con 23 usuarios pagando = Cubrimos costos básicos
-Más usuarios = Más mejoras para todos
-
-**Tu aporte sí importa.** 💪
-
-**Beneficios de renovar HOY:**
-✅ Sin interrupciones en el servicio
-✅ Mantienes tu historial de búsquedas
-✅ Acceso inmediato a nuevas funciones
-✅ Apoyas el crecimiento de Cofradía
-
-**Precio:** ${precio_mensual:,}/mes
-**Valor que recibes:** Incalculable
-
-⏰ **Renueva ahora:** /renovar
-
-Si decides no renovar, está bien. Seguirás siendo parte de Cofradía, solo sin acceso al bot.
-
-Pero si lo renuevas, estarás invirtiendo en:
-1. **Tu productividad** personal
-2. **Tu tiempo** valioso
-3. **Tu comunidad** profesional
-
-**¿Qué eliges?** La decisión es tuya. 🤝
-
-Gracias por considerarlo. 🙏
-"""
-        
-        if mensaje:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=mensaje, parse_mode='Markdown')
-                logger.info(f"Recordatorio enviado a {nombre} ({dias_restantes} días)")
-            except Exception as e:
-                logger.error(f"Error enviando recordatorio a {nombre}: {e}")
-
-async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
-    """Envía mensajes semanales durante periodo gratuito"""
-    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""SELECT user_id, first_name, fecha_registro, mensajes_engagement, ultimo_mensaje_engagement, servicios_usados
-                 FROM suscripciones 
-                 WHERE estado = 'activo' AND mensajes_engagement < 12""")
-    usuarios = c.fetchall()
-    
-    for user_id, nombre, fecha_reg_str, num_msg, ultimo_msg_str, servicios_str in usuarios:
-        fecha_reg = datetime.strptime(fecha_reg_str, "%Y-%m-%d %H:%M:%S")
-        dias_desde_registro = (datetime.now() - fecha_reg).days
-        
-        if dias_desde_registro > 90:
-            continue
-        
-        if ultimo_msg_str:
-            ultimo_msg = datetime.strptime(ultimo_msg_str, "%Y-%m-%d %H:%M:%S")
-            if (datetime.now() - ultimo_msg).days < 7:
-                continue
-        
-        servicios_usados = json.loads(servicios_str)
-        
-        mensajes_engagement = [
-            f"👋 **Hola {nombre}!**\n\n¿Sabías que puedes usar /buscar_ia para encontrar conversaciones por significado?\n\nPruébalo! 🧠",
-            f"💼 **{nombre}, ¿buscas empleo?**\n\nUsa /empleo o /buscar_profesional para encontrar oportunidades! 🚀",
-            f"📊 **{nombre}, usa /graficos** para ver análisis visuales del grupo! 📈",
-            f"⏰ **Tip:** Usa /resumen para mantenerte al día en 2 minutos! ⚡",
-            f"🎯 **{nombre}:** Servicios usados: {', '.join(servicios_usados) if servicios_usados else 'Ninguno'}. Usa /ayuda! 💡"
-        ]
-        
-        mensaje = mensajes_engagement[num_msg % len(mensajes_engagement)]
-        
-        try:
-            await context.bot.send_message(chat_id=user_id, text=mensaje, parse_mode='Markdown')
-            
-            c.execute("""UPDATE suscripciones 
-                         SET mensajes_engagement = ?, ultimo_mensaje_engagement = ? 
-                         WHERE user_id = ?""",
-                      (num_msg + 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
-            conn.commit()
-            
-            logger.info(f"Mensaje engagement #{num_msg + 1} enviado a {nombre}")
-            
-        except Exception as e:
-            logger.error(f"Error enviando engagement a {nombre}: {e}")
-    
-    conn.close()
 
 # ==================== DECORADOR DE SUSCRIPCIÓN ====================
 
 def requiere_suscripcion(func):
-    """Decorador para verificar suscripción activa"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
-        
         if not verificar_suscripcion_activa(user_id):
             dias_restantes = obtener_dias_restantes(user_id)
             if dias_restantes > 0:
-                await update.message.reply_text(
-                    f"⏰ Tu suscripción vence en **{dias_restantes} días**.\n\nUsa /renovar para extenderla.",
-                    parse_mode='Markdown'
-                )
+                await update.message.reply_text(f"⏰ Tu suscripción vence en **{dias_restantes} días**.\n\nUsa /renovar", parse_mode='Markdown')
             else:
-                await update.message.reply_text(
-                    "❌ **Tu suscripción ha expirado.**\n\nPara seguir usando el bot, renueva con /renovar",
-                    parse_mode='Markdown'
-                )
+                await update.message.reply_text("❌ **Tu suscripción ha expirado.**\n\nRenueva con /renovar", parse_mode='Markdown')
             return
-        
         return await func(update, context, *args, **kwargs)
-    
     return wrapper
 
 # ==================== COMANDOS BÁSICOS ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
-    await update.message.reply_text(
-        f"👋 **¡Bienvenido {user.first_name}!**\n\n"
-        f"Soy el Bot Cofradía, tu asistente inteligente.\n\n"
-        f"Para empezar, usa /registrarse en el grupo.\n\n"
-        f"Luego podrás usar todas las funciones disponibles. ✨",
-        parse_mode='Markdown'
-    )
-
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto_ayuda = """
-🤖 **Bot Cofradía - Guía Completa**
-
-**🔍 Búsqueda:**
-/buscar [palabra] - Búsqueda tradicional
-/buscar_ia [frase] - Búsqueda semántica IA
-
-**💼 Empleos y Profesionales:**
-/empleo cargo:[...] ubicacion:[...] - Buscar empleos
-/buscar_profesional [área/expertise] - Buscar profesionales
-
-**📊 Análisis:**
-/graficos - Gráficos profesionales
-/estadisticas - Números del grupo
-/categorias - Distribución
-
-**📝 Resúmenes:**
-/resumen - Resumen del día
-/resumen_semanal - Resumen semanal
-
-**💳 Suscripción:**
-/registrarse - Activar cuenta
-/renovar - Renovar suscripción
-/activar [código] - Usar código
-/mi_cuenta - Ver estado
-
-**👑 Admin (solo dueño):**
-/generar_codigo - Crear códigos
-/precios - Configurar precios
-/pagos_pendientes - Revisar pagos
-
-**💬 IA:**
-Menciona @bot [pregunta]
-"""
-    await update.message.reply_text(texto_ayuda, parse_mode='Markdown')
-
-async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    
-    if update.effective_chat.type == 'private':
-        await update.message.reply_text("❌ Usa este comando en el grupo Cofradía.")
-        return
-    
     if verificar_suscripcion_activa(user.id):
         dias = obtener_dias_restantes(user.id)
         await update.message.reply_text(
-            f"✅ Ya estás registrado. Tu suscripción vence en **{dias} días**.",
-            parse_mode='Markdown'
-        )
+            f"👋 **¡Hola de nuevo, {user.first_name}!**\n\n"
+            f"✅ Tu suscripción está activa ({dias} días restantes)\n\n"
+            f"📋 Usa /ayuda para ver comandos\n"
+            f"💬 Mencióname: @Cofradia_Premium_Bot ¿pregunta?",
+            parse_mode='Markdown')
         return
-    
+    mensaje = f"""
+🎉 **¡Bienvenido/a {user.first_name} al Bot Cofradía Premium!**
+
+━━━━━━━━━━━━━━━━━━━━
+📌 **¿CÓMO EMPEZAR?**
+━━━━━━━━━━━━━━━━━━━━
+
+**PASO 1️⃣** → Ve al grupo Cofradía
+**PASO 2️⃣** → Escribe: /registrarse
+**PASO 3️⃣** → ¡Listo! Ya puedes usar el bot
+
+━━━━━━━━━━━━━━━━━━━━
+🛠️ **¿QUÉ PUEDO HACER?**
+━━━━━━━━━━━━━━━━━━━━
+
+🔍 Buscar información → /buscar o /buscar_ia
+👥 Encontrar profesionales → /buscar_profesional
+💼 Buscar empleos → /empleo
+📊 Ver estadísticas → /graficos
+📝 Resúmenes diarios → /resumen
+🤖 Preguntarme → @Cofradia_Premium_Bot + pregunta
+
+Escribe /ayuda para todos los comandos.
+🚀 **¡Regístrate en el grupo para comenzar!**
+"""
+    await update.message.reply_text(mensaje, parse_mode='Markdown')
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = """
+🤖 **BOT COFRADÍA - GUÍA**
+
+🔍 **BÚSQUEDA**
+/buscar [palabra] - Búsqueda
+/buscar_ia [frase] - Búsqueda IA
+
+💼 **EMPLEOS/PROFESIONALES**
+/empleo cargo:[X] - Buscar empleos
+/buscar_profesional [área] - Buscar expertos
+
+📊 **ANÁLISIS**
+/graficos - Gráficos
+/estadisticas - Números
+/categorias - Distribución
+/top_usuarios - Ranking
+/mi_perfil - Tu perfil
+
+📝 **RESÚMENES**
+/resumen - Resumen del día
+/resumen_semanal - 7 días
+/resumen_mes - Mensual
+/resumen_usuario @nombre - Usuario
+
+💳 **SUSCRIPCIÓN**
+/registrarse - Activar cuenta
+/renovar - Renovar plan
+/activar [código] - Usar código
+/mi_cuenta - Ver estado
+
+💬 **IA**: @Cofradia_Premium_Bot + pregunta
+"""
+    await update.message.reply_text(texto, parse_mode='Markdown')
+
+async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Usa este comando en el grupo Cofradía", parse_mode='Markdown')
+        return
+    if verificar_suscripcion_activa(user.id):
+        dias = obtener_dias_restantes(user.id)
+        await update.message.reply_text(f"✅ Ya estás registrado. {dias} días restantes.\n\nUsa /ayuda", parse_mode='Markdown')
+        return
     chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
     es_admin = chat_member.status in ['creator', 'administrator']
-    
     registrar_usuario_suscripcion(user.id, user.first_name, user.username or "sin_username", es_admin)
-    
-    mensaje_grupo = f"✅ **{user.first_name}** registrado! Inicia conversación conmigo en privado (/start) para activar todas las funciones."
-    
-    await update.message.reply_text(mensaje_grupo, parse_mode='Markdown')
-    
+    await update.message.reply_text(f"✅ **¡{user.first_name} registrado!**\n\n🚀 Ya puedes usar el bot.\n📱 Inicia chat privado conmigo.\n💡 Usa /ayuda", parse_mode='Markdown')
     try:
-        mensaje_privado = f"""
-👋 **¡Bienvenido {user.first_name}!**
-
-Has activado tu cuenta en el Bot Cofradía. 🎉
-
-**Ahora puedes:**
-🔍 Buscar información con IA
-👥 Buscar profesionales en la comunidad
-💼 Encontrar empleos
-📊 Ver análisis del grupo
-📝 Recibir resúmenes diarios
-
-Usa /ayuda para ver todos los comandos.
-
-¡Empieza a explorar! 🚀
-"""
-        await context.bot.send_message(chat_id=user.id, text=mensaje_privado, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=user.id, text=f"🎉 **¡Bienvenido/a {user.first_name}!**\n\nTu cuenta está activa.\n\nUsa /ayuda para ver comandos.", parse_mode='Markdown')
     except:
         pass
 
 async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     precios = obtener_precios()
-    
-    keyboard = []
-    for dias, precio, nombre in precios:
-        keyboard.append([InlineKeyboardButton(
-            f"{nombre} ({dias} días) - ${precio:,}",
-            callback_data=f"plan_{dias}"
-        )])
-    
+    keyboard = [[InlineKeyboardButton(f"{nombre} ({dias}d) - {formato_clp(precio)}", callback_data=f"plan_{dias}")] for dias, precio, nombre in precios]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    mensaje = f"""
-💳 **RENOVACIÓN DE SUSCRIPCIÓN**
-
-Selecciona tu plan:
-"""
-    
+    mensaje = "💳 **RENOVAR SUSCRIPCIÓN**\n\nSelecciona tu plan:"
     for dias, precio, nombre in precios:
-        ahorro = ""
-        if dias == 180:
-            precio_normal = next((p[1] for p in precios if p[0] == 30), 2000)
-            ahorro = f" (Ahorras ${int((precio_normal * 6) - precio):,})"
-        elif dias == 365:
-            precio_normal = next((p[1] for p in precios if p[0] == 30), 2000)
-            ahorro = f" (Ahorras ${int((precio_normal * 12) - precio):,})"
-        
-        mensaje += f"\n💎 **{nombre}** - ${precio:,}{ahorro}"
-    
+        mensaje += f"\n💎 {nombre} - {formato_clp(precio)}"
     await update.message.reply_text(mensaje, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     dias = int(query.data.split('_')[1])
     precios = obtener_precios()
     precio = next((p[1] for p in precios if p[0] == dias), 0)
     nombre_plan = next((p[2] for p in precios if p[0] == dias), "Plan")
-    
-    mensaje = f"""
-✅ **Plan seleccionado:** {nombre_plan}
-💰 **Precio:** ${precio:,}
-⏳ **Duración:** {dias} días
-
-{DATOS_BANCARIOS}
-
-Después de transferir, envíame el comprobante como **imagen**.
-"""
-    
+    mensaje = f"✅ **Plan:** {nombre_plan}\n💰 **Precio:** {formato_clp(precio)}\n⏳ **Duración:** {dias} días\n\n{DATOS_BANCARIOS}\n\nEnvía el comprobante como **imagen**."
     await query.edit_message_text(mensaje, parse_mode='Markdown')
-    
     context.user_data['plan_seleccionado'] = dias
     context.user_data['precio'] = precio
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe comprobante de pago y lo analiza con OCR"""
     user = update.message.from_user
-    
     if 'plan_seleccionado' not in context.user_data:
-        await update.message.reply_text(
-            "❌ Primero selecciona un plan con /renovar",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("❌ Primero selecciona un plan con /renovar")
         return
-    
     dias = context.user_data['plan_seleccionado']
     precio = context.user_data['precio']
-    
-    msg_procesando = await update.message.reply_text("🔍 Analizando comprobante con IA...")
-    
+    msg = await update.message.reply_text("🔍 Analizando comprobante...")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
-    
     image_bytes = requests.get(file.file_path).content
-    
     try:
-        prompt_ocr = f"""Analiza este comprobante de transferencia bancaria.
-
-DATOS ESPERADOS:
-- Monto: ${precio:,} CLP
-- Cuenta: 69104312
-- Banco: Santander
-- Titular: Destak E.I.R.L.
-
-FORMATO JSON:
-{{
-  "monto_detectado": "2000",
-  "monto_correcto": true,
-  "fecha_detectada": "03/02/2026",
-  "fecha_valida": true,
-  "cuenta_detectada": "69104312",
-  "cuenta_correcta": true,
-  "banco_detectado": "Banco Santander",
-  "calidad_imagen": "buena",
-  "legible": true,
-  "observaciones": ""
-}}
-
-Responde SOLO JSON."""
-
         vision_model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        from io import BytesIO
         image = PIL.Image.open(BytesIO(image_bytes))
-        
+        prompt_ocr = f"Analiza este comprobante. Monto esperado: ${precio:,}. Cuenta: 69104312. Responde JSON: {{\"monto_correcto\": true/false, \"legible\": true/false}}"
         response = vision_model.generate_content([prompt_ocr, image])
-        
-        import re
-        response_text = response.text.strip()
-        response_text = re.sub(r'```json\s*|\s*```', '', response_text)
-        
+        response_text = re.sub(r'```json\s*|\s*```', '', response.text.strip())
         try:
             datos_ocr = json.loads(response_text)
         except:
-            datos_ocr = {"legible": False, "calidad_imagen": "mala"}
-        
-        if not datos_ocr.get("legible", False) or datos_ocr.get("calidad_imagen") == "mala":
-            await msg_procesando.delete()
-            await update.message.reply_text(
-                "❌ **Imagen no clara**\n\nEnvía una foto más nítida. 📸",
-                parse_mode='Markdown'
-            )
-            return
-        
-        analisis = "🤖 **ANÁLISIS AUTOMÁTICO**\n\n"
-        
-        if datos_ocr.get("monto_correcto"):
-            analisis += f"✅ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Correcto)\n"
-        else:
-            analisis += f"⚠️ **Monto:** ${datos_ocr.get('monto_detectado', 'N/A')} (Esperado: ${precio:,})\n"
-        
-        if datos_ocr.get("cuenta_correcta"):
-            analisis += f"✅ **Cuenta:** {datos_ocr.get('cuenta_detectada', 'N/A')} (Correcta)\n"
-        else:
-            analisis += f"⚠️ **Cuenta:** {datos_ocr.get('cuenta_detectada', 'N/A')}\n"
-        
-        await msg_procesando.delete()
-        await update.message.reply_text(
-            f"{analisis}\n\n⏳ Tu comprobante está siendo revisado.\nRecibirás tu código pronto. 🙏",
-            parse_mode='Markdown'
-        )
-        
+            datos_ocr = {"legible": True}
+        await msg.delete()
+        await update.message.reply_text("🤖 **Comprobante recibido**\n\n⏳ En revisión.", parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error en OCR: {e}")
-        await msg_procesando.delete()
-        analisis = "⚠️ **Revisión manual**\n\nEl administrador revisará tu comprobante."
-        await update.message.reply_text(analisis, parse_mode='Markdown')
-        datos_ocr = {"observaciones": f"Error: {str(e)}"}
-    
+        await msg.delete()
+        await update.message.reply_text("⚠️ El administrador revisará tu comprobante.", parse_mode='Markdown')
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
-    file_id = photo.file_id
-    fecha_envio = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute("""INSERT INTO pagos_pendientes 
-                 (user_id, first_name, dias_plan, precio, comprobante_file_id, fecha_envio, estado)
-                 VALUES (?, ?, ?, ?, ?, ?, 'pendiente')""",
-              (user.id, user.first_name, dias, precio, file_id, fecha_envio))
-    
+    c.execute("INSERT INTO pagos_pendientes (user_id, first_name, dias_plan, precio, comprobante_file_id, fecha_envio, estado) VALUES (?, ?, ?, ?, ?, ?, 'pendiente')",
+              (user.id, user.first_name, dias, precio, photo.file_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     pago_id = c.lastrowid
     conn.commit()
     conn.close()
-    
     nombre_plan = dict([(p[0], p[2]) for p in obtener_precios()])[dias]
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ Aprobar", callback_data=f"aprobar_{pago_id}")],
-        [InlineKeyboardButton("❌ Rechazar", callback_data=f"rechazar_{pago_id}")]
-    ]
+    keyboard = [[InlineKeyboardButton("✅ Aprobar", callback_data=f"aprobar_{pago_id}")], [InlineKeyboardButton("❌ Rechazar", callback_data=f"rechazar_{pago_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    caption_dueño = f"""
-💳 **PAGO #{pago_id}**
-
-👤 {user.first_name} (@{user.username or 'sin_username'})
-📱 ID: `{user.id}`
-💎 Plan: {nombre_plan} ({dias} días)
-💰 Precio: ${precio:,}
-
-{analisis}
-
-¿Aprobar?
-"""
-    
     try:
-        await context.bot.send_photo(
-            chat_id=OWNER_ID,
-            photo=file_id,
-            caption=caption_dueño,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        await context.bot.send_photo(chat_id=OWNER_ID, photo=photo.file_id, caption=f"💳 **PAGO #{pago_id}**\n\n👤 {user.first_name}\n💎 {nombre_plan} ({dias}d)\n💰 {formato_clp(precio)}", reply_markup=reply_markup, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error notificando al dueño: {e}")
+        logger.error(f"Error notificando: {e}")
 
 async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja aprobación/rechazo de pagos"""
     query = update.callback_query
     await query.answer()
-    
     if query.from_user.id != OWNER_ID:
-        await query.answer("❌ Solo el dueño puede hacer esto.", show_alert=True)
+        await query.answer("❌ Solo el dueño", show_alert=True)
         return
-    
     accion, pago_id = query.data.split('_')
     pago_id = int(pago_id)
-    
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
     c.execute("SELECT user_id, first_name, dias_plan, precio FROM pagos_pendientes WHERE id = ?", (pago_id,))
     resultado = c.fetchone()
-    
     if not resultado:
         await query.edit_message_caption("❌ Pago no encontrado.")
         conn.close()
         return
-    
     user_id, nombre, dias, precio = resultado
-    
     if accion == 'aprobar':
         codigo = generar_codigo_activacion(dias, precio)
-        
         c.execute("UPDATE pagos_pendientes SET estado = 'aprobado' WHERE id = ?", (pago_id,))
         conn.commit()
-        
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ **¡PAGO APROBADO!**\n\nCódigo: `{codigo}`\n\nActívalo: /activar {codigo}\n\n¡Gracias! 🎉",
-                parse_mode='Markdown'
-            )
-            
-            await query.edit_message_caption(
-                f"{query.message.caption}\n\n✅ **APROBADO**\nCódigo: `{codigo}`",
-                parse_mode='Markdown'
-            )
-            
+            await context.bot.send_message(chat_id=user_id, text=f"✅ **¡PAGO APROBADO!**\n\nCódigo: `{codigo}`\n\nActívalo: /activar {codigo}", parse_mode='Markdown')
+            await query.edit_message_caption(f"{query.message.caption}\n\n✅ APROBADO\nCódigo: `{codigo}`", parse_mode='Markdown')
         except Exception as e:
             await query.edit_message_caption(f"❌ Error: {e}")
-    
     else:
         c.execute("UPDATE pagos_pendientes SET estado = 'rechazado' WHERE id = ?", (pago_id,))
         conn.commit()
-        
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="❌ Tu pago no pudo ser verificado. Contacta al administrador.",
-                parse_mode='Markdown'
-            )
-            
-            await query.edit_message_caption(f"{query.message.caption}\n\n❌ **RECHAZADO**", parse_mode='Markdown')
+            await context.bot.send_message(chat_id=user_id, text="❌ Pago no verificado. Contacta al administrador.")
+            await query.edit_message_caption(f"{query.message.caption}\n\n❌ RECHAZADO", parse_mode='Markdown')
         except:
             pass
-    
     conn.close()
 
 async def activar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activa un código de suscripción"""
     user = update.message.from_user
-    
     if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /activar [código]\n\nEjemplo: `/activar COF-ABCD-1234-EFGH`",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("❌ Uso: /activar [código]\nEjemplo: `/activar COF-ABCD-1234-EFGH`", parse_mode='Markdown')
         return
-    
-    codigo = context.args[0].upper()
-    
-    exito, mensaje = validar_y_usar_codigo(user.id, codigo)
-    
+    exito, mensaje = validar_y_usar_codigo(user.id, context.args[0].upper())
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra info de la cuenta"""
     user = update.message.from_user
-    
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
-    c.execute("""SELECT fecha_registro, fecha_expiracion, estado, es_admin, servicios_usados 
-                 FROM suscripciones WHERE user_id = ?""", (user.id,))
+    c.execute("SELECT fecha_registro, fecha_expiracion, estado, es_admin, servicios_usados FROM suscripciones WHERE user_id = ?", (user.id,))
     resultado = c.fetchone()
     conn.close()
-    
     if not resultado:
-        await update.message.reply_text("❌ No estás registrado. Usa /registrarse en el grupo.", parse_mode='Markdown')
+        await update.message.reply_text("❌ No estás registrado. Usa /registrarse en el grupo.")
         return
-    
     fecha_reg, fecha_exp, estado, es_admin, servicios_str = resultado
-    
     fecha_exp_dt = datetime.strptime(fecha_exp, "%Y-%m-%d %H:%M:%S")
     dias_restantes = (fecha_exp_dt - datetime.now()).days
-    
     servicios = json.loads(servicios_str)
-    
     estado_emoji = "✅" if estado == 'activo' and dias_restantes > 0 else "❌"
-    
-    mensaje = f"""
-👤 **MI CUENTA**
-
-{estado_emoji} Estado: {'Activo' if estado == 'activo' and dias_restantes > 0 else 'Expirado'}
-{'👑 Administrador' if es_admin else ''}
-
-⏳ Días restantes: **{max(0, dias_restantes)}**
-📅 Vence: {fecha_exp_dt.strftime('%d/%m/%Y')}
-
-**Servicios usados:**
-{', '.join(servicios) if servicios else 'Ninguno aún'}
-
-Usa /renovar para extender.
-"""
-    
+    mensaje = f"👤 **MI CUENTA**\n\n{estado_emoji} Estado: {'Activo' if estado == 'activo' and dias_restantes > 0 else 'Expirado'}\n{'👑 Admin' if es_admin else ''}\n\n⏳ Días restantes: **{max(0, dias_restantes)}**\n📅 Vence: {fecha_exp_dt.strftime('%d/%m/%Y')}\n\n**Servicios usados:** {', '.join(servicios) if servicios else 'Ninguno'}\n\nUsa /renovar para extender."
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 # ==================== COMANDOS ADMIN ====================
 
 async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera código (solo dueño)"""
-    user = update.message.from_user
-    
-    if user.id != OWNER_ID:
-        await update.message.reply_text("❌ Solo el dueño puede generar códigos.")
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el dueño")
         return
-    
     precios = obtener_precios()
-    
-    keyboard = []
-    for dias, precio, nombre in precios:
-        keyboard.append([InlineKeyboardButton(
-            f"{nombre} ({dias} días) - ${precio:,}",
-            callback_data=f"gencodigo_{dias}"
-        )])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text("👑 **GENERAR CÓDIGO**\n\nSelecciona:", reply_markup=reply_markup, parse_mode='Markdown')
+    keyboard = [[InlineKeyboardButton(f"{nombre} ({dias}d) - {formato_clp(precio)}", callback_data=f"gencodigo_{dias}")] for dias, precio, nombre in precios]
+    await update.message.reply_text("👑 **GENERAR CÓDIGO**\n\nSelecciona:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def callback_generar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback generar código"""
     query = update.callback_query
     await query.answer()
-    
     if query.from_user.id != OWNER_ID:
         return
-    
     dias = int(query.data.split('_')[1])
     precios = obtener_precios()
     precio = next((p[1] for p in precios if p[0] == dias), 0)
-    
     codigo = generar_codigo_activacion(dias, precio)
-    
-    await query.edit_message_text(
-        f"✅ **CÓDIGO GENERADO**\n\n`{codigo}`\n\n📋 Duración: {dias} días\n💰 Precio: ${precio:,}\n⏰ Válido: 30 días",
-        parse_mode='Markdown'
-    )
+    await query.edit_message_text(f"✅ **CÓDIGO GENERADO**\n\n`{codigo}`\n\n📋 {dias} días\n💰 {formato_clp(precio)}", parse_mode='Markdown')
 
 async def precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra precios (solo dueño)"""
-    user = update.message.from_user
-    
-    if user.id != OWNER_ID:
-        await update.message.reply_text("❌ Solo el dueño.")
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el dueño")
         return
-    
     precios = obtener_precios()
-    
     mensaje = "💰 **PRECIOS**\n\n"
     for dias, precio, nombre in precios:
-        mensaje += f"• {nombre} ({dias} días): ${precio:,}\n"
-    
+        mensaje += f"• {nombre} ({dias}d): {formato_clp(precio)}\n"
     mensaje += "\n📝 /set_precio [dias] [precio]"
-    
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 async def set_precio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Actualiza precio (solo dueño)"""
-    user = update.message.from_user
-    
-    if user.id != OWNER_ID:
-        await update.message.reply_text("❌ Solo el dueño.")
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el dueño")
         return
-    
     if len(context.args) != 2:
-        await update.message.reply_text("❌ Uso: /set_precio [dias] [precio]", parse_mode='Markdown')
+        await update.message.reply_text("❌ Uso: /set_precio [dias] [precio]")
         return
-    
     try:
-        dias = int(context.args[0])
-        precio = int(context.args[1])
-        
+        dias, precio = int(context.args[0]), int(context.args[1])
         actualizar_precio(dias, precio)
-        
-        await update.message.reply_text(f"✅ Precio actualizado: {dias} días = ${precio:,}", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Actualizado: {dias}d = {formato_clp(precio)}")
     except:
-        await update.message.reply_text("❌ Error.")
+        await update.message.reply_text("❌ Error")
 
 async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista pagos (solo dueño)"""
-    user = update.message.from_user
-    
-    if user.id != OWNER_ID:
-        await update.message.reply_text("❌ Solo el dueño.")
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el dueño")
         return
-    
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    
-    c.execute("""SELECT id, first_name, dias_plan, precio, fecha_envio, estado 
-                 FROM pagos_pendientes 
-                 ORDER BY fecha_envio DESC 
-                 LIMIT 20""")
+    c.execute("SELECT id, first_name, dias_plan, precio, fecha_envio, estado FROM pagos_pendientes ORDER BY fecha_envio DESC LIMIT 20")
     pagos = c.fetchall()
     conn.close()
-    
     if not pagos:
-        await update.message.reply_text("✅ No hay pagos.")
+        await update.message.reply_text("✅ No hay pagos")
         return
-    
     mensaje = "💳 **PAGOS RECIENTES**\n\n"
-    
     for pago_id, nombre, dias, precio, fecha, estado in pagos:
         emoji = "⏳" if estado == 'pendiente' else ("✅" if estado == 'aprobado' else "❌")
-        mensaje += f"{emoji} #{pago_id} - {nombre}\n   {dias} días - ${precio:,} - {estado}\n\n"
-    
+        mensaje += f"{emoji} #{pago_id} {nombre} - {dias}d - {formato_clp(precio)} - {estado}\n"
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 # ==================== COMANDOS CON SUSCRIPCIÓN ====================
@@ -1516,8 +881,8 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     respuesta = f"🔍 **Búsqueda:** {query}\n\n"
     for nombre, mensaje, fecha in resultados:
-        mensaje_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
-        respuesta += f"👤 **{nombre}** ({fecha}):\n{mensaje_corto}\n\n"
+        msg_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
+        respuesta += f"👤 **{nombre}** ({fecha}):\n{msg_corto}\n\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 @requiere_suscripcion
@@ -1531,12 +896,12 @@ async def buscar_semantica_comando(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text("🧠 Buscando con IA...")
     resultados = buscar_semantica(query, topic_id, limit=5)
     if not resultados:
-        await update.message.reply_text("❌ Sin resultados", parse_mode='Markdown')
+        await update.message.reply_text("❌ Sin resultados")
         return
     respuesta = f"🧠 **Búsqueda IA:** {query}\n\n"
     for nombre, mensaje, fecha in resultados:
-        mensaje_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
-        respuesta += f"👤 **{nombre}** ({fecha}):\n{mensaje_corto}\n\n"
+        msg_corto = mensaje[:100] + "..." if len(mensaje) > 100 else mensaje
+        respuesta += f"👤 **{nombre}** ({fecha}):\n{msg_corto}\n\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 @requiere_suscripcion
@@ -1546,41 +911,27 @@ async def buscar_empleo_comando(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Uso: /empleo cargo:[...] ubicacion:[...]")
         return
     texto = ' '.join(context.args)
-    cargo = industria = area = ubicacion = rango_renta = None
-    if 'cargo:' in texto:
-        cargo = ' '.join(texto.split('cargo:')[1].split()[0:3])
-    if 'industria:' in texto:
-        industria = ' '.join(texto.split('industria:')[1].split()[0:2])
-    if 'ubicacion:' in texto:
-        ubicacion = ' '.join(texto.split('ubicacion:')[1].split()[0:2])
-    if 'renta:' in texto:
-        rango_renta = texto.split('renta:')[1].split()[0]
+    cargo = industria = ubicacion = rango_renta = None
+    if 'cargo:' in texto: cargo = ' '.join(texto.split('cargo:')[1].split()[0:3])
+    if 'industria:' in texto: industria = ' '.join(texto.split('industria:')[1].split()[0:2])
+    if 'ubicacion:' in texto: ubicacion = ' '.join(texto.split('ubicacion:')[1].split()[0:2])
+    if 'renta:' in texto: rango_renta = texto.split('renta:')[1].split()[0]
     await update.message.reply_text("🔍 Buscando empleos...")
-    resultados = await buscar_empleos_web(cargo, industria, area, ubicacion, rango_renta)
+    resultados = await buscar_empleos_web(cargo, industria, None, ubicacion, rango_renta)
     await update.message.reply_text(resultados, parse_mode='Markdown')
 
 @requiere_suscripcion
 async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Busca profesionales en Cofradía"""
     registrar_servicio_usado(update.effective_user.id, 'buscar_profesional')
-    
     if not context.args:
-        await update.message.reply_text(
-            "❌ **Uso:** /buscar_profesional [área]\n\n**Ejemplos:**\n• diseñador gráfico\n• contador\n• abogado laboral",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("❌ **Uso:** /buscar_profesional [área]\n\nEjemplos: contador, abogado, diseñador", parse_mode='Markdown')
         return
-    
     query = ' '.join(context.args)
-    
     await update.message.reply_text("🔍 Buscando profesionales...")
-    
     resultados = buscar_profesionales(query)
-    
     if len(resultados) > 4000:
-        partes = [resultados[i:i+4000] for i in range(0, len(resultados), 4000)]
-        for parte in partes:
-            await update.message.reply_text(parte, parse_mode='Markdown')
+        for i in range(0, len(resultados), 4000):
+            await update.message.reply_text(resultados[i:i+4000], parse_mode='Markdown')
     else:
         await update.message.reply_text(resultados, parse_mode='Markdown')
 
@@ -1613,6 +964,124 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(resumen, parse_mode='Markdown')
 
 @requiere_suscripcion
+async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    registrar_servicio_usado(update.effective_user.id, 'resumen_mes')
+    await update.message.reply_text("📊 Generando resumen mensual...")
+    resumen = generar_resumen_usuarios(dias=30)
+    if not resumen:
+        await update.message.reply_text("📭 Aún no hay suficientes datos del mes")
+        return
+    if len(resumen) > 4000:
+        for i in range(0, len(resumen), 4000):
+            await update.message.reply_text(resumen[i:i+4000])
+    else:
+        await update.message.reply_text(resumen)
+
+@requiere_suscripcion
+async def resumen_semestre_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    registrar_servicio_usado(update.effective_user.id, 'resumen_semestre')
+    await update.message.reply_text("📊 Generando resumen semestral...")
+    resumen = generar_resumen_usuarios(dias=180)
+    if not resumen:
+        await update.message.reply_text("📭 Aún no hay suficientes datos")
+        return
+    if len(resumen) > 4000:
+        for i in range(0, len(resumen), 4000):
+            await update.message.reply_text(resumen[i:i+4000])
+    else:
+        await update.message.reply_text(resumen)
+
+@requiere_suscripcion
+async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Uso: /resumen_usuario @nombre")
+        return
+    username = context.args[0].replace('@', '').lower()
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, username, COUNT(*), MIN(fecha), MAX(fecha) FROM mensajes WHERE LOWER(username) LIKE ? OR LOWER(first_name) LIKE ? GROUP BY user_id", (f'%{username}%', f'%{username}%'))
+    resultado = c.fetchone()
+    if not resultado:
+        conn.close()
+        await update.message.reply_text(f"❌ Usuario no encontrado: {username}")
+        return
+    user_id, nombre, username_real, total, primera, ultima = resultado
+    c.execute("SELECT categoria, COUNT(*) FROM mensajes WHERE user_id = ? AND categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 3", (user_id,))
+    categorias_top = c.fetchall()
+    c.execute("SELECT COUNT(DISTINCT DATE(fecha)) FROM mensajes WHERE user_id = ?", (user_id,))
+    dias_activos = c.fetchone()[0]
+    conn.close()
+    primera_fecha = datetime.strptime(primera, "%Y-%m-%d %H:%M:%S")
+    ultima_fecha = datetime.strptime(ultima, "%Y-%m-%d %H:%M:%S")
+    promedio = total / max(dias_activos, 1)
+    if total >= 100: nivel = "🌟 LÍDER"
+    elif total >= 50: nivel = "⭐ MUY ACTIVO"
+    elif total >= 20: nivel = "✨ ACTIVO"
+    elif total >= 5: nivel = "👤 PARTICIPANTE"
+    else: nivel = "💤 OCASIONAL"
+    respuesta = f"👤 **PERFIL DE {nombre.upper()}**\n\n🏷️ **Nivel:** {nivel}\n📊 Mensajes: **{total}**\n📅 Días activos: **{dias_activos}**\n📈 Promedio: **{promedio:.1f}** msgs/día\n\n🏷️ **CATEGORÍAS:**\n"
+    if categorias_top:
+        for cat, count in categorias_top:
+            respuesta += f"• {cat}: {count} msgs\n"
+    else:
+        respuesta += "Sin categorizar\n"
+    await update.message.reply_text(respuesta)
+    registrar_servicio_usado(update.effective_user.id, 'resumen_usuario')
+
+@requiere_suscripcion
+async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT first_name, COUNT(*) as total, COUNT(DISTINCT DATE(fecha)) as dias FROM mensajes GROUP BY user_id, first_name ORDER BY total DESC LIMIT 15")
+    top_users = c.fetchall()
+    conn.close()
+    if not top_users:
+        await update.message.reply_text("📭 Aún no hay datos")
+        return
+    respuesta = "🏆 **TOP USUARIOS**\n\n"
+    medallas = ["🥇", "🥈", "🥉"]
+    for i, (nombre, total, dias) in enumerate(top_users, 1):
+        emoji = medallas[i-1] if i <= 3 else f"**{i}.**"
+        promedio = total / max(dias, 1)
+        respuesta += f"{emoji} **{nombre}**: {total} msgs ({promedio:.1f}/día)\n"
+    respuesta += "\n💡 ¡Sigue participando!"
+    await update.message.reply_text(respuesta)
+    registrar_servicio_usado(update.effective_user.id, 'top_usuarios')
+
+@requiere_suscripcion
+async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*), MIN(fecha), MAX(fecha) FROM mensajes WHERE user_id = ?", (user.id,))
+    resultado = c.fetchone()
+    if not resultado or resultado[0] == 0:
+        conn.close()
+        await update.message.reply_text("📭 Aún no tienes actividad registrada")
+        return
+    total, primera, ultima = resultado
+    c.execute("SELECT categoria, COUNT(*) FROM mensajes WHERE user_id = ? AND categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC", (user.id,))
+    categorias = c.fetchall()
+    c.execute("SELECT COUNT(*) + 1 FROM (SELECT user_id, COUNT(*) as total FROM mensajes GROUP BY user_id HAVING total > ?)", (total,))
+    posicion = c.fetchone()[0]
+    conn.close()
+    primera_fecha = datetime.strptime(primera, "%Y-%m-%d %H:%M:%S")
+    dias_activo = (datetime.now() - primera_fecha).days + 1
+    if total >= 100: motivacion = "🌟 ¡Eres un líder destacado!"
+    elif total >= 50: motivacion = "⭐ ¡Excelente participación!"
+    elif total >= 20: motivacion = "✨ ¡Sigue así!"
+    else: motivacion = "💪 ¡Participa más!"
+    respuesta = f"👤 **TU PERFIL - {user.first_name}**\n\n📊 Mensajes: **{total}**\n🏆 Ranking: **#{posicion}**\n📅 Miembro desde: {primera_fecha.strftime('%d/%m/%Y')}\n📈 Promedio: **{total/max(dias_activo,1):.1f}** msgs/día\n\n🏷️ **TUS CATEGORÍAS:**\n"
+    if categorias:
+        for cat, count in categorias[:3]:
+            respuesta += f"• {cat}: {count} msgs\n"
+    else:
+        respuesta += "Sin categorizar\n"
+    respuesta += f"\n{motivacion}"
+    await update.message.reply_text(respuesta)
+    registrar_servicio_usado(user.id, 'mi_perfil')
+
+@requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
@@ -1624,24 +1093,14 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = ?", (hoy,))
     hoy_count = c.fetchone()[0]
     conn.close()
-    respuesta = f"""
-📊 **ESTADÍSTICAS**
-
-📝 Total: {total:,}
-👥 Usuarios: {usuarios}
-🕐 Hoy: {hoy_count}
-"""
+    respuesta = f"📊 **ESTADÍSTICAS**\n\n📝 Total: {total:,}\n👥 Usuarios: {usuarios}\n🕐 Hoy: {hoy_count}"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
 @requiere_suscripcion
 async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
-    c.execute("""SELECT categoria, COUNT(*) as total
-                 FROM mensajes
-                 WHERE categoria IS NOT NULL
-                 GROUP BY categoria
-                 ORDER BY total DESC""")
+    c.execute("SELECT categoria, COUNT(*) FROM mensajes WHERE categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC")
     categorias = c.fetchall()
     conn.close()
     if not categorias:
@@ -1655,6 +1114,47 @@ async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         respuesta += f"**{cat}:** {barra} {count} ({porcentaje:.1f}%)\n"
     await update.message.reply_text(respuesta, parse_mode='Markdown')
 
+# ==================== HANDLER DE MENCIONES ====================
+
+async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mensaje = update.message.text
+    user_id = update.effective_user.id
+    bot_username = context.bot.username
+    menciones_validas = [f"@{bot_username}".lower(), "@bot", "@cofradia_premium_bot"]
+    tiene_mencion = any(m in mensaje.lower() for m in menciones_validas)
+    if not tiene_mencion:
+        return
+    if not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("❌ Necesitas suscripción activa.\nUsa /registrarse en el grupo.")
+        return
+    pregunta = re.sub(r'@\w+', '', mensaje).strip()
+    if not pregunta:
+        await update.message.reply_text(f"💡 Mencióname con tu pregunta:\n@{bot_username} ¿Qué es networking?", parse_mode='Markdown')
+        return
+    msg = await update.message.reply_text("🤔 Procesando...")
+    try:
+        topic_id = update.message.message_thread_id if update.message.is_topic_message else None
+        resultados = buscar_semantica(pregunta, topic_id, limit=3)
+        contexto = ""
+        if resultados:
+            contexto = "\n\nCONTEXTO:\n"
+            for nombre, msg_txt, fecha in resultados:
+                contexto += f"- {nombre}: {msg_txt[:100]}...\n"
+        prompt = f"Asistente de Cofradía de Networking. Responde amigable y profesional.\nPREGUNTA: {pregunta}\n{contexto}\nMáximo 3 párrafos. Español."
+        response = model.generate_content(prompt)
+        respuesta = response.text
+        await msg.delete()
+        if len(respuesta) > 4000:
+            for i in range(0, len(respuesta), 4000):
+                await update.message.reply_text(respuesta[i:i+4000])
+        else:
+            await update.message.reply_text(respuesta)
+        registrar_servicio_usado(user_id, 'ia_mencion')
+    except Exception as e:
+        logger.error(f"Error en mencion: {e}")
+        await msg.delete()
+        await update.message.reply_text("❌ Error. Intenta de nuevo.")
+
 # ==================== HANDLERS AUXILIARES ====================
 
 async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1663,448 +1163,127 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         topic_id = update.message.message_thread_id if update.message.is_topic_message else None
         guardar_mensaje(user.id, user.username or "sin_username", user.first_name or "Anónimo", update.message.text, topic_id)
 
-
-# ==================== COMANDOS ÉPICOS NUEVOS ====================
-
-# COMANDOS ÉPICOS PARA AGREGAR AL BOT COFRADÍA
-# Insertar después de categorias_comando (línea 1660)
-
-@requiere_suscripcion
-async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera resumen del último mes con IA"""
-    user_id = update.effective_user.id
-    registrar_servicio_usado(user_id, 'resumen_mes')
-    
-    await update.message.reply_text("📊 Generando resumen mensual...")
-    
-    resumen = generar_resumen_usuarios(dias=30)
-    
-    if not resumen or "No hay mensajes" in str(resumen):
-        await update.message.reply_text(
-            "📭 **Aún no hay suficientes datos del mes**\n\n"
-            "💡 El resumen mensual estará disponible después de 30 días de actividad.\n\n"
-            "Mientras tanto, prueba:\n"
-            "• /resumen - Resumen del día\n"
-            "• /resumen_semanal - Resumen semanal\n"
-            "• /estadisticas - Números actuales"
-        )
-        return
-    
-    if len(resumen) > 4000:
-        partes = [resumen[i:i+4000] for i in range(0, len(resumen), 4000)]
-        for parte in partes:
-            await update.message.reply_text(parte)
-    else:
-        await update.message.reply_text(resumen)
-
-@requiere_suscripcion
-async def resumen_semestre_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera resumen de 6 meses con IA"""
-    user_id = update.effective_user.id
-    registrar_servicio_usado(user_id, 'resumen_semestre')
-    
-    await update.message.reply_text("📊 Generando resumen semestral...")
-    
-    resumen = generar_resumen_usuarios(dias=180)
-    
-    if not resumen or "No hay mensajes" in str(resumen):
-        await update.message.reply_text(
-            "📭 **Aún no hay suficientes datos del semestre**\n\n"
-            "💡 El resumen semestral estará disponible después de 6 meses.\n\n"
-            "Mientras tanto, prueba:\n"
-            "• /resumen_mes - Resumen mensual\n"
-            "• /top_usuarios - Ranking de activos"
-        )
-        return
-    
-    if len(resumen) > 4000:
-        partes = [resumen[i:i+4000] for i in range(0, len(resumen), 4000)]
-        for parte in partes:
-            await update.message.reply_text(parte)
-    else:
-        await update.message.reply_text(resumen)
-
-@requiere_suscripcion
-async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera resumen de actividad de un usuario específico"""
-    if not context.args:
-        await update.message.reply_text(
-            "❌ **Uso incorrecto**\n\n"
-            "📖 **Ejemplo:** /resumen_usuario @german\n"
-            "O: /resumen_usuario german"
-        )
-        return
-    
-    username = context.args[0].replace('@', '').lower()
-    
-    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""
-        SELECT user_id, first_name, username, COUNT(*) as total,
-               MIN(fecha) as primera_vez, MAX(fecha) as ultima_vez
-        FROM mensajes
-        WHERE LOWER(username) LIKE ? OR LOWER(first_name) LIKE ?
-        GROUP BY user_id
-    """, (f'%{username}%', f'%{username}%'))
-    
-    resultado = c.fetchone()
-    
-    if not resultado:
-        conn.close()
-        await update.message.reply_text(
-            f"❌ **Usuario no encontrado: {username}**\n\n"
-            "💡 Asegúrate de escribir bien el nombre"
-        )
-        return
-    
-    user_id_encontrado, nombre, username_real, total, primera, ultima = resultado
-    
-    # Obtener categorías top
-    c.execute("""
-        SELECT categoria, COUNT(*) as count
-        FROM mensajes
-        WHERE user_id = ? AND categoria IS NOT NULL
-        GROUP BY categoria
-        ORDER BY count DESC
-        LIMIT 3
-    """, (user_id_encontrado,))
-    categorias_top = c.fetchall()
-    
-    # Días activos
-    c.execute("""
-        SELECT COUNT(DISTINCT DATE(fecha))
-        FROM mensajes
-        WHERE user_id = ?
-    """, (user_id_encontrado,))
-    dias_activos = c.fetchone()[0]
-    
-    # Total mensajes del grupo
-    c.execute("SELECT COUNT(*) FROM mensajes")
-    total_mensajes = c.fetchone()[0]
-    
-    conn.close()
-    
-    primera_fecha = datetime.strptime(primera, "%Y-%m-%d %H:%M:%S")
-    ultima_fecha = datetime.strptime(ultima, "%Y-%m-%d %H:%M:%S")
-    dias_total = (ultima_fecha - primera_fecha).days + 1
-    promedio = total / max(dias_activos, 1)
-    
-    # Determinar nivel
-    if total >= 100:
-        nivel = "🌟 LÍDER DESTACADO"
-        emoji = "🔥"
-    elif total >= 50:
-        nivel = "⭐ MUY ACTIVO"
-        emoji = "💪"
-    elif total >= 20:
-        nivel = "✨ ACTIVO"
-        emoji = "👍"
-    elif total >= 5:
-        nivel = "👤 PARTICIPANTE"
-        emoji = "🙋"
-    else:
-        nivel = "💤 OCASIONAL"
-        emoji = "😴"
-    
-    respuesta = f"""
-{emoji} **PERFIL DE {nombre.upper()}**
-
-🏷️ **Nivel:** {nivel}
-
-📊 **ESTADÍSTICAS:**
-• Mensajes totales: **{total}**
-• Días activos: **{dias_activos}** de {dias_total}
-• Promedio diario: **{promedio:.1f}** mensajes
-• Primera vez: {primera_fecha.strftime('%d/%m/%Y')}
-• Última actividad: {ultima_fecha.strftime('%d/%m/%Y')}
-
-🏷️ **CATEGORÍAS PREFERIDAS:**
-"""
-    
-    if categorias_top:
-        for i, (cat, count) in enumerate(categorias_top, 1):
-            porcentaje = (count / total) * 100
-            respuesta += f"{i}. **{cat}**: {count} msgs ({porcentaje:.0f}%)\n"
-    else:
-        respuesta += "Sin categorización todavía\n"
-    
-    porcentaje_grupo = (total/max(total_mensajes, 1)*100)
-    respuesta += f"\n💡 {nombre} representa el **{porcentaje_grupo:.1f}%** de la actividad del grupo"
-    
-    await update.message.reply_text(respuesta)
-    registrar_servicio_usado(update.effective_user.id, 'resumen_usuario')
-
-@requiere_suscripcion
-async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra ranking de usuarios más activos con gamificación"""
-    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""
-        SELECT first_name, COUNT(*) as total,
-               COUNT(DISTINCT DATE(fecha)) as dias_activos
-        FROM mensajes
-        GROUP BY user_id, first_name
-        ORDER BY total DESC
-        LIMIT 15
-    """)
-    
-    top_users = c.fetchall()
-    conn.close()
-    
-    if not top_users:
-        await update.message.reply_text(
-            "📭 **Aún no hay datos suficientes**\n\n"
-            "💡 El bot necesita ser **administrador del grupo** para registrar mensajes.\n\n"
-            "🔧 **Solución:**\n"
-            "1. Grupo → Administradores\n"
-            "2. Agregar bot como admin\n"
-            "3. Permisos: 'Ver mensajes' ✅\n\n"
-            "Mientras tanto, ¡sé el primero escribiendo más! 💪"
-        )
-        return
-    
-    respuesta = "🏆 **TOP USUARIOS MÁS ACTIVOS**\n\n"
-    
-    medallas = ["🥇", "🥈", "🥉"]
-    
-    for i, (nombre, total, dias) in enumerate(top_users, 1):
-        if i <= 3:
-            emoji = medallas[i-1]
-        else:
-            emoji = f"**{i}.**"
-        
-        promedio = total / max(dias, 1)
-        respuesta += f"{emoji} **{nombre}**: {total} msgs ({promedio:.1f}/día)\n"
-    
-    respuesta += "\n💡 **¡Sigue participando para subir en el ranking!**"
-    
-    await update.message.reply_text(respuesta)
-    registrar_servicio_usado(update.effective_user.id, 'top_usuarios')
-
-@requiere_suscripcion
-async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra el perfil personal completo del usuario con estadísticas"""
-    user = update.effective_user
-    
-    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""
-        SELECT COUNT(*), MIN(fecha), MAX(fecha)
-        FROM mensajes
-        WHERE user_id = ?
-    """, (user.id,))
-    
-    resultado = c.fetchone()
-    
-    if not resultado or resultado[0] == 0:
-        conn.close()
-        await update.message.reply_text(
-            "📭 **Aún no tienes actividad registrada**\n\n"
-            "💡 Empieza a participar en el grupo y tu perfil se llenará automáticamente.\n\n"
-            "🔧 **Nota:** El bot debe ser administrador para registrar mensajes.\n\n"
-            "¡Sé parte de la comunidad! 🚀"
-        )
-        return
-    
-    total, primera, ultima = resultado
-    
-    # Categorías
-    c.execute("""
-        SELECT categoria, COUNT(*) as count
-        FROM mensajes
-        WHERE user_id = ? AND categoria IS NOT NULL
-        GROUP BY categoria
-        ORDER BY count DESC
-    """, (user.id,))
-    categorias = c.fetchall()
-    
-    # Posición en ranking
-    c.execute("""
-        SELECT COUNT(*) + 1
-        FROM (
-            SELECT user_id, COUNT(*) as total
-            FROM mensajes
-            GROUP BY user_id
-            HAVING total > ?
-        )
-    """, (total,))
-    posicion = c.fetchone()[0]
-    
-    conn.close()
-    
-    primera_fecha = datetime.strptime(primera, "%Y-%m-%d %H:%M:%S")
-    dias_activo = (datetime.now() - primera_fecha).days + 1
-    
-    respuesta = f"""
-👤 **TU PERFIL - {user.first_name}**
-
-📊 **ESTADÍSTICAS:**
-• Mensajes: **{total}**
-• Ranking: **#{posicion}**
-• Miembro desde: {primera_fecha.strftime('%d/%m/%Y')}
-• Días activo: {dias_activo}
-• Promedio: **{total/max(dias_activo,1):.1f}** msgs/día
-
-🏷️ **TUS CATEGORÍAS:**
-"""
-    
-    if categorias:
-        for cat, count in categorias[:3]:
-            respuesta += f"• {cat}: {count} msgs\n"
-    else:
-        respuesta += "Sin categorización aún\n"
-    
-    # Motivación personalizada
-    if total >= 100:
-        motivacion = "🌟 ¡Eres un líder destacado de la comunidad!"
-    elif total >= 50:
-        motivacion = "⭐ ¡Excelente participación!"
-    elif total >= 20:
-        motivacion = "✨ ¡Sigue así, vas muy bien!"
-    else:
-        motivacion = "💪 ¡Participa más para subir en el ranking!"
-    
-    respuesta += f"\n{motivacion}"
-    
-    await update.message.reply_text(respuesta)
-    registrar_servicio_usado(user.id, 'mi_perfil')
-
-# HANDLER DE MENCIONES (@bot)
-async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde cuando el bot es mencionado con @bot o @cofradia_premium_bot"""
-    
-    # Verificar suscripción
-    user_id = update.effective_user.id
-    if not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text(
-            "❌ Necesitas una suscripción activa para usar la IA.\n"
-            "Usa /registrarse para obtener 3 meses gratis."
-        )
-        return
-    
-    # Extraer la pregunta después de la mención
-    texto = update.message.text
-    
-    # Remover la mención del bot
-    pregunta = re.sub(r'@\w+', '', texto).strip()
-    
-    if not pregunta:
-        await update.message.reply_text(
-            "💡 **¿En qué puedo ayudarte?**\n\n"
-            "Mencióname con tu pregunta:\n"
-            "@bot ¿Qué es networking?\n"
-            "@bot Busca info sobre startups en Chile"
-        )
-        return
-    
-    # Mostrar que está procesando
-    await update.message.reply_text("🤔 Buscando información...")
-    
-    try:
-        # Usar Gemini para responder con contexto de búsqueda
-        prompt = f"""Eres un asistente experto en networking profesional y negocios en Chile.
-
-Pregunta del usuario: {pregunta}
-
-Proporciona una respuesta útil, concisa y profesional. Si necesitas información actualizada, menciona que el usuario puede buscar en fuentes confiables.
-
-Respuesta (máximo 500 palabras):"""
-        
-        response = model.generate_content(prompt)
-        respuesta = response.text
-        
-        # Dividir si es muy largo
-        if len(respuesta) > 4000:
-            partes = [respuesta[i:i+4000] for i in range(0, len(respuesta), 4000)]
-            for parte in partes:
-                await update.message.reply_text(parte)
-        else:
-            await update.message.reply_text(respuesta)
-        
-        # Registrar uso
-        registrar_servicio_usado(user_id, 'ia_mencion')
-        
-    except Exception as e:
-        logger.error(f"Error en responder_mencion: {e}")
-        await update.message.reply_text(
-            "❌ Hubo un error al procesar tu pregunta. "
-            "Por favor intenta de nuevo."
-        )
-
-
-
-async def responder_con_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mensaje = update.message.text
-    user_id = update.effective_user.id
-    
-    if not context.bot.username or f"@{context.bot.username}" not in mensaje:
-        return
-    
-    if not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("❌ Tu suscripción expiró. Usa /renovar")
-        return
-    
-    pregunta = mensaje.replace(f"@{context.bot.username}", "").strip()
-    if not pregunta:
-        await update.message.reply_text("¿En qué puedo ayudarte? 😊")
-        return
-    
-    topic_id = update.message.message_thread_id if update.message.is_topic_message else None
-    resultados = buscar_semantica(pregunta, topic_id, limit=5)
-    contexto = ""
-    if resultados:
-        contexto = "\n\nCONTEXTO:\n"
-        for nombre, msg, fecha in resultados:
-            contexto += f"- {nombre}: {msg}\n"
-    prompt = f"""Asistente de Cofradía de Networking. Responde amigable.
-PREGUNTA: {pregunta}
-{contexto}
-Responde en español, máximo 3 párrafos."""
-    try:
-        response = model.generate_content(prompt)
-        await update.message.reply_text(response.text)
-    except:
-        await update.message.reply_text("❌ Error. Intenta de nuevo.")
-
 async def resumen_automatico(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ Ejecutando resumen automático...")
     resumen_usuarios = generar_resumen_usuarios(dias=1)
     resumen_admins = generar_resumen_admins(dias=1)
     if not resumen_usuarios:
-        logger.info("No hay mensajes hoy")
         return
-    
     conn = sqlite3.connect('mensajes.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT user_id, first_name, es_admin FROM suscripciones WHERE estado = 'activo'")
     usuarios = c.fetchall()
     conn.close()
-    
     for user_id, nombre, es_admin in usuarios:
         if not verificar_suscripcion_activa(user_id):
             continue
         try:
-            if es_admin:
-                mensaje = f"👑 **RESUMEN DIARIO - ADMIN**\n\n{resumen_admins}"
-            else:
-                mensaje = f"📧 **RESUMEN DIARIO**\n\n{resumen_usuarios}"
+            mensaje = f"👑 **RESUMEN DIARIO - ADMIN**\n\n{resumen_admins}" if es_admin else f"📧 **RESUMEN DIARIO**\n\n{resumen_usuarios}"
             if len(mensaje) > 4000:
-                partes = [mensaje[i:i+4000] for i in range(0, len(mensaje), 4000)]
-                for parte in partes:
-                    await context.bot.send_message(chat_id=user_id, text=parte, parse_mode='Markdown')
+                for i in range(0, len(mensaje), 4000):
+                    await context.bot.send_message(chat_id=user_id, text=mensaje[i:i+4000], parse_mode='Markdown')
             else:
                 await context.bot.send_message(chat_id=user_id, text=mensaje, parse_mode='Markdown')
-            logger.info(f"Resumen enviado a {nombre}")
         except Exception as e:
             logger.error(f"Error enviando a {nombre}: {e}")
+
+async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, fecha_expiracion FROM suscripciones WHERE estado = 'activo'")
+    usuarios = c.fetchall()
+    conn.close()
+    for user_id, nombre, fecha_exp_str in usuarios:
+        fecha_exp = datetime.strptime(fecha_exp_str, "%Y-%m-%d %H:%M:%S")
+        dias_restantes = (fecha_exp - datetime.now()).days
+        mensaje = ""
+        if dias_restantes == 5:
+            mensaje = f"🔔 **Hola {nombre}!**\n\nTu suscripción vence en **5 días**.\n\n💳 /renovar cuando estés listo."
+        elif dias_restantes == 3:
+            mensaje = f"⭐ **{nombre}**, quedan **3 días**!\n\nRenueva con /renovar"
+        elif dias_restantes == 1:
+            mensaje = f"⚠️ **{nombre}**, ¡MAÑANA vence tu acceso!\n\n⏰ /renovar ahora"
+        if mensaje:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=mensaje, parse_mode='Markdown')
+            except:
+                pass
+
+async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, mensajes_engagement, ultimo_mensaje_engagement FROM suscripciones WHERE estado = 'activo' AND mensajes_engagement < 12")
+    usuarios = c.fetchall()
+    for user_id, nombre, num_msg, ultimo_msg_str in usuarios:
+        if ultimo_msg_str:
+            ultimo_msg = datetime.strptime(ultimo_msg_str, "%Y-%m-%d %H:%M:%S")
+            if (datetime.now() - ultimo_msg).days < 7:
+                continue
+        mensajes = [f"👋 **Hola {nombre}!** Prueba /buscar_ia 🧠", f"💼 **{nombre}**, usa /empleo 🚀", f"📊 **{nombre}**, usa /graficos 📈"]
+        try:
+            await context.bot.send_message(chat_id=user_id, text=mensajes[num_msg % len(mensajes)], parse_mode='Markdown')
+            c.execute("UPDATE suscripciones SET mensajes_engagement = ?, ultimo_mensaje_engagement = ? WHERE user_id = ?", (num_msg + 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
+            conn.commit()
+        except:
+            pass
+    conn.close()
+
+async def enviar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, fecha_expiracion FROM suscripciones WHERE estado = 'activo'")
+    usuarios = c.fetchall()
+    conn.close()
+    for user_id, nombre, fecha_exp_str in usuarios:
+        fecha_exp = datetime.strptime(fecha_exp_str, "%Y-%m-%d %H:%M:%S")
+        dias_restantes = (fecha_exp - datetime.now()).days
+        mensaje = ""
+        if dias_restantes == 5:
+            mensaje = f"🔔 **Hola {nombre}!**\n\nTu suscripción vence en **5 días**.\n\n💳 /renovar cuando estés listo."
+        elif dias_restantes == 3:
+            mensaje = f"⭐ **{nombre}**, quedan **3 días**!\n\nRenueva con /renovar"
+        elif dias_restantes == 1:
+            mensaje = f"⚠️ **{nombre}**, ¡MAÑANA vence tu acceso!\n\n⏰ /renovar ahora"
+        if mensaje:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=mensaje, parse_mode='Markdown')
+            except:
+                pass
+
+async def enviar_mensajes_engagement(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mensajes.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, mensajes_engagement, ultimo_mensaje_engagement FROM suscripciones WHERE estado = 'activo' AND mensajes_engagement < 12")
+    usuarios = c.fetchall()
+    for user_id, nombre, num_msg, ultimo_msg_str in usuarios:
+        if ultimo_msg_str:
+            ultimo_msg = datetime.strptime(ultimo_msg_str, "%Y-%m-%d %H:%M:%S")
+            if (datetime.now() - ultimo_msg).days < 7:
+                continue
+        mensajes = [
+            f"👋 **Hola {nombre}!** Prueba /buscar_ia 🧠",
+            f"💼 **{nombre}**, usa /empleo o /buscar_profesional 🚀",
+            f"📊 **{nombre}**, usa /graficos 📈",
+            f"⏰ Tip: /resumen para mantenerte al día ⚡",
+        ]
+        try:
+            await context.bot.send_message(chat_id=user_id, text=mensajes[num_msg % len(mensajes)], parse_mode='Markdown')
+            c.execute("UPDATE suscripciones SET mensajes_engagement = ?, ultimo_mensaje_engagement = ? WHERE user_id = ?",
+                      (num_msg + 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
+            conn.commit()
+        except:
+            pass
+    conn.close()
 
 # ==================== MAIN ====================
 
 def main():
     init_db()
+    
+    # Iniciar keep-alive
+    keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
+    keepalive_thread.start()
+    
     TOKEN = os.environ.get('TOKEN_BOT')
     if not TOKEN:
         logger.error("❌ TOKEN_BOT no configurado")
@@ -2112,11 +1291,33 @@ def main():
     
     application = Application.builder().token(TOKEN).build()
     
+    # Configurar menú de comandos
+    async def set_commands(app):
+        commands = [
+            BotCommand("start", "Iniciar bot"),
+            BotCommand("ayuda", "Ver comandos"),
+            BotCommand("registrarse", "Activar cuenta"),
+            BotCommand("buscar", "Buscar texto"),
+            BotCommand("buscar_ia", "Buscar con IA"),
+            BotCommand("buscar_profesional", "Buscar expertos"),
+            BotCommand("empleo", "Buscar empleos"),
+            BotCommand("graficos", "Ver gráficos"),
+            BotCommand("resumen", "Resumen del día"),
+            BotCommand("estadisticas", "Ver números"),
+            BotCommand("mi_cuenta", "Mi suscripción"),
+            BotCommand("renovar", "Renovar plan"),
+        ]
+        await app.bot.set_my_commands(commands)
+    
+    application.post_init = set_commands
+    
+    # Jobs programados
     job_queue = application.job_queue
     job_queue.run_daily(resumen_automatico, time=time(hour=20, minute=0), name='resumen_diario')
     job_queue.run_daily(enviar_recordatorios, time=time(hour=10, minute=0), name='recordatorios')
     job_queue.run_daily(enviar_mensajes_engagement, time=time(hour=15, minute=0), name='engagement')
     
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ayuda", ayuda))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
@@ -2149,7 +1350,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_aprobar_rechazar, pattern='^(aprobar|rechazar)_'))
     
     application.add_handler(MessageHandler(filters.PHOTO, recibir_comprobante))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'@'), responder_con_ia))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, guardar_mensaje_grupo))
     
     logger.info("🚀 Bot Cofradía PRO iniciado!")
