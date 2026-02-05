@@ -28,7 +28,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, 
     filters, ContextTypes, CallbackQueryHandler
@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 # ==================== CONFIGURACIÓN GLOBAL ====================
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')  # Para OCR de comprobantes
 TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
@@ -54,8 +55,12 @@ DIAS_PRUEBA_GRATIS = 90
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"  # Modelo más potente y gratuito
 
-# Variable global para indicar si la IA está disponible
+# ==================== CONFIGURACIÓN DE GEMINI (OCR) ====================
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
+# Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
+gemini_disponible = False
 
 if GROQ_API_KEY:
     # Probar conexión con Groq
@@ -79,6 +84,12 @@ if GROQ_API_KEY:
         logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
+
+if GEMINI_API_KEY:
+    gemini_disponible = True
+    logger.info("✅ Gemini API Key configurada (OCR disponible)")
+else:
+    logger.warning("⚠️ GEMINI_API_KEY no configurada - OCR no disponible")
 
 
 def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
@@ -122,15 +133,110 @@ def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -
         return None
 
 
-def analizar_imagen_ocr(image_bytes: bytes, prompt_ocr: str) -> dict:
-    """Analiza una imagen usando Groq (nota: Groq no soporta visión directa, usamos descripción)"""
-    # Groq no soporta análisis de imágenes directamente
-    # Retornamos un análisis básico
-    return {
-        "analizado": False,
-        "motivo": "Análisis visual no disponible con Groq",
-        "requiere_revision_manual": True
-    }
+def analizar_imagen_ocr(image_bytes: bytes, precio_esperado: int) -> dict:
+    """Analiza una imagen de comprobante usando Gemini Vision API"""
+    if not GEMINI_API_KEY or not gemini_disponible:
+        return {
+            "analizado": False,
+            "motivo": "Servicio OCR no disponible",
+            "requiere_revision_manual": True
+        }
+    
+    try:
+        # Convertir imagen a base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Preparar prompt para análisis de comprobante
+        prompt = f"""Analiza esta imagen de un comprobante de transferencia bancaria chilena.
+
+DATOS ESPERADOS:
+- Cuenta destino debe contener: 69104312 (Banco Santander)
+- Titular: Destak E.I.R.L. o RUT 76.698.480-0
+- Monto esperado: aproximadamente ${precio_esperado:,} CLP
+
+EXTRAE Y VERIFICA:
+1. ¿Es un comprobante de transferencia válido? (SI/NO)
+2. ¿El monto visible coincide aproximadamente con ${precio_esperado:,}? (SI/NO/NO_VISIBLE)
+3. ¿La cuenta destino coincide con 69104312? (SI/NO/NO_VISIBLE)
+4. Monto detectado (solo número, ej: 20000)
+5. Fecha de la transferencia si es visible
+6. Observaciones importantes
+
+RESPONDE EN FORMATO JSON:
+{{
+    "es_comprobante": true/false,
+    "monto_coincide": true/false/null,
+    "cuenta_coincide": true/false/null,
+    "monto_detectado": "número o null",
+    "fecha_detectada": "fecha o null",
+    "observaciones": "texto breve"
+}}"""
+
+        # Llamar a Gemini API
+        url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": image_base64
+                            }
+                        },
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 500
+            }
+        }
+        
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            texto_respuesta = data['candidates'][0]['content']['parts'][0]['text']
+            
+            # Extraer JSON de la respuesta
+            try:
+                json_match = re.search(r'\{[^{}]*\}', texto_respuesta, re.DOTALL)
+                if json_match:
+                    resultado = json.loads(json_match.group())
+                    resultado["analizado"] = True
+                    resultado["precio_esperado"] = precio_esperado
+                    return resultado
+            except json.JSONDecodeError:
+                pass
+            
+            return {
+                "analizado": True,
+                "es_comprobante": "comprobante" in texto_respuesta.lower() or "transferencia" in texto_respuesta.lower(),
+                "monto_visible": None,
+                "cuenta_coincide": "69104312" in texto_respuesta,
+                "observaciones": texto_respuesta[:200],
+                "precio_esperado": precio_esperado
+            }
+        else:
+            logger.error(f"Error Gemini API: {response.status_code} - {response.text[:200]}")
+            return {
+                "analizado": False,
+                "error": f"Error API: {response.status_code}",
+                "requiere_revision_manual": True
+            }
+            
+    except Exception as e:
+        logger.error(f"Error en OCR Gemini: {str(e)[:100]}")
+        return {
+            "analizado": False,
+            "error": str(e)[:100],
+            "requiere_revision_manual": True
+        }
 
 DATOS_BANCARIOS = """
 💳 **DATOS PARA TRANSFERENCIA**
@@ -271,7 +377,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        status = "✅ Activo" if model else "⚠️ Sin IA"
+        status = "✅ Activo" if ia_disponible else "⚠️ Sin IA"
         html = f"""
         <html>
         <head><title>Bot Cofradía Premium</title></head>
@@ -378,18 +484,36 @@ def init_db():
     logger.info("✅ Base de datos inicializada")
 # ==================== FUNCIONES DE SUSCRIPCIÓN ====================
 
-def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False, dias_gratis=90):
+def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False, dias_gratis=DIAS_PRUEBA_GRATIS):
+    """Registra un nuevo usuario con período de prueba gratuito (90 días)"""
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # Verificar si el usuario ya existe
+    c.execute("SELECT user_id, fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
+    existente = c.fetchone()
+    
     fecha_registro = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fecha_expiracion = (datetime.now() + timedelta(days=dias_gratis)).strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""INSERT OR REPLACE INTO suscripciones 
-                 (user_id, first_name, username, es_admin, fecha_registro, 
-                  fecha_expiracion, estado, mensajes_engagement, 
-                  ultimo_mensaje_engagement, servicios_usados) 
-                 VALUES (?, ?, ?, ?, ?, ?, 'activo', 0, ?, '[]')""",
-              (user_id, first_name, username, 1 if es_admin else 0, 
-               fecha_registro, fecha_expiracion, fecha_registro))
+    
+    if existente:
+        # Usuario ya existe - solo actualizar nombre/username si cambió
+        c.execute("""UPDATE suscripciones 
+                     SET first_name = ?, username = ?, es_admin = ?
+                     WHERE user_id = ?""",
+                  (first_name, username, 1 if es_admin else 0, user_id))
+        logger.info(f"Usuario existente actualizado: {first_name} (ID: {user_id})")
+    else:
+        # Nuevo usuario - dar período de prueba GRATIS (90 días)
+        fecha_expiracion = (datetime.now() + timedelta(days=dias_gratis)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO suscripciones 
+                     (user_id, first_name, username, es_admin, fecha_registro, 
+                      fecha_expiracion, estado, mensajes_engagement, 
+                      ultimo_mensaje_engagement, servicios_usados) 
+                     VALUES (?, ?, ?, ?, ?, ?, 'activo', 0, ?, '[]')""",
+                  (user_id, first_name, username, 1 if es_admin else 0, 
+                   fecha_registro, fecha_expiracion, fecha_registro))
+        logger.info(f"Nuevo usuario registrado: {first_name} (ID: {user_id}) - {dias_gratis} días gratis")
+    
     conn.commit()
     conn.close()
 
@@ -1339,7 +1463,7 @@ async def callback_aprobar_rechazar(update: Update, context: ContextTypes.DEFAUL
     conn.close()
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe y procesa comprobantes de pago"""
+    """Recibe y procesa comprobantes de pago con OCR de Gemini"""
     user = update.message.from_user
     if not es_chat_privado(update):
         return
@@ -1355,13 +1479,21 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     
-    # Nota: Groq no soporta análisis de imágenes
-    # El comprobante se envía directamente al admin para revisión manual
-    datos_ocr = {
-        "analizado": False, 
-        "motivo": "Revisión manual requerida",
-        "precio_esperado": precio
-    }
+    # Descargar imagen para OCR
+    datos_ocr = {"analizado": False, "motivo": "Revisión manual requerida", "precio_esperado": precio}
+    
+    if gemini_disponible:
+        try:
+            # Descargar la imagen
+            file_path = await file.download_as_bytearray()
+            image_bytes = bytes(file_path)
+            
+            # Analizar con Gemini OCR
+            datos_ocr = analizar_imagen_ocr(image_bytes, precio)
+            logger.info(f"OCR resultado: {datos_ocr}")
+        except Exception as e:
+            logger.error(f"Error descargando/analizando imagen: {e}")
+            datos_ocr = {"analizado": False, "error": str(e)[:100], "precio_esperado": precio}
     
     await msg.delete()
     await update.message.reply_text(
@@ -1393,17 +1525,23 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Formatear info OCR para admin
     ocr_info = ""
     if datos_ocr.get("analizado"):
-        ocr_info = "\n\n🔍 **Análisis OCR:**"
+        ocr_info = "\n\n🔍 **Análisis OCR (Gemini):**"
         if datos_ocr.get("es_comprobante") is not None:
             ocr_info += f"\n• Comprobante válido: {'✅' if datos_ocr.get('es_comprobante') else '❌'}"
-        if datos_ocr.get("monto_visible"):
-            ocr_info += f"\n• Monto detectado: {datos_ocr.get('monto_visible')}"
+        if datos_ocr.get("monto_detectado"):
+            ocr_info += f"\n• Monto detectado: ${datos_ocr.get('monto_detectado')}"
+        if datos_ocr.get("monto_coincide") is not None:
+            ocr_info += f"\n• Monto coincide: {'✅' if datos_ocr.get('monto_coincide') else '❌'}"
         if datos_ocr.get("cuenta_coincide") is not None:
             ocr_info += f"\n• Cuenta coincide: {'✅' if datos_ocr.get('cuenta_coincide') else '❌'}"
+        if datos_ocr.get("fecha_detectada"):
+            ocr_info += f"\n• Fecha: {datos_ocr.get('fecha_detectada')}"
         if datos_ocr.get("observaciones"):
             ocr_info += f"\n• Obs: {datos_ocr.get('observaciones')[:100]}"
     elif datos_ocr.get("error"):
         ocr_info = f"\n\n⚠️ OCR error: {datos_ocr.get('error')}"
+    else:
+        ocr_info = "\n\n⚠️ OCR no disponible - Revisión manual requerida"
     
     try:
         await context.bot.send_photo(
@@ -2193,6 +2331,7 @@ def main():
     """Función principal del bot"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
     logger.info(f"📊 Estado IA (Groq): {'✅ Activa' if ia_disponible else '❌ No disponible'}")
+    logger.info(f"📷 Estado OCR (Gemini): {'✅ Activo' if gemini_disponible else '❌ No disponible'}")
     
     # Inicializar base de datos
     init_db()
@@ -2212,10 +2351,11 @@ def main():
         logger.error("❌ TOKEN_BOT no configurado")
         return
     
-    # Crear aplicación con configuración para evitar conflictos
+    # Crear aplicación
     application = Application.builder().token(TOKEN_BOT).build()
     
-    async def set_commands(app):
+    async def set_commands_and_menu(app):
+        """Configura comandos y menú del bot"""
         commands = [
             BotCommand("start", "Iniciar bot"),
             BotCommand("ayuda", "Ver comandos"),
@@ -2242,12 +2382,36 @@ def main():
             BotCommand("activar", "Activar código"),
         ]
         try:
+            # Configurar comandos para chat privado
             await app.bot.set_my_commands(commands)
+            
+            # Configurar comandos y menú para el grupo Cofradía
+            if COFRADIA_GROUP_ID:
+                comandos_grupo = [
+                    BotCommand("registrarse", "Activar cuenta"),
+                    BotCommand("buscar", "Buscar texto"),
+                    BotCommand("buscar_ia", "Buscar con IA"),
+                    BotCommand("buscar_profesional", "Buscar expertos"),
+                    BotCommand("empleo", "Buscar empleos"),
+                    BotCommand("graficos", "Ver gráficos"),
+                    BotCommand("estadisticas", "Ver estadísticas"),
+                    BotCommand("resumen", "Resumen del día"),
+                    BotCommand("ayuda", "Ver comandos"),
+                ]
+                from telegram import BotCommandScopeChat
+                try:
+                    await app.bot.set_my_commands(comandos_grupo, scope=BotCommandScopeChat(chat_id=COFRADIA_GROUP_ID))
+                    # Configurar botón de menú celeste en el grupo
+                    await app.bot.set_chat_menu_button(chat_id=COFRADIA_GROUP_ID, menu_button=MenuButtonCommands())
+                    logger.info(f"✅ Menú configurado para grupo {COFRADIA_GROUP_ID}")
+                except Exception as e:
+                    logger.warning(f"⚠️ No se pudo configurar menú en grupo: {e}")
+            
             logger.info("✅ Comandos del bot configurados")
         except Exception as e:
             logger.warning(f"⚠️ No se pudieron configurar comandos: {e}")
     
-    application.post_init = set_commands
+    application.post_init = set_commands_and_menu
     
     # Jobs programados
     job_queue = application.job_queue
@@ -2314,7 +2478,8 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
     
     logger.info("✅ Bot Cofradía Premium iniciado!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # drop_pending_updates=True evita el error de conflicto con otras instancias
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
