@@ -1050,9 +1050,9 @@ def requiere_suscripcion(func):
         user_id = update.effective_user.id
         if not verificar_suscripcion_activa(user_id):
             await update.message.reply_text(
-                "❌ **Necesitas una suscripción activa**\n\n"
-                "📝 Usa /registrarse en @Cofradia_de_Networking\n"
-                "💳 O renueva con /renovar",
+                "❌ **Falta activar tu cuenta**\n\n"
+                "👉 Actívala desde @Cofradia_Premium_Bot con el comando /start "
+                "para empezar a asesorarte en Networking y en todo lo que necesites.",
                 parse_mode='Markdown'
             )
             return
@@ -1267,23 +1267,35 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado = "Por vencer pronto"
         else:
             emoji = "🔴"
-            estado = "¡Renueva pronto!"
+            estado = "¡Próximo a vencer!"
         
-        await update.message.reply_text(f"""
+        # Solo mostrar info de renovación si quedan 5 días o menos
+        if dias <= 5:
+            await update.message.reply_text(f"""
 👤 **MI CUENTA**
 
 {emoji} **Estado:** Activa - {estado}
 📅 **Días restantes:** {dias} días
 
-💡 Para renovar usa /renovar
+⚠️ Tu suscripción está por vencer.
+💳 Usa /renovar para continuar disfrutando del bot.
+""", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"""
+👤 **MI CUENTA**
+
+{emoji} **Estado:** Activa - {estado}
+📅 **Días restantes:** {dias} días
+
+🚀 ¡Disfruta todos los servicios del bot!
 """, parse_mode='Markdown')
     else:
         await update.message.reply_text("""
 👤 **MI CUENTA**
 
-🔴 **Estado:** Sin suscripción activa
+🔴 **Estado:** Cuenta no activada
 
-📝 Usa /registrarse en @Cofradia_de_Networking
+👉 Usa /registrarse en @Cofradia_de_Networking para activar tu cuenta.
 """, parse_mode='Markdown')
 
 
@@ -1941,7 +1953,9 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not verificar_suscripcion_activa(user_id):
         await update.message.reply_text(
-            "❌ Necesitas suscripción activa.\n📝 Usa /registrarse en @Cofradia_de_Networking"
+            "👋 ¡Hola! Falta activar tu cuenta.\n\n"
+            "👉 Actívala desde @Cofradia_Premium_Bot con /start "
+            "para empezar a asesorarte en Networking y en todo lo que necesites."
         )
         return
     
@@ -3060,19 +3074,18 @@ def main():
     # Crear aplicación
     application = Application.builder().token(TOKEN_BOT).build()
     
-    # Configurar comandos
+    # Configurar comandos (SIN mostrar mi_cuenta, renovar, activar - son privados)
     async def setup_commands(app):
         commands = [
             BotCommand("start", "Iniciar bot"),
             BotCommand("ayuda", "Ver comandos"),
             BotCommand("registrarse", "Activar cuenta"),
-            BotCommand("mi_cuenta", "Ver suscripción"),
             BotCommand("buscar", "Buscar en historial"),
             BotCommand("buscar_ia", "Búsqueda con IA"),
+            BotCommand("buscar_profesional", "Buscar profesionales"),
             BotCommand("graficos", "Ver gráficos"),
             BotCommand("empleo", "Buscar empleos"),
-            BotCommand("renovar", "Renovar plan"),
-            BotCommand("activar", "Usar código"),
+            BotCommand("estadisticas", "Ver estadísticas"),
         ]
         try:
             await app.bot.set_my_commands(commands)
@@ -3083,9 +3096,9 @@ def main():
                     BotCommand("registrarse", "Activar cuenta"),
                     BotCommand("buscar", "Buscar"),
                     BotCommand("buscar_ia", "Búsqueda IA"),
+                    BotCommand("buscar_profesional", "Buscar profesionales"),
                     BotCommand("graficos", "Ver gráficos"),
                     BotCommand("empleo", "Buscar empleos"),
-                    BotCommand("ayuda", "Ver comandos"),
                 ]
                 try:
                     await app.bot.set_my_commands(comandos_grupo, scope=BotCommandScopeChat(chat_id=COFRADIA_GROUP_ID))
