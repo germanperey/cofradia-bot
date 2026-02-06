@@ -2349,7 +2349,7 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /resumen - Resumen del día"""
+    """Comando /resumen - Resumen del día (mejorado y atractivo)"""
     msg = await update.message.reply_text("📝 Generando resumen del día...")
     
     try:
@@ -2359,77 +2359,123 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         c = conn.cursor()
+        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        hora_actual = datetime.now().strftime("%H:%M")
         
         if DATABASE_URL:
-            c.execute("""SELECT first_name, message FROM mensajes 
+            # Mensajes de hoy
+            c.execute("""SELECT first_name, message, topic_id, categoria FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
                         ORDER BY fecha DESC LIMIT 50""")
-            mensajes = [(r['first_name'], r['message']) for r in c.fetchall()]
+            mensajes_hoy = c.fetchall()
             
             c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
-            total = c.fetchone()['total']
+            total_hoy = c.fetchone()['total']
             
-            c.execute("""SELECT COUNT(DISTINCT user_id) as total FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE""")
-            usuarios = c.fetchone()['total']
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
+            usuarios_hoy = c.fetchone()['total']
+            
+            # Top usuarios de hoy
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE 
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
+            top_hoy = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+            
+            # Categorías de hoy
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY total DESC LIMIT 5""")
+            categorias_hoy = [(r['categoria'], r['total']) for r in c.fetchall()]
+            
+            # Total histórico
+            c.execute("SELECT COUNT(*) as total FROM mensajes")
+            total_historico = c.fetchone()['total']
         else:
-            c.execute("""SELECT first_name, message FROM mensajes 
+            c.execute("""SELECT first_name, message, topic_id, categoria FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
                         ORDER BY fecha DESC LIMIT 50""")
-            mensajes = c.fetchall()
+            mensajes_hoy = c.fetchall()
             
             c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
-            total = c.fetchone()[0]
+            total_hoy = c.fetchone()[0]
             
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
-            usuarios = c.fetchone()[0]
+            usuarios_hoy = c.fetchone()[0]
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') 
+                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""")
+            top_hoy = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 5""")
+            categorias_hoy = c.fetchall()
+            
+            c.execute("SELECT COUNT(*) FROM mensajes")
+            total_historico = c.fetchone()[0]
         
         conn.close()
         
-        if total == 0:
-            await msg.edit_text("📝 No hay mensajes hoy para resumir.")
-            return
+        # Construir resumen atractivo
+        mensaje = "━" * 30 + "\n"
+        mensaje += "📰 **RESUMEN DEL DÍA**\n"
+        mensaje += "━" * 30 + "\n\n"
+        mensaje += f"📅 **Fecha:** {fecha_hoy}\n"
+        mensaje += f"🕐 **Hora:** {hora_actual}\n\n"
         
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        mensaje += "📊 **ACTIVIDAD DE HOY**\n"
+        mensaje += f"   💬 Mensajes: {total_hoy}\n"
+        mensaje += f"   👥 Usuarios activos: {usuarios_hoy}\n\n"
         
-        if ia_disponible and mensajes:
-            contexto = "\n".join([f"- {m[0]}: {m[1][:100]}" for m in mensajes[:20]])
+        if top_hoy:
+            mensaje += "🏆 **MÁS ACTIVOS HOY**\n"
+            medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
+            for i, item in enumerate(top_hoy[:5]):
+                nombre = item[0] if isinstance(item, tuple) else item['first_name']
+                msgs = item[1] if isinstance(item, tuple) else item['msgs']
+                mensaje += f"   {medallas[i]} {nombre}: {msgs} msgs\n"
+            mensaje += "\n"
+        
+        if categorias_hoy:
+            mensaje += "🏷️ **TEMAS DEL DÍA**\n"
+            emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
+                     'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+            for cat, count in categorias_hoy[:5]:
+                emoji = emojis.get(cat, '📌')
+                mensaje += f"   {emoji} {cat}: {count}\n"
+            mensaje += "\n"
+        
+        # Usar IA para generar insights si hay mensajes
+        if ia_disponible and mensajes_hoy and total_hoy > 0:
+            contexto = "\n".join([f"- {m[0] if isinstance(m, tuple) else m['first_name']}: {(m[1] if isinstance(m, tuple) else m['message'])[:80]}" for m in mensajes_hoy[:15]])
             
-            prompt = f"""Resume brevemente la actividad de hoy en el grupo Cofradía de Networking.
-
-MENSAJES DEL DÍA:
+            prompt = f"""Analiza estos mensajes del grupo Cofradía de Networking de hoy y genera 3 insights breves:
 {contexto}
 
-Genera un resumen breve (máximo 5 puntos) de:
-- Temas principales discutidos
-- Participantes destacados
-- Información relevante compartida
-
-Sé conciso y directo."""
-
-            resumen = llamar_groq(prompt, max_tokens=500, temperature=0.3)
+Responde SOLO con 3 bullets cortos sobre temas/tendencias del día. Sin introducción."""
             
-            if resumen:
-                mensaje = f"📝 **RESUMEN DEL DÍA**\n📅 {fecha_hoy}\n\n"
-                mensaje += f"📊 **Actividad:** {total} mensajes de {usuarios} usuarios\n\n"
-                mensaje += resumen
-                await msg.edit_text(mensaje, parse_mode='Markdown')
-                registrar_servicio_usado(update.effective_user.id, 'resumen')
-                return
+            insights = llamar_groq(prompt, max_tokens=200, temperature=0.3)
+            
+            if insights:
+                mensaje += "💡 **INSIGHTS DEL DÍA**\n"
+                mensaje += insights + "\n\n"
         
-        mensaje = f"📝 **RESUMEN DEL DÍA**\n📅 {fecha_hoy}\n\n"
-        mensaje += f"📊 **Actividad:** {total} mensajes de {usuarios} usuarios\n\n"
-        mensaje += "💡 _No hay suficiente actividad para generar un resumen detallado._"
+        mensaje += "━" * 30 + "\n"
+        mensaje += f"📈 **Total histórico:** {total_historico:,} mensajes\n"
+        mensaje += "━" * 30
+        
         await msg.edit_text(mensaje, parse_mode='Markdown')
+        registrar_servicio_usado(update.effective_user.id, 'resumen')
         
     except Exception as e:
         logger.error(f"Error en resumen: {e}")
-        await msg.edit_text("❌ Error generando resumen")
+        await msg.edit_text(f"❌ Error generando resumen: {str(e)[:50]}")
 
 
 @requiere_suscripcion
 async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /resumen_semanal - Resumen de 7 días"""
+    """Comando /resumen_semanal - Resumen de 7 días (mejorado)"""
     msg = await update.message.reply_text("📝 Generando resumen semanal...")
     
     try:
@@ -2439,6 +2485,8 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             return
         
         c = conn.cursor()
+        fecha_inicio = datetime.now() - timedelta(days=7)
+        fecha_fin = datetime.now()
         
         if DATABASE_URL:
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
@@ -2451,39 +2499,102 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             
             c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 10""")
             top = [(r['first_name'], r['msgs']) for r in c.fetchall()]
-        else:
-            fecha_inicio = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             
-            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days' AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY total DESC""")
+            categorias = [(r['categoria'], r['total']) for r in c.fetchall()]
+            
+            c.execute("""SELECT DATE(fecha) as dia, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY DATE(fecha) ORDER BY dia""")
+            por_dia = [(str(r['dia']), r['msgs']) for r in c.fetchall()]
+            
+            c.execute("SELECT COUNT(*) as total FROM mensajes")
+            total_historico = c.fetchone()['total']
+        else:
+            fecha_inicio_str = fecha_inicio.strftime("%Y-%m-%d")
+            
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio_str,))
             total = c.fetchone()[0]
             
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio_str,))
             usuarios = c.fetchone()[0]
             
             c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""", (fecha_inicio,))
+                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio_str,))
             top = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC""", (fecha_inicio_str,))
+            categorias = c.fetchall()
+            
+            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes 
+                        WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio_str,))
+            por_dia = c.fetchall()
+            
+            c.execute("SELECT COUNT(*) FROM mensajes")
+            total_historico = c.fetchone()[0]
         
         conn.close()
         
-        mensaje = f"📅 **RESUMEN SEMANAL**\n\n"
-        mensaje += f"📝 **Total mensajes:** {total}\n"
-        mensaje += f"👥 **Usuarios activos:** {usuarios}\n"
-        mensaje += f"📈 **Promedio diario:** {total/7:.0f} mensajes\n\n"
+        # Construir mensaje atractivo
+        mensaje = "━" * 30 + "\n"
+        mensaje += "📅 **RESUMEN SEMANAL**\n"
+        mensaje += "━" * 30 + "\n\n"
+        mensaje += f"📆 **Período:** {fecha_inicio.strftime('%d/%m')} - {fecha_fin.strftime('%d/%m/%Y')}\n\n"
+        
+        mensaje += "📊 **ESTADÍSTICAS GENERALES**\n"
+        mensaje += f"   💬 Total mensajes: {total:,}\n"
+        mensaje += f"   👥 Usuarios activos: {usuarios}\n"
+        mensaje += f"   📈 Promedio diario: {total/7:.1f}\n\n"
+        
+        if por_dia:
+            mensaje += "📆 **ACTIVIDAD POR DÍA**\n"
+            dias_semana = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+            for fecha, msgs in por_dia[-7:]:
+                try:
+                    dia_dt = datetime.strptime(str(fecha)[:10], "%Y-%m-%d")
+                    dia_nombre = dias_semana[dia_dt.weekday()]
+                    barra = "█" * min(int(msgs/5), 15) if msgs > 0 else "░"
+                    mensaje += f"   {dia_nombre}: {barra} {msgs}\n"
+                except:
+                    mensaje += f"   {str(fecha)[-5:]}: {msgs}\n"
+            mensaje += "\n"
         
         if top:
-            mensaje += "🏆 **Top 5 más activos:**\n"
-            for i, (nombre, msgs) in enumerate(top, 1):
-                mensaje += f"  {i}. {nombre}: {msgs} msgs\n"
+            mensaje += "🏆 **TOP 10 MÁS ACTIVOS**\n"
+            medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
+            for i, item in enumerate(top[:10]):
+                nombre = item[0] if isinstance(item, tuple) else item['first_name']
+                msgs = item[1] if isinstance(item, tuple) else item['msgs']
+                mensaje += f"   {medallas[i]} {nombre}: {msgs}\n"
+            mensaje += "\n"
+        
+        if categorias:
+            mensaje += "🏷️ **TEMAS PRINCIPALES**\n"
+            emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
+                     'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+            total_cats = sum([c[1] for c in categorias])
+            for cat, count in categorias[:6]:
+                emoji = emojis.get(cat, '📌')
+                pct = (count/total_cats*100) if total_cats > 0 else 0
+                mensaje += f"   {emoji} {cat}: {count} ({pct:.1f}%)\n"
+            mensaje += "\n"
+        
+        mensaje += "━" * 30 + "\n"
+        mensaje += f"📈 **Total histórico:** {total_historico:,} mensajes\n"
+        mensaje += "━" * 30
         
         await msg.edit_text(mensaje, parse_mode='Markdown')
         registrar_servicio_usado(update.effective_user.id, 'resumen_semanal')
         
     except Exception as e:
         logger.error(f"Error en resumen_semanal: {e}")
-        await msg.edit_text("❌ Error generando resumen")
+        await msg.edit_text(f"❌ Error generando resumen: {str(e)[:50]}")
 
 
 @requiere_suscripcion
@@ -2912,7 +3023,7 @@ def buscar_profesionales(query):
         resultado += f"📊 **Resultados:** {len(encontrados)} de {len(profesionales)}\n\n"
         resultado += "━" * 30 + "\n\n"
         
-        for i, prof in enumerate(encontrados[:10], 1):
+        for i, prof in enumerate(encontrados[:20], 1):
             resultado += f"**{i}. {prof['nombre']}**\n"
             
             # Mostrar profesión si existe
@@ -2940,8 +3051,8 @@ def buscar_profesionales(query):
             
             resultado += "\n"
         
-        if len(encontrados) > 10:
-            resultado += f"📌 _Mostrando 10 de {len(encontrados)} resultados_\n"
+        if len(encontrados) > 20:
+            resultado += f"📌 _Mostrando 20 de {len(encontrados)} resultados_\n"
         
         resultado += "━" * 30
         
@@ -3092,8 +3203,6 @@ async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
         mensaje += "👉 _Saluda a los cumpleañeros en el tema 'Cumpleaños, Eventos y Efemérides'_"
         
         # Enviar al grupo
-        # NOTA: Necesitarás configurar el ID del tema de cumpleaños
-        # Por ahora enviamos al grupo principal
         if COFRADIA_GROUP_ID:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID,
@@ -3104,6 +3213,140 @@ async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error enviando cumpleaños: {e}")
+
+
+async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
+    """Tarea programada para enviar resumen del día a las 20:00"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("No se pudo conectar a BD para resumen nocturno")
+            return
+        
+        c = conn.cursor()
+        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        
+        if DATABASE_URL:
+            # Estadísticas del día
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
+            total_hoy = c.fetchone()['total']
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
+            usuarios_hoy = c.fetchone()['total']
+            
+            # Top usuarios del día
+            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE 
+                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
+            top_usuarios = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+            
+            # Categorías del día
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY total DESC LIMIT 5""")
+            categorias = [(r['categoria'], r['total']) for r in c.fetchall()]
+            
+            # Mensajes por tema/subgrupo (topic_id)
+            c.execute("""SELECT topic_id, COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE AND topic_id IS NOT NULL
+                        GROUP BY topic_id ORDER BY msgs DESC LIMIT 5""")
+            por_tema = [(r['topic_id'], r['msgs']) for r in c.fetchall()]
+            
+            # Mensajes para análisis IA
+            c.execute("""SELECT first_name, message, categoria FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE ORDER BY fecha DESC LIMIT 30""")
+            mensajes_dia = [(r['first_name'], r['message'], r['categoria']) for r in c.fetchall()]
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
+            total_hoy = c.fetchone()[0]
+            
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
+            usuarios_hoy = c.fetchone()[0]
+            
+            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') 
+                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""")
+            top_usuarios = c.fetchall()
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') AND categoria IS NOT NULL
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 5""")
+            categorias = c.fetchall()
+            
+            c.execute("""SELECT topic_id, COUNT(*) FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') AND topic_id IS NOT NULL
+                        GROUP BY topic_id ORDER BY COUNT(*) DESC LIMIT 5""")
+            por_tema = c.fetchall()
+            
+            c.execute("""SELECT first_name, message, categoria FROM mensajes 
+                        WHERE DATE(fecha) = DATE('now') ORDER BY fecha DESC LIMIT 30""")
+            mensajes_dia = c.fetchall()
+        
+        conn.close()
+        
+        if total_hoy == 0:
+            logger.info("No hay mensajes hoy para el resumen nocturno")
+            return
+        
+        # Construir mensaje de resumen nocturno
+        mensaje = "━" * 30 + "\n"
+        mensaje += "🌙 **RESUMEN DEL DÍA**\n"
+        mensaje += "━" * 30 + "\n\n"
+        mensaje += f"📅 **{fecha_hoy}** | 🕗 20:00 hrs\n\n"
+        
+        mensaje += "📊 **ACTIVIDAD DE HOY**\n"
+        mensaje += f"   💬 Mensajes: {total_hoy}\n"
+        mensaje += f"   👥 Participantes: {usuarios_hoy}\n\n"
+        
+        if top_usuarios:
+            mensaje += "🏆 **MÁS ACTIVOS**\n"
+            medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
+            for i, item in enumerate(top_usuarios[:5]):
+                nombre = item[0] if isinstance(item, tuple) else item['first_name']
+                msgs = item[1] if isinstance(item, tuple) else item['msgs']
+                mensaje += f"   {medallas[i]} {nombre}: {msgs}\n"
+            mensaje += "\n"
+        
+        if categorias:
+            mensaje += "🏷️ **TEMAS DEL DÍA**\n"
+            emojis_cat = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
+                        'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+            for cat, count in categorias[:5]:
+                emoji = emojis_cat.get(cat, '📌')
+                mensaje += f"   {emoji} {cat}: {count}\n"
+            mensaje += "\n"
+        
+        # Generar insights con IA si está disponible
+        if ia_disponible and mensajes_dia:
+            contexto = "\n".join([f"- {m[0]}: {m[1][:60]}" for m in mensajes_dia[:15]])
+            
+            prompt = f"""Resume la actividad del día en Cofradía de Networking en 3-4 puntos clave:
+{contexto}
+
+Menciona brevemente: temas discutidos, tendencias, oportunidades de networking.
+Máximo 100 palabras. Sin introducción."""
+            
+            insights = llamar_groq(prompt, max_tokens=200, temperature=0.3)
+            
+            if insights:
+                mensaje += "💡 **RESUMEN IA**\n"
+                mensaje += insights + "\n\n"
+        
+        mensaje += "━" * 30 + "\n"
+        mensaje += "🌟 _¡Gracias por participar! Nos vemos mañana._\n"
+        mensaje += "━" * 30
+        
+        # Enviar al grupo
+        if COFRADIA_GROUP_ID:
+            await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID,
+                text=mensaje,
+                parse_mode='Markdown'
+            )
+            logger.info(f"✅ Enviado resumen nocturno: {total_hoy} mensajes del día")
+        
+    except Exception as e:
+        logger.error(f"Error enviando resumen nocturno: {e}")
 
 
 # ==================== MAIN ====================
@@ -3221,15 +3464,23 @@ def main():
     # Programar tarea de cumpleaños diaria a las 8:00 AM (hora Chile)
     job_queue = application.job_queue
     if job_queue:
-        # Configurar para las 8:00 AM hora Chile (UTC-3 o UTC-4)
-        # Usamos 12:00 UTC que es 8:00 AM en Chile (horario de verano)
         from datetime import time as dt_time
+        
+        # Cumpleaños a las 8:00 AM hora Chile (12:00 UTC)
         job_queue.run_daily(
             enviar_cumpleanos_diario,
             time=dt_time(hour=12, minute=0, second=0),  # 12:00 UTC = 8:00 Chile
             name='cumpleanos_diario'
         )
-        logger.info("🎂 Tarea de cumpleaños programada para las 8:00 AM")
+        logger.info("🎂 Tarea de cumpleaños programada para las 8:00 AM Chile")
+        
+        # Resumen nocturno a las 20:00 hora Chile (00:00 UTC del día siguiente)
+        job_queue.run_daily(
+            enviar_resumen_nocturno,
+            time=dt_time(hour=0, minute=0, second=0),  # 00:00 UTC = 20:00 Chile (día anterior)
+            name='resumen_nocturno'
+        )
+        logger.info("🌙 Tarea de resumen nocturno programada para las 20:00 Chile")
     
     logger.info("✅ Bot iniciado!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
