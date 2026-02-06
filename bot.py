@@ -1045,9 +1045,14 @@ def auto_ping():
 # ==================== DECORADORES ====================
 
 def requiere_suscripcion(func):
-    """Decorador que verifica suscripción activa"""
+    """Decorador que verifica suscripción activa (owner siempre tiene acceso)"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        
+        # El owner siempre tiene acceso
+        if user_id == OWNER_ID:
+            return await func(update, context)
+        
         if not verificar_suscripcion_activa(user_id):
             await update.message.reply_text(
                 "❌ **Falta activar tu cuenta**\n\n"
@@ -1933,7 +1938,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ==================== HANDLER MENCIONES ====================
 
 async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde cuando mencionan al bot - con IA mejorada"""
+    """Responde cuando mencionan al bot - con IA mejorada y consulta de estadísticas"""
     if not update.message or not update.message.text:
         return
     
@@ -1951,7 +1956,10 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not any(m.lower() in mensaje.lower() for m in menciones_validas):
         return
     
-    if not verificar_suscripcion_activa(user_id):
+    # Verificar si es el owner (siempre tiene acceso)
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
         await update.message.reply_text(
             "👋 ¡Hola! Falta activar tu cuenta.\n\n"
             "👉 Actívala desde @Cofradia_Premium_Bot con /start "
@@ -1968,13 +1976,60 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    if not ia_disponible:
-        await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
-        return
-    
     msg = await update.message.reply_text("🧠 Procesando tu consulta...")
     
     try:
+        pregunta_lower = pregunta.lower()
+        
+        # Detectar preguntas sobre estadísticas del bot
+        if any(palabra in pregunta_lower for palabra in ['cuántos', 'cuantos', 'registrado', 'usuarios', 'integrantes', 'miembros', 'suscrito']):
+            # Consultar base de datos
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+                        usuarios_activos = c.fetchone()['total']
+                        c.execute("SELECT COUNT(*) as total FROM suscripciones")
+                        usuarios_total = c.fetchone()['total']
+                        c.execute("SELECT COUNT(*) as total FROM mensajes")
+                        mensajes_total = c.fetchone()['total']
+                        c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes")
+                        participantes = c.fetchone()['total']
+                    else:
+                        c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+                        usuarios_activos = c.fetchone()[0]
+                        c.execute("SELECT COUNT(*) FROM suscripciones")
+                        usuarios_total = c.fetchone()[0]
+                        c.execute("SELECT COUNT(*) FROM mensajes")
+                        mensajes_total = c.fetchone()[0]
+                        c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes")
+                        participantes = c.fetchone()[0]
+                    
+                    conn.close()
+                    
+                    await msg.delete()
+                    await update.message.reply_text(
+                        f"📊 **ESTADÍSTICAS DEL BOT**\n\n"
+                        f"👥 **Usuarios registrados:** {usuarios_total}\n"
+                        f"✅ **Usuarios activos:** {usuarios_activos}\n"
+                        f"💬 **Mensajes guardados:** {mensajes_total:,}\n"
+                        f"🗣️ **Participantes únicos:** {participantes}\n\n"
+                        f"💡 Usa /estadisticas para más detalles.",
+                        parse_mode='Markdown'
+                    )
+                    return
+                except Exception as e:
+                    logger.error(f"Error consultando stats: {e}")
+                    conn.close()
+        
+        # Si no es pregunta de estadísticas, usar IA
+        if not ia_disponible:
+            await msg.delete()
+            await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
+            return
+        
         # Buscar contexto en el historial del grupo
         contexto_grupo = ""
         resultados = buscar_en_historial(pregunta, limit=5)
@@ -1990,23 +2045,21 @@ PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
 
 INSTRUCCIONES:
 1. Si la pregunta es sobre SERVICIOS (electricistas, gasfiter, abogados, etc.):
-   - Explica que no tienes acceso a internet para buscar proveedores específicos
    - Sugiere usar /buscar_profesional [profesión] para buscar en la base de datos del grupo
    - Recomienda preguntar en el grupo si alguien conoce un buen profesional
 
 2. Si la pregunta es sobre EMPLEOS:
-   - Sugiere usar /empleo cargo:[nombre] para ver ofertas reales
+   - Sugiere usar /empleo [cargo] para ver ofertas reales
 
 3. Si la pregunta es sobre el GRUPO o sus MIEMBROS:
    - Usa la información del contexto si está disponible
    - Sugiere usar /buscar_ia [tema] para buscar en el historial
 
 4. Para PREGUNTAS GENERALES:
-   - Responde de forma útil y concisa con tu conocimiento
+   - Responde de forma útil y concisa
    - Sé profesional pero cercano
 
-IMPORTANTE: No inventes información específica sobre proveedores de servicios chilenos.
-Responde en máximo 3 párrafos."""
+Responde en máximo 2-3 párrafos."""
 
         respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
         
@@ -2019,9 +2072,10 @@ Responde en máximo 3 párrafos."""
             await update.message.reply_text(
                 "❌ No pude generar respuesta.\n\n"
                 "💡 **Comandos útiles:**\n"
-                "• /buscar_profesional [profesión] - Buscar en BD del grupo\n"
-                "• /empleo cargo:[nombre] - Ver empleos reales\n"
-                "• /buscar_ia [tema] - Buscar en historial"
+                "• /buscar_profesional [profesión]\n"
+                "• /empleo [cargo]\n"
+                "• /buscar_ia [tema]",
+                parse_mode='Markdown'
             )
             
     except Exception as e:
@@ -2789,9 +2843,14 @@ def buscar_profesionales(query):
         
         # Búsqueda con scoring
         encontrados = []
+        
+        # PRIORIZACIÓN: Owner del bot (Germán Perey) tiene bonus de visibilidad
+        OWNER_NAMES = ['germán', 'german', 'perey', 'oñate', 'onate']
+        
         for p in profesionales:
             score = 0
             texto = p['texto_busqueda']
+            nombre_lower = p['nombre'].lower()
             
             for palabra in palabras_busqueda:
                 if len(palabra) > 2:
@@ -2808,11 +2867,15 @@ def buscar_profesionales(query):
                     if palabra in p['industria3'].lower():
                         score += 60
                     # Coincidencia en nombre
-                    if palabra in p['nombre'].lower():
+                    if palabra in nombre_lower:
                         score += 40
                     # Coincidencia parcial
                     if palabra in texto:
                         score += 20
+            
+            # BONUS para el owner si hay coincidencia (para ayudarle a ser contratado)
+            if score > 0 and any(owner_name in nombre_lower for owner_name in OWNER_NAMES):
+                score += 50  # Bonus de visibilidad
             
             if score > 0:
                 encontrados.append((p, score))
