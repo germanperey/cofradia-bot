@@ -1065,6 +1065,20 @@ def es_chat_privado(update: Update) -> bool:
     return update.effective_chat.type == 'private'
 
 
+def solo_chat_privado(func):
+    """Decorador para comandos que solo funcionan en chat privado"""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not es_chat_privado(update):
+            await update.message.reply_text(
+                "🔒 **Este comando solo funciona en chat privado**\n\n"
+                "👉 Escríbeme directamente a @Cofradia_Premium_Bot",
+                parse_mode='Markdown'
+            )
+            return
+        return await func(update, context)
+    return wrapper
+
+
 # ==================== FUNCIONES AUXILIARES ====================
 
 async def enviar_mensaje_largo(update: Update, texto: str, parse_mode='Markdown'):
@@ -1149,45 +1163,37 @@ Escribe /ayuda para ver todos los comandos.
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 
+@solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /ayuda - Lista de comandos"""
+    """Comando /ayuda - Lista de comandos (SOLO EN PRIVADO)"""
     texto = """
 📚 **COMANDOS DISPONIBLES**
+━━━━━━━━━━━━━━━━━━━━
 
-━━━ **BÁSICOS** ━━━
-/start - Iniciar bot
-/ayuda - Ver esta ayuda
-/registrarse - Activar cuenta (usar en @Cofradia_de_Networking)
-/mi_cuenta - Ver tu suscripción
-/renovar - Renovar plan
-/activar [código] - Usar código de activación
+🔍 **BÚSQUEDA**
+/buscar [texto] - Buscar en historial del grupo
+/buscar_ia [consulta] - Búsqueda inteligente con IA
+/buscar_profesional [área] - Buscar profesionales
+/empleo [cargo] - Buscar empleos reales
 
-━━━ **BÚSQUEDA** ━━━
-/buscar [texto] - Buscar en historial
-/buscar_ia [consulta] - Búsqueda con IA
-/buscar_profesional [área] - Buscar expertos
-/empleo cargo:[X], ubicación:[Y] - Buscar empleos
-
-━━━ **ESTADÍSTICAS** ━━━
+📊 **ESTADÍSTICAS**
 /graficos - Ver gráficos de actividad
 /estadisticas - Estadísticas generales
-/categorias - Ver categorías de mensajes
+/kpis - Dashboard de métricas
+/categorias - Categorías de mensajes
 /top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil de actividad
 
-━━━ **RESÚMENES** ━━━
+📋 **RESÚMENES**
 /resumen - Resumen del día
 /resumen_semanal - Resumen de 7 días
 /resumen_mes - Resumen mensual
-/resumen_usuario @nombre - Perfil de usuario
 
-━━━ **RRHH** ━━━
+👥 **GRUPO**
 /dotacion - Total de integrantes
-/ingresos [mes_año] - Nuevos ingresos
-/crecimiento_mes - Crecimiento mensual
-/crecimiento_anual - Crecimiento anual
 
-💡 **TIP:** Mencióname en el grupo @Cofradia_de_Networking con tu pregunta:
+━━━━━━━━━━━━━━━━━━━━
+💡 **TIP:** Mencióname en el grupo con tu pregunta:
 `@Cofradia_Premium_Bot ¿tu pregunta?`
 """
     await update.message.reply_text(texto, parse_mode='Markdown')
@@ -1245,8 +1251,9 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Hubo un error al registrarte. Intenta de nuevo.")
 
 
+@solo_chat_privado
 async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /mi_cuenta - Ver estado de suscripción"""
+    """Comando /mi_cuenta - Ver estado de suscripción (SOLO EN PRIVADO)"""
     user = update.message.from_user
     
     if verificar_suscripcion_activa(user.id):
@@ -1277,16 +1284,12 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔴 **Estado:** Sin suscripción activa
 
 📝 Usa /registrarse en @Cofradia_de_Networking
-💳 O renueva con /renovar
 """, parse_mode='Markdown')
 
 
+@solo_chat_privado
 async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /renovar - Renovar suscripción"""
-    if not es_chat_privado(update):
-        await update.message.reply_text("❌ Usa /renovar en el chat privado @Cofradia_Premium_Bot")
-        return
-    
+    """Comando /renovar - Renovar suscripción (SOLO EN PRIVADO)"""
     precios = obtener_precios()
     keyboard = [
         [InlineKeyboardButton(f"💎 {nombre} ({dias}d) - {formato_clp(precio)}", callback_data=f"plan_{dias}")]
@@ -1300,8 +1303,9 @@ Selecciona tu plan:
 """, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 
+@solo_chat_privado
 async def activar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /activar - Activar código"""
+    """Comando /activar - Activar código (SOLO EN PRIVADO)"""
     user = update.message.from_user
     
     if not context.args:
@@ -2591,7 +2595,7 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
 
 
 def buscar_profesionales(query):
-    """Busca profesionales en la base de datos de Google Drive"""
+    """Busca profesionales en Google Drive con búsqueda semántica en columna K (industria)"""
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         
@@ -2623,103 +2627,168 @@ def buscar_profesionales(query):
         
         headers = {'Authorization': f'Bearer {access_token}'}
         
-        # Buscar archivos Excel
+        # Buscar archivo específico "BD Grupo Laboral"
         search_url = "https://www.googleapis.com/drive/v3/files"
         params = {
-            'q': "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
             'fields': 'files(id, name)'
         }
         
         response = requests.get(search_url, headers=headers, params=params, timeout=30)
         
         if response.status_code != 200:
-            logger.error(f"Error Google Drive API: {response.status_code} - {response.text[:100]}")
+            logger.error(f"Error Google Drive API: {response.status_code}")
             return "❌ Error conectando con Google Drive."
         
         archivos = response.json().get('files', [])
         
+        # Si no encuentra el archivo específico, buscar cualquier Excel
         if not archivos:
-            return (
-                "❌ **No se encontró base de datos de profesionales**\n\n"
-                "No hay archivos Excel en el Google Drive configurado.\n\n"
-                "💡 El administrador debe subir un archivo Excel con los profesionales."
-            )
+            params['q'] = "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+            response = requests.get(search_url, headers=headers, params=params, timeout=30)
+            archivos = response.json().get('files', [])
         
-        # Descargar el primer archivo Excel encontrado
+        if not archivos:
+            return "❌ No se encontró base de datos de profesionales en Google Drive."
+        
+        # Descargar el archivo
         file_id = archivos[0]['id']
         file_name = archivos[0]['name']
         logger.info(f"Leyendo archivo: {file_name}")
         
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-        
-        response = requests.get(download_url, headers=headers, timeout=30)
+        response = requests.get(download_url, headers=headers, timeout=60)
         
         if response.status_code != 200:
             return "❌ Error descargando base de datos."
         
         # Leer Excel
         df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
+        
+        logger.info(f"Columnas originales: {list(df.columns)}")
+        logger.info(f"Total filas: {len(df)}")
+        
+        # COLUMNA K (índice 10) = Industria/Área profesional
+        # Mapear columnas por posición y nombre
+        col_industria = None
+        
+        # Primero intentar por índice (columna K = índice 10)
+        if len(df.columns) > 10:
+            col_industria = df.columns[10]
+            logger.info(f"Columna K (industria): {col_industria}")
+        
+        # Normalizar nombres de columnas
         df.columns = df.columns.str.strip().str.lower()
         
-        logger.info(f"Columnas encontradas: {list(df.columns)}")
+        # Mapear otras columnas
+        col_nombre = next((c for c in df.columns if any(x in c.lower() for x in ['nombre', 'name', 'integrante'])), df.columns[0] if len(df.columns) > 0 else None)
+        col_email = next((c for c in df.columns if any(x in c.lower() for x in ['email', 'correo', 'mail'])), None)
+        col_telefono = next((c for c in df.columns if any(x in c.lower() for x in ['teléfono', 'telefono', 'fono', 'celular', 'whatsapp'])), None)
+        col_empresa = next((c for c in df.columns if any(x in c.lower() for x in ['empresa', 'company', 'compañía'])), None)
+        col_linkedin = next((c for c in df.columns if 'linkedin' in c.lower()), None)
         
-        # Mapeo de columnas más flexible
-        col_nombre = next((c for c in df.columns if any(x in c for x in ['nombre', 'name', 'integrante', 'miembro'])), None)
-        col_profesion = next((c for c in df.columns if any(x in c for x in ['profesión', 'profesion', 'área', 'area', 'cargo', 'rubro', 'especialidad', 'ocupación', 'ocupacion'])), None)
-        col_email = next((c for c in df.columns if any(x in c for x in ['email', 'correo', 'mail', 'e-mail'])), None)
-        col_telefono = next((c for c in df.columns if any(x in c for x in ['teléfono', 'telefono', 'fono', 'celular', 'móvil', 'movil', 'whatsapp'])), None)
-        col_empresa = next((c for c in df.columns if any(x in c for x in ['empresa', 'company', 'compañía', 'organización', 'organizacion'])), None)
+        # Actualizar col_industria al nombre normalizado
+        if col_industria:
+            col_industria = col_industria.strip().lower()
+        
+        # Si no hay industria por índice, buscar por nombre
+        if not col_industria or col_industria not in df.columns:
+            col_industria = next((c for c in df.columns if any(x in c for x in ['industria', 'área', 'area', 'profesión', 'profesion', 'rubro', 'sector', 'especialidad'])), None)
         
         if not col_nombre:
-            return f"❌ No se encontró columna de nombres en el Excel.\n\nColumnas disponibles: {', '.join(df.columns)}"
+            return f"❌ No se encontró columna de nombres.\nColumnas: {', '.join(df.columns[:10])}"
         
+        # Sinónimos y carreras afines para búsqueda semántica
+        SINONIMOS = {
+            'corredor': ['corredor', 'broker', 'agente', 'inmobiliario', 'bienes raíces', 'propiedades', 'real estate'],
+            'contador': ['contador', 'contabilidad', 'auditor', 'tributario', 'contable', 'finanzas'],
+            'abogado': ['abogado', 'legal', 'jurídico', 'derecho', 'leyes', 'lawyer', 'attorney'],
+            'ingeniero': ['ingeniero', 'ingeniería', 'engineering', 'técnico', 'engineer'],
+            'diseñador': ['diseñador', 'diseño', 'design', 'gráfico', 'ux', 'ui', 'creativo'],
+            'marketing': ['marketing', 'mercadeo', 'publicidad', 'ventas', 'comercial', 'digital', 'growth'],
+            'recursos humanos': ['rrhh', 'recursos humanos', 'hr', 'people', 'talento', 'selección', 'gestión personas'],
+            'tecnología': ['tecnología', 'ti', 'it', 'sistemas', 'software', 'desarrollo', 'programador', 'developer'],
+            'salud': ['salud', 'médico', 'doctor', 'enfermero', 'clínica', 'hospital', 'healthcare'],
+            'educación': ['educación', 'profesor', 'docente', 'capacitador', 'coach', 'formador'],
+            'construcción': ['construcción', 'arquitecto', 'ingeniero civil', 'obra', 'edificación'],
+            'finanzas': ['finanzas', 'financiero', 'banca', 'inversiones', 'economía', 'finance'],
+            'logística': ['logística', 'supply chain', 'transporte', 'distribución', 'bodega', 'operaciones'],
+            'administración': ['administración', 'administrador', 'gerente', 'gestión', 'manager', 'director'],
+            'seguros': ['seguros', 'corredor de seguros', 'insurance', 'asegurador', 'póliza'],
+            'retail': ['retail', 'comercio', 'tienda', 'ventas', 'store'],
+            'minería': ['minería', 'mining', 'minero', 'recursos naturales'],
+            'agricultura': ['agricultura', 'agrícola', 'agro', 'campo', 'farming'],
+            'consultoría': ['consultoría', 'consultor', 'consulting', 'asesor', 'advisory'],
+        }
+        
+        # Expandir palabras de búsqueda con sinónimos
+        query_lower = query.lower().strip()
+        palabras_busqueda = set([query_lower])
+        
+        for categoria, sinonimos in SINONIMOS.items():
+            if any(palabra in query_lower for palabra in sinonimos):
+                palabras_busqueda.update(sinonimos)
+        
+        palabras_busqueda = list(palabras_busqueda)
+        logger.info(f"Palabras de búsqueda expandidas: {palabras_busqueda[:10]}")
+        
+        # Crear lista de profesionales
         profesionales = []
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             nombre = str(row.get(col_nombre, '')).strip() if col_nombre else ''
-            profesion = str(row.get(col_profesion, '')).strip() if col_profesion else ''
+            industria = str(row.get(col_industria, '')).strip() if col_industria else ''
             email = str(row.get(col_email, '')).strip() if col_email else ''
             telefono = str(row.get(col_telefono, '')).strip() if col_telefono else ''
             empresa = str(row.get(col_empresa, '')).strip() if col_empresa else ''
+            linkedin = str(row.get(col_linkedin, '')).strip() if col_linkedin else ''
             
-            if nombre and nombre.lower() not in ['nan', 'none', '', 'null']:
+            # Limpiar valores nulos
+            def limpiar(val):
+                return val if val.lower() not in ['nan', 'none', '', 'null', 'n/a', '-'] else ''
+            
+            nombre = limpiar(nombre)
+            industria = limpiar(industria)
+            email = limpiar(email)
+            telefono = limpiar(telefono)
+            empresa = limpiar(empresa)
+            linkedin = limpiar(linkedin)
+            
+            if nombre:
                 profesionales.append({
                     'nombre': nombre,
-                    'profesion': profesion if profesion.lower() not in ['nan', 'none', '', 'null'] else 'No especificada',
-                    'email': email if email.lower() not in ['nan', 'none', '', 'null'] else '',
-                    'telefono': telefono if telefono.lower() not in ['nan', 'none', '', 'null'] else '',
-                    'empresa': empresa if empresa.lower() not in ['nan', 'none', '', 'null'] else ''
+                    'industria': industria or 'No especificada',
+                    'email': email,
+                    'telefono': telefono,
+                    'empresa': empresa,
+                    'linkedin': linkedin
                 })
         
         if not profesionales:
-            return "❌ La base de datos está vacía o no tiene formato válido."
+            return "❌ La base de datos está vacía."
         
-        # Buscar coincidencias con scoring
-        query_lower = query.lower()
-        query_words = query_lower.split()
+        logger.info(f"Total profesionales cargados: {len(profesionales)}")
         
+        # Búsqueda con scoring semántico
         encontrados = []
         for p in profesionales:
             score = 0
-            nombre_lower = p['nombre'].lower()
-            profesion_lower = p['profesion'].lower()
-            empresa_lower = p['empresa'].lower()
+            texto_buscar = f"{p['nombre']} {p['industria']} {p['empresa']}".lower()
             
-            # Coincidencia exacta en profesión = 100 puntos
-            if query_lower in profesion_lower:
-                score += 100
-            # Coincidencia exacta en nombre = 80 puntos
-            if query_lower in nombre_lower:
-                score += 80
-            # Coincidencia en empresa = 60 puntos
-            if query_lower in empresa_lower:
-                score += 60
-            # Coincidencia de palabras individuales = 20 puntos cada una
-            for word in query_words:
-                if len(word) > 2:
-                    if word in profesion_lower:
-                        score += 20
-                    if word in nombre_lower:
-                        score += 15
+            for palabra in palabras_busqueda:
+                if len(palabra) > 2:
+                    # Coincidencia exacta = más puntos
+                    if palabra in p['industria'].lower():
+                        score += 100
+                    if palabra in p['nombre'].lower():
+                        score += 50
+                    if palabra in p['empresa'].lower():
+                        score += 30
+                    
+                    # Coincidencia parcial
+                    for term in texto_buscar.split():
+                        if len(term) > 3:
+                            if palabra in term or term in palabra:
+                                score += 10
             
             if score > 0:
                 encontrados.append((p, score))
@@ -2729,33 +2798,42 @@ def buscar_profesionales(query):
         encontrados = [e[0] for e in encontrados]
         
         if not encontrados:
-            profesiones = list(set([p['profesion'] for p in profesionales if p['profesion'] != 'No especificada']))[:10]
+            # Mostrar industrias disponibles
+            industrias = list(set([p['industria'] for p in profesionales if p['industria'] != 'No especificada']))
             msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
-            msg += f"📊 Total en base de datos: {len(profesionales)} profesionales\n\n"
-            if profesiones:
-                msg += "💡 **Algunas profesiones disponibles:**\n"
-                for p in sorted(profesiones)[:10]:
-                    msg += f"• {p}\n"
+            msg += f"📊 Total en BD: {len(profesionales)} profesionales\n\n"
+            if industrias:
+                msg += "💡 **Áreas/Industrias disponibles:**\n"
+                for ind in sorted(industrias)[:15]:
+                    msg += f"• {ind}\n"
             return msg
         
-        resultado = f"👥 **PROFESIONALES ENCONTRADOS**\n"
-        resultado += f"🔍 Búsqueda: _{query}_\n"
-        resultado += f"📊 Resultados: {len(encontrados)} de {len(profesionales)}\n"
-        resultado += "━" * 25 + "\n\n"
+        # Formatear resultados elegantes
+        resultado = "━" * 30 + "\n"
+        resultado += f"👥 **PROFESIONALES ENCONTRADOS**\n"
+        resultado += "━" * 30 + "\n\n"
+        resultado += f"🔍 **Búsqueda:** _{query}_\n"
+        resultado += f"📊 **Resultados:** {len(encontrados)} de {len(profesionales)}\n\n"
+        resultado += "━" * 30 + "\n\n"
         
         for i, prof in enumerate(encontrados[:10], 1):
             resultado += f"**{i}. {prof['nombre']}**\n"
-            resultado += f"   🎯 {prof['profesion']}\n"
+            if prof['industria'] != 'No especificada':
+                resultado += f"   🎯 {prof['industria']}\n"
             if prof['empresa']:
                 resultado += f"   🏢 {prof['empresa']}\n"
             if prof['email']:
                 resultado += f"   📧 {prof['email']}\n"
             if prof['telefono']:
                 resultado += f"   📱 {prof['telefono']}\n"
+            if prof['linkedin']:
+                resultado += f"   🔗 [LinkedIn]({prof['linkedin']})\n"
             resultado += "\n"
         
         if len(encontrados) > 10:
-            resultado += f"📌 _Mostrando 10 de {len(encontrados)} resultados_"
+            resultado += f"📌 _Mostrando 10 de {len(encontrados)} resultados_\n"
+        
+        resultado += "━" * 30
         
         return resultado
         
@@ -2763,7 +2841,7 @@ def buscar_profesionales(query):
         return "❌ Módulo oauth2client no instalado."
     except Exception as e:
         logger.error(f"Error buscar_profesionales: {e}")
-        return f"❌ Error buscando profesionales.\n\nDetalle: {str(e)[:100]}"
+        return f"❌ Error buscando profesionales.\n\nDetalle: {str(e)[:150]}"
 
 
 # ==================== MAIN ====================
