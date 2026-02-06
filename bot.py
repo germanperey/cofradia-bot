@@ -2595,7 +2595,23 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
 
 
 def buscar_profesionales(query):
-    """Busca profesionales en Google Drive con búsqueda semántica en columna K (industria)"""
+    """
+    Busca profesionales en Google Drive con búsqueda semántica.
+    
+    ESTRUCTURA DEL EXCEL "BD Grupo Laboral":
+    - Columna C: Nombre
+    - Columna D: Apellido
+    - Columna F: Teléfono
+    - Columna G: Email
+    - Columna K: Industria 1
+    - Columna L: Empresa 1
+    - Columna M: Industria 2
+    - Columna N: Empresa 2
+    - Columna O: Industria 3
+    - Columna P: Empresa 3
+    - Columna X: Fecha cumpleaños (DD-MMM)
+    - Columna Y: Profesión/Actividad (PRIORIDAD para búsqueda)
+    """
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         
@@ -2603,18 +2619,15 @@ def buscar_profesionales(query):
         if not creds_json:
             return (
                 "❌ **Base de datos de profesionales no configurada**\n\n"
-                "La conexión a Google Drive no está activa.\n\n"
                 "💡 **Alternativas:**\n"
                 "• Pregunta en el grupo si alguien conoce un profesional\n"
-                "• Usa /buscar_ia [profesión] para buscar en el historial del grupo\n"
-                "• Contacta al administrador para configurar Google Drive"
+                "• Usa /buscar_ia [profesión] para buscar en el historial"
             )
         
         try:
             creds_dict = json.loads(creds_json)
         except json.JSONDecodeError:
-            logger.error("Error parseando GOOGLE_DRIVE_CREDS JSON")
-            return "❌ Error en credenciales de Google Drive. Contacta al administrador."
+            return "❌ Error en credenciales de Google Drive."
         
         scope = ['https://www.googleapis.com/auth/drive.readonly']
         
@@ -2622,12 +2635,12 @@ def buscar_profesionales(query):
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             access_token = creds.get_access_token().access_token
         except Exception as e:
-            logger.error(f"Error obteniendo token Google Drive: {e}")
+            logger.error(f"Error token Google Drive: {e}")
             return "❌ Error de autenticación con Google Drive."
         
         headers = {'Authorization': f'Bearer {access_token}'}
         
-        # Buscar archivo específico "BD Grupo Laboral"
+        # Buscar archivo "BD Grupo Laboral"
         search_url = "https://www.googleapis.com/drive/v3/files"
         params = {
             'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
@@ -2637,24 +2650,22 @@ def buscar_profesionales(query):
         response = requests.get(search_url, headers=headers, params=params, timeout=30)
         
         if response.status_code != 200:
-            logger.error(f"Error Google Drive API: {response.status_code}")
             return "❌ Error conectando con Google Drive."
         
         archivos = response.json().get('files', [])
         
-        # Si no encuentra el archivo específico, buscar cualquier Excel
         if not archivos:
             params['q'] = "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
             response = requests.get(search_url, headers=headers, params=params, timeout=30)
             archivos = response.json().get('files', [])
         
         if not archivos:
-            return "❌ No se encontró base de datos de profesionales en Google Drive."
+            return "❌ No se encontró base de datos de profesionales."
         
-        # Descargar el archivo
+        # Descargar Excel
         file_id = archivos[0]['id']
         file_name = archivos[0]['name']
-        logger.info(f"Leyendo archivo: {file_name}")
+        logger.info(f"Leyendo: {file_name}")
         
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
         response = requests.get(download_url, headers=headers, timeout=60)
@@ -2662,66 +2673,49 @@ def buscar_profesionales(query):
         if response.status_code != 200:
             return "❌ Error descargando base de datos."
         
-        # Leer Excel
-        df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
+        # Leer Excel SIN modificar nombres de columnas
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
         
-        logger.info(f"Columnas originales: {list(df.columns)}")
+        logger.info(f"Columnas: {list(df.columns)[:15]}")
         logger.info(f"Total filas: {len(df)}")
         
-        # COLUMNA K (índice 10) = Industria/Área profesional
-        # Mapear columnas por posición y nombre
-        col_industria = None
+        # MAPEO POR ÍNDICE DE COLUMNAS (0-based):
+        # C=2, D=3, F=5, G=6, K=10, L=11, M=12, N=13, O=14, P=15, X=23, Y=24
         
-        # Primero intentar por índice (columna K = índice 10)
-        if len(df.columns) > 10:
-            col_industria = df.columns[10]
-            logger.info(f"Columna K (industria): {col_industria}")
+        def get_col(row, idx):
+            """Obtiene valor de columna por índice, limpiando nulos"""
+            try:
+                val = row.iloc[idx] if idx < len(row) else ''
+                val = str(val).strip()
+                if val.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
+                    return ''
+                return val
+            except:
+                return ''
         
-        # Normalizar nombres de columnas
-        df.columns = df.columns.str.strip().str.lower()
-        
-        # Mapear otras columnas
-        col_nombre = next((c for c in df.columns if any(x in c.lower() for x in ['nombre', 'name', 'integrante'])), df.columns[0] if len(df.columns) > 0 else None)
-        col_email = next((c for c in df.columns if any(x in c.lower() for x in ['email', 'correo', 'mail'])), None)
-        col_telefono = next((c for c in df.columns if any(x in c.lower() for x in ['teléfono', 'telefono', 'fono', 'celular', 'whatsapp'])), None)
-        col_empresa = next((c for c in df.columns if any(x in c.lower() for x in ['empresa', 'company', 'compañía'])), None)
-        col_linkedin = next((c for c in df.columns if 'linkedin' in c.lower()), None)
-        
-        # Actualizar col_industria al nombre normalizado
-        if col_industria:
-            col_industria = col_industria.strip().lower()
-        
-        # Si no hay industria por índice, buscar por nombre
-        if not col_industria or col_industria not in df.columns:
-            col_industria = next((c for c in df.columns if any(x in c for x in ['industria', 'área', 'area', 'profesión', 'profesion', 'rubro', 'sector', 'especialidad'])), None)
-        
-        if not col_nombre:
-            return f"❌ No se encontró columna de nombres.\nColumnas: {', '.join(df.columns[:10])}"
-        
-        # Sinónimos y carreras afines para búsqueda semántica
+        # Sinónimos para búsqueda semántica
         SINONIMOS = {
             'corredor': ['corredor', 'broker', 'agente', 'inmobiliario', 'bienes raíces', 'propiedades', 'real estate'],
             'contador': ['contador', 'contabilidad', 'auditor', 'tributario', 'contable', 'finanzas'],
-            'abogado': ['abogado', 'legal', 'jurídico', 'derecho', 'leyes', 'lawyer', 'attorney'],
-            'ingeniero': ['ingeniero', 'ingeniería', 'engineering', 'técnico', 'engineer'],
+            'abogado': ['abogado', 'legal', 'jurídico', 'derecho', 'leyes', 'lawyer'],
+            'ingeniero': ['ingeniero', 'ingeniería', 'engineering', 'técnico'],
             'diseñador': ['diseñador', 'diseño', 'design', 'gráfico', 'ux', 'ui', 'creativo'],
             'marketing': ['marketing', 'mercadeo', 'publicidad', 'ventas', 'comercial', 'digital', 'growth'],
-            'recursos humanos': ['rrhh', 'recursos humanos', 'hr', 'people', 'talento', 'selección', 'gestión personas'],
+            'recursos humanos': ['rrhh', 'recursos humanos', 'hr', 'people', 'talento', 'selección'],
             'tecnología': ['tecnología', 'ti', 'it', 'sistemas', 'software', 'desarrollo', 'programador', 'developer'],
-            'salud': ['salud', 'médico', 'doctor', 'enfermero', 'clínica', 'hospital', 'healthcare'],
+            'salud': ['salud', 'médico', 'doctor', 'enfermero', 'clínica', 'hospital'],
             'educación': ['educación', 'profesor', 'docente', 'capacitador', 'coach', 'formador'],
-            'construcción': ['construcción', 'arquitecto', 'ingeniero civil', 'obra', 'edificación'],
-            'finanzas': ['finanzas', 'financiero', 'banca', 'inversiones', 'economía', 'finance'],
-            'logística': ['logística', 'supply chain', 'transporte', 'distribución', 'bodega', 'operaciones'],
+            'construcción': ['construcción', 'arquitecto', 'ingeniero civil', 'obra'],
+            'finanzas': ['finanzas', 'financiero', 'banca', 'inversiones', 'economía'],
+            'logística': ['logística', 'supply chain', 'transporte', 'distribución', 'bodega'],
             'administración': ['administración', 'administrador', 'gerente', 'gestión', 'manager', 'director'],
-            'seguros': ['seguros', 'corredor de seguros', 'insurance', 'asegurador', 'póliza'],
-            'retail': ['retail', 'comercio', 'tienda', 'ventas', 'store'],
-            'minería': ['minería', 'mining', 'minero', 'recursos naturales'],
-            'agricultura': ['agricultura', 'agrícola', 'agro', 'campo', 'farming'],
-            'consultoría': ['consultoría', 'consultor', 'consulting', 'asesor', 'advisory'],
+            'seguros': ['seguros', 'corredor de seguros', 'insurance', 'asegurador'],
+            'consultoría': ['consultoría', 'consultor', 'consulting', 'asesor', 'asesoría', 'advisory'],
+            'ventas': ['ventas', 'vendedor', 'ejecutivo comercial', 'sales', 'comercial'],
+            'importaciones': ['importaciones', 'exportaciones', 'comercio exterior', 'aduanas', 'comex'],
         }
         
-        # Expandir palabras de búsqueda con sinónimos
+        # Expandir búsqueda con sinónimos
         query_lower = query.lower().strip()
         palabras_busqueda = set([query_lower])
         
@@ -2730,65 +2724,81 @@ def buscar_profesionales(query):
                 palabras_busqueda.update(sinonimos)
         
         palabras_busqueda = list(palabras_busqueda)
-        logger.info(f"Palabras de búsqueda expandidas: {palabras_busqueda[:10]}")
         
-        # Crear lista de profesionales
+        # Procesar cada fila
         profesionales = []
         for idx, row in df.iterrows():
-            nombre = str(row.get(col_nombre, '')).strip() if col_nombre else ''
-            industria = str(row.get(col_industria, '')).strip() if col_industria else ''
-            email = str(row.get(col_email, '')).strip() if col_email else ''
-            telefono = str(row.get(col_telefono, '')).strip() if col_telefono else ''
-            empresa = str(row.get(col_empresa, '')).strip() if col_empresa else ''
-            linkedin = str(row.get(col_linkedin, '')).strip() if col_linkedin else ''
+            # Datos de contacto
+            nombre = get_col(row, 2)      # Columna C
+            apellido = get_col(row, 3)    # Columna D
+            telefono = get_col(row, 5)    # Columna F
+            email = get_col(row, 6)       # Columna G
             
-            # Limpiar valores nulos
-            def limpiar(val):
-                return val if val.lower() not in ['nan', 'none', '', 'null', 'n/a', '-'] else ''
+            # Profesión/Actividad (PRIORIDAD)
+            profesion = get_col(row, 24)  # Columna Y
             
-            nombre = limpiar(nombre)
-            industria = limpiar(industria)
-            email = limpiar(email)
-            telefono = limpiar(telefono)
-            empresa = limpiar(empresa)
-            linkedin = limpiar(linkedin)
+            # Industrias y empresas
+            industria1 = get_col(row, 10)  # Columna K
+            empresa1 = get_col(row, 11)    # Columna L
+            industria2 = get_col(row, 12)  # Columna M
+            empresa2 = get_col(row, 13)    # Columna N
+            industria3 = get_col(row, 14)  # Columna O
+            empresa3 = get_col(row, 15)    # Columna P
             
-            if nombre:
-                profesionales.append({
-                    'nombre': nombre,
-                    'industria': industria or 'No especificada',
-                    'email': email,
-                    'telefono': telefono,
-                    'empresa': empresa,
-                    'linkedin': linkedin
-                })
+            # Nombre completo
+            nombre_completo = f"{nombre} {apellido}".strip()
+            
+            if not nombre_completo or nombre_completo == ' ':
+                continue
+            
+            # Crear texto para búsqueda (prioridad: profesión Y, luego industrias)
+            texto_busqueda = f"{profesion} {industria1} {industria2} {industria3}".lower()
+            
+            profesionales.append({
+                'nombre': nombre_completo,
+                'telefono': telefono,
+                'email': email,
+                'profesion': profesion,
+                'industria1': industria1,
+                'empresa1': empresa1,
+                'industria2': industria2,
+                'empresa2': empresa2,
+                'industria3': industria3,
+                'empresa3': empresa3,
+                'texto_busqueda': texto_busqueda
+            })
         
         if not profesionales:
             return "❌ La base de datos está vacía."
         
-        logger.info(f"Total profesionales cargados: {len(profesionales)}")
+        logger.info(f"Total profesionales: {len(profesionales)}")
         
-        # Búsqueda con scoring semántico
+        # Búsqueda con scoring
         encontrados = []
         for p in profesionales:
             score = 0
-            texto_buscar = f"{p['nombre']} {p['industria']} {p['empresa']}".lower()
+            texto = p['texto_busqueda']
             
             for palabra in palabras_busqueda:
                 if len(palabra) > 2:
-                    # Coincidencia exacta = más puntos
-                    if palabra in p['industria'].lower():
+                    # Coincidencia en profesión (col Y) = máxima prioridad
+                    if palabra in p['profesion'].lower():
+                        score += 150
+                    # Coincidencia en industria 1 (col K)
+                    if palabra in p['industria1'].lower():
                         score += 100
+                    # Coincidencia en industria 2 (col M)
+                    if palabra in p['industria2'].lower():
+                        score += 80
+                    # Coincidencia en industria 3 (col O)
+                    if palabra in p['industria3'].lower():
+                        score += 60
+                    # Coincidencia en nombre
                     if palabra in p['nombre'].lower():
-                        score += 50
-                    if palabra in p['empresa'].lower():
-                        score += 30
-                    
+                        score += 40
                     # Coincidencia parcial
-                    for term in texto_buscar.split():
-                        if len(term) > 3:
-                            if palabra in term or term in palabra:
-                                score += 10
+                    if palabra in texto:
+                        score += 20
             
             if score > 0:
                 encontrados.append((p, score))
@@ -2798,19 +2808,28 @@ def buscar_profesionales(query):
         encontrados = [e[0] for e in encontrados]
         
         if not encontrados:
-            # Mostrar industrias disponibles
-            industrias = list(set([p['industria'] for p in profesionales if p['industria'] != 'No especificada']))
+            # Mostrar profesiones disponibles
+            profesiones = list(set([p['profesion'] for p in profesionales if p['profesion']]))
+            industrias = list(set([p['industria1'] for p in profesionales if p['industria1']]))
+            
             msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
             msg += f"📊 Total en BD: {len(profesionales)} profesionales\n\n"
+            
+            if profesiones:
+                msg += "💡 **Algunas profesiones (col Y):**\n"
+                for p in sorted(profesiones)[:10]:
+                    msg += f"• {p}\n"
+            
             if industrias:
-                msg += "💡 **Áreas/Industrias disponibles:**\n"
-                for ind in sorted(industrias)[:15]:
-                    msg += f"• {ind}\n"
+                msg += "\n💼 **Algunas industrias (col K):**\n"
+                for i in sorted(industrias)[:10]:
+                    msg += f"• {i}\n"
+            
             return msg
         
-        # Formatear resultados elegantes
+        # Formatear resultados
         resultado = "━" * 30 + "\n"
-        resultado += f"👥 **PROFESIONALES ENCONTRADOS**\n"
+        resultado += "👥 **PROFESIONALES ENCONTRADOS**\n"
         resultado += "━" * 30 + "\n\n"
         resultado += f"🔍 **Búsqueda:** _{query}_\n"
         resultado += f"📊 **Resultados:** {len(encontrados)} de {len(profesionales)}\n\n"
@@ -2818,16 +2837,30 @@ def buscar_profesionales(query):
         
         for i, prof in enumerate(encontrados[:10], 1):
             resultado += f"**{i}. {prof['nombre']}**\n"
-            if prof['industria'] != 'No especificada':
-                resultado += f"   🎯 {prof['industria']}\n"
-            if prof['empresa']:
-                resultado += f"   🏢 {prof['empresa']}\n"
-            if prof['email']:
-                resultado += f"   📧 {prof['email']}\n"
+            
+            # Mostrar profesión si existe
+            if prof['profesion']:
+                resultado += f"   🎯 {prof['profesion']}\n"
+            
+            # Mostrar industrias y empresas
+            if prof['industria1']:
+                linea = f"   💼 {prof['industria1']}"
+                if prof['empresa1']:
+                    linea += f" ({prof['empresa1']})"
+                resultado += linea + "\n"
+            
+            if prof['industria2']:
+                linea = f"   💼 {prof['industria2']}"
+                if prof['empresa2']:
+                    linea += f" ({prof['empresa2']})"
+                resultado += linea + "\n"
+            
+            # Contacto
             if prof['telefono']:
                 resultado += f"   📱 {prof['telefono']}\n"
-            if prof['linkedin']:
-                resultado += f"   🔗 [LinkedIn]({prof['linkedin']})\n"
+            if prof['email']:
+                resultado += f"   📧 {prof['email']}\n"
+            
             resultado += "\n"
         
         if len(encontrados) > 10:
@@ -2841,7 +2874,159 @@ def buscar_profesionales(query):
         return "❌ Módulo oauth2client no instalado."
     except Exception as e:
         logger.error(f"Error buscar_profesionales: {e}")
-        return f"❌ Error buscando profesionales.\n\nDetalle: {str(e)[:150]}"
+        return f"❌ Error: {str(e)[:150]}"
+
+
+# ==================== SISTEMA DE CUMPLEAÑOS ====================
+
+def obtener_cumpleanos_hoy():
+    """
+    Obtiene los cumpleaños del día desde el Excel de Google Drive.
+    Columna X = Fecha cumpleaños (formato DD-MMM, ej: 15-Ene)
+    """
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        # Buscar archivo
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            'fields': 'files(id, name)'
+        }
+        
+        response = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = response.json().get('files', [])
+        
+        if not archivos:
+            return None
+        
+        # Descargar Excel
+        file_id = archivos[0]['id']
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        response = requests.get(download_url, headers=headers, timeout=60)
+        
+        if response.status_code != 200:
+            return None
+        
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
+        
+        # Fecha de hoy
+        hoy = datetime.now()
+        dia_hoy = hoy.day
+        mes_hoy = hoy.month
+        
+        # Mapeo de meses en español
+        MESES = {
+            'ene': 1, 'feb': 2, 'mar': 3, 'abr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'ago': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dic': 12,
+            'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
+            'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12
+        }
+        
+        cumpleaneros = []
+        
+        for idx, row in df.iterrows():
+            try:
+                # Columna X = índice 23
+                fecha_cumple = row.iloc[23] if len(row) > 23 else None
+                
+                if pd.isna(fecha_cumple) or not fecha_cumple:
+                    continue
+                
+                fecha_str = str(fecha_cumple).strip().lower()
+                
+                # Intentar parsear diferentes formatos
+                dia_cumple = None
+                mes_cumple = None
+                
+                # Formato DD-MMM (ej: 15-Ene)
+                if '-' in fecha_str:
+                    partes = fecha_str.split('-')
+                    if len(partes) >= 2:
+                        try:
+                            dia_cumple = int(partes[0])
+                            mes_str = partes[1].strip()[:3]
+                            mes_cumple = MESES.get(mes_str)
+                        except:
+                            pass
+                
+                # Formato DD/MM
+                elif '/' in fecha_str:
+                    partes = fecha_str.split('/')
+                    if len(partes) >= 2:
+                        try:
+                            dia_cumple = int(partes[0])
+                            mes_cumple = int(partes[1])
+                        except:
+                            pass
+                
+                # Verificar si es hoy
+                if dia_cumple == dia_hoy and mes_cumple == mes_hoy:
+                    nombre = str(row.iloc[2]).strip() if len(row) > 2 else ''  # Columna C
+                    apellido = str(row.iloc[3]).strip() if len(row) > 3 else ''  # Columna D
+                    
+                    if nombre and nombre.lower() not in ['nan', 'none', '']:
+                        nombre_completo = f"{nombre} {apellido}".strip()
+                        cumpleaneros.append(nombre_completo)
+                        
+            except Exception as e:
+                continue
+        
+        return cumpleaneros
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo cumpleaños: {e}")
+        return None
+
+
+async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
+    """Tarea programada para enviar felicitaciones de cumpleaños a las 8:00 AM"""
+    try:
+        cumpleaneros = obtener_cumpleanos_hoy()
+        
+        if not cumpleaneros:
+            logger.info("No hay cumpleaños hoy")
+            return
+        
+        # Crear mensaje de cumpleaños
+        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        
+        mensaje = "🎂🎉 **¡CUMPLEAÑOS DEL DÍA!** 🎉🎂\n"
+        mensaje += "━" * 30 + "\n"
+        mensaje += f"📅 {fecha_hoy}\n\n"
+        
+        mensaje += "🥳 ¡Hoy celebramos a:\n\n"
+        
+        for nombre in cumpleaneros:
+            mensaje += f"🎈 **{nombre}**\n"
+        
+        mensaje += "\n━" * 30 + "\n"
+        mensaje += "💐 ¡Felicidades! Les deseamos un excelente día.\n\n"
+        mensaje += "👉 _Saluda a los cumpleañeros en el tema 'Cumpleaños, Eventos y Efemérides'_"
+        
+        # Enviar al grupo
+        # NOTA: Necesitarás configurar el ID del tema de cumpleaños
+        # Por ahora enviamos al grupo principal
+        if COFRADIA_GROUP_ID:
+            await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID,
+                text=mensaje,
+                parse_mode='Markdown'
+            )
+            logger.info(f"✅ Enviado mensaje de cumpleaños: {len(cumpleaneros)} cumpleañeros")
+        
+    except Exception as e:
+        logger.error(f"Error enviando cumpleaños: {e}")
 
 
 # ==================== MAIN ====================
@@ -2956,6 +3141,19 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
+    
+    # Programar tarea de cumpleaños diaria a las 8:00 AM (hora Chile)
+    job_queue = application.job_queue
+    if job_queue:
+        # Configurar para las 8:00 AM hora Chile (UTC-3 o UTC-4)
+        # Usamos 12:00 UTC que es 8:00 AM en Chile (horario de verano)
+        from datetime import time as dt_time
+        job_queue.run_daily(
+            enviar_cumpleanos_diario,
+            time=dt_time(hour=12, minute=0, second=0),  # 12:00 UTC = 8:00 Chile
+            name='cumpleanos_diario'
+        )
+        logger.info("🎂 Tarea de cumpleaños programada para las 8:00 AM")
     
     logger.info("✅ Bot iniciado!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
