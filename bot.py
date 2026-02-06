@@ -1140,68 +1140,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start - Bienvenida"""
     user = update.message.from_user
     
-    mensaje = f"""
-🎉 **¡Bienvenido/a {user.first_name} al Bot Cofradía Premium!**
+    # Enviar SIN parse_mode para evitar errores con guiones bajos
+    mensaje = f"""🎉 Bienvenido/a {user.first_name} al Bot Cofradia Premium!
 
-━━━━━━━━━━━━━━━━━━━━
-📌 **¿CÓMO EMPEZAR?**
-━━━━━━━━━━━━━━━━━━━━
+============================
+📌 COMO EMPEZAR?
+============================
 
-**PASO 1️⃣** → Ve al grupo @Cofradia_de_Networking
-**PASO 2️⃣** → Escribe: /registrarse (¡Sólo si no lo has hecho!)
-**PASO 3️⃣** → ¡Listo! Ahora puedo asistirte
+PASO 1️⃣ Ve al grupo @CofradiadeNetworking
+PASO 2️⃣ Escribe: /registrarse
+PASO 3️⃣ Listo! Ahora puedo asistirte
 
-━━━━━━━━━━━━━━━━━━━━
-🛠️ **¿QUÉ PUEDO HACER?**
-━━━━━━━━━━━━━━━━━━━━
+============================
+🛠️ QUE PUEDO HACER?
+============================
 
-🔍 Buscar información → /buscar o /buscar_ia
-👥 Encontrar profesionales → /buscar_profesional
-💼 Buscar empleos → /empleo
-📊 Ver estadísticas → /graficos
-📝 Resúmenes diarios → /resumen
-🤖 Preguntarme → @Cofradia_Premium_Bot + pregunta
+🔍 Buscar informacion - /buscar o /buscar_ia
+👥 Encontrar profesionales - /buscar_profesional
+💼 Buscar empleos - /empleo
+📊 Ver estadisticas - /graficos
+📝 Resumenes diarios - /resumen
+🤖 Preguntarme - @Cofradia_Premium_Bot + pregunta
 
 Escribe /ayuda para ver todos los comandos.
-🚀 **¡Regístrate en el grupo para comenzar!**
+🚀 Registrate en el grupo para comenzar!
 """
-    await update.message.reply_text(mensaje, parse_mode='Markdown')
+    await update.message.reply_text(mensaje)
 
 
 @solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos (SOLO EN PRIVADO)"""
-    texto = """
-📚 **COMANDOS DISPONIBLES**
-━━━━━━━━━━━━━━━━━━━━
+    # Enviar SIN parse_mode para evitar errores con guiones bajos
+    texto = """📚 COMANDOS DISPONIBLES
+============================
 
-🔍 **BÚSQUEDA**
-/buscar [texto] - Buscar en historial del grupo
-/buscar_ia [consulta] - Búsqueda inteligente con IA
-/buscar_profesional [área] - Buscar profesionales
-/empleo [cargo] - Buscar empleos reales
+🔍 BUSQUEDA
+/buscar [texto] - Buscar en historial
+/buscar_ia [consulta] - Busqueda con IA
+/buscar_profesional [area] - Buscar profesionales
+/empleo [cargo] - Buscar empleos
 
-📊 **ESTADÍSTICAS**
-/graficos - Ver gráficos de actividad
-/estadisticas - Estadísticas generales
-/kpis - Dashboard de métricas
-/categorias - Categorías de mensajes
-/top_usuarios - Ranking de participación
+📊 ESTADISTICAS
+/graficos - Ver graficos de actividad
+/estadisticas - Estadisticas generales
+/categorias - Categorias de mensajes
+/top_usuarios - Ranking de participacion
 /mi_perfil - Tu perfil de actividad
 
-📋 **RESÚMENES**
-/resumen - Resumen del día
-/resumen_semanal - Resumen de 7 días
+📋 RESUMENES
+/resumen - Resumen del dia
+/resumen_semanal - Resumen de 7 dias
 /resumen_mes - Resumen mensual
 
-👥 **GRUPO**
+👥 GRUPO
 /dotacion - Total de integrantes
 
-━━━━━━━━━━━━━━━━━━━━
-💡 **TIP:** Mencióname en el grupo con tu pregunta:
-`@Cofradia_Premium_Bot ¿tu pregunta?`
+============================
+💡 TIP: Mencioname en el grupo:
+@Cofradia_Premium_Bot tu pregunta?
 """
-    await update.message.reply_text(texto, parse_mode='Markdown')
+    await update.message.reply_text(texto)
 
 
 async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2349,7 +2348,7 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /resumen - Resumen del día (mejorado y atractivo)"""
+    """Comando /resumen - Resumen del día"""
     msg = await update.message.reply_text("📝 Generando resumen del día...")
     
     try:
@@ -2363,7 +2362,6 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hora_actual = datetime.now().strftime("%H:%M")
         
         if DATABASE_URL:
-            # Mensajes de hoy
             c.execute("""SELECT first_name, message, topic_id, categoria FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
                         ORDER BY fecha DESC LIMIT 50""")
@@ -2375,19 +2373,16 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
             usuarios_hoy = c.fetchone()['total']
             
-            # Top usuarios de hoy
             c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
                         GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
             top_hoy = [(r['first_name'], r['msgs']) for r in c.fetchall()]
             
-            # Categorías de hoy
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE AND categoria IS NOT NULL
                         GROUP BY categoria ORDER BY total DESC LIMIT 5""")
             categorias_hoy = [(r['categoria'], r['total']) for r in c.fetchall()]
             
-            # Total histórico
             c.execute("SELECT COUNT(*) as total FROM mensajes")
             total_historico = c.fetchone()['total']
         else:
@@ -2417,60 +2412,70 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         conn.close()
         
-        # Construir resumen atractivo
-        mensaje = "━" * 30 + "\n"
-        mensaje += "📰 **RESUMEN DEL DÍA**\n"
-        mensaje += "━" * 30 + "\n\n"
-        mensaje += f"📅 **Fecha:** {fecha_hoy}\n"
-        mensaje += f"🕐 **Hora:** {hora_actual}\n\n"
-        
-        mensaje += "📊 **ACTIVIDAD DE HOY**\n"
+        # Construir resumen SIN parse_mode para evitar errores
+        mensaje = "=" * 28 + "\n"
+        mensaje += "📰 RESUMEN DEL DIA\n"
+        mensaje += "=" * 28 + "\n\n"
+        mensaje += f"📅 Fecha: {fecha_hoy}\n"
+        mensaje += f"🕐 Hora: {hora_actual}\n\n"
+        mensaje += "📊 ACTIVIDAD DE HOY\n"
         mensaje += f"   💬 Mensajes: {total_hoy}\n"
         mensaje += f"   👥 Usuarios activos: {usuarios_hoy}\n\n"
         
         if top_hoy:
-            mensaje += "🏆 **MÁS ACTIVOS HOY**\n"
-            medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
+            mensaje += "🏆 MAS ACTIVOS HOY\n"
+            medallas = ['🥇', '🥈', '🥉', '4.', '5.']
             for i, item in enumerate(top_hoy[:5]):
-                nombre = item[0] if isinstance(item, tuple) else item['first_name']
-                msgs = item[1] if isinstance(item, tuple) else item['msgs']
-                mensaje += f"   {medallas[i]} {nombre}: {msgs} msgs\n"
+                nombre = item[0] if isinstance(item, tuple) else item.get('first_name', '')
+                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
+                if nombre:
+                    nombre_limpio = str(nombre).replace('_', ' ')
+                    mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs} msgs\n"
             mensaje += "\n"
         
         if categorias_hoy:
-            mensaje += "🏷️ **TEMAS DEL DÍA**\n"
-            emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
-                     'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+            mensaje += "🏷️ TEMAS DEL DIA\n"
             for cat, count in categorias_hoy[:5]:
-                emoji = emojis.get(cat, '📌')
-                mensaje += f"   {emoji} {cat}: {count}\n"
+                if cat:
+                    mensaje += f"   📌 {cat}: {count}\n"
             mensaje += "\n"
         
         # Usar IA para generar insights si hay mensajes
         if ia_disponible and mensajes_hoy and total_hoy > 0:
-            contexto = "\n".join([f"- {m[0] if isinstance(m, tuple) else m['first_name']}: {(m[1] if isinstance(m, tuple) else m['message'])[:80]}" for m in mensajes_hoy[:15]])
-            
-            prompt = f"""Analiza estos mensajes del grupo Cofradía de Networking de hoy y genera 3 insights breves:
+            try:
+                contexto = ""
+                for m in mensajes_hoy[:10]:
+                    nombre = m[0] if isinstance(m, tuple) else m.get('first_name', '')
+                    texto = m[1] if isinstance(m, tuple) else m.get('message', '')
+                    if nombre and texto:
+                        texto_limpio = str(texto)[:50].replace('_', ' ')
+                        contexto += f"- {nombre}: {texto_limpio}\n"
+                
+                if contexto:
+                    prompt = f"""Analiza brevemente estos mensajes del grupo:
 {contexto}
 
-Responde SOLO con 3 bullets cortos sobre temas/tendencias del día. Sin introducción."""
-            
-            insights = llamar_groq(prompt, max_tokens=200, temperature=0.3)
-            
-            if insights:
-                mensaje += "💡 **INSIGHTS DEL DÍA**\n"
-                mensaje += insights + "\n\n"
+Responde con 2 puntos muy cortos sobre los temas del dia. Maximo 30 palabras."""
+                    
+                    insights = llamar_groq(prompt, max_tokens=100, temperature=0.3)
+                    
+                    if insights:
+                        insights_limpio = insights.replace('_', ' ').replace('*', '')
+                        mensaje += "💡 INSIGHTS\n"
+                        mensaje += insights_limpio + "\n\n"
+            except Exception as e:
+                logger.error(f"Error generando insights: {e}")
         
-        mensaje += "━" * 30 + "\n"
-        mensaje += f"📈 **Total histórico:** {total_historico:,} mensajes\n"
-        mensaje += "━" * 30
+        mensaje += "=" * 28 + "\n"
+        mensaje += f"📈 Total historico: {total_historico:,} mensajes"
         
-        await msg.edit_text(mensaje, parse_mode='Markdown')
+        # Enviar SIN parse_mode para evitar errores de Markdown
+        await msg.edit_text(mensaje)
         registrar_servicio_usado(update.effective_user.id, 'resumen')
         
     except Exception as e:
         logger.error(f"Error en resumen: {e}")
-        await msg.edit_text(f"❌ Error generando resumen: {str(e)[:50]}")
+        await msg.edit_text(f"Error generando resumen. Intenta de nuevo.")
 
 
 @requiere_suscripcion
