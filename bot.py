@@ -355,14 +355,14 @@ def init_db():
                 c2 = conn.cursor()
                 if DATABASE_URL:
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = %s""", (str(OWNER_ID),))
+                                WHERE user_id = %s""", (OWNER_ID,))
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = %s""", (str(OWNER_ID),))
+                                WHERE user_id = %s""", (OWNER_ID,))
                 else:
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = ?""", (str(OWNER_ID),))
+                                WHERE user_id = ?""", (OWNER_ID,))
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = ?""", (str(OWNER_ID),))
+                                WHERE user_id = ?""", (OWNER_ID,))
                 conn.commit()
                 logger.info("✅ Registros del owner verificados/corregidos")
         except Exception as e:
@@ -1355,8 +1355,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 TIP: Mencioname en el grupo:
 @Cofradia_Premium_Bot tu pregunta?
 """
-    # Agregar sección RAG solo para el owner/admin
-    if user_id == OWNER_ID:
+    # Agregar sección RAG solo para el owner en chat privado
+    if user_id == OWNER_ID and es_chat_privado(update):
         texto += """
 🧠 RAG - DOCUMENTOS (ADMIN)
 /subir_pdf - Subir PDF al sistema RAG
@@ -1605,7 +1605,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
             por_dia = c.fetchall()
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
                         GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10""")
@@ -1622,7 +1622,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio,))
             por_dia = c.fetchall()
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as count FROM mensajes 
                         WHERE fecha >= ? GROUP BY user_id ORDER BY count DESC LIMIT 10""", (fecha_inicio,))
             usuarios_activos = c.fetchall()
@@ -2598,13 +2598,13 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         c = conn.cursor()
         
         if DATABASE_URL:
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = c.fetchall()
             top = [(r['nombre_completo'].strip(), r['msgs']) for r in top]
         else:
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = [(r[0].strip() if isinstance(r, tuple) else r['nombre_completo'].strip(), 
@@ -2763,7 +2763,7 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
             usuarios_hoy = c.fetchone()['total']
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
@@ -2788,7 +2788,7 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
@@ -2880,7 +2880,7 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
@@ -2907,7 +2907,7 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio_str,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= ? GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fecha_inicio_str,))
             top = c.fetchall()
@@ -3035,7 +3035,7 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
@@ -3054,7 +3054,7 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= ? GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fecha_inicio,))
             top = c.fetchall()
@@ -5171,7 +5171,7 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             usuarios_hoy = c.fetchone()['total']
             
             # Top usuarios del día
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
@@ -5200,7 +5200,7 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
+            c.execute("""SELECT MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
                         GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
