@@ -1576,7 +1576,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             por_categoria = [(r['categoria'], r['count']) for r in por_categoria] if por_categoria else []
         else:
             por_dia = [(r[0], r[1]) for r in por_dia] if por_dia else []
-            usuarios_activos = [(r[0].strip() if r[0] else 'Anon', r[1]) for r in usuarios_activos] if usuarios_activos else []
+            usuarios_activos = [(r[0].strip() if r[0] else 'Sin Nombre', r[1]) for r in usuarios_activos] if usuarios_activos else []
             por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
         
         if not por_dia and not usuarios_activos:
@@ -1596,9 +1596,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"No se pudo obtener datos de Drive para graficos: {e}")
         
-        # Crear gráfico - layout dinámico: 4x2 con Drive, 2x2 sin Drive
+        # Crear gráfico - layout dinámico: 3x2 con Drive, 2x2 sin Drive
         if drive_data is not None and len(drive_data) > 0:
-            fig, axes = plt.subplots(4, 2, figsize=(16, 22))
+            fig, axes = plt.subplots(3, 2, figsize=(16, 18))
             fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=18, fontweight='bold', y=0.99)
         else:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -1653,8 +1653,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ===== Gráfico 2: Usuarios más activos con etiquetas =====
         ax2 = axes[0, 1]
         if usuarios_activos:
-            nombres = [str(u[0])[:18].replace('_', ' ').strip() if u[0] else 'Anon' for u in usuarios_activos[:8]]
-            nombres = [n if n.lower() not in ['group', 'grupo', 'anónimo', ''] else 'Anónimo' for n in nombres]
+            nombres = [str(u[0])[:25].replace('_', ' ').strip() if u[0] else 'Sin Nombre' for u in usuarios_activos[:8]]
             mensajes_u = [u[1] for u in usuarios_activos[:8]]
             colors_bar = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
             bars = ax2.barh(nombres, mensajes_u, color=colors_bar, edgecolor='white')
@@ -1717,29 +1716,45 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ax4.text(0.05, 0.5, resumen_texto, fontsize=11, verticalalignment='center',
                 fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
         
-        # ===== Gráficos 5-8: Solo si hay datos de Drive =====
+        # ===== Gráficos 5-6: Solo si hay datos de Drive =====
         if drive_data is not None and len(drive_data) > 0:
             
             # ===== Gráfico 5: Distribución por Situación Laboral (col I = idx 8) =====
             ax5 = axes[2, 0]
             try:
                 col_sit = drive_data.iloc[:, 8].dropna().astype(str)
-                col_sit = col_sit[~col_sit.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat'])]
+                # Filtrar valores basura y headers
+                col_sit = col_sit[~col_sit.str.lower().isin([
+                    'nan', 'none', '', 'n/a', '-', 'nat', 
+                    'situación laboral', 'situacion laboral'
+                ])]
+                
                 if len(col_sit) > 0:
-                    sit_counts = col_sit.value_counts().head(8)
-                    # Colores específicos por situación laboral (como el Excel)
-                    COLORES_SITUACION = {
-                        'Con Contrato': '#4472C4',
-                        'con contrato': '#4472C4',
-                        'Independiente': '#4472C4',
-                        'independiente': '#4472C4',
-                        'Búsqueda Laboral': '#4472C4',
-                        'busqueda laboral': '#4472C4',
-                        'Transición': '#4472C4',
-                        'transición': '#4472C4',
+                    # NORMALIZAR: agrupar case-insensitive
+                    NORMALIZACION_SITUACION = {
+                        'con contrato': 'Con Contrato',
+                        'con  contrato': 'Con Contrato',
+                        'independiente': 'Independiente',
+                        'búsqueda laboral': 'Búsqueda Laboral',
+                        'busqueda laboral': 'Búsqueda Laboral',
+                        'transición': 'Transición',
+                        'transicion': 'Transición',
+                        'cesante': 'Transición',
                     }
-                    # Usar degradé de azul uniforme como el Excel
-                    colores_sit = ['#4472C4'] * len(sit_counts)
+                    col_sit_norm = col_sit.str.strip().apply(
+                        lambda x: NORMALIZACION_SITUACION.get(x.lower().strip(), x.strip())
+                    )
+                    sit_counts = col_sit_norm.value_counts()
+                    
+                    # Colores por categoría (igual que el Excel)
+                    COLORES_SIT = {
+                        'Con Contrato': '#00B050',      # Verde
+                        'Independiente': '#FFD700',      # Amarillo
+                        'Búsqueda Laboral': '#FF0000',   # Rojo
+                        'Transición': '#BFBFBF',         # Gris
+                    }
+                    colores_sit = [COLORES_SIT.get(cat, '#4472C4') for cat in sit_counts.index]
+                    
                     bars5 = ax5.barh(sit_counts.index.tolist(), sit_counts.values.tolist(), 
                                     color=colores_sit, edgecolor='white', alpha=0.9)
                     for bar, val in zip(bars5, sit_counts.values):
@@ -1762,7 +1777,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 col_ind = col_ind[~col_ind.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat', 'industria_1'])]
                 if len(col_ind) > 0:
                     ind_counts = col_ind.value_counts().head(10)
-                    # Azul uniforme como el Excel de referencia
                     colores_ind = ['#4472C4'] * len(ind_counts)
                     bars6 = ax6.barh(ind_counts.index.tolist(), ind_counts.values.tolist(), 
                                     color=colores_ind, edgecolor='white', alpha=0.9)
@@ -1778,70 +1792,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Error graficando industrias: {e}")
                 ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
                 ax6.set_title('🏢 Top 10 Industrias')
-            
-            # ===== Gráfico 7: Número de Egresados por Año de Egreso =====
-            ax7 = axes[3, 0]
-            try:
-                # Auto-detectar columna de Año de Egreso
-                col_anio_idx = detectar_columna_anio_egreso(drive_data)
-                if col_anio_idx is not None:
-                    col_anio = pd.to_numeric(drive_data.iloc[:, col_anio_idx], errors='coerce').dropna()
-                    col_anio = col_anio[(col_anio >= 1960) & (col_anio <= 2026)].astype(int)
-                    if len(col_anio) > 0:
-                        anio_counts = col_anio.value_counts().sort_index()
-                        ax7.bar(anio_counts.index.tolist(), anio_counts.values.tolist(), 
-                               color='#4472C4', alpha=0.85, edgecolor='white', width=0.8)
-                        ax7.set_title('🎓 Numero de Egresados por Ano de Egreso', fontsize=11, fontweight='bold')
-                        ax7.set_xlabel('Ano de Egreso')
-                        ax7.set_ylabel('Numero de Egresados')
-                        ax7.tick_params(axis='x', rotation=45)
-                        # Reducir etiquetas en X si hay muchos años
-                        if len(anio_counts) > 15:
-                            ax7.set_xticks(ax7.get_xticks()[::3])
-                    else:
-                        ax7.text(0.5, 0.5, 'Sin datos de Ano de Egreso', ha='center', va='center')
-                        ax7.set_title('🎓 Ano de Egreso')
-                else:
-                    ax7.text(0.5, 0.5, 'Columna Ano de Egreso\nno detectada', ha='center', va='center', fontsize=10)
-                    ax7.set_title('🎓 Ano de Egreso')
-            except Exception as e:
-                logger.warning(f"Error graficando año de egreso: {e}")
-                ax7.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-                ax7.set_title('🎓 Ano de Egreso')
-            
-            # ===== Gráfico 8: Resumen adicional / Contactabilidad =====
-            ax8 = axes[3, 1]
-            ax8.axis('off')
-            try:
-                # Estadísticas adicionales del Drive
-                total_registros = len(drive_data)
-                
-                # Contar situaciones laborales
-                col_sit2 = drive_data.iloc[:, 8].dropna().astype(str)
-                col_sit2 = col_sit2[~col_sit2.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat'])]
-                
-                con_contrato = col_sit2.str.lower().str.contains('contrato', na=False).sum()
-                independiente = col_sit2.str.lower().str.contains('independiente', na=False).sum()
-                en_busqueda = col_sit2.str.lower().str.contains('busqueda|búsqueda', na=False).sum()
-                transicion = col_sit2.str.lower().str.contains('transici|cesante', na=False).sum()
-                
-                # Contar contactabilidad (col J = idx 9)
-                col_j = drive_data.iloc[:, 9].dropna().astype(str) if len(drive_data.columns) > 9 else pd.Series([])
-                desean_contacto = col_j.str.upper().str.contains('SI', na=False).sum()
-                
-                info = f"  📊 RESUMEN BD PROFESIONALES\n\n"
-                info += f"  👥 Total registros: {total_registros}\n\n"
-                info += f"  💼 Situacion Laboral:\n"
-                info += f"     ✅ Con Contrato: {con_contrato}\n"
-                info += f"     🟡 Independiente: {independiente}\n"
-                info += f"     🔍 Busqueda: {en_busqueda}\n"
-                info += f"     🔄 Transicion: {transicion}\n\n"
-                info += f"  📞 Desean contacto: {desean_contacto}\n"
-                
-                ax8.text(0.05, 0.5, info, fontsize=10, verticalalignment='center',
-                        fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='#E8F4FD', alpha=0.8))
-            except Exception as e:
-                ax8.text(0.5, 0.5, 'Sin datos adicionales', ha='center', va='center')
         
         plt.tight_layout()
         
@@ -2588,8 +2538,8 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         
         for i, (nombre, msgs) in enumerate(top):
             nombre_limpio = nombre.replace('_', ' ').strip()
-            if not nombre_limpio or nombre_limpio.lower() == 'group':
-                nombre_limpio = "Anónimo"
+            if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
+                nombre_limpio = "Usuario"
             mensaje += f"{medallas[i]} {nombre_limpio}: {msgs} mensajes\n"
         
         await update.message.reply_text(mensaje)
@@ -2789,8 +2739,8 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 if nombre:
                     nombre_limpio = str(nombre).replace('_', ' ').strip()
-                    if not nombre_limpio or nombre_limpio.lower() == 'group':
-                        nombre_limpio = "Anónimo"
+                    if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
+                        nombre_limpio = "Usuario"
                     mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs} msgs\n"
             mensaje += "\n"
         
@@ -2940,8 +2890,8 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() == 'group':
-                    nombre_limpio = "Anónimo"
+                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
+                    nombre_limpio = "Usuario"
                 mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
@@ -3061,8 +3011,8 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() == 'group':
-                    nombre_limpio = "Anónimo"
+                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
+                    nombre_limpio = "Usuario"
                 mensaje += f"  {i}. {nombre_limpio}: {msgs}\n"
         
         if cats:
@@ -5208,8 +5158,8 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() == 'group':
-                    nombre_limpio = "Anónimo"
+                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
+                    nombre_limpio = "Usuario"
                 mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
