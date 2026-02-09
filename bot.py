@@ -349,6 +349,29 @@ def init_db():
             
             logger.info("✅ Base de datos SQLite inicializada con migraciones v2.0 (modo local)")
         
+        # Fix: Corregir registros del OWNER que tengan nombre "Group" o vacío
+        try:
+            if OWNER_ID:
+                c2 = conn.cursor()
+                if DATABASE_URL:
+                    c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
+                                WHERE user_id = %s AND (first_name IN ('Group', 'Grupo', '', 'Anónimo') 
+                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
+                                WHERE user_id = %s AND (first_name IN ('Group', 'Grupo', '', 'Anónimo')
+                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                else:
+                    c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
+                                WHERE user_id = ? AND (first_name IN ('Group', 'Grupo', '', 'Anónimo') 
+                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
+                                WHERE user_id = ? AND (first_name IN ('Group', 'Grupo', '', 'Anónimo')
+                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                conn.commit()
+                logger.info("✅ Registros del owner verificados/corregidos")
+        except Exception as e:
+            logger.warning(f"Nota al corregir registros owner: {e}")
+        
         conn.commit()
         conn.close()
         return True
@@ -1510,10 +1533,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
             por_dia = c.fetchall()
             
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY first_name, last_name ORDER BY COUNT(*) DESC LIMIT 10""")
+                        GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10""")
             usuarios_activos = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) as count FROM mensajes 
@@ -1527,9 +1550,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio,))
             por_dia = c.fetchall()
             
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as count FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY count DESC LIMIT 10""", (fecha_inicio,))
+                        WHERE fecha >= ? GROUP BY user_id ORDER BY count DESC LIMIT 10""", (fecha_inicio,))
             usuarios_activos = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -1566,18 +1589,17 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"No se pudo obtener datos de Drive para graficos: {e}")
         
-        # Crear gráfico - layout dinámico
+        # Crear gráfico - layout dinámico: 4x2 con Drive, 2x2 sin Drive
         if drive_data is not None and len(drive_data) > 0:
-            fig, axes = plt.subplots(3, 2, figsize=(14, 16))
-            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=16, fontweight='bold', y=0.98)
+            fig, axes = plt.subplots(4, 2, figsize=(16, 22))
+            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=18, fontweight='bold', y=0.99)
         else:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
             fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=14, fontweight='bold')
         
-        # Gráfico 1: Actividad por Hora del Día
+        # ===== Gráfico 1: Actividad por Hora del Día =====
         ax1 = axes[0, 0]
         if por_dia:
-            # Obtener actividad por hora
             if DATABASE_URL:
                 conn2 = get_db_connection()
                 c2 = conn2.cursor()
@@ -1598,18 +1620,17 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if por_hora:
                 horas = [h[0] for h in por_hora]
                 conteos = [h[1] for h in por_hora]
-                # Colores por periodo del dia
-                colores = []
+                colores_hora = []
                 for h in horas:
                     if 6 <= h < 12:
-                        colores.append('#FFD700')  # Mañana - dorado
+                        colores_hora.append('#FFD700')
                     elif 12 <= h < 18:
-                        colores.append('#FF6B35')  # Tarde - naranja
+                        colores_hora.append('#FF6B35')
                     elif 18 <= h < 22:
-                        colores.append('#4169E1')  # Noche - azul
+                        colores_hora.append('#4169E1')
                     else:
-                        colores.append('#2C3E50')  # Madrugada - oscuro
-                ax1.bar(horas, conteos, color=colores, alpha=0.85, edgecolor='white')
+                        colores_hora.append('#2C3E50')
+                ax1.bar(horas, conteos, color=colores_hora, alpha=0.85, edgecolor='white')
                 hora_pico = horas[conteos.index(max(conteos))]
                 ax1.axvline(x=hora_pico, color='red', linestyle='--', alpha=0.5, label=f'Pico: {hora_pico}:00')
                 ax1.legend(fontsize=8)
@@ -1622,16 +1643,14 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
             ax1.set_title('🕐 Actividad por Hora')
         
-        # Gráfico 2: Usuarios más activos con etiquetas
+        # ===== Gráfico 2: Usuarios más activos con etiquetas =====
         ax2 = axes[0, 1]
         if usuarios_activos:
-            nombres = [str(u[0])[:15].replace('_', ' ').strip() if u[0] else 'Anon' for u in usuarios_activos[:8]]
-            # Limpiar "Group" -> "Anónimo"
-            nombres = [n if n.lower() != 'group' else 'Anónimo' for n in nombres]
+            nombres = [str(u[0])[:18].replace('_', ' ').strip() if u[0] else 'Anon' for u in usuarios_activos[:8]]
+            nombres = [n if n.lower() not in ['group', 'grupo', 'anónimo', ''] else 'Anónimo' for n in nombres]
             mensajes_u = [u[1] for u in usuarios_activos[:8]]
-            colors = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
-            bars = ax2.barh(nombres, mensajes_u, color=colors, edgecolor='white')
-            # Etiquetas de valor
+            colors_bar = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
+            bars = ax2.barh(nombres, mensajes_u, color=colors_bar, edgecolor='white')
             for bar, val in zip(bars, mensajes_u):
                 ax2.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
                         str(val), va='center', fontsize=9, fontweight='bold')
@@ -1641,13 +1660,12 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax2.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
             ax2.set_title('👥 Usuarios Mas Activos')
         
-        # Gráfico 3: Categorías desglosadas (General -> subcategorías)
+        # ===== Gráfico 3: Categorías desglosadas =====
         ax3 = axes[1, 0]
         if por_categoria:
             cats_desglosadas = []
             for cat_name, cat_count in por_categoria:
                 if str(cat_name) == 'General':
-                    # Desglosar "General" en subcategorías
                     cats_desglosadas.append(('Conversacion', int(cat_count * 0.40)))
                     cats_desglosadas.append(('Opinion', int(cat_count * 0.25)))
                     cats_desglosadas.append(('Informacion', int(cat_count * 0.20)))
@@ -1655,7 +1673,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cats_desglosadas.append(('Otro', max(resto, 1)))
                 else:
                     cats_desglosadas.append((str(cat_name), cat_count))
-            
             categorias_g = [c[0] for c in cats_desglosadas[:8]]
             cantidades_g = [c[1] for c in cats_desglosadas[:8]]
             colores_pie = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
@@ -1666,7 +1683,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax3.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
             ax3.set_title('🏷️ Categorias de Mensajes')
         
-        # Gráfico 4: KPIs resumen con datos de Drive
+        # ===== Gráfico 4: KPIs Resumen =====
         ax4 = axes[1, 1]
         ax4.axis('off')
         total_mensajes = sum([d[1] for d in por_dia]) if por_dia else 0
@@ -1682,7 +1699,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if drive_data is not None:
             resumen_texto += f"\n  📁 BD Google Drive\n"
             resumen_texto += f"  👤 Total registros: {len(drive_data)}\n"
-            # Contar situación laboral
             try:
                 col_i = drive_data.iloc[:, 8] if len(drive_data.columns) > 8 else None
                 if col_i is not None:
@@ -1694,22 +1710,36 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ax4.text(0.05, 0.5, resumen_texto, fontsize=11, verticalalignment='center',
                 fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
         
-        # Gráficos 5 y 6: Solo si hay datos de Drive
+        # ===== Gráficos 5-8: Solo si hay datos de Drive =====
         if drive_data is not None and len(drive_data) > 0:
-            # Gráfico 5: Situación Laboral (columna I = índice 8)
+            
+            # ===== Gráfico 5: Distribución por Situación Laboral (col I = idx 8) =====
             ax5 = axes[2, 0]
             try:
                 col_sit = drive_data.iloc[:, 8].dropna().astype(str)
-                col_sit = col_sit[~col_sit.str.lower().isin(['nan', 'none', '', 'n/a', '-'])]
+                col_sit = col_sit[~col_sit.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat'])]
                 if len(col_sit) > 0:
                     sit_counts = col_sit.value_counts().head(8)
-                    colores_sit = plt.cm.Set3([i/max(len(sit_counts),1) for i in range(len(sit_counts))])
-                    bars5 = ax5.barh(sit_counts.index.tolist(), sit_counts.values.tolist(), color=colores_sit)
+                    # Colores específicos por situación laboral (como el Excel)
+                    COLORES_SITUACION = {
+                        'Con Contrato': '#4472C4',
+                        'con contrato': '#4472C4',
+                        'Independiente': '#4472C4',
+                        'independiente': '#4472C4',
+                        'Búsqueda Laboral': '#4472C4',
+                        'busqueda laboral': '#4472C4',
+                        'Transición': '#4472C4',
+                        'transición': '#4472C4',
+                    }
+                    # Usar degradé de azul uniforme como el Excel
+                    colores_sit = ['#4472C4'] * len(sit_counts)
+                    bars5 = ax5.barh(sit_counts.index.tolist(), sit_counts.values.tolist(), 
+                                    color=colores_sit, edgecolor='white', alpha=0.9)
                     for bar, val in zip(bars5, sit_counts.values):
-                        ax5.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=8)
-                    ax5.set_title('💼 Situacion Laboral')
-                    ax5.set_xlabel('Personas')
+                        ax5.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
+                                str(val), va='center', fontsize=9, fontweight='bold')
+                    ax5.set_title('💼 Distribucion de Egresados por Situacion Laboral', fontsize=11, fontweight='bold')
+                    ax5.set_xlabel('Numero de Egresados')
                 else:
                     ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
                     ax5.set_title('💼 Situacion Laboral')
@@ -1718,20 +1748,22 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
                 ax5.set_title('💼 Situacion Laboral')
             
-            # Gráfico 6: Top 10 Industrias (columna K = índice 10)
+            # ===== Gráfico 6: Top 10 Industrias Principales (col K = idx 10) =====
             ax6 = axes[2, 1]
             try:
                 col_ind = drive_data.iloc[:, 10].dropna().astype(str)
-                col_ind = col_ind[~col_ind.str.lower().isin(['nan', 'none', '', 'n/a', '-'])]
+                col_ind = col_ind[~col_ind.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat', 'industria_1'])]
                 if len(col_ind) > 0:
                     ind_counts = col_ind.value_counts().head(10)
-                    colores_ind = plt.cm.tab10([i/max(len(ind_counts),1) for i in range(len(ind_counts))])
-                    bars6 = ax6.barh(ind_counts.index.tolist(), ind_counts.values.tolist(), color=colores_ind)
+                    # Azul uniforme como el Excel de referencia
+                    colores_ind = ['#4472C4'] * len(ind_counts)
+                    bars6 = ax6.barh(ind_counts.index.tolist(), ind_counts.values.tolist(), 
+                                    color=colores_ind, edgecolor='white', alpha=0.9)
                     for bar, val in zip(bars6, ind_counts.values):
-                        ax6.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=8)
-                    ax6.set_title('🏢 Top 10 Industrias')
-                    ax6.set_xlabel('Profesionales')
+                        ax6.text(bar.get_width() + 0.2, bar.get_y() + bar.get_height()/2, 
+                                str(val), va='center', fontsize=9, fontweight='bold')
+                    ax6.set_title('🏢 Top 10 Industrias Principales de los Egresados', fontsize=11, fontweight='bold')
+                    ax6.set_xlabel('Numero de Egresados')
                 else:
                     ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
                     ax6.set_title('🏢 Top 10 Industrias')
@@ -1739,6 +1771,70 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Error graficando industrias: {e}")
                 ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
                 ax6.set_title('🏢 Top 10 Industrias')
+            
+            # ===== Gráfico 7: Número de Egresados por Año de Egreso =====
+            ax7 = axes[3, 0]
+            try:
+                # Auto-detectar columna de Año de Egreso
+                col_anio_idx = detectar_columna_anio_egreso(drive_data)
+                if col_anio_idx is not None:
+                    col_anio = pd.to_numeric(drive_data.iloc[:, col_anio_idx], errors='coerce').dropna()
+                    col_anio = col_anio[(col_anio >= 1960) & (col_anio <= 2026)].astype(int)
+                    if len(col_anio) > 0:
+                        anio_counts = col_anio.value_counts().sort_index()
+                        ax7.bar(anio_counts.index.tolist(), anio_counts.values.tolist(), 
+                               color='#4472C4', alpha=0.85, edgecolor='white', width=0.8)
+                        ax7.set_title('🎓 Numero de Egresados por Ano de Egreso', fontsize=11, fontweight='bold')
+                        ax7.set_xlabel('Ano de Egreso')
+                        ax7.set_ylabel('Numero de Egresados')
+                        ax7.tick_params(axis='x', rotation=45)
+                        # Reducir etiquetas en X si hay muchos años
+                        if len(anio_counts) > 15:
+                            ax7.set_xticks(ax7.get_xticks()[::3])
+                    else:
+                        ax7.text(0.5, 0.5, 'Sin datos de Ano de Egreso', ha='center', va='center')
+                        ax7.set_title('🎓 Ano de Egreso')
+                else:
+                    ax7.text(0.5, 0.5, 'Columna Ano de Egreso\nno detectada', ha='center', va='center', fontsize=10)
+                    ax7.set_title('🎓 Ano de Egreso')
+            except Exception as e:
+                logger.warning(f"Error graficando año de egreso: {e}")
+                ax7.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+                ax7.set_title('🎓 Ano de Egreso')
+            
+            # ===== Gráfico 8: Resumen adicional / Contactabilidad =====
+            ax8 = axes[3, 1]
+            ax8.axis('off')
+            try:
+                # Estadísticas adicionales del Drive
+                total_registros = len(drive_data)
+                
+                # Contar situaciones laborales
+                col_sit2 = drive_data.iloc[:, 8].dropna().astype(str)
+                col_sit2 = col_sit2[~col_sit2.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat'])]
+                
+                con_contrato = col_sit2.str.lower().str.contains('contrato', na=False).sum()
+                independiente = col_sit2.str.lower().str.contains('independiente', na=False).sum()
+                en_busqueda = col_sit2.str.lower().str.contains('busqueda|búsqueda', na=False).sum()
+                transicion = col_sit2.str.lower().str.contains('transici|cesante', na=False).sum()
+                
+                # Contar contactabilidad (col J = idx 9)
+                col_j = drive_data.iloc[:, 9].dropna().astype(str) if len(drive_data.columns) > 9 else pd.Series([])
+                desean_contacto = col_j.str.upper().str.contains('SI', na=False).sum()
+                
+                info = f"  📊 RESUMEN BD PROFESIONALES\n\n"
+                info += f"  👥 Total registros: {total_registros}\n\n"
+                info += f"  💼 Situacion Laboral:\n"
+                info += f"     ✅ Con Contrato: {con_contrato}\n"
+                info += f"     🟡 Independiente: {independiente}\n"
+                info += f"     🔍 Busqueda: {en_busqueda}\n"
+                info += f"     🔄 Transicion: {transicion}\n\n"
+                info += f"  📞 Desean contacto: {desean_contacto}\n"
+                
+                ax8.text(0.05, 0.5, info, fontsize=10, verticalalignment='center',
+                        fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='#E8F4FD', alpha=0.8))
+            except Exception as e:
+                ax8.text(0.5, 0.5, 'Sin datos adicionales', ha='center', va='center')
         
         plt.tight_layout()
         
@@ -1751,8 +1847,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
         await update.message.reply_photo(
             photo=buf,
-            caption="📊 **Estadísticas de los últimos 7 días**\n\nUsa /estadisticas para ver más detalles.",
-            parse_mode='Markdown'
+            caption="📊 Estadisticas de los ultimos 7 dias\n\nUsa /estadisticas para ver mas detalles."
         )
         
         registrar_servicio_usado(update.effective_user.id, 'graficos')
@@ -2322,15 +2417,35 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     user = update.message.from_user
+    if not user:
+        return
+    
     topic_id = update.message.message_thread_id if hasattr(update.message, 'message_thread_id') else None
+    
+    # Detectar nombre correcto - evitar "Group" como nombre
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+    
+    # Si el user_id es del OWNER, forzar nombre correcto
+    if user.id == OWNER_ID:
+        if not first_name or first_name.lower() in ['group', 'grupo', 'cofradía', 'cofradia']:
+            first_name = "Germán"
+            last_name = "Perey"
+    
+    # Si el nombre parece ser un grupo/canal, usar username
+    if first_name.lower() in ['group', 'grupo', 'channel', 'canal'] or not first_name:
+        if user.username:
+            first_name = user.username
+        else:
+            first_name = "Usuario"
     
     guardar_mensaje(
         user.id,
         user.username or "sin_username",
-        user.first_name or "Anónimo",
+        first_name,
         update.message.text,
         topic_id,
-        last_name=user.last_name or ''
+        last_name=last_name
     )
 
 
@@ -2443,15 +2558,15 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         c = conn.cursor()
         
         if DATABASE_URL:
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 15""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = c.fetchall()
             top = [(r['nombre_completo'].strip(), r['msgs']) for r in top]
         else:
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 15""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = [(r[0].strip() if isinstance(r, tuple) else r['nombre_completo'].strip(), 
                     r[1] if isinstance(r, tuple) else r['msgs']) for r in c.fetchall()]
         
@@ -2608,10 +2723,10 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
             usuarios_hoy = c.fetchone()['total']
             
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
             top_hoy = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
@@ -2633,10 +2748,10 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
             top_hoy = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -2741,10 +2856,10 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
             top = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
@@ -2768,9 +2883,9 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio_str,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""", (fecha_inicio_str,))
+                        WHERE fecha >= ? GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fecha_inicio_str,))
             top = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -2887,10 +3002,10 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
             top = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
@@ -2906,9 +3021,9 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""", (fecha_inicio,))
+                        WHERE fecha >= ? GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fecha_inicio,))
             top = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -3321,7 +3436,7 @@ def buscar_profesionales(query):
 
 # ==================== FUNCIÓN AUXILIAR: OBTENER DATOS EXCEL DRIVE ====================
 
-def obtener_datos_excel_drive():
+def obtener_datos_excel_drive(sheet_name=0):
     """Obtiene DataFrame completo del Excel de Google Drive para análisis"""
     try:
         from oauth2client.service_account import ServiceAccountCredentials
@@ -3355,12 +3470,28 @@ def obtener_datos_excel_drive():
         if response.status_code != 200:
             return None
         
-        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0, sheet_name=sheet_name)
         return df
         
     except Exception as e:
-        logger.error(f"Error obteniendo datos Excel Drive: {e}")
+        logger.error(f"Error obteniendo datos Excel Drive (sheet={sheet_name}): {e}")
         return None
+
+
+def detectar_columna_anio_egreso(df):
+    """Detecta automáticamente la columna que contiene años de egreso"""
+    for col_idx in range(len(df.columns)):
+        try:
+            col_data = pd.to_numeric(df.iloc[:, col_idx], errors='coerce').dropna()
+            # Verificar si la mayoría son años válidos (1960-2025)
+            if len(col_data) > 10:
+                years_valid = col_data[(col_data >= 1960) & (col_data <= 2026)]
+                if len(years_valid) > len(col_data) * 0.5:  # >50% son años válidos
+                    logger.info(f"Columna de año de egreso detectada: índice {col_idx}")
+                    return col_idx
+        except:
+            continue
+    return None
 
 
 # ==================== SISTEMA RAG (MEMORIA SEMÁNTICA) ====================
@@ -3506,29 +3637,77 @@ async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
 
 def buscar_especialista_sec(especialidad, ciudad=""):
     """
-    Busca especialistas certificados en la SEC.
-    Intenta scraping de sec.cl, con fallback a links directos.
+    Busca especialistas certificados en la SEC (Chile).
+    Intenta scraping del buscador SEC, con fallback a links directos.
     """
     try:
         ESPECIALIDADES_SEC = {
-            'electricista': 'TE',
-            'electrico': 'TE',
-            'electrica': 'TE',
-            'gas': 'TG',
-            'gasfiter': 'TG',
-            'gasfíter': 'TG',
-            'instalador gas': 'TG',
-            'combustible': 'TC',
-            'combustibles': 'TC',
-            'generacion': 'GE',
-            'generación': 'GE',
+            'electricista': ('E', 'Electrico'),
+            'electrico': ('E', 'Electrico'),
+            'electrica': ('E', 'Electrico'),
+            'instalador electrico': ('E', 'Electrico'),
+            'gas': ('G', 'Gas'),
+            'gasfiter': ('G', 'Gas'),
+            'gasfíter': ('G', 'Gas'),
+            'instalador gas': ('G', 'Gas'),
+            'combustible': ('E', 'Combustibles'),
+            'combustibles': ('E', 'Combustibles'),
+        }
+        
+        # Mapeo de ciudades/comunas a códigos de región SEC
+        REGIONES_SEC = {
+            'arica': ('15', 'Arica y Parinacota'),
+            'iquique': ('01', 'Tarapaca'),
+            'antofagasta': ('02', 'Antofagasta'),
+            'copiapo': ('03', 'Atacama'),
+            'la serena': ('04', 'Coquimbo'),
+            'coquimbo': ('04', 'Coquimbo'),
+            'valparaiso': ('05', 'Valparaiso'),
+            'viña del mar': ('05', 'Valparaiso'),
+            'viña': ('05', 'Valparaiso'),
+            'rancagua': ('06', "O'Higgins"),
+            'talca': ('07', 'Maule'),
+            'concepcion': ('08', 'Biobio'),
+            'chillan': ('16', 'Nuble'),
+            'temuco': ('09', 'La Araucania'),
+            'valdivia': ('14', 'Los Rios'),
+            'puerto montt': ('10', 'Los Lagos'),
+            'osorno': ('10', 'Los Lagos'),
+            'coyhaique': ('11', 'Aysen'),
+            'punta arenas': ('12', 'Magallanes'),
+            'santiago': ('13', 'Metropolitana'),
+            'providencia': ('13', 'Metropolitana'),
+            'las condes': ('13', 'Metropolitana'),
+            'maipu': ('13', 'Metropolitana'),
+            'puente alto': ('13', 'Metropolitana'),
+            'la florida': ('13', 'Metropolitana'),
+            'ñuñoa': ('13', 'Metropolitana'),
+            'nunoa': ('13', 'Metropolitana'),
+            'san bernardo': ('13', 'Metropolitana'),
+            'quilpue': ('05', 'Valparaiso'),
         }
         
         esp_lower = especialidad.lower().strip()
-        codigo_sec = None
-        for key, code in ESPECIALIDADES_SEC.items():
+        tipo_inst = None
+        tipo_nombre = ''
+        for key, (code, nombre) in ESPECIALIDADES_SEC.items():
             if key in esp_lower:
-                codigo_sec = code
+                tipo_inst = code
+                tipo_nombre = nombre
+                break
+        
+        if not tipo_inst:
+            tipo_inst = 'E'
+            tipo_nombre = 'Electrico'
+        
+        # Detectar región
+        region_code = None
+        region_nombre = ''
+        ciudad_lower = ciudad.lower().strip() if ciudad else ''
+        for key, (code, nombre) in REGIONES_SEC.items():
+            if key in ciudad_lower:
+                region_code = code
+                region_nombre = nombre
                 break
         
         resultado = "━" * 30 + "\n"
@@ -3537,66 +3716,123 @@ def buscar_especialista_sec(especialidad, ciudad=""):
         resultado += f"📋 Especialidad: {especialidad}\n"
         if ciudad:
             resultado += f"📍 Ciudad/Comuna: {ciudad}\n"
+        if region_nombre:
+            resultado += f"🗺️ Region: {region_nombre}\n"
         resultado += "\n"
         
-        # Intentar scraping
+        # Intentar scraping real del buscador SEC
+        especialistas_encontrados = []
         if bs4_disponible:
             try:
-                # La SEC tiene un buscador en su sitio
-                search_url = "https://www.sec.cl/instaladores-autorizados/"
-                resp = requests.get(search_url, timeout=15, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                session = requests.Session()
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'es-CL,es;q=0.9',
                 })
+                
+                # Intentar el buscador avanzado con parámetros directos
+                search_params = {
+                    'tipoBusqueda': 'avanzada',
+                    'tipoInstalacion': tipo_inst,
+                }
+                if region_code:
+                    search_params['region'] = region_code
+                
+                buscador_url = "https://wlhttp.sec.cl/buscadorinstaladores/busqueda.do"
+                resp = session.get(buscador_url, params=search_params, timeout=20)
                 
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
                     
-                    # Buscar formularios o links de búsqueda
-                    forms = soup.find_all('form')
-                    links = soup.find_all('a', href=True)
+                    # Buscar tablas con resultados
+                    tables = soup.find_all('table')
+                    for table in tables:
+                        rows = table.find_all('tr')
+                        for row in rows[1:]:  # Saltar header
+                            cols = row.find_all('td')
+                            if len(cols) >= 3:
+                                nombre = cols[0].get_text(strip=True)
+                                rut = cols[1].get_text(strip=True) if len(cols) > 1 else ''
+                                niveles = cols[2].get_text(strip=True) if len(cols) > 2 else ''
+                                telefono = cols[3].get_text(strip=True) if len(cols) > 3 else ''
+                                email_col = cols[4].get_text(strip=True) if len(cols) > 4 else ''
+                                
+                                if nombre and len(nombre) > 2 and nombre.lower() != 'nombre':
+                                    especialistas_encontrados.append({
+                                        'nombre': nombre,
+                                        'rut': rut,
+                                        'niveles': niveles,
+                                        'telefono': telefono,
+                                        'email': email_col
+                                    })
                     
-                    # Buscar links relevantes
-                    sec_links = []
-                    for link in links:
-                        href = link.get('href', '')
-                        text = link.get_text().lower()
-                        if any(kw in text for kw in ['instalador', 'certificad', 'autorizado', 'buscar', 'consulta']):
-                            sec_links.append((link.get_text().strip(), href))
-                    
-                    if sec_links:
-                        resultado += "🔗 Enlaces encontrados en SEC:\n\n"
-                        for nombre, href in sec_links[:5]:
-                            if not href.startswith('http'):
-                                href = f"https://www.sec.cl{href}"
-                            resultado += f"   🌐 {nombre}\n      {href}\n\n"
+                    # Si no encontró tabla, intentar otro formato
+                    if not especialistas_encontrados:
+                        # Buscar divs o listas con resultados
+                        divs = soup.find_all(['div', 'li'], class_=True)
+                        for div in divs:
+                            text = div.get_text(strip=True)
+                            if 'rut' in text.lower() or 'instalador' in text.lower():
+                                if len(text) > 10 and len(text) < 500:
+                                    especialistas_encontrados.append({
+                                        'nombre': text[:100],
+                                        'rut': '',
+                                        'niveles': '',
+                                        'telefono': '',
+                                        'email': ''
+                                    })
+                
+                logger.info(f"SEC scraping: encontrados {len(especialistas_encontrados)} resultados")
                 
             except Exception as e:
                 logger.warning(f"Error scraping SEC: {e}")
         
-        # Links directos de consulta SEC
+        # Mostrar resultados encontrados
+        if especialistas_encontrados:
+            resultado += f"✅ RESULTADOS ENCONTRADOS: {len(especialistas_encontrados)}\n\n"
+            for i, esp in enumerate(especialistas_encontrados[:15], 1):
+                resultado += f"{i}. {esp['nombre']}\n"
+                if esp['rut']:
+                    resultado += f"   🆔 RUT: {esp['rut']}\n"
+                if esp['niveles']:
+                    resultado += f"   📜 Certificacion: {esp['niveles']}\n"
+                if esp['telefono']:
+                    resultado += f"   📞 Tel: {esp['telefono']}\n"
+                if esp['email']:
+                    resultado += f"   📧 Email: {esp['email']}\n"
+                resultado += "\n"
+        else:
+            resultado += "⚠️ No se encontraron resultados via scraping.\n"
+            resultado += "El buscador SEC requiere navegador web.\n\n"
+        
+        # Links directos siempre visibles
+        resultado += "━" * 30 + "\n"
         resultado += "🌐 CONSULTA DIRECTA EN SEC:\n\n"
         
-        if codigo_sec == 'TE' or not codigo_sec:
-            resultado += "⚡ Instaladores Electricos:\n"
-            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        resultado += "🔍 Buscador de Instaladores:\n"
+        resultado += "   https://wlhttp.sec.cl/buscadorinstaladores/buscador.do\n\n"
         
-        if codigo_sec == 'TG' or not codigo_sec:
-            resultado += "🔥 Instaladores de Gas:\n"
-            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        resultado += "📋 Validador de Instaladores (por RUT):\n"
+        resultado += "   https://wlhttp.sec.cl/validadorInstaladores/\n\n"
         
-        if codigo_sec == 'TC' or not codigo_sec:
-            resultado += "⛽ Combustibles Liquidos:\n"
-            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        resultado += "🏛️ Registro Nacional de Instaladores:\n"
+        resultado += "   https://wlhttp.sec.cl/rnii/home\n\n"
         
         resultado += "💡 COMO BUSCAR:\n"
-        resultado += "1. Ingresa al enlace de la SEC\n"
-        resultado += "2. Selecciona tu region y comuna\n"
-        if ciudad:
-            resultado += f"3. Busca en la comuna: {ciudad}\n"
+        resultado += f"1. Ingresa a: wlhttp.sec.cl/buscadorinstaladores/buscador.do\n"
+        resultado += f"2. Selecciona tipo: {tipo_nombre}\n"
+        resultado += "3. Marca los trabajos que necesitas\n"
+        if region_nombre:
+            resultado += f"4. Region: {region_nombre}\n"
         else:
-            resultado += "3. Selecciona tu comuna\n"
-        resultado += "4. Filtra por especialidad\n"
-        resultado += "5. Obtendras: Nombre, RUT y Niveles de certificacion\n\n"
+            resultado += "4. Selecciona tu region\n"
+        if ciudad:
+            resultado += f"5. Comuna: {ciudad}\n"
+        else:
+            resultado += "5. Selecciona tu comuna\n"
+        resultado += "6. Clic en Buscar\n"
+        resultado += "7. Obtendras: Nombre, RUT, Clase, Telefono, Email\n\n"
         
         resultado += "━" * 30 + "\n"
         resultado += "📞 Mesa de ayuda SEC: 600 6000 732\n"
@@ -3977,10 +4213,10 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             usuarios_hoy = c.fetchone()['total']
             
             # Top usuarios del día
-            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
             top_usuarios = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             # Categorías del día
@@ -4006,10 +4242,10 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+            c.execute("""SELECT MAX(first_name) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), '') as nombre_completo, 
                         COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
-                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 5""")
             top_usuarios = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -4125,7 +4361,15 @@ def main():
         return
     
     # Crear aplicación
-    application = Application.builder().token(TOKEN_BOT).build()
+    async def post_init(app):
+        """Eliminar webhook anterior para evitar error Conflict en Render"""
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
+        except Exception as e:
+            logger.warning(f"Nota al limpiar webhook: {e}")
+    
+    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
     # Configurar comandos (SIN mostrar mi_cuenta, renovar, activar - son privados)
     async def setup_commands(app):
@@ -4218,21 +4462,45 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         from datetime import time as dt_time
+        try:
+            from zoneinfo import ZoneInfo
+            chile_tz = ZoneInfo('America/Santiago')
+        except ImportError:
+            try:
+                import pytz
+                chile_tz = pytz.timezone('America/Santiago')
+            except ImportError:
+                chile_tz = None
+                logger.warning("⚠️ No se pudo cargar timezone Chile, usando UTC offsets")
         
-        # Cumpleaños a las 8:00 AM hora Chile (12:00 UTC)
-        job_queue.run_daily(
-            enviar_cumpleanos_diario,
-            time=dt_time(hour=12, minute=0, second=0),  # 12:00 UTC = 8:00 Chile
-            name='cumpleanos_diario'
-        )
+        # Cumpleaños a las 8:00 AM hora Chile
+        if chile_tz:
+            job_queue.run_daily(
+                enviar_cumpleanos_diario,
+                time=dt_time(hour=8, minute=0, second=0, tzinfo=chile_tz),
+                name='cumpleanos_diario'
+            )
+        else:
+            job_queue.run_daily(
+                enviar_cumpleanos_diario,
+                time=dt_time(hour=12, minute=0, second=0),  # ~8AM Chile
+                name='cumpleanos_diario'
+            )
         logger.info("🎂 Tarea de cumpleaños programada para las 8:00 AM Chile")
         
-        # Resumen nocturno a las 20:00 hora Chile (00:00 UTC del día siguiente)
-        job_queue.run_daily(
-            enviar_resumen_nocturno,
-            time=dt_time(hour=0, minute=0, second=0),  # 00:00 UTC = 20:00 Chile (día anterior)
-            name='resumen_nocturno'
-        )
+        # Resumen nocturno a las 20:00 hora Chile
+        if chile_tz:
+            job_queue.run_daily(
+                enviar_resumen_nocturno,
+                time=dt_time(hour=20, minute=0, second=0, tzinfo=chile_tz),
+                name='resumen_nocturno'
+            )
+        else:
+            job_queue.run_daily(
+                enviar_resumen_nocturno,
+                time=dt_time(hour=0, minute=0, second=0),  # ~20:00 Chile
+                name='resumen_nocturno'
+            )
         logger.info("🌙 Tarea de resumen nocturno programada para las 20:00 Chile")
         
         # RAG indexación cada 6 horas
@@ -4245,7 +4513,11 @@ def main():
         logger.info("🧠 Tarea de indexación RAG programada cada 6 horas")
     
     logger.info("✅ Bot iniciado!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES, 
+        drop_pending_updates=True
+    )
 
 
 if __name__ == '__main__':
