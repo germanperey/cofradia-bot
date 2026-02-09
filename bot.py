@@ -1287,6 +1287,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /resumen_semanal - Resumen de 7 dias
 /resumen_mes - Resumen mensual
 
+🧠 RAG - DOCUMENTOS INTELIGENTES
+/subir_pdf - Subir PDF al sistema RAG
+/rag_consulta [pregunta] - Consultar documentos
+/rag_status - Ver estado del RAG
+/rag_reindexar - Re-indexar todo (admin)
+/eliminar_pdf - Eliminar PDF (admin)
+
 👥 GRUPO
 /dotacion - Total de integrantes
 
@@ -3434,6 +3441,913 @@ def buscar_profesionales(query):
         return f"❌ Error: {str(e)[:150]}"
 
 
+# ==================== GOOGLE DRIVE: HELPERS Y RAG PDF ====================
+
+def obtener_drive_auth_headers():
+    """Obtiene headers de autenticación para Google Drive API (centralizado)"""
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        scope = [
+            'https://www.googleapis.com/auth/drive',
+            'https://www.googleapis.com/auth/drive.file'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        return {'Authorization': f'Bearer {access_token}'}
+    except Exception as e:
+        logger.error(f"Error obteniendo auth Drive: {e}")
+        return None
+
+
+def obtener_o_crear_carpeta_drive(nombre_carpeta, parent_id=None):
+    """Busca una carpeta en Drive, si no existe la crea. Retorna folder_id."""
+    try:
+        headers = obtener_drive_auth_headers()
+        if not headers:
+            return None
+        
+        # Buscar carpeta existente
+        query = f"name = '{nombre_carpeta}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        if parent_id:
+            query += f" and '{parent_id}' in parents"
+        
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {'q': query, 'fields': 'files(id, name)'}
+        resp = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = resp.json().get('files', [])
+        
+        if archivos:
+            logger.info(f"📁 Carpeta '{nombre_carpeta}' encontrada: {archivos[0]['id']}")
+            return archivos[0]['id']
+        
+        # Crear carpeta
+        metadata = {
+            'name': nombre_carpeta,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        if parent_id:
+            metadata['parents'] = [parent_id]
+        
+        create_url = "https://www.googleapis.com/drive/v3/files"
+        resp = requests.post(create_url, headers={**headers, 'Content-Type': 'application/json'},
+                           json=metadata, timeout=30)
+        
+        if resp.status_code in [200, 201]:
+            folder_id = resp.json()['id']
+            logger.info(f"📁 Carpeta '{nombre_carpeta}' creada: {folder_id}")
+            return folder_id
+        else:
+            logger.error(f"Error creando carpeta '{nombre_carpeta}': {resp.status_code} {resp.text[:200]}")
+            return None
+    
+    except Exception as e:
+        logger.error(f"Error en obtener_o_crear_carpeta_drive: {e}")
+        return None
+
+
+def obtener_carpeta_rag_pdf():
+    """Obtiene (o crea) la ruta INBESTU/RAG_PDF en Google Drive. Retorna folder_id de RAG_PDF."""
+    try:
+        inbestu_id = obtener_o_crear_carpeta_drive("INBESTU")
+        if not inbestu_id:
+            logger.error("No se pudo crear/encontrar carpeta INBESTU")
+            return None
+        
+        rag_pdf_id = obtener_o_crear_carpeta_drive("RAG_PDF", parent_id=inbestu_id)
+        if not rag_pdf_id:
+            logger.error("No se pudo crear/encontrar carpeta RAG_PDF")
+            return None
+        
+        return rag_pdf_id
+    except Exception as e:
+        logger.error(f"Error obteniendo carpeta RAG_PDF: {e}")
+        return None
+
+
+def subir_pdf_a_drive(file_bytes, filename):
+    """Sube un archivo PDF a Google Drive en INBESTU/RAG_PDF. Retorna file_id o None."""
+    try:
+        headers = obtener_drive_auth_headers()
+        if not headers:
+            return None, "Error de autenticación con Google Drive"
+        
+        rag_folder_id = obtener_carpeta_rag_pdf()
+        if not rag_folder_id:
+            return None, "No se pudo acceder a la carpeta INBESTU/RAG_PDF"
+        
+        # Verificar espacio (15 GB límite gratuito)
+        espacio = verificar_espacio_drive(headers)
+        if espacio and espacio.get('uso_porcentaje', 0) > 95:
+            return None, f"⚠️ Google Drive casi lleno ({espacio['uso_porcentaje']:.0f}%). Libera espacio antes de subir."
+        
+        # Verificar si ya existe un archivo con el mismo nombre
+        query = f"name = '{filename}' and '{rag_folder_id}' in parents and trashed = false"
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {'q': query, 'fields': 'files(id, name)'}
+        resp = requests.get(search_url, headers=headers, params=params, timeout=30)
+        existentes = resp.json().get('files', [])
+        
+        if existentes:
+            # Actualizar archivo existente
+            file_id = existentes[0]['id']
+            upload_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media"
+            resp = requests.patch(upload_url, 
+                                headers={**headers, 'Content-Type': 'application/pdf'},
+                                data=file_bytes, timeout=120)
+            if resp.status_code == 200:
+                logger.info(f"📄 PDF actualizado en Drive: {filename} ({file_id})")
+                return file_id, "actualizado"
+        
+        # Subir archivo nuevo (multipart upload)
+        import io
+        metadata = {
+            'name': filename,
+            'parents': [rag_folder_id],
+            'mimeType': 'application/pdf'
+        }
+        
+        # Multipart upload
+        boundary = '----RAGPDFBoundary'
+        body = io.BytesIO()
+        
+        # Part 1: metadata
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(b'Content-Type: application/json; charset=UTF-8\r\n\r\n')
+        body.write(json.dumps(metadata).encode())
+        body.write(b'\r\n')
+        
+        # Part 2: file content
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(b'Content-Type: application/pdf\r\n\r\n')
+        body.write(file_bytes)
+        body.write(b'\r\n')
+        body.write(f'--{boundary}--\r\n'.encode())
+        
+        upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        resp = requests.post(upload_url,
+                           headers={**headers, 'Content-Type': f'multipart/related; boundary={boundary}'},
+                           data=body.getvalue(), timeout=120)
+        
+        if resp.status_code in [200, 201]:
+            file_id = resp.json().get('id')
+            logger.info(f"📄 PDF subido a Drive: {filename} ({file_id})")
+            return file_id, "subido"
+        else:
+            logger.error(f"Error subiendo PDF: {resp.status_code} {resp.text[:300]}")
+            return None, f"Error HTTP {resp.status_code}"
+    
+    except Exception as e:
+        logger.error(f"Error subiendo PDF a Drive: {e}")
+        return None, str(e)
+
+
+def verificar_espacio_drive(headers=None):
+    """Verifica el espacio usado/disponible en Google Drive"""
+    try:
+        if not headers:
+            headers = obtener_drive_auth_headers()
+        if not headers:
+            return None
+        
+        about_url = "https://www.googleapis.com/drive/v3/about?fields=storageQuota"
+        resp = requests.get(about_url, headers=headers, timeout=15)
+        
+        if resp.status_code == 200:
+            quota = resp.json().get('storageQuota', {})
+            limit_bytes = int(quota.get('limit', 0))
+            usage_bytes = int(quota.get('usage', 0))
+            
+            if limit_bytes > 0:
+                return {
+                    'limite_gb': limit_bytes / (1024**3),
+                    'usado_gb': usage_bytes / (1024**3),
+                    'disponible_gb': (limit_bytes - usage_bytes) / (1024**3),
+                    'uso_porcentaje': (usage_bytes / limit_bytes) * 100
+                }
+        return None
+    except Exception as e:
+        logger.warning(f"Error verificando espacio Drive: {e}")
+        return None
+
+
+def listar_pdfs_rag():
+    """Lista todos los PDFs en la carpeta INBESTU/RAG_PDF de Google Drive"""
+    try:
+        headers = obtener_drive_auth_headers()
+        if not headers:
+            return []
+        
+        rag_folder_id = obtener_carpeta_rag_pdf()
+        if not rag_folder_id:
+            return []
+        
+        query = f"'{rag_folder_id}' in parents and mimeType = 'application/pdf' and trashed = false"
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': query,
+            'fields': 'files(id, name, size, createdTime, modifiedTime)',
+            'orderBy': 'modifiedTime desc',
+            'pageSize': 100
+        }
+        
+        resp = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = resp.json().get('files', [])
+        
+        return archivos
+    except Exception as e:
+        logger.error(f"Error listando PDFs RAG: {e}")
+        return []
+
+
+def descargar_pdf_drive(file_id):
+    """Descarga contenido de un PDF desde Google Drive"""
+    try:
+        headers = obtener_drive_auth_headers()
+        if not headers:
+            return None
+        
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        resp = requests.get(download_url, headers=headers, timeout=120)
+        
+        if resp.status_code == 200:
+            return resp.content
+        else:
+            logger.error(f"Error descargando PDF {file_id}: {resp.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error descargando PDF: {e}")
+        return None
+
+
+def extraer_texto_pdf(file_bytes):
+    """Extrae texto de un PDF usando PyPDF2"""
+    try:
+        import PyPDF2
+        
+        reader = PyPDF2.PdfReader(BytesIO(file_bytes))
+        texto_completo = ""
+        paginas_procesadas = 0
+        
+        for page in reader.pages:
+            try:
+                texto = page.extract_text()
+                if texto:
+                    texto_completo += texto + "\n\n"
+                    paginas_procesadas += 1
+            except Exception as e:
+                logger.warning(f"Error extrayendo página: {e}")
+                continue
+        
+        logger.info(f"📄 PDF: {paginas_procesadas} páginas procesadas, {len(texto_completo)} caracteres")
+        return texto_completo.strip()
+    
+    except ImportError:
+        logger.error("PyPDF2 no disponible. Instalar con: pip install PyPDF2")
+        return None
+    except Exception as e:
+        logger.error(f"Error extrayendo texto PDF: {e}")
+        return None
+
+
+def crear_chunks_texto(texto, chunk_size=800, overlap=100):
+    """Divide texto largo en chunks con overlap para RAG"""
+    if not texto or len(texto) < 50:
+        return []
+    
+    # Limpiar texto
+    texto = texto.replace('\x00', '').replace('\r', '')
+    
+    # Dividir por párrafos primero
+    parrafos = [p.strip() for p in texto.split('\n\n') if p.strip()]
+    
+    chunks = []
+    chunk_actual = ""
+    
+    for parrafo in parrafos:
+        # Si el párrafo solo cabe, agregarlo
+        if len(chunk_actual) + len(parrafo) + 2 <= chunk_size:
+            chunk_actual += parrafo + "\n\n"
+        else:
+            # Guardar chunk actual si tiene contenido
+            if chunk_actual.strip() and len(chunk_actual.strip()) > 30:
+                chunks.append(chunk_actual.strip())
+            
+            # Si el párrafo es muy largo, dividir por oraciones
+            if len(parrafo) > chunk_size:
+                oraciones = parrafo.replace('. ', '.\n').split('\n')
+                chunk_actual = ""
+                for oracion in oraciones:
+                    if len(chunk_actual) + len(oracion) + 2 <= chunk_size:
+                        chunk_actual += oracion + " "
+                    else:
+                        if chunk_actual.strip() and len(chunk_actual.strip()) > 30:
+                            chunks.append(chunk_actual.strip())
+                        chunk_actual = oracion + " "
+            else:
+                chunk_actual = parrafo + "\n\n"
+    
+    # Último chunk
+    if chunk_actual.strip() and len(chunk_actual.strip()) > 30:
+        chunks.append(chunk_actual.strip())
+    
+    return chunks
+
+
+def generar_keywords_chunk(chunk_text):
+    """Genera keywords de un chunk de texto para búsqueda"""
+    import re
+    # Limpiar y extraer palabras significativas
+    texto = re.sub(r'[^\w\sáéíóúñü]', ' ', chunk_text.lower())
+    palabras = texto.split()
+    
+    # Filtrar stopwords español básicas
+    STOPWORDS = {'de', 'la', 'el', 'en', 'y', 'a', 'que', 'es', 'por', 'un', 'una', 'los', 'las',
+                 'del', 'con', 'no', 'se', 'su', 'al', 'lo', 'para', 'como', 'más', 'o', 'pero',
+                 'sus', 'le', 'ya', 'este', 'si', 'entre', 'cuando', 'muy', 'sin', 'sobre', 'ser',
+                 'también', 'me', 'hasta', 'hay', 'donde', 'quien', 'desde', 'todo', 'nos', 'durante',
+                 'todos', 'uno', 'les', 'ni', 'contra', 'otros', 'ese', 'eso', 'ante', 'ellos', 'e',
+                 'esto', 'mi', 'antes', 'algunos', 'qué', 'unos', 'yo', 'otro', 'otras', 'otra',
+                 'él', 'tanto', 'esa', 'estos', 'mucho', 'quienes', 'nada', 'muchos', 'cual', 'poco',
+                 'ella', 'estar', 'estas', 'algunas', 'algo', 'nosotros', 'cada', 'fue', 'son', 'han',
+                 'the', 'and', 'of', 'to', 'in', 'is', 'for', 'on', 'with', 'at', 'by', 'an', 'be',
+                 'this', 'that', 'from', 'or', 'as', 'are', 'was', 'were', 'has', 'have', 'had'}
+    
+    keywords = [p for p in palabras if len(p) > 2 and p not in STOPWORDS]
+    
+    # Deduplicar manteniendo orden
+    seen = set()
+    unique = []
+    for k in keywords:
+        if k not in seen:
+            seen.add(k)
+            unique.append(k)
+    
+    return ' '.join(unique[:50])
+
+
+def indexar_pdf_en_rag(filename, texto, file_id=None):
+    """Indexa un PDF en la tabla rag_chunks para búsqueda RAG"""
+    try:
+        if not texto or len(texto) < 50:
+            logger.warning(f"PDF '{filename}' sin texto suficiente para indexar")
+            return 0
+        
+        conn = get_db_connection()
+        if not conn:
+            return 0
+        
+        c = conn.cursor()
+        source = f"PDF:{filename}"
+        
+        # Eliminar chunks anteriores de este PDF
+        if DATABASE_URL:
+            c.execute("DELETE FROM rag_chunks WHERE source = %s", (source,))
+        else:
+            c.execute("DELETE FROM rag_chunks WHERE source = ?", (source,))
+        
+        # Crear chunks
+        chunks = crear_chunks_texto(texto)
+        chunks_creados = 0
+        
+        for i, chunk_text in enumerate(chunks):
+            keywords = generar_keywords_chunk(chunk_text)
+            
+            metadata = json.dumps({
+                'filename': filename,
+                'file_id': file_id or '',
+                'chunk_index': i,
+                'total_chunks': len(chunks),
+                'tipo': 'pdf'
+            })
+            
+            if DATABASE_URL:
+                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                           VALUES (%s, %s, %s, %s)""",
+                         (source, chunk_text, metadata, keywords))
+            else:
+                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                           VALUES (?, ?, ?, ?)""",
+                         (source, chunk_text, metadata, keywords))
+            chunks_creados += 1
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ PDF '{filename}' indexado: {chunks_creados} chunks")
+        return chunks_creados
+    
+    except Exception as e:
+        logger.error(f"Error indexando PDF en RAG: {e}")
+        return 0
+
+
+def indexar_todos_pdfs_rag():
+    """Indexa (o re-indexa) todos los PDFs de la carpeta INBESTU/RAG_PDF"""
+    try:
+        pdfs = listar_pdfs_rag()
+        if not pdfs:
+            logger.info("RAG PDF: No hay PDFs para indexar en INBESTU/RAG_PDF")
+            return 0
+        
+        total_chunks = 0
+        pdfs_procesados = 0
+        pdfs_error = 0
+        
+        for pdf_info in pdfs:
+            file_id = pdf_info['id']
+            filename = pdf_info['name']
+            
+            try:
+                logger.info(f"📄 Indexando PDF: {filename}...")
+                
+                # Descargar PDF
+                contenido = descargar_pdf_drive(file_id)
+                if not contenido:
+                    logger.warning(f"No se pudo descargar: {filename}")
+                    pdfs_error += 1
+                    continue
+                
+                # Extraer texto
+                texto = extraer_texto_pdf(contenido)
+                if not texto:
+                    logger.warning(f"No se pudo extraer texto de: {filename}")
+                    pdfs_error += 1
+                    continue
+                
+                # Indexar en RAG
+                chunks = indexar_pdf_en_rag(filename, texto, file_id)
+                total_chunks += chunks
+                pdfs_procesados += 1
+                
+            except Exception as e:
+                logger.error(f"Error procesando PDF {filename}: {e}")
+                pdfs_error += 1
+                continue
+        
+        logger.info(f"✅ RAG PDF completado: {pdfs_procesados} PDFs, {total_chunks} chunks, {pdfs_error} errores")
+        return total_chunks
+    
+    except Exception as e:
+        logger.error(f"Error indexando todos los PDFs: {e}")
+        return 0
+
+
+def obtener_estadisticas_rag():
+    """Obtiene estadísticas del sistema RAG"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        c = conn.cursor()
+        stats = {}
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM rag_chunks")
+            stats['total_chunks'] = c.fetchone()['total']
+            
+            c.execute("SELECT source, COUNT(*) as total FROM rag_chunks GROUP BY source ORDER BY total DESC")
+            stats['por_fuente'] = [(r['source'], r['total']) for r in c.fetchall()]
+            
+            c.execute("SELECT COUNT(DISTINCT source) as total FROM rag_chunks WHERE source LIKE 'PDF:%'")
+            stats['total_pdfs'] = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM rag_chunks")
+            stats['total_chunks'] = c.fetchone()[0]
+            
+            c.execute("SELECT source, COUNT(*) as total FROM rag_chunks GROUP BY source ORDER BY total DESC")
+            stats['por_fuente'] = c.fetchall()
+            
+            c.execute("SELECT COUNT(DISTINCT source) FROM rag_chunks WHERE source LIKE 'PDF:%'")
+            stats['total_pdfs'] = c.fetchone()[0]
+        
+        conn.close()
+        
+        # Info de Drive
+        pdfs_drive = listar_pdfs_rag()
+        stats['pdfs_en_drive'] = len(pdfs_drive)
+        stats['pdfs_lista'] = [(p['name'], int(p.get('size', 0)) / (1024*1024)) for p in pdfs_drive]
+        
+        # Espacio
+        espacio = verificar_espacio_drive()
+        stats['espacio'] = espacio
+        
+        return stats
+    except Exception as e:
+        logger.error(f"Error obteniendo stats RAG: {e}")
+        return None
+
+
+# ==================== COMANDOS RAG PDF ====================
+
+@requiere_suscripcion
+async def subir_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /subir_pdf - Instrucciones para subir PDFs al RAG"""
+    mensaje = "━" * 30 + "\n"
+    mensaje += "📄 SUBIR PDF AL SISTEMA RAG\n"
+    mensaje += "━" * 30 + "\n\n"
+    mensaje += "Para subir un PDF al sistema de memoria RAG:\n\n"
+    mensaje += "1. Envia el PDF como documento adjunto al bot\n"
+    mensaje += "   (en chat privado con @Cofradia_Premium_Bot)\n\n"
+    mensaje += "2. El bot lo subira automaticamente a:\n"
+    mensaje += "   📁 Google Drive > INBESTU > RAG_PDF\n\n"
+    mensaje += "3. El texto se extraera e indexara para que\n"
+    mensaje += "   el bot pueda responder preguntas sobre el contenido\n\n"
+    mensaje += "━" * 30 + "\n"
+    mensaje += "📋 TIPOS DE DOCUMENTOS SUGERIDOS:\n\n"
+    mensaje += "📋 Manual del grupo\n"
+    mensaje += "📖 Guia de networking\n"
+    mensaje += "🎓 Decalogo de bienvenida\n"
+    mensaje += "💼 Directorio de servicios\n"
+    mensaje += "📊 Informes mensuales\n"
+    mensaje += "🤝 Casos de exito\n"
+    mensaje += "📅 Calendario de eventos\n"
+    mensaje += "💰 Guia de precios/tarifas\n"
+    mensaje += "📚 Material de capacitacion\n"
+    mensaje += "⚖️ Contratos modelo\n"
+    mensaje += "💵 Estudios de remuneraciones\n\n"
+    mensaje += "━" * 30 + "\n"
+    mensaje += "💡 Usa /rag_status para ver PDFs indexados\n"
+    mensaje += "💡 Usa /rag_consulta [pregunta] para consultar\n"
+    mensaje += "📏 Limite: 15 GB gratuitos en Google Drive"
+    
+    await update.message.reply_text(mensaje)
+
+
+async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler para recibir documentos PDF enviados al bot"""
+    if not update.message or not update.message.document:
+        return
+    
+    # Solo procesar en chat privado
+    if not es_chat_privado(update):
+        return
+    
+    document = update.message.document
+    user_id = update.effective_user.id
+    
+    # Verificar que sea PDF
+    if document.mime_type != 'application/pdf':
+        return  # Ignorar silenciosamente si no es PDF
+    
+    # Solo owner puede subir PDFs (seguridad)
+    es_owner = (user_id == OWNER_ID)
+    if not es_owner:
+        # Verificar si es admin/suscriptor activo
+        if not verificar_suscripcion_activa(user_id):
+            await update.message.reply_text(
+                "❌ Necesitas una suscripcion activa para subir PDFs.\n"
+                "Usa /start para registrarte."
+            )
+            return
+    
+    filename = document.file_name or f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    file_size_mb = document.file_size / (1024 * 1024) if document.file_size else 0
+    
+    # Límite de tamaño por archivo (20 MB para Telegram API)
+    if file_size_mb > 20:
+        await update.message.reply_text(
+            f"⚠️ El archivo es muy grande ({file_size_mb:.1f} MB).\n"
+            "Telegram permite maximo 20 MB por archivo.\n"
+            "Intenta comprimir el PDF o dividirlo."
+        )
+        return
+    
+    msg = await update.message.reply_text(
+        f"📥 Recibiendo: {filename} ({file_size_mb:.1f} MB)\n"
+        "⏳ Descargando..."
+    )
+    
+    try:
+        # Descargar archivo de Telegram
+        tg_file = await document.get_file()
+        file_bytes = await tg_file.download_as_bytearray()
+        file_bytes = bytes(file_bytes)
+        
+        await msg.edit_text(
+            f"📥 {filename} ({file_size_mb:.1f} MB)\n"
+            "☁️ Subiendo a Google Drive..."
+        )
+        
+        # Subir a Google Drive
+        file_id, status = subir_pdf_a_drive(file_bytes, filename)
+        
+        if not file_id:
+            await msg.edit_text(
+                f"❌ Error subiendo {filename} a Drive:\n{status}\n\n"
+                "Verifica que la service account tenga permisos de escritura."
+            )
+            return
+        
+        await msg.edit_text(
+            f"☁️ {filename} {status} en Drive\n"
+            "🔍 Extrayendo texto del PDF..."
+        )
+        
+        # Extraer texto
+        texto = extraer_texto_pdf(file_bytes)
+        
+        if not texto:
+            await msg.edit_text(
+                f"☁️ {filename} {status} en Drive: INBESTU/RAG_PDF\n\n"
+                "⚠️ No se pudo extraer texto del PDF.\n"
+                "El archivo esta guardado pero no se indexo.\n"
+                "Posibles causas: PDF escaneado (imagen), protegido, o sin texto."
+            )
+            return
+        
+        await msg.edit_text(
+            f"☁️ {filename} {status} en Drive\n"
+            "🧠 Indexando en sistema RAG..."
+        )
+        
+        # Indexar en RAG
+        chunks_creados = indexar_pdf_en_rag(filename, texto, file_id)
+        
+        # Resultado final
+        resultado = "━" * 30 + "\n"
+        resultado += "✅ PDF PROCESADO EXITOSAMENTE\n"
+        resultado += "━" * 30 + "\n\n"
+        resultado += f"📄 Archivo: {filename}\n"
+        resultado += f"📏 Tamano: {file_size_mb:.1f} MB\n"
+        resultado += f"☁️ Estado: {status} en Google Drive\n"
+        resultado += f"📁 Ubicacion: INBESTU/RAG_PDF\n"
+        resultado += f"📝 Texto extraido: {len(texto):,} caracteres\n"
+        resultado += f"🧩 Chunks RAG creados: {chunks_creados}\n\n"
+        resultado += "━" * 30 + "\n"
+        resultado += "El bot ahora puede responder preguntas\n"
+        resultado += "sobre el contenido de este documento.\n\n"
+        resultado += "💡 Prueba: @Cofradia_Premium_Bot [tu pregunta]\n"
+        resultado += "💡 O usa: /rag_consulta [tu pregunta]"
+        
+        await msg.edit_text(resultado)
+        registrar_servicio_usado(user_id, 'subir_pdf')
+        logger.info(f"✅ PDF procesado: {filename} - {chunks_creados} chunks por user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error procesando PDF: {e}")
+        await msg.edit_text(f"❌ Error procesando PDF: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_status - Ver estado del sistema RAG"""
+    msg = await update.message.reply_text("🔍 Consultando estado del sistema RAG...")
+    
+    try:
+        stats = obtener_estadisticas_rag()
+        
+        if not stats:
+            await msg.edit_text("❌ Error obteniendo estadisticas RAG")
+            return
+        
+        resultado = "━" * 30 + "\n"
+        resultado += "🧠 ESTADO DEL SISTEMA RAG\n"
+        resultado += "━" * 30 + "\n\n"
+        
+        resultado += f"📊 Total chunks indexados: {stats['total_chunks']}\n"
+        resultado += f"📄 PDFs indexados: {stats['total_pdfs']}\n"
+        resultado += f"☁️ PDFs en Drive: {stats['pdfs_en_drive']}\n\n"
+        
+        # Detalle por fuente
+        if stats.get('por_fuente'):
+            resultado += "📁 FUENTES INDEXADAS:\n"
+            for fuente_data in stats['por_fuente']:
+                fuente = fuente_data[0] if isinstance(fuente_data, tuple) else fuente_data
+                total = fuente_data[1] if isinstance(fuente_data, tuple) else 0
+                if str(fuente).startswith('PDF:'):
+                    nombre_pdf = str(fuente).replace('PDF:', '')
+                    resultado += f"   📄 {nombre_pdf}: {total} chunks\n"
+                else:
+                    resultado += f"   📊 {fuente}: {total} chunks\n"
+            resultado += "\n"
+        
+        # PDFs en Drive
+        if stats.get('pdfs_lista'):
+            resultado += "📁 ARCHIVOS EN INBESTU/RAG_PDF:\n"
+            for nombre, size_mb in stats['pdfs_lista']:
+                resultado += f"   📄 {nombre} ({size_mb:.1f} MB)\n"
+            resultado += "\n"
+        
+        # Espacio
+        if stats.get('espacio'):
+            esp = stats['espacio']
+            resultado += "💾 ESPACIO GOOGLE DRIVE:\n"
+            resultado += f"   📏 Limite: {esp['limite_gb']:.1f} GB\n"
+            resultado += f"   📦 Usado: {esp['usado_gb']:.1f} GB ({esp['uso_porcentaje']:.0f}%)\n"
+            resultado += f"   ✅ Disponible: {esp['disponible_gb']:.1f} GB\n\n"
+        
+        resultado += "━" * 30 + "\n"
+        resultado += "💡 /subir_pdf - Instrucciones para subir\n"
+        resultado += "💡 /rag_consulta [pregunta] - Consultar RAG\n"
+        resultado += "💡 /rag_reindexar - Re-indexar todo"
+        
+        await msg.edit_text(resultado)
+        
+    except Exception as e:
+        logger.error(f"Error en rag_status: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_consulta - Consulta directa al sistema RAG con IA"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /rag_consulta [tu pregunta]\n\n"
+            "Ejemplos:\n"
+            "  /rag_consulta reglas del grupo\n"
+            "  /rag_consulta tarifas recomendadas\n"
+            "  /rag_consulta como hacer networking\n\n"
+            "Busca en todos los PDFs y datos indexados."
+        )
+        return
+    
+    query = ' '.join(context.args)
+    msg = await update.message.reply_text(f"🧠 Buscando en RAG: {query}...")
+    
+    try:
+        # Buscar en RAG
+        resultados = buscar_rag(query, limit=8)
+        
+        if not resultados:
+            await msg.edit_text(
+                f"🔍 No se encontraron resultados para: {query}\n\n"
+                "💡 Prueba con palabras clave diferentes.\n"
+                "💡 Usa /rag_status para ver que hay indexado."
+            )
+            return
+        
+        # Si hay IA disponible, generar respuesta inteligente
+        if ia_disponible:
+            contexto_rag = "\n\n".join([f"[Fragmento {i+1}]: {r}" for i, r in enumerate(resultados)])
+            
+            prompt = f"""Eres el asistente de Cofradía de Networking. 
+El usuario pregunta: "{query}"
+
+INFORMACIÓN ENCONTRADA EN LOS DOCUMENTOS:
+{contexto_rag}
+
+INSTRUCCIONES:
+1. Responde basándote EXCLUSIVAMENTE en la información proporcionada
+2. Si la información no es suficiente, indícalo
+3. Sé conciso y directo
+4. Si hay datos de contacto, inclúyelos
+5. No uses asteriscos ni guiones bajos
+6. Máximo 300 palabras"""
+            
+            respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.3)
+            
+            if respuesta:
+                respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
+                texto_final = "🧠 CONSULTA RAG\n"
+                texto_final += "━" * 30 + "\n\n"
+                texto_final += f"🔍 Pregunta: {query}\n\n"
+                texto_final += respuesta_limpia + "\n\n"
+                texto_final += "━" * 30 + "\n"
+                texto_final += f"📚 Fuentes: {len(resultados)} fragmentos encontrados"
+                
+                await msg.edit_text(texto_final)
+                registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
+                return
+        
+        # Sin IA, mostrar resultados directos
+        texto_final = "🧠 RESULTADOS RAG\n"
+        texto_final += "━" * 30 + "\n\n"
+        texto_final += f"🔍 Busqueda: {query}\n"
+        texto_final += f"📊 Encontrados: {len(resultados)} fragmentos\n\n"
+        
+        for i, r in enumerate(resultados[:5], 1):
+            texto_final += f"📄 Resultado {i}:\n"
+            texto_final += f"{r[:300]}...\n\n" if len(r) > 300 else f"{r}\n\n"
+        
+        await msg.edit_text(texto_final)
+        registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
+        
+    except Exception as e:
+        logger.error(f"Error en rag_consulta: {e}")
+        await msg.edit_text(f"❌ Error consultando RAG: {str(e)[:200]}")
+
+
+async def rag_reindexar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_reindexar - Re-indexa todos los PDFs y Excel (solo owner/admin)"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador puede re-indexar el RAG.")
+        return
+    
+    msg = await update.message.reply_text("🔄 Re-indexando sistema RAG completo...\n⏳ Esto puede tomar unos minutos.")
+    
+    try:
+        # 1. Indexar Excel
+        await msg.edit_text("🔄 Paso 1/2: Indexando base de datos Excel...")
+        indexar_google_drive_rag()
+        
+        # 2. Indexar PDFs
+        await msg.edit_text("🔄 Paso 2/2: Indexando PDFs de INBESTU/RAG_PDF...")
+        chunks_pdf = indexar_todos_pdfs_rag()
+        
+        # Obtener stats finales
+        stats = obtener_estadisticas_rag()
+        
+        resultado = "✅ RE-INDEXACION COMPLETADA\n"
+        resultado += "━" * 30 + "\n\n"
+        if stats:
+            resultado += f"📊 Total chunks: {stats['total_chunks']}\n"
+            resultado += f"📄 PDFs procesados: {stats['total_pdfs']}\n"
+            resultado += f"☁️ PDFs en Drive: {stats['pdfs_en_drive']}\n"
+        resultado += f"\n🧩 Chunks PDF creados: {chunks_pdf}\n"
+        resultado += "\n💡 El sistema RAG esta actualizado."
+        
+        await msg.edit_text(resultado)
+        
+    except Exception as e:
+        logger.error(f"Error re-indexando RAG: {e}")
+        await msg.edit_text(f"❌ Error re-indexando: {str(e)[:200]}")
+
+
+async def eliminar_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /eliminar_pdf [nombre] - Elimina un PDF del RAG (solo owner)"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador puede eliminar PDFs.")
+        return
+    
+    if not context.args:
+        # Listar PDFs disponibles
+        pdfs = listar_pdfs_rag()
+        if not pdfs:
+            await update.message.reply_text("📁 No hay PDFs en INBESTU/RAG_PDF")
+            return
+        
+        msg = "📁 PDFs en INBESTU/RAG_PDF:\n\n"
+        for i, pdf in enumerate(pdfs, 1):
+            size_mb = int(pdf.get('size', 0)) / (1024*1024)
+            msg += f"{i}. {pdf['name']} ({size_mb:.1f} MB)\n"
+        msg += "\n💡 Uso: /eliminar_pdf [nombre exacto del archivo]"
+        
+        await update.message.reply_text(msg)
+        return
+    
+    filename = ' '.join(context.args)
+    
+    try:
+        headers = obtener_drive_auth_headers()
+        if not headers:
+            await update.message.reply_text("❌ Error de autenticación Drive")
+            return
+        
+        # Buscar el archivo
+        rag_folder_id = obtener_carpeta_rag_pdf()
+        if not rag_folder_id:
+            await update.message.reply_text("❌ No se encontró carpeta RAG_PDF")
+            return
+        
+        query = f"name = '{filename}' and '{rag_folder_id}' in parents and trashed = false"
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {'q': query, 'fields': 'files(id, name)'}
+        resp = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = resp.json().get('files', [])
+        
+        if not archivos:
+            await update.message.reply_text(f"❌ No se encontró: {filename}")
+            return
+        
+        # Mover a papelera
+        file_id = archivos[0]['id']
+        delete_url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+        resp = requests.patch(delete_url, headers={**headers, 'Content-Type': 'application/json'},
+                            json={'trashed': True}, timeout=30)
+        
+        # Eliminar chunks del RAG
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            source = f"PDF:{filename}"
+            if DATABASE_URL:
+                c.execute("DELETE FROM rag_chunks WHERE source = %s", (source,))
+            else:
+                c.execute("DELETE FROM rag_chunks WHERE source = ?", (source,))
+            conn.commit()
+            conn.close()
+        
+        await update.message.reply_text(
+            f"✅ PDF eliminado: {filename}\n"
+            "📊 Chunks RAG también eliminados."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error eliminando PDF: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
 # ==================== FUNCIÓN AUXILIAR: OBTENER DATOS EXCEL DRIVE ====================
 
 def obtener_datos_excel_drive(sheet_name=0):
@@ -3628,9 +4542,18 @@ def buscar_rag(query, limit=5):
 
 
 async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job programado para re-indexar RAG cada 6 horas"""
+    """Job programado para re-indexar RAG cada 6 horas (Excel + PDFs)"""
     logger.info("🔄 Ejecutando re-indexación RAG...")
+    
+    # 1. Indexar Excel de BD Grupo Laboral
     indexar_google_drive_rag()
+    
+    # 2. Indexar PDFs de INBESTU/RAG_PDF
+    try:
+        chunks_pdf = indexar_todos_pdfs_rag()
+        logger.info(f"🧠 RAG PDFs: {chunks_pdf} chunks indexados")
+    except Exception as e:
+        logger.error(f"Error indexando PDFs en job RAG: {e}")
 
 
 # ==================== SCRAPER SEC (SUPERINTENDENCIA ELECTRICIDAD Y COMBUSTIBLES) ====================
@@ -4385,6 +5308,9 @@ def main():
             BotCommand("graficos", "Ver gráficos"),
             BotCommand("empleo", "Buscar empleos"),
             BotCommand("estadisticas", "Ver estadísticas"),
+            BotCommand("subir_pdf", "Subir PDF al RAG"),
+            BotCommand("rag_status", "Estado del sistema RAG"),
+            BotCommand("rag_consulta", "Consultar documentos RAG"),
         ]
         try:
             await app.bot.set_my_commands(commands)
@@ -4448,13 +5374,21 @@ def main():
     application.add_handler(CommandHandler("cobros_admin", cobros_admin_comando))
     application.add_handler(CommandHandler("generar_codigo", generar_codigo_comando))
     
+    # Handlers RAG PDF
+    application.add_handler(CommandHandler("subir_pdf", subir_pdf_comando))
+    application.add_handler(CommandHandler("rag_status", rag_status_comando))
+    application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
+    application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
+    application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
+    
     # Callbacks
     application.add_handler(CallbackQueryHandler(callback_plan, pattern='^plan_'))
     application.add_handler(CallbackQueryHandler(callback_generar_codigo, pattern='^gencodigo_'))
     application.add_handler(CallbackQueryHandler(callback_aprobar_rechazar, pattern='^(aprobar|rechazar)_'))
     
-    # Mensajes
+    # Mensajes y documentos
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
+    application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
     
