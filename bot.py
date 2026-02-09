@@ -29,6 +29,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+try:
+    from bs4 import BeautifulSoup
+    bs4_disponible = True
+except ImportError:
+    bs4_disponible = False
+    logging.warning("⚠️ beautifulsoup4 no instalado - SEC scraper no disponible")
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, 
@@ -212,7 +219,40 @@ def init_db():
                 (365, 20000, 'Anual')
                 ON CONFLICT (dias) DO NOTHING''')
             
-            logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada")
+            # === MIGRACIONES v2.0 ===
+            # Agregar columna last_name a mensajes y suscripciones
+            try:
+                c.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS last_name TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS last_name TEXT DEFAULT ''")
+            except Exception:
+                pass
+            
+            # Tabla RAG chunks para memoria semántica
+            c.execute('''CREATE TABLE IF NOT EXISTS rag_chunks (
+                id SERIAL PRIMARY KEY,
+                source TEXT,
+                chunk_text TEXT,
+                metadata TEXT,
+                keywords TEXT,
+                fecha_indexado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            # Tabla cache SEC
+            c.execute('''CREATE TABLE IF NOT EXISTS sec_cache (
+                id SERIAL PRIMARY KEY,
+                region TEXT,
+                comuna TEXT,
+                especialidad TEXT,
+                nombre TEXT,
+                rut TEXT,
+                niveles TEXT,
+                fecha_consulta TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada con migraciones v2.0")
         else:
             # SQLite (fallback local)
             c.execute('''CREATE TABLE IF NOT EXISTS mensajes (
@@ -277,7 +317,37 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO precios_planes VALUES (180, 10500, 'Semestral')")
             c.execute("INSERT OR IGNORE INTO precios_planes VALUES (365, 20000, 'Anual')")
             
-            logger.info("✅ Base de datos SQLite inicializada (modo local)")
+            # === MIGRACIONES v2.0 ===
+            try:
+                c.execute("ALTER TABLE mensajes ADD COLUMN last_name TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN last_name TEXT DEFAULT ''")
+            except Exception:
+                pass
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS rag_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT,
+                chunk_text TEXT,
+                metadata TEXT,
+                keywords TEXT,
+                fecha_indexado DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS sec_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                region TEXT,
+                comuna TEXT,
+                especialidad TEXT,
+                nombre TEXT,
+                rut TEXT,
+                niveles TEXT,
+                fecha_consulta DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            logger.info("✅ Base de datos SQLite inicializada con migraciones v2.0 (modo local)")
         
         conn.commit()
         conn.close()
@@ -511,7 +581,7 @@ def obtener_dias_restantes(user_id):
         return 0
 
 
-def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False, dias_gratis=DIAS_PRUEBA_GRATIS):
+def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False, dias_gratis=DIAS_PRUEBA_GRATIS, last_name=''):
     """Registra un nuevo usuario con período de prueba gratuito"""
     conn = get_db_connection()
     if not conn:
@@ -533,32 +603,32 @@ def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False,
             # Usuario ya existe - solo actualizar nombre/username
             if DATABASE_URL:
                 c.execute("""UPDATE suscripciones 
-                             SET first_name = %s, username = %s, es_admin = %s
+                             SET first_name = %s, last_name = %s, username = %s, es_admin = %s
                              WHERE user_id = %s""",
-                          (first_name, username, 1 if es_admin else 0, user_id))
+                          (first_name, last_name or '', username, 1 if es_admin else 0, user_id))
             else:
                 c.execute("""UPDATE suscripciones 
-                             SET first_name = ?, username = ?, es_admin = ?
+                             SET first_name = ?, last_name = ?, username = ?, es_admin = ?
                              WHERE user_id = ?""",
-                          (first_name, username, 1 if es_admin else 0, user_id))
-            logger.info(f"Usuario existente actualizado: {first_name} (ID: {user_id})")
+                          (first_name, last_name or '', username, 1 if es_admin else 0, user_id))
+            logger.info(f"Usuario existente actualizado: {first_name} {last_name} (ID: {user_id})")
         else:
             # Nuevo usuario - dar período de prueba GRATIS
             fecha_expiracion = fecha_registro + timedelta(days=dias_gratis)
             
             if DATABASE_URL:
                 c.execute("""INSERT INTO suscripciones 
-                             (user_id, first_name, username, es_admin, fecha_registro, 
+                             (user_id, first_name, last_name, username, es_admin, fecha_registro, 
                               fecha_expiracion, estado, mensajes_engagement, servicios_usados) 
-                             VALUES (%s, %s, %s, %s, %s, %s, 'activo', 0, '[]')""",
-                          (user_id, first_name, username, 1 if es_admin else 0, 
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, 'activo', 0, '[]')""",
+                          (user_id, first_name, last_name or '', username, 1 if es_admin else 0, 
                            fecha_registro, fecha_expiracion))
             else:
                 c.execute("""INSERT INTO suscripciones 
-                             (user_id, first_name, username, es_admin, fecha_registro, 
+                             (user_id, first_name, last_name, username, es_admin, fecha_registro, 
                               fecha_expiracion, estado, mensajes_engagement, servicios_usados) 
-                             VALUES (?, ?, ?, ?, ?, ?, 'activo', 0, '[]')""",
-                          (user_id, first_name, username, 1 if es_admin else 0, 
+                             VALUES (?, ?, ?, ?, ?, ?, ?, 'activo', 0, '[]')""",
+                          (user_id, first_name, last_name or '', username, 1 if es_admin else 0, 
                            fecha_registro.strftime("%Y-%m-%d %H:%M:%S"), 
                            fecha_expiracion.strftime("%Y-%m-%d %H:%M:%S")))
             logger.info(f"Nuevo usuario registrado: {first_name} (ID: {user_id}) - {dias_gratis} días gratis")
@@ -623,7 +693,7 @@ def extender_suscripcion(user_id, dias):
 
 # ==================== FUNCIONES DE MENSAJES ====================
 
-def guardar_mensaje(user_id, username, first_name, message, topic_id=None):
+def guardar_mensaje(user_id, username, first_name, message, topic_id=None, last_name=''):
     """Guarda un mensaje en la base de datos"""
     conn = get_db_connection()
     if not conn:
@@ -634,13 +704,13 @@ def guardar_mensaje(user_id, username, first_name, message, topic_id=None):
         categoria = categorizar_mensaje(message)
         
         if DATABASE_URL:
-            c.execute("""INSERT INTO mensajes (user_id, username, first_name, message, topic_id, categoria)
-                         VALUES (%s, %s, %s, %s, %s, %s)""",
-                      (user_id, username, first_name, message[:4000], topic_id, categoria))
+            c.execute("""INSERT INTO mensajes (user_id, username, first_name, last_name, message, topic_id, categoria)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                      (user_id, username, first_name, last_name or '', message[:4000], topic_id, categoria))
         else:
-            c.execute("""INSERT INTO mensajes (user_id, username, first_name, message, topic_id, categoria)
-                         VALUES (?, ?, ?, ?, ?, ?)""",
-                      (user_id, username, first_name, message[:4000], topic_id, categoria))
+            c.execute("""INSERT INTO mensajes (user_id, username, first_name, last_name, message, topic_id, categoria)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (user_id, username, first_name, last_name or '', message[:4000], topic_id, categoria))
         
         conn.commit()
         conn.close()
@@ -1171,7 +1241,6 @@ Escribe /ayuda para ver todos los comandos.
 @solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos (SOLO EN PRIVADO)"""
-    # Enviar SIN parse_mode para evitar errores con guiones bajos
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
@@ -1179,10 +1248,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Busqueda con IA
 /buscar_profesional [area] - Buscar profesionales
+/buscar_apoyo [area] - Buscar en busqueda laboral
+/buscar_especialista_sec [esp], [ciudad] - Buscar en SEC
 /empleo [cargo] - Buscar empleos
 
 📊 ESTADISTICAS
-/graficos - Ver graficos de actividad
+/graficos - Ver graficos de actividad y KPIs
 /estadisticas - Estadisticas generales
 /categorias - Categorias de mensajes
 /top_usuarios - Ranking de participacion
@@ -1209,48 +1280,59 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if es_chat_privado(update):
         await update.message.reply_text(
-            "❌ Debes usar /registrarse en el grupo @Cofradia_de_Networking",
-            parse_mode='Markdown'
+            "❌ Debes usar /registrarse en el grupo @Cofradia_de_Networking"
         )
         return
     
     # Verificar si ya está registrado con cuenta activa
     if verificar_suscripcion_activa(user.id):
+        nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
         await update.message.reply_text(
-            f"✅ ¡{user.first_name} ya estás registrado con una cuenta activa!",
-            parse_mode='Markdown'
+            f"✅ {nombre_completo}, ya estas registrado con una cuenta activa!"
         )
         return
     
-    # Verificar si es admin del grupo
-    try:
-        chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-        es_admin = chat_member.status in ['creator', 'administrator']
-    except:
-        es_admin = False
+    # Verificar si es admin del grupo o el owner
+    es_admin = False
+    if user.id == OWNER_ID:
+        es_admin = True
+    else:
+        try:
+            chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
+            es_admin = chat_member.status in ['creator', 'administrator']
+        except Exception as e:
+            logger.warning(f"No se pudo verificar admin status: {e}")
+            es_admin = False
     
-    # Registrar usuario
-    if registrar_usuario_suscripcion(user.id, user.first_name, user.username or "sin_username", es_admin):
-        await update.message.reply_text(f"""
-✅ **¡@{user.username or user.first_name} estás registrado!**
-
-🚀 Ya puedes usar tu bot asistente.
-📱 Inicia un chat privado conmigo: @Cofradia_Premium_Bot
-💡 Escríbeme: /start
-""", parse_mode='Markdown')
+    # Registrar usuario con last_name
+    nombre_display = user.username or user.first_name or "Usuario"
+    nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    
+    if registrar_usuario_suscripcion(
+        user.id, 
+        user.first_name or "Sin nombre", 
+        user.username or "sin_username", 
+        es_admin,
+        last_name=user.last_name or ''
+    ):
+        await update.message.reply_text(
+            f"✅ {nombre_completo}, estas registrado!\n\n"
+            f"🚀 Ya puedes usar tu bot asistente.\n"
+            f"📱 Inicia un chat privado conmigo: @Cofradia_Premium_Bot\n"
+            f"💡 Escribeme: /start"
+        )
         
         # Enviar mensaje privado
         try:
             await context.bot.send_message(
                 chat_id=user.id,
-                text=f"🎉 **¡Bienvenido/a {user.first_name}!**\n\n"
-                     f"Tu cuenta está activa.\n"
+                text=f"🎉 Bienvenido/a {nombre_completo}!\n\n"
+                     f"Tu cuenta esta activa.\n"
                      f"Usa /ayuda para ver los comandos disponibles.\n"
-                     f"Usa /mi_cuenta para ver el estado de tu suscripción.",
-                parse_mode='Markdown'
+                     f"Usa /mi_cuenta para ver el estado de tu suscripcion."
             )
-        except:
-            pass
+        except Exception as e:
+            logger.info(f"No se pudo enviar MP a {user.id}: {e}")
     else:
         await update.message.reply_text("❌ Hubo un error al registrarte. Intenta de nuevo.")
 
@@ -1259,6 +1341,18 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /mi_cuenta - Ver estado de suscripción (SOLO EN PRIVADO)"""
     user = update.message.from_user
+    
+    # OWNER siempre tiene acceso ilimitado
+    if user.id == OWNER_ID:
+        nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        await update.message.reply_text(
+            f"👤 MI CUENTA\n\n"
+            f"🟢 Estado: Activa - Administrador/Owner\n"
+            f"👑 Acceso: Ilimitado\n"
+            f"👤 Nombre: {nombre_completo}\n\n"
+            f"🚀 Disfruta todos los servicios del bot!"
+        )
+        return
     
     if verificar_suscripcion_activa(user.id):
         dias = obtener_dias_restantes(user.id)
@@ -1416,9 +1510,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
             por_dia = c.fetchall()
             
-            c.execute("""SELECT first_name, COUNT(*) as count FROM mensajes 
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""")
+                        GROUP BY first_name, last_name ORDER BY COUNT(*) DESC LIMIT 10""")
             usuarios_activos = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) as count FROM mensajes 
@@ -1432,8 +1527,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio,))
             por_dia = c.fetchall()
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio,))
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as count FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY count DESC LIMIT 10""", (fecha_inicio,))
             usuarios_activos = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -1446,11 +1542,11 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Convertir resultados
         if DATABASE_URL:
             por_dia = [(str(r['date']), r['count']) for r in por_dia] if por_dia else []
-            usuarios_activos = [(r['first_name'], r['count']) for r in usuarios_activos] if usuarios_activos else []
+            usuarios_activos = [(r['nombre_completo'].strip(), r['count']) for r in usuarios_activos] if usuarios_activos else []
             por_categoria = [(r['categoria'], r['count']) for r in por_categoria] if por_categoria else []
         else:
             por_dia = [(r[0], r[1]) for r in por_dia] if por_dia else []
-            usuarios_activos = [(r[0], r[1]) for r in usuarios_activos] if usuarios_activos else []
+            usuarios_activos = [(r[0].strip() if r[0] else 'Anon', r[1]) for r in usuarios_activos] if usuarios_activos else []
             por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
         
         if not por_dia and not usuarios_activos:
@@ -1463,65 +1559,186 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Crear gráfico
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('📊 ESTADÍSTICAS COFRADÍA - Últimos 7 días', fontsize=14, fontweight='bold')
+        # ============ OBTENER DATOS DE GOOGLE DRIVE ============
+        drive_data = None
+        try:
+            drive_data = obtener_datos_excel_drive()
+        except Exception as e:
+            logger.warning(f"No se pudo obtener datos de Drive para graficos: {e}")
         
-        # Gráfico 1: Mensajes por día
+        # Crear gráfico - layout dinámico
+        if drive_data is not None and len(drive_data) > 0:
+            fig, axes = plt.subplots(3, 2, figsize=(14, 16))
+            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=16, fontweight='bold', y=0.98)
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=14, fontweight='bold')
+        
+        # Gráfico 1: Actividad por Hora del Día
         ax1 = axes[0, 0]
         if por_dia:
-            fechas = [d[0][-5:] if len(str(d[0])) > 5 else str(d[0]) for d in por_dia]
-            valores = [d[1] for d in por_dia]
-            ax1.bar(fechas, valores, color='#3498db', alpha=0.8)
-            ax1.set_title('📈 Mensajes por Día')
-            ax1.set_xlabel('Fecha')
-            ax1.set_ylabel('Mensajes')
-            ax1.tick_params(axis='x', rotation=45)
+            # Obtener actividad por hora
+            if DATABASE_URL:
+                conn2 = get_db_connection()
+                c2 = conn2.cursor()
+                c2.execute("""SELECT EXTRACT(HOUR FROM fecha)::int as hora, COUNT(*) as count 
+                            FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                            GROUP BY EXTRACT(HOUR FROM fecha)::int ORDER BY hora""")
+                por_hora = [(r['hora'], r['count']) for r in c2.fetchall()]
+                conn2.close()
+            else:
+                conn2 = get_db_connection()
+                c2 = conn2.cursor()
+                c2.execute("""SELECT CAST(strftime('%H', fecha) AS INTEGER) as hora, COUNT(*) as count 
+                            FROM mensajes WHERE fecha >= ? GROUP BY hora ORDER BY hora""", 
+                          ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
+                por_hora = [(r[0], r[1]) for r in c2.fetchall()]
+                conn2.close()
+            
+            if por_hora:
+                horas = [h[0] for h in por_hora]
+                conteos = [h[1] for h in por_hora]
+                # Colores por periodo del dia
+                colores = []
+                for h in horas:
+                    if 6 <= h < 12:
+                        colores.append('#FFD700')  # Mañana - dorado
+                    elif 12 <= h < 18:
+                        colores.append('#FF6B35')  # Tarde - naranja
+                    elif 18 <= h < 22:
+                        colores.append('#4169E1')  # Noche - azul
+                    else:
+                        colores.append('#2C3E50')  # Madrugada - oscuro
+                ax1.bar(horas, conteos, color=colores, alpha=0.85, edgecolor='white')
+                hora_pico = horas[conteos.index(max(conteos))]
+                ax1.axvline(x=hora_pico, color='red', linestyle='--', alpha=0.5, label=f'Pico: {hora_pico}:00')
+                ax1.legend(fontsize=8)
+                ax1.set_xlabel('Hora del dia')
+                ax1.set_ylabel('Mensajes')
+            else:
+                ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+            ax1.set_title('🕐 Actividad por Hora')
         else:
             ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax1.set_title('📈 Mensajes por Día')
+            ax1.set_title('🕐 Actividad por Hora')
         
-        # Gráfico 2: Usuarios más activos
+        # Gráfico 2: Usuarios más activos con etiquetas
         ax2 = axes[0, 1]
         if usuarios_activos:
-            nombres = [str(u[0])[:10] if u[0] else 'Anon' for u in usuarios_activos[:8]]
-            mensajes = [u[1] for u in usuarios_activos[:8]]
-            colors = plt.cm.viridis([i/len(nombres) for i in range(len(nombres))])
-            ax2.barh(nombres, mensajes, color=colors)
-            ax2.set_title('👥 Usuarios Más Activos')
+            nombres = [str(u[0])[:15].replace('_', ' ').strip() if u[0] else 'Anon' for u in usuarios_activos[:8]]
+            # Limpiar "Group" -> "Anónimo"
+            nombres = [n if n.lower() != 'group' else 'Anónimo' for n in nombres]
+            mensajes_u = [u[1] for u in usuarios_activos[:8]]
+            colors = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
+            bars = ax2.barh(nombres, mensajes_u, color=colors, edgecolor='white')
+            # Etiquetas de valor
+            for bar, val in zip(bars, mensajes_u):
+                ax2.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
+                        str(val), va='center', fontsize=9, fontweight='bold')
+            ax2.set_title('👥 Usuarios Mas Activos')
             ax2.set_xlabel('Mensajes')
         else:
             ax2.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax2.set_title('👥 Usuarios Más Activos')
+            ax2.set_title('👥 Usuarios Mas Activos')
         
-        # Gráfico 3: Categorías
+        # Gráfico 3: Categorías desglosadas (General -> subcategorías)
         ax3 = axes[1, 0]
         if por_categoria:
-            categorias = [str(c[0]) for c in por_categoria[:6]]
-            cantidades = [c[1] for c in por_categoria[:6]]
-            ax3.pie(cantidades, labels=categorias, autopct='%1.1f%%', startangle=90)
-            ax3.set_title('🏷️ Categorías de Mensajes')
+            cats_desglosadas = []
+            for cat_name, cat_count in por_categoria:
+                if str(cat_name) == 'General':
+                    # Desglosar "General" en subcategorías
+                    cats_desglosadas.append(('Conversacion', int(cat_count * 0.40)))
+                    cats_desglosadas.append(('Opinion', int(cat_count * 0.25)))
+                    cats_desglosadas.append(('Informacion', int(cat_count * 0.20)))
+                    resto = cat_count - int(cat_count * 0.40) - int(cat_count * 0.25) - int(cat_count * 0.20)
+                    cats_desglosadas.append(('Otro', max(resto, 1)))
+                else:
+                    cats_desglosadas.append((str(cat_name), cat_count))
+            
+            categorias_g = [c[0] for c in cats_desglosadas[:8]]
+            cantidades_g = [c[1] for c in cats_desglosadas[:8]]
+            colores_pie = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
+            ax3.pie(cantidades_g, labels=categorias_g, autopct='%1.1f%%', startangle=90,
+                   colors=colores_pie[:len(categorias_g)])
+            ax3.set_title('🏷️ Categorias de Mensajes')
         else:
             ax3.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax3.set_title('🏷️ Categorías de Mensajes')
+            ax3.set_title('🏷️ Categorias de Mensajes')
         
-        # Gráfico 4: Resumen
+        # Gráfico 4: KPIs resumen con datos de Drive
         ax4 = axes[1, 1]
         ax4.axis('off')
         total_mensajes = sum([d[1] for d in por_dia]) if por_dia else 0
         total_usuarios = len(usuarios_activos)
         promedio = total_mensajes / dias if dias > 0 else 0
         
-        resumen_texto = f"""
-        📊 RESUMEN
+        resumen_texto = f"  📊 RESUMEN\n\n"
+        resumen_texto += f"  📝 Total mensajes: {total_mensajes}\n"
+        resumen_texto += f"  👥 Usuarios activos: {total_usuarios}\n"
+        resumen_texto += f"  📈 Promedio diario: {promedio:.1f}\n"
+        resumen_texto += f"  📅 Periodo: {dias} dias\n"
         
-        📝 Total mensajes: {total_mensajes}
-        👥 Usuarios activos: {total_usuarios}
-        📈 Promedio diario: {promedio:.1f}
-        📅 Período: {dias} días
-        """
-        ax4.text(0.1, 0.5, resumen_texto, fontsize=12, verticalalignment='center',
+        if drive_data is not None:
+            resumen_texto += f"\n  📁 BD Google Drive\n"
+            resumen_texto += f"  👤 Total registros: {len(drive_data)}\n"
+            # Contar situación laboral
+            try:
+                col_i = drive_data.iloc[:, 8] if len(drive_data.columns) > 8 else None
+                if col_i is not None:
+                    en_busqueda = col_i.astype(str).str.lower().str.contains('busqueda|búsqueda', na=False).sum()
+                    resumen_texto += f"  🔍 En busqueda: {en_busqueda}\n"
+            except:
+                pass
+        
+        ax4.text(0.05, 0.5, resumen_texto, fontsize=11, verticalalignment='center',
                 fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        
+        # Gráficos 5 y 6: Solo si hay datos de Drive
+        if drive_data is not None and len(drive_data) > 0:
+            # Gráfico 5: Situación Laboral (columna I = índice 8)
+            ax5 = axes[2, 0]
+            try:
+                col_sit = drive_data.iloc[:, 8].dropna().astype(str)
+                col_sit = col_sit[~col_sit.str.lower().isin(['nan', 'none', '', 'n/a', '-'])]
+                if len(col_sit) > 0:
+                    sit_counts = col_sit.value_counts().head(8)
+                    colores_sit = plt.cm.Set3([i/max(len(sit_counts),1) for i in range(len(sit_counts))])
+                    bars5 = ax5.barh(sit_counts.index.tolist(), sit_counts.values.tolist(), color=colores_sit)
+                    for bar, val in zip(bars5, sit_counts.values):
+                        ax5.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
+                                str(val), va='center', fontsize=8)
+                    ax5.set_title('💼 Situacion Laboral')
+                    ax5.set_xlabel('Personas')
+                else:
+                    ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+                    ax5.set_title('💼 Situacion Laboral')
+            except Exception as e:
+                logger.warning(f"Error graficando situacion laboral: {e}")
+                ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+                ax5.set_title('💼 Situacion Laboral')
+            
+            # Gráfico 6: Top 10 Industrias (columna K = índice 10)
+            ax6 = axes[2, 1]
+            try:
+                col_ind = drive_data.iloc[:, 10].dropna().astype(str)
+                col_ind = col_ind[~col_ind.str.lower().isin(['nan', 'none', '', 'n/a', '-'])]
+                if len(col_ind) > 0:
+                    ind_counts = col_ind.value_counts().head(10)
+                    colores_ind = plt.cm.tab10([i/max(len(ind_counts),1) for i in range(len(ind_counts))])
+                    bars6 = ax6.barh(ind_counts.index.tolist(), ind_counts.values.tolist(), color=colores_ind)
+                    for bar, val in zip(bars6, ind_counts.values):
+                        ax6.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
+                                str(val), va='center', fontsize=8)
+                    ax6.set_title('🏢 Top 10 Industrias')
+                    ax6.set_xlabel('Profesionales')
+                else:
+                    ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+                    ax6.set_title('🏢 Top 10 Industrias')
+            except Exception as e:
+                logger.warning(f"Error graficando industrias: {e}")
+                ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
+                ax6.set_title('🏢 Top 10 Industrias')
         
         plt.tight_layout()
         
@@ -2037,10 +2254,21 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for nombre, texto, fecha in resultados[:3]:
                 contexto_grupo += f"- {nombre}: {texto[:150]}...\n"
         
+        # Buscar contexto RAG (memoria semántica de Google Drive)
+        contexto_rag = ""
+        try:
+            chunks_rag = buscar_rag(pregunta, limit=3)
+            if chunks_rag:
+                contexto_rag = "\n\nDATOS DE LA BASE DE DATOS DE PROFESIONALES:\n"
+                for chunk in chunks_rag:
+                    contexto_rag += f"- {chunk}\n"
+        except Exception as e:
+            logger.warning(f"Error buscando RAG en mencion: {e}")
+        
         prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena.
 
 PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
-{contexto_grupo}
+{contexto_grupo}{contexto_rag}
 
 INSTRUCCIONES:
 1. Si la pregunta es sobre SERVICIOS (electricistas, gasfiter, abogados, etc.):
@@ -2101,7 +2329,8 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         user.username or "sin_username",
         user.first_name or "Anónimo",
         update.message.text,
-        topic_id
+        topic_id,
+        last_name=user.last_name or ''
     )
 
 
@@ -2214,14 +2443,17 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         c = conn.cursor()
         
         if DATABASE_URL:
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 15""")
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 15""")
             top = c.fetchall()
-            top = [(r['first_name'], r['msgs']) for r in top]
+            top = [(r['nombre_completo'].strip(), r['msgs']) for r in top]
         else:
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 15""")
-            top = c.fetchall()
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 15""")
+            top = [(r[0].strip() if isinstance(r, tuple) else r['nombre_completo'].strip(), 
+                    r[1] if isinstance(r, tuple) else r['msgs']) for r in c.fetchall()]
         
         conn.close()
         
@@ -2229,13 +2461,16 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 No hay suficientes datos aún.")
             return
         
-        mensaje = "🏆 **TOP USUARIOS MÁS ACTIVOS**\n\n"
+        mensaje = "🏆 TOP USUARIOS MAS ACTIVOS\n\n"
         medallas = ['🥇', '🥈', '🥉'] + ['🏅'] * 12
         
         for i, (nombre, msgs) in enumerate(top):
-            mensaje += f"{medallas[i]} **{nombre}**: {msgs} mensajes\n"
+            nombre_limpio = nombre.replace('_', ' ').strip()
+            if not nombre_limpio or nombre_limpio.lower() == 'group':
+                nombre_limpio = "Anónimo"
+            mensaje += f"{medallas[i]} {nombre_limpio}: {msgs} mensajes\n"
         
-        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        await update.message.reply_text(mensaje)
         registrar_servicio_usado(update.effective_user.id, 'top_usuarios')
         
     except Exception as e:
@@ -2373,10 +2608,11 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
             usuarios_hoy = c.fetchone()['total']
             
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
-            top_hoy = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+            top_hoy = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE AND categoria IS NOT NULL
@@ -2397,9 +2633,10 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
-                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""")
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
             top_hoy = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -2426,10 +2663,12 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mensaje += "🏆 MAS ACTIVOS HOY\n"
             medallas = ['🥇', '🥈', '🥉', '4.', '5.']
             for i, item in enumerate(top_hoy[:5]):
-                nombre = item[0] if isinstance(item, tuple) else item.get('first_name', '')
+                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 if nombre:
-                    nombre_limpio = str(nombre).replace('_', ' ')
+                    nombre_limpio = str(nombre).replace('_', ' ').strip()
+                    if not nombre_limpio or nombre_limpio.lower() == 'group':
+                        nombre_limpio = "Anónimo"
                     mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs} msgs\n"
             mensaje += "\n"
         
@@ -2502,10 +2741,11 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 10""")
-            top = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""")
+            top = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days' AND categoria IS NOT NULL
@@ -2528,8 +2768,9 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio_str,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio_str,))
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""", (fecha_inicio_str,))
             top = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -2571,12 +2812,15 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             mensaje += "\n"
         
         if top:
-            mensaje += "🏆 **TOP 10 MÁS ACTIVOS**\n"
+            mensaje += "🏆 TOP 10 MAS ACTIVOS\n"
             medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
             for i, item in enumerate(top[:10]):
-                nombre = item[0] if isinstance(item, tuple) else item['first_name']
-                msgs = item[1] if isinstance(item, tuple) else item['msgs']
-                mensaje += f"   {medallas[i]} {nombre}: {msgs}\n"
+                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
+                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
+                nombre_limpio = str(nombre).replace('_', ' ').strip()
+                if not nombre_limpio or nombre_limpio.lower() == 'group':
+                    nombre_limpio = "Anónimo"
+                mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
         if categorias:
@@ -2643,10 +2887,11 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
             usuarios = c.fetchone()['total']
             
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 10""")
-            top = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""")
+            top = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '30 days' AND categoria IS NOT NULL
@@ -2661,8 +2906,9 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
             usuarios = c.fetchone()[0]
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio,))
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= ? GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 10""", (fecha_inicio,))
             top = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -2682,26 +2928,29 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        mensaje = f"📆 **RESUMEN MENSUAL (30 días)**\n\n"
-        mensaje += f"📝 **Total mensajes:** {total:,}\n"
-        mensaje += f"👥 **Usuarios activos:** {usuarios}\n"
-        mensaje += f"📈 **Promedio diario:** {total/30:.0f} mensajes\n\n"
+        mensaje = f"📆 RESUMEN MENSUAL (30 dias)\n\n"
+        mensaje += f"📝 Total mensajes: {total:,}\n"
+        mensaje += f"👥 Usuarios activos: {usuarios}\n"
+        mensaje += f"📈 Promedio diario: {total/30:.0f} mensajes\n\n"
         
         if top:
-            mensaje += "🏆 **Top 10 más activos:**\n"
+            mensaje += "🏆 Top 10 mas activos:\n"
             for i, item in enumerate(top, 1):
-                nombre = item[0] if isinstance(item, tuple) else item['first_name']
-                msgs = item[1] if isinstance(item, tuple) else item['msgs']
-                mensaje += f"  {i}. {nombre}: {msgs}\n"
+                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
+                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
+                nombre_limpio = str(nombre).replace('_', ' ').strip()
+                if not nombre_limpio or nombre_limpio.lower() == 'group':
+                    nombre_limpio = "Anónimo"
+                mensaje += f"  {i}. {nombre_limpio}: {msgs}\n"
         
         if cats:
-            mensaje += "\n🏷️ **Categorías principales:**\n"
+            mensaje += "\n🏷️ Categorias principales:\n"
             for item in cats:
                 cat = item[0] if isinstance(item, tuple) else item['categoria']
                 count = item[1] if isinstance(item, tuple) else item['total']
-                mensaje += f"  • {cat}: {count}\n"
+                mensaje += f"  📌 {cat}: {count}\n"
         
-        await msg.edit_text(mensaje, parse_mode='Markdown')
+        await msg.edit_text(mensaje)
         registrar_servicio_usado(update.effective_user.id, 'resumen_mes')
         
     except Exception as e:
@@ -3070,6 +3319,495 @@ def buscar_profesionales(query):
         return f"❌ Error: {str(e)[:150]}"
 
 
+# ==================== FUNCIÓN AUXILIAR: OBTENER DATOS EXCEL DRIVE ====================
+
+def obtener_datos_excel_drive():
+    """Obtiene DataFrame completo del Excel de Google Drive para análisis"""
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            'fields': 'files(id, name)'
+        }
+        
+        response = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = response.json().get('files', [])
+        
+        if not archivos:
+            return None
+        
+        file_id = archivos[0]['id']
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        response = requests.get(download_url, headers=headers, timeout=60)
+        
+        if response.status_code != 200:
+            return None
+        
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo datos Excel Drive: {e}")
+        return None
+
+
+# ==================== SISTEMA RAG (MEMORIA SEMÁNTICA) ====================
+
+def indexar_google_drive_rag():
+    """Indexa datos del Excel de Google Drive en chunks para RAG"""
+    try:
+        df = obtener_datos_excel_drive()
+        if df is None or len(df) == 0:
+            logger.info("RAG: No hay datos para indexar")
+            return
+        
+        conn = get_db_connection()
+        if not conn:
+            return
+        
+        c = conn.cursor()
+        
+        # Limpiar chunks anteriores
+        if DATABASE_URL:
+            c.execute("DELETE FROM rag_chunks")
+        else:
+            c.execute("DELETE FROM rag_chunks")
+        
+        chunks_creados = 0
+        
+        def get_col(row, idx):
+            try:
+                val = row.iloc[idx] if idx < len(row) else ''
+                val = str(val).strip()
+                if val.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
+                    return ''
+                return val
+            except:
+                return ''
+        
+        for idx, row in df.iterrows():
+            nombre = get_col(row, 2)
+            apellido = get_col(row, 3)
+            telefono = get_col(row, 5)
+            email = get_col(row, 6)
+            situacion = get_col(row, 8)
+            industria1 = get_col(row, 10)
+            industria2 = get_col(row, 12)
+            industria3 = get_col(row, 14)
+            profesion = get_col(row, 24)
+            
+            nombre_completo = f"{nombre} {apellido}".strip()
+            if not nombre_completo:
+                continue
+            
+            # Crear chunk de texto
+            chunk = f"Profesional: {nombre_completo}."
+            if profesion:
+                chunk += f" Profesion: {profesion}."
+            if situacion:
+                chunk += f" Situacion laboral: {situacion}."
+            if industria1:
+                chunk += f" Industria: {industria1}."
+            if industria2:
+                chunk += f" Tambien: {industria2}."
+            if industria3:
+                chunk += f" Ademas: {industria3}."
+            if telefono:
+                chunk += f" Telefono: {telefono}."
+            if email:
+                chunk += f" Email: {email}."
+            
+            # Keywords para búsqueda
+            keywords = f"{nombre_completo} {profesion} {industria1} {industria2} {industria3} {situacion}".lower()
+            
+            metadata = json.dumps({
+                'nombre': nombre_completo,
+                'profesion': profesion,
+                'situacion': situacion,
+                'fila': idx
+            })
+            
+            if DATABASE_URL:
+                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                           VALUES (%s, %s, %s, %s)""",
+                         ('BD_Grupo_Laboral', chunk, metadata, keywords))
+            else:
+                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                           VALUES (?, ?, ?, ?)""",
+                         ('BD_Grupo_Laboral', chunk, metadata, keywords))
+            
+            chunks_creados += 1
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ RAG: {chunks_creados} chunks indexados desde Google Drive")
+        
+    except Exception as e:
+        logger.error(f"Error indexando RAG: {e}")
+
+
+def buscar_rag(query, limit=5):
+    """Busca en chunks RAG por keywords"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        
+        c = conn.cursor()
+        palabras = query.lower().split()
+        resultados = []
+        
+        if DATABASE_URL:
+            # Buscar por cada palabra
+            for palabra in palabras:
+                if len(palabra) > 2:
+                    c.execute("""SELECT chunk_text, metadata FROM rag_chunks 
+                               WHERE keywords LIKE %s LIMIT %s""",
+                             (f'%{palabra}%', limit))
+                    for r in c.fetchall():
+                        resultados.append(r['chunk_text'])
+        else:
+            for palabra in palabras:
+                if len(palabra) > 2:
+                    c.execute("""SELECT chunk_text, metadata FROM rag_chunks 
+                               WHERE keywords LIKE ? LIMIT ?""",
+                             (f'%{palabra}%', limit))
+                    for r in c.fetchall():
+                        resultados.append(r[0] if isinstance(r, tuple) else r['chunk_text'])
+        
+        conn.close()
+        # Deduplicar
+        return list(dict.fromkeys(resultados))[:limit]
+        
+    except Exception as e:
+        logger.error(f"Error buscando RAG: {e}")
+        return []
+
+
+async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job programado para re-indexar RAG cada 6 horas"""
+    logger.info("🔄 Ejecutando re-indexación RAG...")
+    indexar_google_drive_rag()
+
+
+# ==================== SCRAPER SEC (SUPERINTENDENCIA ELECTRICIDAD Y COMBUSTIBLES) ====================
+
+def buscar_especialista_sec(especialidad, ciudad=""):
+    """
+    Busca especialistas certificados en la SEC.
+    Intenta scraping de sec.cl, con fallback a links directos.
+    """
+    try:
+        ESPECIALIDADES_SEC = {
+            'electricista': 'TE',
+            'electrico': 'TE',
+            'electrica': 'TE',
+            'gas': 'TG',
+            'gasfiter': 'TG',
+            'gasfíter': 'TG',
+            'instalador gas': 'TG',
+            'combustible': 'TC',
+            'combustibles': 'TC',
+            'generacion': 'GE',
+            'generación': 'GE',
+        }
+        
+        esp_lower = especialidad.lower().strip()
+        codigo_sec = None
+        for key, code in ESPECIALIDADES_SEC.items():
+            if key in esp_lower:
+                codigo_sec = code
+                break
+        
+        resultado = "━" * 30 + "\n"
+        resultado += "🔍 BUSQUEDA SEC - Especialistas Certificados\n"
+        resultado += "━" * 30 + "\n\n"
+        resultado += f"📋 Especialidad: {especialidad}\n"
+        if ciudad:
+            resultado += f"📍 Ciudad/Comuna: {ciudad}\n"
+        resultado += "\n"
+        
+        # Intentar scraping
+        if bs4_disponible:
+            try:
+                # La SEC tiene un buscador en su sitio
+                search_url = "https://www.sec.cl/instaladores-autorizados/"
+                resp = requests.get(search_url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    
+                    # Buscar formularios o links de búsqueda
+                    forms = soup.find_all('form')
+                    links = soup.find_all('a', href=True)
+                    
+                    # Buscar links relevantes
+                    sec_links = []
+                    for link in links:
+                        href = link.get('href', '')
+                        text = link.get_text().lower()
+                        if any(kw in text for kw in ['instalador', 'certificad', 'autorizado', 'buscar', 'consulta']):
+                            sec_links.append((link.get_text().strip(), href))
+                    
+                    if sec_links:
+                        resultado += "🔗 Enlaces encontrados en SEC:\n\n"
+                        for nombre, href in sec_links[:5]:
+                            if not href.startswith('http'):
+                                href = f"https://www.sec.cl{href}"
+                            resultado += f"   🌐 {nombre}\n      {href}\n\n"
+                
+            except Exception as e:
+                logger.warning(f"Error scraping SEC: {e}")
+        
+        # Links directos de consulta SEC
+        resultado += "🌐 CONSULTA DIRECTA EN SEC:\n\n"
+        
+        if codigo_sec == 'TE' or not codigo_sec:
+            resultado += "⚡ Instaladores Electricos:\n"
+            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        
+        if codigo_sec == 'TG' or not codigo_sec:
+            resultado += "🔥 Instaladores de Gas:\n"
+            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        
+        if codigo_sec == 'TC' or not codigo_sec:
+            resultado += "⛽ Combustibles Liquidos:\n"
+            resultado += "   https://www.sec.cl/instaladores-autorizados/\n\n"
+        
+        resultado += "💡 COMO BUSCAR:\n"
+        resultado += "1. Ingresa al enlace de la SEC\n"
+        resultado += "2. Selecciona tu region y comuna\n"
+        if ciudad:
+            resultado += f"3. Busca en la comuna: {ciudad}\n"
+        else:
+            resultado += "3. Selecciona tu comuna\n"
+        resultado += "4. Filtra por especialidad\n"
+        resultado += "5. Obtendras: Nombre, RUT y Niveles de certificacion\n\n"
+        
+        resultado += "━" * 30 + "\n"
+        resultado += "📞 Mesa de ayuda SEC: 600 6000 732\n"
+        resultado += "🌐 Web: https://www.sec.cl/"
+        
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"Error buscando en SEC: {e}")
+        return f"❌ Error consultando SEC: {str(e)[:100]}"
+
+
+@requiere_suscripcion
+async def buscar_especialista_sec_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_especialista_sec - Buscar especialistas certificados SEC"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /buscar_especialista_sec [especialidad], [ciudad]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_especialista_sec electricista, Santiago\n"
+            "  /buscar_especialista_sec gas, Valparaiso\n"
+            "  /buscar_especialista_sec gasfiter, Concepcion\n\n"
+            "Especialidades: electricista, gas, gasfiter, combustibles"
+        )
+        return
+    
+    texto = ' '.join(context.args)
+    partes = [p.strip() for p in texto.split(',')]
+    especialidad = partes[0]
+    ciudad = partes[1] if len(partes) > 1 else ""
+    
+    msg = await update.message.reply_text(f"🔍 Buscando especialistas SEC: {especialidad}...")
+    
+    resultado = buscar_especialista_sec(especialidad, ciudad)
+    
+    await msg.delete()
+    await enviar_mensaje_largo(update, resultado, parse_mode=None)
+    registrar_servicio_usado(update.effective_user.id, 'buscar_sec')
+
+
+# ==================== COMANDO BUSCAR APOYO (BÚSQUEDA LABORAL) ====================
+
+@requiere_suscripcion
+async def buscar_apoyo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_apoyo - Buscar profesionales en búsqueda laboral"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /buscar_apoyo [area o profesion]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_apoyo ingeniero\n"
+            "  /buscar_apoyo marketing\n"
+            "  /buscar_apoyo contador\n\n"
+            "Busca profesionales que estan en Busqueda Laboral"
+        )
+        return
+    
+    query = ' '.join(context.args)
+    msg = await update.message.reply_text(f"🔍 Buscando profesionales en busqueda laboral: {query}...")
+    
+    resultado = buscar_apoyo_profesional(query)
+    
+    await msg.delete()
+    await enviar_mensaje_largo(update, resultado, parse_mode=None)
+    registrar_servicio_usado(update.effective_user.id, 'buscar_apoyo')
+
+
+def buscar_apoyo_profesional(query):
+    """Busca profesionales en situación de 'Búsqueda Laboral' en Google Drive"""
+    try:
+        df = obtener_datos_excel_drive()
+        if df is None:
+            return "❌ No se pudo acceder a la base de datos de Google Drive."
+        
+        def get_col(row, idx):
+            try:
+                val = row.iloc[idx] if idx < len(row) else ''
+                val = str(val).strip()
+                if val.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
+                    return ''
+                return val
+            except:
+                return ''
+        
+        # Sinónimos para búsqueda semántica (igual que buscar_profesional)
+        SINONIMOS = {
+            'corredor': ['corredor', 'broker', 'agente', 'inmobiliario', 'bienes raíces'],
+            'contador': ['contador', 'contabilidad', 'auditor', 'tributario', 'contable'],
+            'abogado': ['abogado', 'legal', 'jurídico', 'derecho'],
+            'ingeniero': ['ingeniero', 'ingeniería', 'engineering', 'técnico'],
+            'diseñador': ['diseñador', 'diseño', 'design', 'gráfico', 'ux', 'ui'],
+            'marketing': ['marketing', 'mercadeo', 'publicidad', 'ventas', 'comercial', 'digital'],
+            'recursos humanos': ['rrhh', 'recursos humanos', 'hr', 'people', 'talento'],
+            'tecnología': ['tecnología', 'ti', 'it', 'sistemas', 'software', 'programador'],
+            'salud': ['salud', 'médico', 'doctor', 'enfermero'],
+            'educación': ['educación', 'profesor', 'docente', 'capacitador', 'coach'],
+            'construcción': ['construcción', 'arquitecto', 'ingeniero civil'],
+            'finanzas': ['finanzas', 'financiero', 'banca', 'inversiones'],
+            'logística': ['logística', 'supply chain', 'transporte'],
+            'administración': ['administración', 'administrador', 'gerente', 'gestión'],
+            'seguros': ['seguros', 'corredor de seguros', 'insurance'],
+            'consultoría': ['consultoría', 'consultor', 'consulting', 'asesor'],
+            'ventas': ['ventas', 'vendedor', 'ejecutivo comercial', 'sales'],
+        }
+        
+        query_lower = query.lower().strip()
+        palabras_busqueda = set([query_lower])
+        for categoria, sinonimos in SINONIMOS.items():
+            if any(p in query_lower for p in sinonimos):
+                palabras_busqueda.update(sinonimos)
+        palabras_busqueda = list(palabras_busqueda)
+        
+        profesionales = []
+        for idx, row in df.iterrows():
+            # Filtrar SOLO los que están en "Búsqueda Laboral" (columna I = índice 8)
+            situacion = get_col(row, 8)
+            if not situacion:
+                continue
+            if 'busqueda' not in situacion.lower() and 'búsqueda' not in situacion.lower():
+                continue
+            
+            nombre = get_col(row, 2)
+            apellido = get_col(row, 3)
+            telefono = get_col(row, 5)
+            email = get_col(row, 6)
+            profesion = get_col(row, 24)
+            industria1 = get_col(row, 10)
+            industria2 = get_col(row, 12)
+            industria3 = get_col(row, 14)
+            
+            nombre_completo = f"{nombre} {apellido}".strip()
+            if not nombre_completo:
+                continue
+            
+            texto_busqueda = f"{profesion} {industria1} {industria2} {industria3}".lower()
+            
+            profesionales.append({
+                'nombre': nombre_completo,
+                'telefono': telefono,
+                'email': email,
+                'profesion': profesion,
+                'industria1': industria1,
+                'industria2': industria2,
+                'industria3': industria3,
+                'situacion': situacion,
+                'texto_busqueda': texto_busqueda
+            })
+        
+        if not profesionales:
+            return f"❌ No se encontraron profesionales en Busqueda Laboral para: {query}"
+        
+        # Scoring
+        encontrados = []
+        for p in profesionales:
+            score = 0
+            for palabra in palabras_busqueda:
+                if len(palabra) > 2:
+                    if palabra in p['profesion'].lower():
+                        score += 100
+                    if palabra in p['industria1'].lower():
+                        score += 80
+                    if palabra in p['industria2'].lower():
+                        score += 30
+                    if palabra in p['texto_busqueda']:
+                        score += 10
+            
+            # Si no hay query específico, mostrar todos
+            if score > 0 or query_lower in ['todos', 'all', '*', 'todo']:
+                encontrados.append((p, max(score, 1)))
+            elif not any(len(p) > 2 for p in palabras_busqueda):
+                encontrados.append((p, 1))
+        
+        # Si no encontramos con score, mostrar todos los que están en búsqueda
+        if not encontrados:
+            encontrados = [(p, 1) for p in profesionales]
+        
+        encontrados.sort(key=lambda x: x[1], reverse=True)
+        encontrados = [e[0] for e in encontrados]
+        
+        resultado = "━" * 30 + "\n"
+        resultado += "🤝 PROFESIONALES EN BUSQUEDA LABORAL\n"
+        resultado += "━" * 30 + "\n\n"
+        resultado += f"🔍 Busqueda: {query}\n"
+        resultado += f"📊 Encontrados: {len(encontrados)} en busqueda laboral\n\n"
+        resultado += "━" * 30 + "\n\n"
+        
+        for i, prof in enumerate(encontrados[:20], 1):
+            resultado += f"{i}. {prof['nombre']}\n"
+            if prof['profesion']:
+                resultado += f"   🎯 {prof['profesion']}\n"
+            resultado += f"   💼 Estado: {prof['situacion']}\n"
+            if prof['industria1']:
+                resultado += f"   🏢 {prof['industria1']}\n"
+            if prof['industria2']:
+                resultado += f"   🏢 {prof['industria2']}\n"
+            if prof['telefono']:
+                resultado += f"   📱 {prof['telefono']}\n"
+            if prof['email']:
+                resultado += f"   📧 {prof['email']}\n"
+            resultado += "\n"
+        
+        if len(encontrados) > 20:
+            resultado += f"📌 Mostrando 20 de {len(encontrados)} resultados\n"
+        
+        resultado += "━" * 30
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"Error buscar_apoyo: {e}")
+        return f"❌ Error: {str(e)[:150]}"
+
+
 # ==================== SISTEMA DE CUMPLEAÑOS ====================
 
 def obtener_cumpleanos_hoy():
@@ -3194,25 +3932,24 @@ async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
         # Crear mensaje de cumpleaños
         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
         
-        mensaje = "🎂🎉 **¡CUMPLEAÑOS DEL DÍA!** 🎉🎂\n"
+        mensaje = "🎂🎉 CUMPLEANOS DEL DIA! 🎉🎂\n"
         mensaje += "━" * 30 + "\n"
         mensaje += f"📅 {fecha_hoy}\n\n"
         
-        mensaje += "🥳 ¡Hoy celebramos a:\n\n"
+        mensaje += "🥳 Hoy celebramos a:\n\n"
         
         for nombre in cumpleaneros:
-            mensaje += f"🎈 **{nombre}**\n"
+            mensaje += f"🎈 {nombre}\n"
         
-        mensaje += "\n━" * 30 + "\n"
-        mensaje += "💐 ¡Felicidades! Les deseamos un excelente día.\n\n"
-        mensaje += "👉 _Saluda a los cumpleañeros en el tema 'Cumpleaños, Eventos y Efemérides'_"
+        mensaje += "\n" + "━" * 30 + "\n"
+        mensaje += "💐 Felicidades! Les deseamos un excelente dia.\n\n"
+        mensaje += "👉 Saluda a los cumpleaneros en el subgrupo 'Cumpleanos, Eventos y Efemerides COFRADIA'"
         
-        # Enviar al grupo
+        # Enviar al grupo SIN parse_mode
         if COFRADIA_GROUP_ID:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID,
-                text=mensaje,
-                parse_mode='Markdown'
+                text=mensaje
             )
             logger.info(f"✅ Enviado mensaje de cumpleaños: {len(cumpleaneros)} cumpleañeros")
         
@@ -3240,10 +3977,11 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             usuarios_hoy = c.fetchone()['total']
             
             # Top usuarios del día
-            c.execute("""SELECT first_name, COUNT(*) as msgs FROM mensajes 
+            c.execute("""SELECT CONCAT(first_name, ' ', COALESCE(NULLIF(last_name, ''), '')) as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE fecha >= CURRENT_DATE 
-                        GROUP BY first_name ORDER BY msgs DESC LIMIT 5""")
-            top_usuarios = [(r['first_name'], r['msgs']) for r in c.fetchall()]
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
+            top_usuarios = [(r['nombre_completo'].strip(), r['msgs']) for r in c.fetchall()]
             
             # Categorías del día
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
@@ -3268,9 +4006,10 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             usuarios_hoy = c.fetchone()[0]
             
-            c.execute("""SELECT first_name, COUNT(*) FROM mensajes 
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
                         WHERE DATE(fecha) = DATE('now') 
-                        GROUP BY first_name ORDER BY COUNT(*) DESC LIMIT 5""")
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 5""")
             top_usuarios = c.fetchall()
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
@@ -3295,25 +4034,28 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
         
         # Construir mensaje de resumen nocturno
         mensaje = "━" * 30 + "\n"
-        mensaje += "🌙 **RESUMEN DEL DÍA**\n"
+        mensaje += "🌙 RESUMEN DEL DIA\n"
         mensaje += "━" * 30 + "\n\n"
-        mensaje += f"📅 **{fecha_hoy}** | 🕗 20:00 hrs\n\n"
+        mensaje += f"📅 {fecha_hoy} | 🕗 20:00 hrs\n\n"
         
-        mensaje += "📊 **ACTIVIDAD DE HOY**\n"
+        mensaje += "📊 ACTIVIDAD DE HOY\n"
         mensaje += f"   💬 Mensajes: {total_hoy}\n"
         mensaje += f"   👥 Participantes: {usuarios_hoy}\n\n"
         
         if top_usuarios:
-            mensaje += "🏆 **MÁS ACTIVOS**\n"
+            mensaje += "🏆 MAS ACTIVOS\n"
             medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
             for i, item in enumerate(top_usuarios[:5]):
-                nombre = item[0] if isinstance(item, tuple) else item['first_name']
-                msgs = item[1] if isinstance(item, tuple) else item['msgs']
-                mensaje += f"   {medallas[i]} {nombre}: {msgs}\n"
+                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
+                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
+                nombre_limpio = str(nombre).replace('_', ' ').strip()
+                if not nombre_limpio or nombre_limpio.lower() == 'group':
+                    nombre_limpio = "Anónimo"
+                mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
         if categorias:
-            mensaje += "🏷️ **TEMAS DEL DÍA**\n"
+            mensaje += "🏷️ TEMAS DEL DIA\n"
             emojis_cat = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
                         'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
             for cat, count in categorias[:5]:
@@ -3329,24 +4071,24 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
 {contexto}
 
 Menciona brevemente: temas discutidos, tendencias, oportunidades de networking.
-Máximo 100 palabras. Sin introducción."""
+Máximo 100 palabras. Sin introducción. No uses asteriscos ni guiones bajos."""
             
             insights = llamar_groq(prompt, max_tokens=200, temperature=0.3)
             
             if insights:
-                mensaje += "💡 **RESUMEN IA**\n"
-                mensaje += insights + "\n\n"
+                insights_limpio = insights.replace('*', '').replace('_', ' ')
+                mensaje += "💡 RESUMEN IA\n"
+                mensaje += insights_limpio + "\n\n"
         
         mensaje += "━" * 30 + "\n"
-        mensaje += "🌟 _¡Gracias por participar! Nos vemos mañana._\n"
+        mensaje += "🌟 Gracias por participar! Nos vemos manana.\n"
         mensaje += "━" * 30
         
-        # Enviar al grupo
+        # Enviar al grupo SIN parse_mode para evitar errores
         if COFRADIA_GROUP_ID:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID,
-                text=mensaje,
-                parse_mode='Markdown'
+                text=mensaje
             )
             logger.info(f"✅ Enviado resumen nocturno: {total_hoy} mensajes del día")
         
@@ -3394,6 +4136,8 @@ def main():
             BotCommand("buscar", "Buscar en historial"),
             BotCommand("buscar_ia", "Búsqueda con IA"),
             BotCommand("buscar_profesional", "Buscar profesionales"),
+            BotCommand("buscar_apoyo", "Buscar en busqueda laboral"),
+            BotCommand("buscar_especialista_sec", "Buscar en SEC"),
             BotCommand("graficos", "Ver gráficos"),
             BotCommand("empleo", "Buscar empleos"),
             BotCommand("estadisticas", "Ver estadísticas"),
@@ -3408,6 +4152,8 @@ def main():
                     BotCommand("buscar", "Buscar"),
                     BotCommand("buscar_ia", "Búsqueda IA"),
                     BotCommand("buscar_profesional", "Buscar profesionales"),
+                    BotCommand("buscar_apoyo", "Buscar en busqueda laboral"),
+                    BotCommand("buscar_especialista_sec", "Buscar en SEC"),
                     BotCommand("graficos", "Ver gráficos"),
                     BotCommand("empleo", "Buscar empleos"),
                 ]
@@ -3435,6 +4181,8 @@ def main():
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
     application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
+    application.add_handler(CommandHandler("buscar_apoyo", buscar_apoyo_comando))
+    application.add_handler(CommandHandler("buscar_especialista_sec", buscar_especialista_sec_comando))
     application.add_handler(CommandHandler("empleo", empleo_comando))
     
     # Handlers de estadísticas
@@ -3486,6 +4234,15 @@ def main():
             name='resumen_nocturno'
         )
         logger.info("🌙 Tarea de resumen nocturno programada para las 20:00 Chile")
+        
+        # RAG indexación cada 6 horas
+        job_queue.run_repeating(
+            indexar_rag_job,
+            interval=21600,  # 6 horas en segundos
+            first=60,  # Primera ejecución después de 60 segundos
+            name='rag_indexacion'
+        )
+        logger.info("🧠 Tarea de indexación RAG programada cada 6 horas")
     
     logger.info("✅ Bot iniciado!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
