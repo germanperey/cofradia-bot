@@ -349,24 +349,20 @@ def init_db():
             
             logger.info("✅ Base de datos SQLite inicializada con migraciones v2.0 (modo local)")
         
-        # Fix: Corregir registros del OWNER que tengan nombre "Group" o vacío
+        # Fix: Corregir TODOS los registros del OWNER para asegurar nombre correcto
         try:
             if OWNER_ID:
                 c2 = conn.cursor()
                 if DATABASE_URL:
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = %s AND (first_name IN ('Group', 'Grupo', '', 'Anónimo') 
-                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                                WHERE user_id = %s""", (str(OWNER_ID),))
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = %s AND (first_name IN ('Group', 'Grupo', '', 'Anónimo')
-                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                                WHERE user_id = %s""", (str(OWNER_ID),))
                 else:
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = ? AND (first_name IN ('Group', 'Grupo', '', 'Anónimo') 
-                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                                WHERE user_id = ?""", (str(OWNER_ID),))
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = ? AND (first_name IN ('Group', 'Grupo', '', 'Anónimo')
-                                OR first_name IS NULL)""", (str(OWNER_ID),))
+                                WHERE user_id = ?""", (str(OWNER_ID),))
                 conn.commit()
                 logger.info("✅ Registros del owner verificados/corregidos")
         except Exception as e:
@@ -761,6 +757,69 @@ def categorizar_mensaje(texto):
             return categoria
     
     return 'General'
+
+
+def generar_insights_temas(dias=7):
+    """Genera insights de temas principales usando IA analizando mensajes reales"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        c = conn.cursor()
+        
+        # Obtener mensajes recientes (texto real) para análisis
+        if DATABASE_URL:
+            c.execute("""SELECT message FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '%s days'
+                        AND message IS NOT NULL AND LENGTH(message) > 10
+                        ORDER BY fecha DESC LIMIT 50""" % int(dias))
+            mensajes = [r['message'] for r in c.fetchall()]
+        else:
+            fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+            c.execute("""SELECT message FROM mensajes 
+                        WHERE fecha >= ? AND message IS NOT NULL AND LENGTH(message) > 10
+                        ORDER BY fecha DESC LIMIT 50""", (fecha_inicio,))
+            mensajes = [r[0] if isinstance(r, tuple) else r['message'] for r in c.fetchall()]
+        
+        conn.close()
+        
+        if not mensajes or len(mensajes) < 2:
+            return None
+        
+        # Truncar mensajes para no exceder tokens
+        mensajes_texto = "\n---\n".join([m[:200] for m in mensajes[:40]])
+        
+        if not ia_disponible:
+            return None
+        
+        prompt = f"""Analiza estos mensajes de un grupo profesional de networking chileno y genera un resumen de los 3 a 5 temas PRINCIPALES que se conversaron.
+
+MENSAJES:
+{mensajes_texto}
+
+INSTRUCCIONES:
+- Identifica los temas REALES y CONCRETOS de conversacion (no categorias genericas)
+- Ejemplos de buenos temas: "Ofertas laborales en tecnologia", "Recomendaciones de proveedores", "Experiencias de emprendimiento", "Consultas sobre beneficios laborales", "Networking para area comercial"
+- NO uses categorias genericas como "General", "Saludo", "Conversacion"
+- Responde SOLO con una lista de 3-5 temas, uno por linea
+- Formato: EMOJI TEMA: breve descripcion (max 40 caracteres)
+- No uses asteriscos ni guiones bajos ni markdown
+- Si hay pocos mensajes significativos, indica los temas que puedas detectar"""
+        
+        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.3)
+        
+        if respuesta:
+            # Limpiar respuesta
+            respuesta = respuesta.replace('*', '').replace('_', '').strip()
+            lineas = [l.strip() for l in respuesta.split('\n') if l.strip() and len(l.strip()) > 5]
+            if lineas:
+                return lineas[:5]
+        
+        return None
+    except Exception as e:
+        logger.warning(f"Error generando insights de temas: {e}")
+        return None
 
 
 # ==================== FUNCIONES DE PRECIOS Y CÓDIGOS ====================
@@ -1264,6 +1323,8 @@ Escribe /ayuda para ver todos los comandos.
 @solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos (SOLO EN PRIVADO)"""
+    user_id = update.effective_user.id
+    
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
@@ -1287,13 +1348,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /resumen_semanal - Resumen de 7 dias
 /resumen_mes - Resumen mensual
 
-🧠 RAG - DOCUMENTOS INTELIGENTES
-/subir_pdf - Subir PDF al sistema RAG
-/rag_consulta [pregunta] - Consultar documentos
-/rag_status - Ver estado del RAG
-/rag_reindexar - Re-indexar todo (admin)
-/eliminar_pdf - Eliminar PDF (admin)
-
 👥 GRUPO
 /dotacion - Total de integrantes
 
@@ -1301,6 +1355,17 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 TIP: Mencioname en el grupo:
 @Cofradia_Premium_Bot tu pregunta?
 """
+    # Agregar sección RAG solo para el owner/admin
+    if user_id == OWNER_ID:
+        texto += """
+🧠 RAG - DOCUMENTOS (ADMIN)
+/subir_pdf - Subir PDF al sistema RAG
+/rag_consulta [pregunta] - Consultar documentos
+/rag_status - Ver estado del RAG
+/rag_reindexar - Re-indexar todo
+/eliminar_pdf - Eliminar PDF
+"""
+    
     await update.message.reply_text(texto)
 
 
@@ -2383,11 +2448,10 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     
-    # Si el user_id es del OWNER, forzar nombre correcto
+    # Si el user_id es del OWNER, SIEMPRE forzar nombre correcto
     if user.id == OWNER_ID:
-        if not first_name or first_name.lower() in ['group', 'grupo', 'cofradía', 'cofradia']:
-            first_name = "Germán"
-            last_name = "Perey"
+        first_name = "Germán"
+        last_name = "Perey"
     
     # Si el nombre parece ser un grupo/canal, usar username
     if first_name.lower() in ['group', 'grupo', 'channel', 'canal'] or not first_name:
@@ -2404,6 +2468,25 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         topic_id,
         last_name=last_name
     )
+    
+    # Backfill: actualizar registros antiguos sin last_name si ahora tenemos uno
+    if last_name and last_name.strip():
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""UPDATE mensajes SET last_name = %s, first_name = %s
+                                WHERE user_id = %s AND (last_name IS NULL OR last_name = '')""",
+                             (last_name, first_name, str(user.id)))
+                else:
+                    c.execute("""UPDATE mensajes SET last_name = ?, first_name = ?
+                                WHERE user_id = ? AND (last_name IS NULL OR last_name = '')""",
+                             (last_name, first_name, str(user.id)))
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
 
 
 # ==================== COMANDOS ADMIN ====================
@@ -2745,37 +2828,21 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mensaje += "\n"
         
         if categorias_hoy:
-            mensaje += "🏷️ TEMAS DEL DIA\n"
-            for cat, count in categorias_hoy[:5]:
-                if cat:
-                    mensaje += f"   📌 {cat}: {count}\n"
-            mensaje += "\n"
-        
-        # Usar IA para generar insights si hay mensajes
-        if ia_disponible and mensajes_hoy and total_hoy > 0:
-            try:
-                contexto = ""
-                for m in mensajes_hoy[:10]:
-                    nombre = m[0] if isinstance(m, tuple) else m.get('first_name', '')
-                    texto = m[1] if isinstance(m, tuple) else m.get('message', '')
-                    if nombre and texto:
-                        texto_limpio = str(texto)[:50].replace('_', ' ')
-                        contexto += f"- {nombre}: {texto_limpio}\n"
-                
-                if contexto:
-                    prompt = f"""Analiza brevemente estos mensajes del grupo:
-{contexto}
-
-Responde con 2 puntos muy cortos sobre los temas del dia. Maximo 30 palabras."""
-                    
-                    insights = llamar_groq(prompt, max_tokens=100, temperature=0.3)
-                    
-                    if insights:
-                        insights_limpio = insights.replace('_', ' ').replace('*', '')
-                        mensaje += "💡 INSIGHTS\n"
-                        mensaje += insights_limpio + "\n\n"
-            except Exception as e:
-                logger.error(f"Error generando insights: {e}")
+            # Usar IA para temas reales si hay suficientes mensajes
+            insights_temas = generar_insights_temas(dias=1)
+            if insights_temas:
+                mensaje += "🏷️ TEMAS DEL DIA\n"
+                for tema in insights_temas:
+                    tema_limpio = tema.replace('*', '').replace('_', '').strip()
+                    if tema_limpio:
+                        mensaje += f"   {tema_limpio}\n"
+                mensaje += "\n"
+            else:
+                mensaje += "🏷️ TEMAS DEL DIA\n"
+                for cat, count in categorias_hoy[:5]:
+                    if cat:
+                        mensaje += f"   📌 {cat}: {count}\n"
+                mensaje += "\n"
         
         mensaje += "=" * 28 + "\n"
         mensaje += f"📈 Total historico: {total_historico:,} mensajes"
@@ -2895,7 +2962,16 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
                 mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
-        if categorias:
+        # Temas principales con IA (análisis real de contenido)
+        insights = generar_insights_temas(dias=7)
+        if insights:
+            mensaje += "🏷️ **TEMAS PRINCIPALES**\n"
+            for tema in insights:
+                tema_limpio = tema.replace('*', '').replace('_', '').strip()
+                if tema_limpio:
+                    mensaje += f"   {tema_limpio}\n"
+            mensaje += "\n"
+        elif categorias:
             mensaje += "🏷️ **TEMAS PRINCIPALES**\n"
             emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
                      'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
@@ -3016,11 +3092,20 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 mensaje += f"  {i}. {nombre_limpio}: {msgs}\n"
         
         if cats:
-            mensaje += "\n🏷️ Categorias principales:\n"
-            for item in cats:
-                cat = item[0] if isinstance(item, tuple) else item['categoria']
-                count = item[1] if isinstance(item, tuple) else item['total']
-                mensaje += f"  📌 {cat}: {count}\n"
+            # Usar IA para temas reales
+            insights_temas = generar_insights_temas(dias=30)
+            if insights_temas:
+                mensaje += "\n🏷️ Temas principales del mes:\n"
+                for tema in insights_temas:
+                    tema_limpio = tema.replace('*', '').replace('_', '').strip()
+                    if tema_limpio:
+                        mensaje += f"  {tema_limpio}\n"
+            else:
+                mensaje += "\n🏷️ Categorias principales:\n"
+                for item in cats:
+                    cat = item[0] if isinstance(item, tuple) else item['categoria']
+                    count = item[1] if isinstance(item, tuple) else item['total']
+                    mensaje += f"  📌 {cat}: {count}\n"
         
         await msg.edit_text(mensaje)
         registrar_servicio_usado(update.effective_user.id, 'resumen_mes')
@@ -5164,13 +5249,23 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             mensaje += "\n"
         
         if categorias:
-            mensaje += "🏷️ TEMAS DEL DIA\n"
-            emojis_cat = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
-                        'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
-            for cat, count in categorias[:5]:
-                emoji = emojis_cat.get(cat, '📌')
-                mensaje += f"   {emoji} {cat}: {count}\n"
-            mensaje += "\n"
+            # Usar IA para temas reales
+            insights_temas = generar_insights_temas(dias=1)
+            if insights_temas:
+                mensaje += "🏷️ TEMAS DEL DIA\n"
+                for tema in insights_temas:
+                    tema_limpio = tema.replace('*', '').replace('_', '').strip()
+                    if tema_limpio:
+                        mensaje += f"   {tema_limpio}\n"
+                mensaje += "\n"
+            else:
+                mensaje += "🏷️ TEMAS DEL DIA\n"
+                emojis_cat = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
+                            'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+                for cat, count in categorias[:5]:
+                    emoji = emojis_cat.get(cat, '📌')
+                    mensaje += f"   {emoji} {cat}: {count}\n"
+                mensaje += "\n"
         
         # Generar insights con IA si está disponible
         if ia_disponible and mensajes_dia:
@@ -5258,9 +5353,6 @@ def main():
             BotCommand("graficos", "Ver gráficos"),
             BotCommand("empleo", "Buscar empleos"),
             BotCommand("estadisticas", "Ver estadísticas"),
-            BotCommand("subir_pdf", "Subir PDF al RAG"),
-            BotCommand("rag_status", "Estado del sistema RAG"),
-            BotCommand("rag_consulta", "Consultar documentos RAG"),
         ]
         try:
             await app.bot.set_my_commands(commands)
