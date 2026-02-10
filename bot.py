@@ -39,7 +39,8 @@ except ImportError:
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, 
-    filters, ContextTypes, CallbackQueryHandler
+    filters, ContextTypes, CallbackQueryHandler,
+    ConversationHandler, ChatJoinRequestHandler
 )
 
 # ==================== CONFIGURACIÓN DE LOGGING ====================
@@ -59,6 +60,9 @@ COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
+
+# Estados de conversación para onboarding
+ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO = range(3)
 
 # ==================== CONFIGURACIÓN DE GROQ AI ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -252,6 +256,19 @@ def init_db():
                 fecha_consulta TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             
+            c.execute('''CREATE TABLE IF NOT EXISTS nuevos_miembros (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                nombre TEXT,
+                apellido TEXT,
+                generacion TEXT,
+                recomendado_por TEXT,
+                estado TEXT DEFAULT 'pendiente',
+                fecha_solicitud TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_aprobacion TIMESTAMP
+            )''')
+            
             logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada con migraciones v2.0")
         else:
             # SQLite (fallback local)
@@ -347,24 +364,55 @@ def init_db():
                 fecha_consulta DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
+            c.execute('''CREATE TABLE IF NOT EXISTS nuevos_miembros (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                nombre TEXT,
+                apellido TEXT,
+                generacion TEXT,
+                recomendado_por TEXT,
+                estado TEXT DEFAULT 'pendiente',
+                fecha_solicitud DATETIME DEFAULT CURRENT_TIMESTAMP,
+                fecha_aprobacion DATETIME
+            )''')
+            
             logger.info("✅ Base de datos SQLite inicializada con migraciones v2.0 (modo local)")
         
-        # Fix: Corregir TODOS los registros del OWNER para asegurar nombre correcto
+        # Fix: Transferir mensajes "Group" (admin anónimo) y corregir owner
         try:
-            if OWNER_ID:
+            if OWNER_ID and OWNER_ID != 0:
                 c2 = conn.cursor()
+                owner_int = int(OWNER_ID)
+                logger.info(f"🔧 Corrigiendo registros del owner ID={owner_int}")
+                
                 if DATABASE_URL:
+                    # PASO 1: Transferir mensajes de admin anónimo (first_name='Group') al OWNER
+                    c2.execute("""UPDATE mensajes SET user_id = %s, first_name = 'Germán', last_name = 'Perey' 
+                                WHERE first_name IN ('Group', 'Grupo', 'Cofradía', 'Cofradía de Networking')""", 
+                              (owner_int,))
+                    transferidos = c2.rowcount
+                    
+                    # PASO 2: Corregir nombre en todos los registros del owner
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = %s""", (OWNER_ID,))
+                                WHERE user_id = %s""", (owner_int,))
+                    corregidos = c2.rowcount
+                    
+                    # PASO 3: Suscripciones
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = %s""", (OWNER_ID,))
+                                WHERE user_id = %s""", (owner_int,))
+                    
+                    logger.info(f"✅ Owner fix: {transferidos} transferidos, {corregidos} corregidos")
                 else:
+                    c2.execute("""UPDATE mensajes SET user_id = ?, first_name = 'Germán', last_name = 'Perey' 
+                                WHERE first_name IN ('Group', 'Grupo', 'Cofradía')""", (owner_int,))
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
-                                WHERE user_id = ?""", (OWNER_ID,))
+                                WHERE user_id = ?""", (owner_int,))
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
-                                WHERE user_id = ?""", (OWNER_ID,))
+                                WHERE user_id = ?""", (owner_int,))
+                    logger.info("✅ Registros owner corregidos")
+                
                 conn.commit()
-                logger.info("✅ Registros del owner verificados/corregidos")
         except Exception as e:
             logger.warning(f"Nota al corregir registros owner: {e}")
         
@@ -845,6 +893,17 @@ def obtener_precios():
         if conn:
             conn.close()
         return [(30, 2000, 'Mensual'), (180, 10500, 'Semestral'), (365, 20000, 'Anual')]
+
+
+def limpiar_nombre_display(nombre):
+    """Limpia un nombre para mostrar, reemplazando nombres de grupo/canal"""
+    if not nombre:
+        return "Sin Nombre"
+    nombre = str(nombre).replace('_', ' ').strip()
+    if not nombre or nombre.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 
+                                          'cofradía de networking', 'usuario', 'anónimo', 'sin nombre']:
+        return "Germán Perey"  # Solo el owner postea como admin anónimo
+    return nombre
 
 
 def formato_clp(numero):
@@ -1707,7 +1766,14 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ===== Gráfico 2: Usuarios más activos con etiquetas =====
         ax2 = axes[0, 1]
         if usuarios_activos:
-            nombres = [str(u[0])[:25].replace('_', ' ').strip() if u[0] else 'Sin Nombre' for u in usuarios_activos[:8]]
+            # Limpiar nombres: filtrar Group, agregar apellido
+            nombres_limpios = []
+            for u in usuarios_activos[:8]:
+                n = str(u[0]).replace('_', ' ').strip() if u[0] else 'Sin Nombre'
+                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking', 'usuario']:
+                    n = 'Germán Perey'
+                nombres_limpios.append(n[:25])
+            nombres = nombres_limpios
             mensajes_u = [u[1] for u in usuarios_activos[:8]]
             colors_bar = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
             bars = ax2.barh(nombres, mensajes_u, color=colors_bar, edgecolor='white')
@@ -2356,9 +2422,10 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         contexto_grupo = ""
         resultados = buscar_en_historial(pregunta, limit=5)
         if resultados:
-            contexto_grupo = "\n\nINFORMACIÓN RELACIONADA DEL GRUPO:\n"
-            for nombre, texto, fecha in resultados[:3]:
-                contexto_grupo += f"- {nombre}: {texto[:150]}...\n"
+            contexto_grupo = "\n\nINFORMACIÓN RELACIONADA DEL GRUPO (mensajes de otros usuarios):\n"
+            for nombre, texto, fecha in resultados[:5]:
+                nombre_limpio = limpiar_nombre_display(nombre)
+                contexto_grupo += f"- {nombre_limpio} dijo: {texto[:200]}...\n"
         
         # Buscar contexto RAG (memoria semántica de Google Drive)
         contexto_rag = ""
@@ -2371,28 +2438,30 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Error buscando RAG en mencion: {e}")
         
-        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena.
+        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena de oficiales de la Armada (activos y retirados).
 
 PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
 {contexto_grupo}{contexto_rag}
 
-INSTRUCCIONES:
-1. Si la pregunta es sobre SERVICIOS (electricistas, gasfiter, abogados, etc.):
-   - Sugiere usar /buscar_profesional [profesión] para buscar en la base de datos del grupo
-   - Recomienda preguntar en el grupo si alguien conoce un buen profesional
+INSTRUCCIONES PRIORITARIAS:
+1. Si la INFORMACIÓN RELACIONADA DEL GRUPO contiene datos relevantes a la pregunta del usuario, SIEMPRE usa esa información en tu respuesta. Cita qué usuario compartió la información y qué dijo.
 
-2. Si la pregunta es sobre EMPLEOS:
-   - Sugiere usar /empleo [cargo] para ver ofertas reales
+2. Si la pregunta es sobre SERVICIOS o PROVEEDORES (electricistas, gasfiter, abogados, etc.):
+   - PRIMERO revisa si hay información relevante en el contexto del grupo
+   - Si encuentras datos de contacto o recomendaciones, compártelos directamente
+   - Además sugiere: /buscar_profesional [profesión] para buscar en la base de datos
 
-3. Si la pregunta es sobre el GRUPO o sus MIEMBROS:
+3. Si la pregunta es sobre EMPLEOS:
+   - Sugiere usar /empleo [cargo] para ver ofertas
+   - Revisa si alguien mencionó ofertas laborales en el historial
+
+4. Si la pregunta es sobre el GRUPO o sus MIEMBROS:
    - Usa la información del contexto si está disponible
-   - Sugiere usar /buscar_ia [tema] para buscar en el historial
+   - Sugiere /buscar_ia [tema] para búsquedas más profundas
 
-4. Para PREGUNTAS GENERALES:
-   - Responde de forma útil y concisa
-   - Sé profesional pero cercano
+5. Para PREGUNTAS GENERALES: Responde de forma útil y concisa
 
-Responde en máximo 2-3 párrafos."""
+Responde en máximo 2-3 párrafos. No uses asteriscos ni guiones bajos."""
 
         respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
         
@@ -2433,12 +2502,27 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
     
     topic_id = update.message.message_thread_id if hasattr(update.message, 'message_thread_id') else None
     
-    # Detectar nombre correcto - evitar "Group" como nombre
+    # Detectar nombre correcto
     first_name = user.first_name or ""
     last_name = user.last_name or ""
+    user_id = user.id
     
-    # Si el user_id es del OWNER, SIEMPRE forzar nombre correcto
-    if user.id == OWNER_ID:
+    # DETECCIÓN DE ADMIN ANÓNIMO: Si from_user es un grupo/canal (ID negativo o nombre 'Group')
+    # Telegram envía from_user.id = ID del grupo cuando admin postea anónimamente
+    sender_chat = getattr(update.message, 'sender_chat', None)
+    es_admin_anonimo = (
+        sender_chat is not None or 
+        user_id < 0 or 
+        first_name.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking']
+    )
+    
+    if es_admin_anonimo:
+        # Asumir que es el owner (único admin del grupo)
+        user_id = OWNER_ID
+        first_name = "Germán"
+        last_name = "Perey"
+    elif user_id == OWNER_ID:
+        # Si el owner postea con su cuenta normal, forzar nombre
         first_name = "Germán"
         last_name = "Perey"
     
@@ -2447,10 +2531,10 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         if user.username:
             first_name = user.username
         else:
-            first_name = "Usuario"
+            first_name = "Sin Nombre"
     
     guardar_mensaje(
-        user.id,
+        user_id,
         user.username or "sin_username",
         first_name,
         update.message.text,
@@ -2467,11 +2551,11 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
                 if DATABASE_URL:
                     c.execute("""UPDATE mensajes SET last_name = %s, first_name = %s
                                 WHERE user_id = %s AND (last_name IS NULL OR last_name = '')""",
-                             (last_name, first_name, str(user.id)))
+                             (last_name, first_name, str(user_id)))
                 else:
                     c.execute("""UPDATE mensajes SET last_name = ?, first_name = ?
                                 WHERE user_id = ? AND (last_name IS NULL OR last_name = '')""",
-                             (last_name, first_name, str(user.id)))
+                             (last_name, first_name, str(user_id)))
                 conn.commit()
                 conn.close()
         except Exception:
@@ -2609,9 +2693,7 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         medallas = ['🥇', '🥈', '🥉'] + ['🏅'] * 12
         
         for i, (nombre, msgs) in enumerate(top):
-            nombre_limpio = nombre.replace('_', ' ').strip()
-            if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
-                nombre_limpio = "Usuario"
+            nombre_limpio = limpiar_nombre_display(nombre)
             mensaje += f"{medallas[i]} {nombre_limpio}: {msgs} mensajes\n"
         
         await update.message.reply_text(mensaje)
@@ -2677,46 +2759,53 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         c = conn.cursor()
+        user_id = user.id
+        
+        # Nombre completo
+        if user_id == OWNER_ID:
+            nombre_display = "Germán Perey"
+        else:
+            nombre_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Usuario"
         
         if DATABASE_URL:
-            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE user_id = %s", (user.id,))
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE user_id = %s", (user_id,))
             total_msgs = c.fetchone()['total']
             
             c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
                         WHERE user_id = %s AND categoria IS NOT NULL 
-                        GROUP BY categoria ORDER BY total DESC LIMIT 3""", (user.id,))
+                        GROUP BY categoria ORDER BY total DESC LIMIT 3""", (user_id,))
             top_cats = [(r['categoria'], r['total']) for r in c.fetchall()]
             
-            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = %s", (user.id,))
+            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = %s", (user_id,))
             sus = c.fetchone()
         else:
-            c.execute("SELECT COUNT(*) FROM mensajes WHERE user_id = ?", (user.id,))
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE user_id = ?", (user_id,))
             total_msgs = c.fetchone()[0]
             
             c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
                         WHERE user_id = ? AND categoria IS NOT NULL 
-                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 3""", (user.id,))
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 3""", (user_id,))
             top_cats = c.fetchall()
             
-            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = ?", (user.id,))
+            c.execute("SELECT fecha_registro, fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
             sus = c.fetchone()
         
         conn.close()
         
-        mensaje = f"👤 **MI PERFIL**\n\n"
-        mensaje += f"📛 **Nombre:** {user.first_name}\n"
-        mensaje += f"📝 **Mensajes totales:** {total_msgs}\n"
+        mensaje = f"👤 MI PERFIL\n\n"
+        mensaje += f"📛 Nombre: {nombre_display}\n"
+        mensaje += f"📝 Mensajes totales: {total_msgs}\n"
         
         if top_cats:
-            mensaje += f"\n📊 **Tus temas favoritos:**\n"
+            mensaje += f"\n📊 Tus temas favoritos:\n"
             for cat, total in top_cats:
-                mensaje += f"  • {cat}: {total}\n"
+                mensaje += f"  📌 {cat}: {total}\n"
         
         if sus:
-            dias = obtener_dias_restantes(user.id)
-            mensaje += f"\n⏰ **Días restantes:** {dias}\n"
+            dias = obtener_dias_restantes(user_id)
+            mensaje += f"\n⏰ Días restantes: {dias}\n"
         
-        await update.message.reply_text(mensaje, parse_mode='Markdown')
+        await update.message.reply_text(mensaje)
         
     except Exception as e:
         logger.error(f"Error en mi_perfil: {e}")
@@ -2810,9 +2899,7 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
                 if nombre:
-                    nombre_limpio = str(nombre).replace('_', ' ').strip()
-                    if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
-                        nombre_limpio = "Usuario"
+                    nombre_limpio = limpiar_nombre_display(nombre)
                     mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs} msgs\n"
             mensaje += "\n"
         
@@ -2945,9 +3032,7 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             for i, item in enumerate(top[:10]):
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
-                nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
-                    nombre_limpio = "Usuario"
+                nombre_limpio = limpiar_nombre_display(nombre)
                 mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
@@ -3075,9 +3160,7 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             for i, item in enumerate(top, 1):
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
-                nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
-                    nombre_limpio = "Usuario"
+                nombre_limpio = limpiar_nombre_display(nombre)
                 mensaje += f"  {i}. {nombre_limpio}: {msgs}\n"
         
         if cats:
@@ -3298,8 +3381,38 @@ def buscar_profesionales(query):
         query_lower = query.lower().strip()
         palabras_busqueda = set([query_lower])
         
+        # Stemming básico español: generar variaciones de la palabra
+        def generar_variaciones(palabra):
+            """Genera variaciones de una palabra para búsqueda flexible"""
+            variaciones = {palabra}
+            # Quitar/agregar 's' final
+            if palabra.endswith('s'):
+                variaciones.add(palabra[:-1])
+            else:
+                variaciones.add(palabra + 's')
+            # Quitar/agregar 'es' final
+            if palabra.endswith('es'):
+                variaciones.add(palabra[:-2])
+            # Quitar 'ción'/'cion' → agregar otras formas
+            if palabra.endswith('ción') or palabra.endswith('cion'):
+                raiz = palabra.replace('ción', '').replace('cion', '')
+                variaciones.update([raiz, raiz + 'ciones', raiz + 'cionista'])
+            # Quitar 'ista' → agregar otras formas
+            if palabra.endswith('ista'):
+                raiz = palabra[:-4]
+                variaciones.update([raiz, raiz + 'ismo', raiz + 'ístico'])
+            # Quitar 'ero/era'
+            if palabra.endswith('ero') or palabra.endswith('era'):
+                variaciones.add(palabra[:-3])
+                variaciones.add(palabra[:-3] + 'ería')
+            return variaciones
+        
+        # Agregar variaciones del query original
+        for var in generar_variaciones(query_lower):
+            palabras_busqueda.add(var)
+        
         for categoria, sinonimos in SINONIMOS.items():
-            if any(palabra in query_lower for palabra in sinonimos):
+            if any(palabra in query_lower or query_lower in palabra for palabra in sinonimos):
                 palabras_busqueda.update(sinonimos)
         
         palabras_busqueda = list(palabras_busqueda)
@@ -5231,9 +5344,7 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             for i, item in enumerate(top_usuarios[:5]):
                 nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', item.get('first_name', ''))
                 msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
-                nombre_limpio = str(nombre).replace('_', ' ').strip()
-                if not nombre_limpio or nombre_limpio.lower() in ['group', 'grupo', 'channel', 'cofradía']:
-                    nombre_limpio = "Usuario"
+                nombre_limpio = limpiar_nombre_display(nombre)
                 mensaje += f"   {medallas[i]} {nombre_limpio}: {msgs}\n"
             mensaje += "\n"
         
@@ -5290,6 +5401,343 @@ Máximo 100 palabras. Sin introducción. No uses asteriscos ni guiones bajos."""
 
 
 # ==================== MAIN ====================
+
+# ==================== SISTEMA DE ONBOARDING ====================
+
+MENSAJE_BIENVENIDA = """🎉 Bienvenido {nombre} {apellido}, Generación {generacion}, pasas a formar parte de este selecto grupo de camaradas, donde prima la sana convivencia y la ayuda colectiva en materia laboral. Es importante que cada uno se presente para conocerlos y saber a qué se dedican...
+
+Comparte tus datos de contacto, tu situación laboral y el área en que te desenvuelves laboralmente en la planilla alojada en el siguiente link, donde varios ya ingresamos nuestros datos.
+
+https://docs.google.com/spreadsheets/d/1Py6I68tWZBSBH6koDo1JMf4U5QFvwI31/edit?usp=sharing&ouid=105662138872486212877&rtpof=true&sd=true
+
+Luego, quienes se encuentran en una etapa de "Búsqueda Laboral" (o etapa de Transición) podrán subir su CV en la siguiente carpeta, de manera que el resto del grupo pueda compartirlo entre su red de contactos y su círculo más cercano. Pero además, quienes están actualmente "Con Contrato Laboral" o son "Independientes" también pueden subir sus CV y el de sus cónyuges (si así lo desean), de manera de tener a la vista el área de especialización de cada uno!
+
+https://drive.google.com/drive/folders/1in_JhEy5h19e2F0ShCl3gglx8rnETVHP?usp=sharing
+
+Este chat es sólo de Marinos activos y retirados, cuyo único propósito es formar una red laboral virtuosa, para fomentar el apoyo colectivo entre todos quienes la integran...
+Nuestro grupo promueve valores como la amistad, la sana convivencia, respecto hacia los demás y un apoyo genuino y desinteresado para colaborar en el grupo. En consecuencia, no existe espacio para otros temas (como la pornografía, chistes o comentarios políticos) lo que conllevaría a perder nuestro foco central… 😃👍🏻 como nos enseñaron en nuestra querida Escuela Naval (Todos a una!).
+
+DECALOGO DE COFRADÍA
+
+1. Somos una Cofradía de Networking y eso nos debe unir siempre
+2. Nuestro foco es 100% Laboral y ampliar redes
+3. No seamos spam!... No enviemos campañas ni cadenas
+4. Respeto y Tolerancia con otras opiniones… No criticar!
+5. Si la conversación es para un miembro del grupo, háblalo en privado!
+6. NO hablar de política, religión, futbol u otra temática que nos divida
+7. Lo que se habla aquí, se queda aquí... ese es nuestro casco de presión!
+8. Compartamos buenas prácticas, ideas, consejos y fortalezas
+9. Destaquemos los éxitos… Se felicita en público y se critica en privado!
+10. Si no compartes tus datos en la Planilla es probable que no necesites ayuda!
+11. NO romper estas reglas, debemos cuidarnos y el administrador velará por eso!
+12. Si buscas un determinado Perfil Profesional, o indagas en algún Producto o Servicio, que tu búsqueda inicial sea dentro de Cofradía.
+
+NUESTROS VALORES & PRINCIPIOS
+
+Participamos de un grupo de camaradas, cuyo único propósito es apoyar, colaborar y dar soporte a otros en materia laboral... Nuestra motivación es ver que todos puedan desarrollarse en su campo de acción y logren la anhelada estabilidad. Nuestros principios que nos define son:
+
+1. Consigna: Facilitar la movilidad laboral y contribuir en dar apoyo a otras empresas relacionadas
+2. Mística: Nuestros valores y amistad nos sensibilizan con las necesidades de nuestros camaradas
+3. Virtud: La colaboración circular nos transforma en un grupo virtuoso, para generar un bien común
+4. Redes: La sinergía entre todos contribuye a crear más redes de apoyo, confianza y la cooperación."""
+
+
+async def manejar_solicitud_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja solicitudes de ingreso al grupo (ChatJoinRequest)"""
+    join_request = update.chat_join_request
+    user = join_request.from_user
+    
+    logger.info(f"📨 Solicitud de ingreso: {user.first_name} {user.last_name or ''} (ID: {user.id})")
+    
+    try:
+        # Enviar mensaje al usuario con la primera pregunta
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"⚓ Bienvenido al proceso de ingreso a Cofradía de Networking!\n\n"
+                 f"Para completar tu solicitud, necesito que respondas 3 preguntas.\n\n"
+                 f"📝 Pregunta 1 de 3:\n"
+                 f"¿Cuál es tu Nombre y Apellido completo?"
+        )
+        
+        # Guardar datos del solicitante
+        context.user_data['onboard_user_id'] = user.id
+        context.user_data['onboard_username'] = user.username or ''
+        context.user_data['onboard_chat_id'] = join_request.chat.id
+        context.user_data['onboard_activo'] = True
+        
+        logger.info(f"✅ Preguntas de onboarding enviadas a {user.first_name}")
+        return ONBOARD_NOMBRE
+        
+    except Exception as e:
+        logger.error(f"❌ Error enviando preguntas de onboarding: {e}")
+        # Notificar al owner que no se pudo contactar al usuario
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"⚠️ Solicitud de ingreso de {user.first_name} {user.last_name or ''} "
+                     f"(@{user.username or 'sin_username'}, ID: {user.id})\n\n"
+                     f"No se pudo enviar las preguntas de onboarding. "
+                     f"El usuario debe iniciar chat con el bot primero.\n\n"
+                     f"Para aprobar manualmente: /aprobar_solicitud {user.id}"
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
+
+async def onboard_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe el nombre del solicitante"""
+    if not context.user_data.get('onboard_activo'):
+        return ConversationHandler.END
+    
+    nombre_completo = update.message.text.strip()
+    
+    # Separar nombre y apellido
+    partes = nombre_completo.split(maxsplit=1)
+    nombre = partes[0] if partes else nombre_completo
+    apellido = partes[1] if len(partes) > 1 else ''
+    
+    context.user_data['onboard_nombre'] = nombre
+    context.user_data['onboard_apellido'] = apellido
+    
+    await update.message.reply_text(
+        f"✅ Gracias, {nombre}!\n\n"
+        f"📝 Pregunta 2 de 3:\n"
+        f"¿A qué Generación perteneces? (Año de Guardiamarina, ingresa 4 dígitos)\n\n"
+        f"Ejemplo: 1995"
+    )
+    
+    return ONBOARD_GENERACION
+
+
+async def onboard_generacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe la generación del solicitante"""
+    texto = update.message.text.strip()
+    
+    # Validar que sean 4 dígitos
+    if not texto.isdigit() or len(texto) != 4:
+        await update.message.reply_text(
+            "❌ Por favor ingresa un año válido de 4 dígitos.\n"
+            "Ejemplo: 1995"
+        )
+        return ONBOARD_GENERACION
+    
+    anio = int(texto)
+    if anio < 1950 or anio > 2025:
+        await update.message.reply_text(
+            "❌ El año debe estar entre 1950 y 2025.\n"
+            "Ejemplo: 1995"
+        )
+        return ONBOARD_GENERACION
+    
+    context.user_data['onboard_generacion'] = texto
+    
+    await update.message.reply_text(
+        f"✅ Generación {texto}!\n\n"
+        f"📝 Pregunta 3 de 3:\n"
+        f"¿Quién te recomendó el grupo Cofradía?"
+    )
+    
+    return ONBOARD_RECOMENDADO
+
+
+async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe quién recomendó al solicitante y finaliza"""
+    recomendado = update.message.text.strip()
+    
+    nombre = context.user_data.get('onboard_nombre', '')
+    apellido = context.user_data.get('onboard_apellido', '')
+    generacion = context.user_data.get('onboard_generacion', '')
+    user_id = context.user_data.get('onboard_user_id', update.effective_user.id)
+    username = context.user_data.get('onboard_username', '')
+    
+    # Guardar en base de datos
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("""INSERT INTO nuevos_miembros 
+                            (user_id, username, nombre, apellido, generacion, recomendado_por)
+                            VALUES (%s, %s, %s, %s, %s, %s)""",
+                         (user_id, username, nombre, apellido, generacion, recomendado))
+            else:
+                c.execute("""INSERT INTO nuevos_miembros 
+                            (user_id, username, nombre, apellido, generacion, recomendado_por)
+                            VALUES (?, ?, ?, ?, ?, ?)""",
+                         (user_id, username, nombre, apellido, generacion, recomendado))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.error(f"Error guardando nuevo miembro: {e}")
+    
+    # Confirmar al usuario
+    await update.message.reply_text(
+        f"✅ ¡Gracias {nombre}! Tu solicitud ha sido enviada al administrador.\n\n"
+        f"📋 Resumen:\n"
+        f"👤 Nombre: {nombre} {apellido}\n"
+        f"⚓ Generación: {generacion}\n"
+        f"👥 Recomendado por: {recomendado}\n\n"
+        f"⏳ Recibirás una notificación cuando tu solicitud sea aprobada."
+    )
+    
+    # Enviar al owner para aprobar
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"📨 NUEVA SOLICITUD DE INGRESO\n"
+                 f"{'━' * 30}\n\n"
+                 f"👤 Nombre: {nombre} {apellido}\n"
+                 f"⚓ Generación: {generacion}\n"
+                 f"👥 Recomendado por: {recomendado}\n"
+                 f"🆔 User ID: {user_id}\n"
+                 f"📱 Username: @{username}\n\n"
+                 f"Para aprobar, usa:\n"
+                 f"/aprobar_solicitud {user_id}"
+        )
+    except Exception as e:
+        logger.error(f"Error notificando al owner: {e}")
+    
+    # Limpiar datos de conversación
+    context.user_data['onboard_activo'] = False
+    
+    return ConversationHandler.END
+
+
+async def onboard_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancela el proceso de onboarding"""
+    context.user_data['onboard_activo'] = False
+    await update.message.reply_text("❌ Proceso de registro cancelado.")
+    return ConversationHandler.END
+
+
+async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /aprobar_solicitud [user_id] - Aprobar solicitud de ingreso"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args:
+        # Mostrar solicitudes pendientes
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""SELECT user_id, nombre, apellido, generacion, recomendado_por, fecha_solicitud 
+                                FROM nuevos_miembros WHERE estado = 'pendiente' 
+                                ORDER BY fecha_solicitud DESC LIMIT 10""")
+                    pendientes = c.fetchall()
+                else:
+                    c.execute("""SELECT user_id, nombre, apellido, generacion, recomendado_por, fecha_solicitud 
+                                FROM nuevos_miembros WHERE estado = 'pendiente' 
+                                ORDER BY fecha_solicitud DESC LIMIT 10""")
+                    pendientes = c.fetchall()
+                conn.close()
+                
+                if not pendientes:
+                    await update.message.reply_text("✅ No hay solicitudes pendientes.")
+                    return
+                
+                mensaje = "📋 SOLICITUDES PENDIENTES\n\n"
+                for p in pendientes:
+                    if DATABASE_URL:
+                        mensaje += (f"👤 {p['nombre']} {p['apellido']} - Gen {p['generacion']}\n"
+                                   f"   Rec: {p['recomendado_por']}\n"
+                                   f"   /aprobar_solicitud {p['user_id']}\n\n")
+                    else:
+                        mensaje += (f"👤 {p[1]} {p[2]} - Gen {p[3]}\n"
+                                   f"   Rec: {p[4]}\n"
+                                   f"   /aprobar_solicitud {p[0]}\n\n")
+                
+                await update.message.reply_text(mensaje)
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+        return
+    
+    target_user_id = int(context.args[0])
+    
+    # Obtener datos del miembro
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT nombre, apellido, generacion, recomendado_por 
+                        FROM nuevos_miembros WHERE user_id = %s AND estado = 'pendiente'""", (target_user_id,))
+        else:
+            c.execute("""SELECT nombre, apellido, generacion, recomendado_por 
+                        FROM nuevos_miembros WHERE user_id = ? AND estado = 'pendiente'""", (target_user_id,))
+        
+        miembro = c.fetchone()
+        
+        if not miembro:
+            conn.close()
+            await update.message.reply_text("❌ No se encontró solicitud pendiente para ese usuario.")
+            return
+        
+        if DATABASE_URL:
+            nombre = miembro['nombre']
+            apellido = miembro['apellido']
+            generacion = miembro['generacion']
+        else:
+            nombre = miembro[0]
+            apellido = miembro[1]
+            generacion = miembro[2]
+        
+        # Aprobar la solicitud en Telegram
+        try:
+            if COFRADIA_GROUP_ID:
+                await context.bot.approve_chat_join_request(
+                    chat_id=COFRADIA_GROUP_ID,
+                    user_id=target_user_id
+                )
+        except Exception as e:
+            logger.warning(f"No se pudo aprobar automáticamente: {e}")
+        
+        # Actualizar estado en BD
+        if DATABASE_URL:
+            c.execute("""UPDATE nuevos_miembros SET estado = 'aprobado', fecha_aprobacion = CURRENT_TIMESTAMP 
+                        WHERE user_id = %s""", (target_user_id,))
+        else:
+            c.execute("""UPDATE nuevos_miembros SET estado = 'aprobado', fecha_aprobacion = CURRENT_TIMESTAMP 
+                        WHERE user_id = ?""", (target_user_id,))
+        conn.commit()
+        conn.close()
+        
+        # Enviar mensaje de bienvenida al grupo
+        bienvenida = MENSAJE_BIENVENIDA.format(
+            nombre=nombre,
+            apellido=apellido,
+            generacion=generacion
+        )
+        
+        if COFRADIA_GROUP_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID,
+                    text=bienvenida
+                )
+            except Exception as e:
+                logger.error(f"Error enviando bienvenida al grupo: {e}")
+        
+        # Notificar al usuario
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"🎉 ¡Tu solicitud ha sido aprobada! Ya puedes acceder al grupo Cofradía de Networking."
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(f"✅ Solicitud de {nombre} {apellido} aprobada. Bienvenida enviada al grupo.")
+        
+    except Exception as e:
+        logger.error(f"Error aprobando solicitud: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
 
 def main():
     """Función principal"""
@@ -5411,6 +5859,23 @@ def main():
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
+    
+    # Onboarding: Aprobar solicitudes
+    application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
+    
+    # Onboarding: ConversationHandler para preguntas de ingreso
+    onboarding_conv = ConversationHandler(
+        entry_points=[ChatJoinRequestHandler(manejar_solicitud_ingreso)],
+        states={
+            ONBOARD_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_nombre)],
+            ONBOARD_GENERACION: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_generacion)],
+            ONBOARD_RECOMENDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_recomendado)],
+        },
+        fallbacks=[CommandHandler("cancelar", onboard_cancelar)],
+        per_user=True,
+        per_chat=True,
+    )
+    application.add_handler(onboarding_conv)
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(callback_plan, pattern='^plan_'))
