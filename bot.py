@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')  # Obtener en platform.deepseek.com (gratis)
 TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
@@ -64,9 +65,11 @@ DIAS_PRUEBA_GRATIS = 90
 # Estados de conversación para onboarding
 ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO = range(3)
 
-# ==================== CONFIGURACIÓN DE GROQ AI ====================
+# ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
@@ -105,6 +108,32 @@ if GROQ_API_KEY:
         logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
+
+# Probar conexión con DeepSeek (LLM alternativo/fallback)
+deepseek_disponible = False
+if DEEPSEEK_API_KEY:
+    try:
+        headers_ds = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        test_ds = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": "Hola"}],
+            "max_tokens": 10
+        }
+        response_ds = requests.post(DEEPSEEK_API_URL, headers=headers_ds, json=test_ds, timeout=10)
+        if response_ds.status_code == 200:
+            deepseek_disponible = True
+            if not ia_disponible:
+                ia_disponible = True  # DeepSeek como LLM principal si Groq no está
+            logger.info(f"✅ DeepSeek AI inicializado (modelo: {DEEPSEEK_MODEL})")
+        else:
+            logger.warning(f"⚠️ DeepSeek no disponible: {response_ds.status_code}")
+    except Exception as e:
+        logger.warning(f"⚠️ Error inicializando DeepSeek: {str(e)[:50]}")
+else:
+    logger.info("ℹ️ DEEPSEEK_API_KEY no configurada (opcional)")
 
 # Verificar Gemini
 if GEMINI_API_KEY:
@@ -495,6 +524,55 @@ Tu personalidad:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
             return None
     
+    # FALLBACK: Si Groq falla, intentar con DeepSeek
+    resultado_deepseek = llamar_deepseek(prompt, max_tokens, temperature)
+    if resultado_deepseek:
+        return resultado_deepseek
+    
+    return None
+
+
+def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Llama a la API de DeepSeek como LLM alternativo/fallback"""
+    if not DEEPSEEK_API_KEY:
+        return None
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena. Responde siempre en español, de forma profesional y útil."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+        
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            respuesta = data['choices'][0]['message']['content']
+            if respuesta and len(respuesta.strip()) > 0:
+                logger.info("✅ Respuesta obtenida de DeepSeek (fallback)")
+                return respuesta.strip()
+        else:
+            logger.warning(f"DeepSeek API error: {response.status_code}")
+    
+    except Exception as e:
+        logger.warning(f"Error DeepSeek: {str(e)[:100]}")
+    
     return None
 
 
@@ -788,23 +866,47 @@ def guardar_mensaje(user_id, username, first_name, message, topic_id=None, last_
 
 
 def categorizar_mensaje(texto):
-    """Categoriza un mensaje según su contenido"""
+    """Categoriza un mensaje según su contenido - categorías específicas"""
     texto_lower = texto.lower()
     
     categorias = {
-        'Empleo': ['trabajo', 'empleo', 'vacante', 'busco', 'oferta laboral', 'cv', 'currículum', 'postular'],
-        'Networking': ['contacto', 'networking', 'conocer', 'conectar', 'alianza', 'colaboración'],
-        'Consulta': ['ayuda', 'pregunta', 'duda', 'consulta', 'cómo', 'qué es', 'alguien sabe'],
-        'Emprendimiento': ['emprendimiento', 'negocio', 'startup', 'empresa', 'proyecto', 'inversión'],
-        'Evento': ['evento', 'webinar', 'charla', 'meetup', 'conferencia', 'taller'],
-        'Saludo': ['hola', 'buenos días', 'buenas tardes', 'saludos', 'bienvenido']
+        'Oferta Laboral': ['oferta laboral', 'vacante', 'estamos buscando', 'se necesita', 'oportunidad laboral', 'cargo disponible'],
+        'Búsqueda Empleo': ['busco trabajo', 'busco empleo', 'estoy buscando', 'cv', 'currículum', 'postular', 'transición laboral'],
+        'Recomendación Profesional': ['recomiendo', 'les comparto', 'contacto de', 'excelente servicio', 'buen profesional', 'maestro', 'técnico'],
+        'Consulta Profesional': ['alguien sabe', 'alguien conoce', 'necesito', 'busco un', 'recomienden', 'ayuda con', 'consulta'],
+        'Servicios y Productos': ['vendo', 'ofrezco', 'servicio de', 'cotización', 'presupuesto', 'precio', 'descuento', 'proveedor'],
+        'Networking': ['contacto', 'networking', 'conectar', 'alianza', 'colaboración', 'red de'],
+        'Emprendimiento': ['emprendimiento', 'negocio', 'startup', 'empresa propia', 'proyecto', 'inversión', 'socio'],
+        'Capacitación': ['curso', 'capacitación', 'taller', 'diplomado', 'certificación', 'formación', 'webinar'],
+        'Evento': ['evento', 'charla', 'meetup', 'conferencia', 'seminario', 'feria'],
+        'Información': ['les informo', 'dato', 'comparto', 'información', 'noticia', 'artículo', 'link', 'www', 'http'],
+        'Opinión': ['creo que', 'opino', 'mi experiencia', 'en mi caso', 'a mi juicio', 'considero'],
+        'Conversación': ['gracias', 'excelente', 'buena idea', 'de acuerdo', 'así es', 'correcto', 'claro'],
+        'Saludo': ['hola', 'buenos días', 'buenas tardes', 'buenas noches', 'saludos', 'bienvenido', 'felicitaciones']
     }
     
     for categoria, palabras in categorias.items():
         if any(palabra in texto_lower for palabra in palabras):
             return categoria
     
-    return 'General'
+    # Intento adicional: detectar temas por contexto
+    if any(w in texto_lower for w in ['panel', 'construcción', 'instalación', 'obra']):
+        return 'Construcción'
+    if any(w in texto_lower for w in ['finanza', 'banco', 'crédito', 'inversión', 'contabilidad']):
+        return 'Finanzas'
+    if any(w in texto_lower for w in ['tecnología', 'software', 'sistema', 'app', 'digital']):
+        return 'Tecnología'
+    if any(w in texto_lower for w in ['inmobiliaria', 'propiedad', 'arriendo', 'departamento']):
+        return 'Inmobiliaria'
+    if any(w in texto_lower for w in ['seguridad', 'cámara', 'alarma', 'vigilancia']):
+        return 'Seguridad'
+    if any(w in texto_lower for w in ['combustible', 'energía', 'gas', 'electricidad']):
+        return 'Energía'
+    if any(w in texto_lower for w in ['marítimo', 'naviera', 'puerto', 'armada', 'naval']):
+        return 'Sector Marítimo'
+    if len(texto) < 20:
+        return 'Conversación'
+    return 'Otro'
 
 
 def generar_insights_temas(dias=7):
@@ -988,7 +1090,7 @@ def usar_codigo_activacion(codigo, user_id):
 # ==================== FUNCIONES DE BÚSQUEDA ====================
 
 def buscar_en_historial(query, topic_id=None, limit=10):
-    """Busca en el historial de mensajes"""
+    """Busca en el historial de mensajes - retorna nombre completo"""
     conn = get_db_connection()
     if not conn:
         return []
@@ -997,32 +1099,46 @@ def buscar_en_historial(query, topic_id=None, limit=10):
         c = conn.cursor()
         query_like = f'%{query.lower()}%'
         
-        if DATABASE_URL:
-            if topic_id:
-                c.execute("""SELECT first_name, message, fecha FROM mensajes 
-                             WHERE LOWER(message) LIKE %s AND topic_id = %s
-                             ORDER BY fecha DESC LIMIT %s""", (query_like, topic_id, limit))
-            else:
-                c.execute("""SELECT first_name, message, fecha FROM mensajes 
-                             WHERE LOWER(message) LIKE %s
-                             ORDER BY fecha DESC LIMIT %s""", (query_like, limit))
+        # Stemming básico: buscar con y sin 's' final
+        query_l = query.lower().strip()
+        variantes = [query_like]
+        if query_l.endswith('s'):
+            variantes.append(f'%{query_l[:-1]}%')
         else:
+            variantes.append(f'%{query_l}s%')
+        
+        if DATABASE_URL:
+            like_clause = " OR ".join(["LOWER(message) LIKE %s"] * len(variantes))
             if topic_id:
-                c.execute("""SELECT first_name, message, fecha FROM mensajes 
-                             WHERE LOWER(message) LIKE ? AND topic_id = ?
-                             ORDER BY fecha DESC LIMIT ?""", (query_like, topic_id, limit))
+                c.execute(f"""SELECT first_name || ' ' || COALESCE(NULLIF(last_name, ''), '') as nombre_completo, 
+                             message, fecha FROM mensajes 
+                             WHERE ({like_clause}) AND topic_id = %s
+                             ORDER BY fecha DESC LIMIT %s""", (*variantes, topic_id, limit))
             else:
-                c.execute("""SELECT first_name, message, fecha FROM mensajes 
-                             WHERE LOWER(message) LIKE ?
-                             ORDER BY fecha DESC LIMIT ?""", (query_like, limit))
+                c.execute(f"""SELECT first_name || ' ' || COALESCE(NULLIF(last_name, ''), '') as nombre_completo, 
+                             message, fecha FROM mensajes 
+                             WHERE ({like_clause})
+                             ORDER BY fecha DESC LIMIT %s""", (*variantes, limit))
+        else:
+            like_clause = " OR ".join(["LOWER(message) LIKE ?"] * len(variantes))
+            if topic_id:
+                c.execute(f"""SELECT first_name || ' ' || COALESCE(NULLIF(last_name, ''), '') as nombre_completo, 
+                             message, fecha FROM mensajes 
+                             WHERE ({like_clause}) AND topic_id = ?
+                             ORDER BY fecha DESC LIMIT ?""", (*variantes, topic_id, limit))
+            else:
+                c.execute(f"""SELECT first_name || ' ' || COALESCE(NULLIF(last_name, ''), '') as nombre_completo, 
+                             message, fecha FROM mensajes 
+                             WHERE ({like_clause})
+                             ORDER BY fecha DESC LIMIT ?""", (*variantes, limit))
         
         resultados = c.fetchall()
         conn.close()
         
         if DATABASE_URL:
-            return [(r['first_name'], r['message'], r['fecha']) for r in resultados]
+            return [((r['nombre_completo'] or '').strip(), r['message'], r['fecha']) for r in resultados]
         else:
-            return [(r['first_name'], r['message'], r['fecha']) for r in resultados]
+            return [((r[0] or '').strip(), r[1], r[2]) for r in resultados]
             
     except Exception as e:
         logger.error(f"Error buscando en historial: {e}")
@@ -1297,14 +1413,27 @@ def solo_chat_privado(func):
 
 # ==================== FUNCIONES AUXILIARES ====================
 
-async def enviar_mensaje_largo(update: Update, texto: str, parse_mode='Markdown'):
-    """Envía mensajes largos dividiéndolos si es necesario"""
+async def enviar_mensaje_largo(update: Update, texto: str, parse_mode=None):
+    """Envía mensajes largos dividiéndolos si es necesario. Sin Markdown por defecto para evitar errores."""
     if len(texto) <= 4000:
-        await update.message.reply_text(texto, parse_mode=parse_mode)
+        try:
+            await update.message.reply_text(texto, parse_mode=parse_mode)
+        except Exception:
+            # Si falla con parse_mode, reintentar sin formato
+            try:
+                await update.message.reply_text(texto)
+            except Exception as e:
+                logger.error(f"Error enviando mensaje: {e}")
     else:
         partes = [texto[i:i+4000] for i in range(0, len(texto), 4000)]
         for parte in partes:
-            await update.message.reply_text(parte, parse_mode=parse_mode)
+            try:
+                await update.message.reply_text(parte, parse_mode=parse_mode)
+            except Exception:
+                try:
+                    await update.message.reply_text(parte)
+                except Exception as e:
+                    logger.error(f"Error enviando parte: {e}")
 
 
 def registrar_servicio_usado(user_id, servicio):
@@ -1599,14 +1728,22 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultados = buscar_en_historial(query, topic_id, limit=10)
     
     if not resultados:
-        await update.message.reply_text(f"❌ No se encontraron resultados para: _{query}_", parse_mode='Markdown')
+        await update.message.reply_text(f"❌ No se encontraron resultados para: {query}")
         return
     
-    mensaje = f"🔍 **RESULTADOS PARA:** _{query}_\n\n"
+    mensaje = f"🔍 RESULTADOS PARA: {query}\n\n"
     
     for nombre, texto, fecha in resultados[:10]:
+        nombre_limpio = limpiar_nombre_display(nombre)
         texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
-        mensaje += f"👤 **{nombre}**\n{texto_corto}\n\n"
+        try:
+            if hasattr(fecha, 'strftime'):
+                fecha_str = fecha.strftime("%d/%m/%Y %H:%M")
+            else:
+                fecha_str = str(fecha)[:16]
+        except:
+            fecha_str = str(fecha)[:16] if fecha else ""
+        mensaje += f"👤 {nombre_limpio}\n📅 {fecha_str}\n{texto_corto}\n\n"
     
     await enviar_mensaje_largo(update, mensaje)
     registrar_servicio_usado(update.effective_user.id, 'buscar')
@@ -1712,10 +1849,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Crear gráfico - layout dinámico: 3x2 con Drive, 2x2 sin Drive
         if drive_data is not None and len(drive_data) > 0:
             fig, axes = plt.subplots(3, 2, figsize=(16, 18))
-            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=18, fontweight='bold', y=0.99)
+            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=20, fontweight='bold', y=0.99)
         else:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=14, fontweight='bold')
+            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=16, fontweight='bold')
         
         # ===== Gráfico 1: Actividad por Hora del Día =====
         ax1 = axes[0, 0]
@@ -1753,8 +1890,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ax1.bar(horas, conteos, color=colores_hora, alpha=0.85, edgecolor='white')
                 hora_pico = horas[conteos.index(max(conteos))]
                 ax1.axvline(x=hora_pico, color='red', linestyle='--', alpha=0.5, label=f'Pico: {hora_pico}:00')
-                ax1.legend(fontsize=8)
-                ax1.set_xlabel('Hora del dia')
+                ax1.legend(fontsize=10)
+                ax1.set_xlabel('Hora del dia', fontsize=12)
+                ax1.tick_params(axis='both', labelsize=10)
                 ax1.set_ylabel('Mensajes')
             else:
                 ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
@@ -1779,9 +1917,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bars = ax2.barh(nombres, mensajes_u, color=colors_bar, edgecolor='white')
             for bar, val in zip(bars, mensajes_u):
                 ax2.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
-                        str(val), va='center', fontsize=9, fontweight='bold')
+                        str(val), va='center', fontsize=12, fontweight='bold')
             ax2.set_title('👥 Usuarios Mas Activos')
-            ax2.set_xlabel('Mensajes')
+            ax2.set_xlabel('Mensajes', fontsize=12)
+            ax2.tick_params(axis='both', labelsize=10)
         else:
             ax2.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
             ax2.set_title('👥 Usuarios Mas Activos')
@@ -1833,7 +1972,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        ax4.text(0.05, 0.5, resumen_texto, fontsize=11, verticalalignment='center',
+        ax4.text(0.05, 0.5, resumen_texto, fontsize=12, verticalalignment='center',
                 fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
         
         # ===== Gráficos 5-6: Solo si hay datos de Drive =====
@@ -1879,8 +2018,8 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     color=colores_sit, edgecolor='white', alpha=0.9)
                     for bar, val in zip(bars5, sit_counts.values):
                         ax5.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=9, fontweight='bold')
-                    ax5.set_title('💼 Distribucion de Egresados por Situacion Laboral', fontsize=11, fontweight='bold')
+                                str(val), va='center', fontsize=12, fontweight='bold')
+                    ax5.set_title('💼 Distribucion de Egresados por Situacion Laboral', fontsize=12, fontweight='bold')
                     ax5.set_xlabel('Numero de Egresados')
                 else:
                     ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
@@ -1902,8 +2041,8 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     color=colores_ind, edgecolor='white', alpha=0.9)
                     for bar, val in zip(bars6, ind_counts.values):
                         ax6.text(bar.get_width() + 0.2, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=9, fontweight='bold')
-                    ax6.set_title('🏢 Top 10 Industrias Principales de los Egresados', fontsize=11, fontweight='bold')
+                                str(val), va='center', fontsize=12, fontweight='bold')
+                    ax6.set_title('🏢 Top 10 Industrias Principales de los Egresados', fontsize=12, fontweight='bold')
                     ax6.set_xlabel('Numero de Egresados')
                 else:
                     ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
@@ -1939,10 +2078,9 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /buscar_ia - Búsqueda inteligente en el historial del grupo con IA"""
     if not context.args:
         await update.message.reply_text(
-            "❌ **Uso:** /buscar_ia [tu consulta]\n\n"
-            "**Ejemplo:** `/buscar_ia aniversario`\n\n"
-            "Este comando busca en el historial del grupo y usa IA para analizar los resultados.",
-            parse_mode='Markdown'
+            "❌ Uso: /buscar_ia [tu consulta]\n\n"
+            "Ejemplo: /buscar_ia aniversario\n\n"
+            "Este comando busca en el historial del grupo y usa IA para analizar los resultados."
         )
         return
     
@@ -1955,22 +2093,22 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not resultados:
         await msg.edit_text(
-            f"❌ No se encontraron mensajes relacionados con: **{consulta}**\n\n"
-            f"💡 Intenta con otras palabras clave.",
-            parse_mode='Markdown'
+            f"❌ No se encontraron mensajes relacionados con: {consulta}\n\n"
+            f"💡 Intenta con otras palabras clave."
         )
         return
     
     # Si no hay IA disponible, mostrar resultados sin análisis
     if not ia_disponible:
         await msg.delete()
-        mensaje = f"🔍 **RESULTADOS PARA:** _{consulta}_\n"
+        mensaje = f"🔍 RESULTADOS PARA: {consulta}\n"
         mensaje += f"📊 Encontrados: {len(resultados)} mensajes\n\n"
         
         for nombre, texto, fecha in resultados[:10]:
-            fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
+            nombre_limpio = limpiar_nombre_display(nombre)
+            fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
             texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
-            mensaje += f"👤 **{nombre}** ({fecha_str})\n{texto_corto}\n\n"
+            mensaje += f"👤 {nombre_limpio} ({fecha_str})\n{texto_corto}\n\n"
         
         await enviar_mensaje_largo(update, mensaje)
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
@@ -2566,26 +2704,40 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cobros_admin_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /cobros_admin - Panel admin"""
-    if update.message.from_user.id != OWNER_ID:
+    if update.effective_user.id != OWNER_ID:
         return
     
-    await update.message.reply_text("""
-👑 **PANEL ADMIN**
-
-💰 **COBROS:**
-/generar_codigo - Crear código
-/precios - Ver precios
-/pagos_pendientes - Ver pagos
-
-📅 **VENCIMIENTOS:**
-/vencimientos - Próximos
-/vencimientos_mes [1-12] - Por mes
-""", parse_mode='Markdown')
+    await update.message.reply_text(
+        "👑 PANEL DE ADMINISTRACIÓN\n\n"
+        "💰 COBROS:\n"
+        "  /generar_codigo - Crear código de activación\n"
+        "  /precios - Ver precios actuales\n"
+        "  /set_precios [dias] [precio] [nombre] - Configurar\n"
+        "  /pagos_pendientes - Ver pagos por aprobar\n\n"
+        "📅 SUSCRIPCIONES:\n"
+        "  /vencimientos - Próximos a vencer\n"
+        "  /vencimientos_mes [1-12] - Por mes\n"
+        "  /ingresos - Resumen de ingresos\n\n"
+        "📈 CRECIMIENTO:\n"
+        "  /crecimiento_mes [mes] - Suscriptores por mes\n"
+        "  /crecimiento_anual - Resumen anual\n\n"
+        "👥 USUARIOS:\n"
+        "  /resumen_usuario @username - Actividad de un usuario\n"
+        "  /dotacion - Miembros del grupo\n"
+        "  /aprobar_solicitud - Solicitudes pendientes\n\n"
+        "📂 TOPICS:\n"
+        "  /ver_topics - Ver actividad por topic\n\n"
+        "📚 RAG:\n"
+        "  /subir_pdf - Subir documento\n"
+        "  /rag_status - Estado del sistema RAG\n"
+        "  /rag_reindexar - Reindexar documentos\n"
+        "  /eliminar_pdf - Eliminar documento"
+    )
 
 
 async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /generar_codigo - Admin"""
-    if update.message.from_user.id != OWNER_ID:
+    if update.effective_user.id != OWNER_ID:
         return
     
     precios = obtener_precios()
@@ -2595,9 +2747,580 @@ async def generar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
     ]
     
     await update.message.reply_text(
-        "👑 **GENERAR CÓDIGO**\n\nSelecciona el plan:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        "👑 GENERAR CÓDIGO\n\nSelecciona el plan:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ==================== COMANDOS ADMIN FALTANTES ====================
+
+async def precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /precios - Ver precios actuales"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    precios = obtener_precios()
+    if not precios:
+        await update.message.reply_text("❌ No hay planes configurados.")
+        return
+    
+    mensaje = "💰 PRECIOS ACTUALES\n\n"
+    for dias, precio, nombre in precios:
+        mensaje += f"📋 {nombre} ({dias} días): {formato_clp(precio)}\n"
+    
+    await update.message.reply_text(mensaje)
+
+
+async def set_precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_precios [dias] [precio] [nombre] - Configurar precios"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "❌ Uso: /set_precios [dias] [precio] [nombre]\n\n"
+            "Ejemplo: /set_precios 30 5000 Plan Mensual"
+        )
+        return
+    
+    try:
+        dias = int(context.args[0])
+        precio = int(context.args[1])
+        nombre = ' '.join(context.args[2:])
+        
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("DELETE FROM precios WHERE dias = %s", (dias,))
+                c.execute("INSERT INTO precios (dias, precio, nombre) VALUES (%s, %s, %s)", (dias, precio, nombre))
+            else:
+                c.execute("DELETE FROM precios WHERE dias = ?", (dias,))
+                c.execute("INSERT INTO precios (dias, precio, nombre) VALUES (?, ?, ?)", (dias, precio, nombre))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Plan actualizado: {nombre} ({dias}d) = {formato_clp(precio)}")
+    except ValueError:
+        await update.message.reply_text("❌ Formato inválido. Días y precio deben ser números.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /pagos_pendientes - Ver pagos por aprobar"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT id, user_id, first_name, dias_plan, monto, estado, fecha 
+                        FROM pagos_pendientes WHERE estado = 'pendiente' 
+                        ORDER BY fecha DESC LIMIT 20""")
+            pagos = c.fetchall()
+        else:
+            c.execute("""SELECT id, user_id, first_name, dias_plan, monto, estado, fecha 
+                        FROM pagos_pendientes WHERE estado = 'pendiente' 
+                        ORDER BY fecha DESC LIMIT 20""")
+            pagos = c.fetchall()
+        conn.close()
+        
+        if not pagos:
+            await update.message.reply_text("✅ No hay pagos pendientes de aprobación.")
+            return
+        
+        mensaje = "💳 PAGOS PENDIENTES\n\n"
+        for p in pagos:
+            if DATABASE_URL:
+                mensaje += (f"🆔 ID: {p['id']}\n"
+                           f"👤 {p['first_name']} (ID: {p['user_id']})\n"
+                           f"📋 Plan: {p['dias_plan']} días\n"
+                           f"💰 Monto: {formato_clp(p['monto'] or 0)}\n"
+                           f"📅 Fecha: {str(p['fecha'])[:16]}\n\n")
+            else:
+                mensaje += (f"🆔 ID: {p[0]}\n"
+                           f"👤 {p[2]} (ID: {p[1]})\n"
+                           f"📋 Plan: {p[3]} días\n"
+                           f"💰 Monto: {formato_clp(p[4] or 0)}\n"
+                           f"📅 Fecha: {str(p[6])[:16]}\n\n")
+        
+        await enviar_mensaje_largo(update, mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def vencimientos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /vencimientos - Ver suscripciones próximas a vencer"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, last_name, fecha_expiracion,
+                        fecha_expiracion - CURRENT_DATE as dias_restantes
+                        FROM suscripciones 
+                        WHERE estado = 'activo' AND fecha_expiracion IS NOT NULL
+                        ORDER BY fecha_expiracion ASC LIMIT 20""")
+            subs = c.fetchall()
+        else:
+            c.execute("""SELECT user_id, first_name, last_name, fecha_expiracion
+                        FROM suscripciones 
+                        WHERE estado = 'activo' AND fecha_expiracion IS NOT NULL
+                        ORDER BY fecha_expiracion ASC LIMIT 20""")
+            subs = c.fetchall()
+        conn.close()
+        
+        if not subs:
+            await update.message.reply_text("📋 No hay suscripciones activas con fecha de vencimiento.")
+            return
+        
+        mensaje = "📅 VENCIMIENTOS DE SUSCRIPCIONES\n\n"
+        for s in subs:
+            if DATABASE_URL:
+                nombre = f"{s['first_name'] or ''} {s['last_name'] or ''}".strip()
+                fecha = str(s['fecha_expiracion'])[:10]
+                dias = s['dias_restantes']
+                if hasattr(dias, 'days'):
+                    dias = dias.days
+            else:
+                nombre = f"{s[1] or ''} {s[2] or ''}".strip()
+                fecha = str(s[3])[:10]
+                dias = obtener_dias_restantes(s[0])
+            
+            nombre = limpiar_nombre_display(nombre)
+            
+            if dias and dias <= 7:
+                emoji = "🔴"
+            elif dias and dias <= 15:
+                emoji = "🟡"
+            else:
+                emoji = "🟢"
+            
+            mensaje += f"{emoji} {nombre}: vence {fecha} ({dias} días)\n"
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def vencimientos_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /vencimientos_mes [mes] - Ver vencimientos de un mes específico"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    mes = datetime.now().month
+    if context.args:
+        try:
+            mes = int(context.args[0])
+            if mes < 1 or mes > 12:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Ingresa un mes válido (1-12)")
+            return
+    
+    meses_nombre = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        anio = datetime.now().year
+        
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, last_name, fecha_expiracion
+                        FROM suscripciones 
+                        WHERE estado = 'activo' 
+                        AND EXTRACT(MONTH FROM fecha_expiracion) = %s
+                        AND EXTRACT(YEAR FROM fecha_expiracion) = %s
+                        ORDER BY fecha_expiracion ASC""", (mes, anio))
+            subs = c.fetchall()
+        else:
+            c.execute("""SELECT user_id, first_name, last_name, fecha_expiracion
+                        FROM suscripciones 
+                        WHERE estado = 'activo'
+                        AND strftime('%%m', fecha_expiracion) = ?
+                        AND strftime('%%Y', fecha_expiracion) = ?
+                        ORDER BY fecha_expiracion ASC""", (f"{mes:02d}", str(anio)))
+            subs = c.fetchall()
+        conn.close()
+        
+        if not subs:
+            await update.message.reply_text(f"📋 No hay vencimientos en {meses_nombre[mes]} {anio}.")
+            return
+        
+        mensaje = f"📅 VENCIMIENTOS - {meses_nombre[mes]} {anio}\n\n"
+        for s in subs:
+            if DATABASE_URL:
+                nombre = f"{s['first_name'] or ''} {s['last_name'] or ''}".strip()
+                fecha = str(s['fecha_expiracion'])[:10]
+            else:
+                nombre = f"{s[1] or ''} {s[2] or ''}".strip()
+                fecha = str(s[3])[:10]
+            nombre = limpiar_nombre_display(nombre)
+            mensaje += f"👤 {nombre}: {fecha}\n"
+        
+        mensaje += f"\nTotal: {len(subs)} suscripciones"
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def ingresos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /ingresos - Resumen de ingresos"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+            activas = c.fetchone()['total']
+            c.execute("SELECT COUNT(*) as total FROM suscripciones")
+            total = c.fetchone()['total']
+            c.execute("""SELECT SUM(monto) as total_ingresos FROM pagos_pendientes 
+                        WHERE estado = 'aprobado'""")
+            row = c.fetchone()
+            total_ingresos = row['total_ingresos'] if row and row['total_ingresos'] else 0
+            c.execute("""SELECT SUM(monto) as total_mes FROM pagos_pendientes 
+                        WHERE estado = 'aprobado' 
+                        AND fecha >= DATE_TRUNC('month', CURRENT_DATE)""")
+            row = c.fetchone()
+            ingresos_mes = row['total_mes'] if row and row['total_mes'] else 0
+        else:
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+            activas = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM suscripciones")
+            total = c.fetchone()[0]
+            c.execute("SELECT SUM(monto) FROM pagos_pendientes WHERE estado = 'aprobado'")
+            total_ingresos = c.fetchone()[0] or 0
+            primer_dia = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            c.execute("SELECT SUM(monto) FROM pagos_pendientes WHERE estado = 'aprobado' AND fecha >= ?", (primer_dia,))
+            ingresos_mes = c.fetchone()[0] or 0
+        
+        conn.close()
+        
+        mensaje = (f"💰 RESUMEN DE INGRESOS\n\n"
+                  f"👥 Suscripciones activas: {activas}\n"
+                  f"📊 Total registrados: {total}\n"
+                  f"💵 Ingresos totales: {formato_clp(total_ingresos)}\n"
+                  f"📅 Ingresos este mes: {formato_clp(ingresos_mes)}\n")
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def crecimiento_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /crecimiento_mes [mes] - Crecimiento de suscriptores por mes"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    mes = datetime.now().month
+    if context.args:
+        try:
+            mes = int(context.args[0])
+            if mes < 1 or mes > 12:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Ingresa un mes válido (1-12)")
+            return
+    
+    meses_nombre = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        anio = datetime.now().year
+        
+        if DATABASE_URL:
+            c.execute("""SELECT COUNT(*) as nuevos FROM suscripciones 
+                        WHERE EXTRACT(MONTH FROM fecha_registro) = %s
+                        AND EXTRACT(YEAR FROM fecha_registro) = %s""", (mes, anio))
+            nuevos = c.fetchone()['nuevos']
+            c.execute("""SELECT COUNT(*) as total FROM suscripciones 
+                        WHERE fecha_registro <= (DATE '%s-%s-01' + INTERVAL '1 month' - INTERVAL '1 day')""" % (anio, f"{mes:02d}"))
+            acumulado = c.fetchone()['total']
+        else:
+            c.execute("""SELECT COUNT(*) FROM suscripciones 
+                        WHERE strftime('%%m', fecha_registro) = ? AND strftime('%%Y', fecha_registro) = ?""", 
+                     (f"{mes:02d}", str(anio)))
+            nuevos = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM suscripciones")
+            acumulado = c.fetchone()[0]
+        
+        conn.close()
+        
+        mensaje = (f"📈 CRECIMIENTO - {meses_nombre[mes]} {anio}\n\n"
+                  f"🆕 Nuevos suscriptores: {nuevos}\n"
+                  f"📊 Total acumulado: {acumulado}\n")
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def crecimiento_anual_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /crecimiento_anual - Crecimiento anual de suscriptores"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        anio = datetime.now().year
+        meses_nombre = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+        
+        mensaje = f"📊 CRECIMIENTO ANUAL {anio}\n\n"
+        
+        for mes in range(1, 13):
+            if DATABASE_URL:
+                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
+                            WHERE EXTRACT(MONTH FROM fecha_registro) = %s
+                            AND EXTRACT(YEAR FROM fecha_registro) = %s""", (mes, anio))
+                count = c.fetchone()['total']
+            else:
+                c.execute("""SELECT COUNT(*) FROM suscripciones 
+                            WHERE strftime('%%m', fecha_registro) = ? AND strftime('%%Y', fecha_registro) = ?""",
+                         (f"{mes:02d}", str(anio)))
+                count = c.fetchone()[0]
+            
+            barra = "█" * count if count > 0 else ""
+            if mes <= datetime.now().month:
+                mensaje += f"  {meses_nombre[mes-1]}: {barra} {count}\n"
+        
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE EXTRACT(YEAR FROM fecha_registro) = %s", (anio,))
+            total_anio = c.fetchone()['total']
+        else:
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE strftime('%%Y', fecha_registro) = ?", (str(anio),))
+            total_anio = c.fetchone()[0]
+        
+        conn.close()
+        mensaje += f"\n📈 Total {anio}: {total_anio} suscriptores"
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /resumen_usuario @username - Resumen de actividad de un usuario"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /resumen_usuario @username\n\n"
+            "Ejemplo: /resumen_usuario @francisco_clavel"
+        )
+        return
+    
+    busqueda = ' '.join(context.args).replace('@', '').lower().strip()
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        
+        # Buscar por username o nombre
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, 
+                        MAX(first_name) as first_name, 
+                        MAX(COALESCE(last_name, '')) as last_name,
+                        MAX(username) as username,
+                        COUNT(*) as total_msgs,
+                        MIN(fecha) as primera_fecha,
+                        MAX(fecha) as ultima_fecha
+                        FROM mensajes 
+                        WHERE LOWER(username) LIKE %s 
+                        OR LOWER(first_name) LIKE %s 
+                        OR LOWER(last_name) LIKE %s
+                        GROUP BY user_id
+                        ORDER BY total_msgs DESC LIMIT 1""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        else:
+            c.execute("""SELECT user_id, 
+                        MAX(first_name) as first_name, 
+                        MAX(COALESCE(last_name, '')) as last_name,
+                        MAX(username) as username,
+                        COUNT(*) as total_msgs,
+                        MIN(fecha) as primera_fecha,
+                        MAX(fecha) as ultima_fecha
+                        FROM mensajes 
+                        WHERE LOWER(username) LIKE ? 
+                        OR LOWER(first_name) LIKE ? 
+                        OR LOWER(last_name) LIKE ?
+                        GROUP BY user_id
+                        ORDER BY total_msgs DESC LIMIT 1""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        
+        user = c.fetchone()
+        
+        if not user:
+            conn.close()
+            await update.message.reply_text(f"❌ No se encontró usuario: {busqueda}")
+            return
+        
+        if DATABASE_URL:
+            uid = user['user_id']
+            nombre = f"{user['first_name'] or ''} {user['last_name'] or ''}".strip()
+            username = user['username'] or ''
+            total = user['total_msgs']
+            primera = str(user['primera_fecha'])[:10]
+            ultima = str(user['ultima_fecha'])[:16]
+            
+            # Categorías
+            c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                        WHERE user_id = %s AND categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY total DESC LIMIT 5""", (uid,))
+            cats = [(r['categoria'], r['total']) for r in c.fetchall()]
+        else:
+            uid = user[0]
+            nombre = f"{user[1] or ''} {user[2] or ''}".strip()
+            username = user[3] or ''
+            total = user[4]
+            primera = str(user[5])[:10]
+            ultima = str(user[6])[:16]
+            
+            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
+                        WHERE user_id = ? AND categoria IS NOT NULL 
+                        GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 5""", (uid,))
+            cats = c.fetchall()
+        
+        conn.close()
+        nombre = limpiar_nombre_display(nombre)
+        
+        mensaje = (f"👤 RESUMEN DE USUARIO\n\n"
+                  f"📛 Nombre: {nombre}\n"
+                  f"📱 Username: @{username}\n"
+                  f"💬 Total mensajes: {total}\n"
+                  f"📅 Primer mensaje: {primera}\n"
+                  f"🕐 Último mensaje: {ultima}\n")
+        
+        if cats:
+            mensaje += "\n📊 Temas más frecuentes:\n"
+            for cat, cnt in cats:
+                cat_name = cat if DATABASE_URL else cat[0]
+                cat_count = cnt if DATABASE_URL else cat[1]
+                mensaje += f"  📌 {cat_name}: {cat_count}\n"
+        
+        # Suscripción
+        dias = obtener_dias_restantes(uid)
+        if dias > 0:
+            mensaje += f"\n⏰ Suscripción: {dias} días restantes"
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        logger.error(f"Error en resumen_usuario: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def ver_topics_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /ver_topics - Ver temas/topics del grupo"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de base de datos")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT topic_id, COUNT(*) as msgs, 
+                        MAX(fecha) as ultimo_msg
+                        FROM mensajes 
+                        WHERE topic_id IS NOT NULL
+                        GROUP BY topic_id 
+                        ORDER BY msgs DESC""")
+            topics = c.fetchall()
+        else:
+            c.execute("""SELECT topic_id, COUNT(*) as msgs, MAX(fecha) as ultimo_msg
+                        FROM mensajes WHERE topic_id IS NOT NULL
+                        GROUP BY topic_id ORDER BY msgs DESC""")
+            topics = c.fetchall()
+        conn.close()
+        
+        if not topics:
+            await update.message.reply_text("📋 No hay topics registrados.")
+            return
+        
+        mensaje = "📂 TOPICS DEL GRUPO\n\n"
+        for t in topics:
+            if DATABASE_URL:
+                mensaje += f"🔹 Topic #{t['topic_id']}: {t['msgs']} msgs (último: {str(t['ultimo_msg'])[:10]})\n"
+            else:
+                mensaje += f"🔹 Topic #{t[0]}: {t[1]} msgs (último: {str(t[2])[:10]})\n"
+        
+        await update.message.reply_text(mensaje)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def set_topic_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_topic - Información sobre topics de Telegram"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    await update.message.reply_text(
+        "📝 GESTIÓN DE TOPICS\n\n"
+        "Los topics se gestionan directamente en la configuración del grupo de Telegram.\n\n"
+        "Para crear/editar topics:\n"
+        "1. Abre el grupo en Telegram\n"
+        "2. Toca el nombre del grupo\n"
+        "3. Selecciona 'Topics'\n"
+        "4. Crea o edita los temas\n\n"
+        "El bot registra automáticamente los mensajes por topic.\n"
+        "Usa /ver_topics para ver la actividad por topic."
+    )
+
+
+async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_topic_emoji - Info sobre emojis de topics"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    await update.message.reply_text(
+        "🎨 EMOJIS DE TOPICS\n\n"
+        "Los emojis de los topics se configuran directamente en Telegram:\n"
+        "1. Abre la configuración del grupo\n"
+        "2. Selecciona el topic a editar\n"
+        "3. Cambia el emoji del topic\n\n"
+        "El bot automáticamente detecta los topics por su ID."
     )
 
 
@@ -2734,7 +3457,12 @@ async def categorias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         mensaje = "🏷️ **CATEGORÍAS DE MENSAJES**\n\n"
         emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
-                  'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+                  'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋',
+                  'Oferta Laboral': '💼', 'Búsqueda Empleo': '🔍', 'Recomendación Profesional': '⭐',
+                  'Consulta Profesional': '❓', 'Servicios y Productos': '🛒', 'Capacitación': '📚',
+                  'Información': '📰', 'Opinión': '💭', 'Conversación': '💬', 'Construcción': '🏗️',
+                  'Finanzas': '💰', 'Tecnología': '💻', 'Inmobiliaria': '🏠', 'Seguridad': '🔒',
+                  'Energía': '⚡', 'Sector Marítimo': '⚓', 'Otro': '📌'}
         
         for cat, total in cats:
             emoji = emojis.get(cat, '📌')
@@ -3048,7 +3776,12 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
         elif categorias:
             mensaje += "🏷️ **TEMAS PRINCIPALES**\n"
             emojis = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
-                     'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+                     'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋',
+                  'Oferta Laboral': '💼', 'Búsqueda Empleo': '🔍', 'Recomendación Profesional': '⭐',
+                  'Consulta Profesional': '❓', 'Servicios y Productos': '🛒', 'Capacitación': '📚',
+                  'Información': '📰', 'Opinión': '💭', 'Conversación': '💬', 'Construcción': '🏗️',
+                  'Finanzas': '💰', 'Tecnología': '💻', 'Inmobiliaria': '🏠', 'Seguridad': '🔒',
+                  'Energía': '⚡', 'Sector Marítimo': '⚓', 'Otro': '📌'}
             total_cats = sum([c[1] for c in categorias])
             for cat, count in categorias[:6]:
                 emoji = emojis.get(cat, '📌')
@@ -3236,17 +3969,16 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
     """Comando /buscar_profesional - Buscar en base de datos de Google Drive"""
     if not context.args:
         await update.message.reply_text(
-            "❌ **Uso:** /buscar_profesional [profesión o nombre]\n\n"
-            "**Ejemplos:**\n"
-            "• `/buscar_profesional abogado`\n"
-            "• `/buscar_profesional contador`\n"
-            "• `/buscar_profesional diseñador`",
-            parse_mode='Markdown'
+            "❌ Uso: /buscar_profesional [profesión o nombre]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_profesional abogado\n"
+            "  /buscar_profesional contador\n"
+            "  /buscar_profesional diseñador"
         )
         return
     
     query = ' '.join(context.args)
-    msg = await update.message.reply_text(f"🔍 Buscando profesionales: _{query}_...", parse_mode='Markdown')
+    msg = await update.message.reply_text(f"🔍 Buscando profesionales: {query}...")
     
     # Buscar en Google Drive
     resultado = buscar_profesionales(query)
@@ -3513,7 +4245,7 @@ def buscar_profesionales(query):
             profesiones = list(set([p['profesion'] for p in profesionales if p['profesion']]))
             industrias = list(set([p['industria1'] for p in profesionales if p['industria1']]))
             
-            msg = f"❌ No se encontraron profesionales para: **{query}**\n\n"
+            msg = f"❌ No se encontraron profesionales para: {query}\n\n"
             msg += f"📊 Total en BD: {len(profesionales)} profesionales\n\n"
             
             if profesiones:
@@ -3522,7 +4254,7 @@ def buscar_profesionales(query):
                     msg += f"• {p}\n"
             
             if industrias:
-                msg += "\n💼 **Algunas industrias (col K):**\n"
+                msg += "\n💼 Algunas industrias:\n"
                 for i in sorted(industrias)[:10]:
                     msg += f"• {i}\n"
             
@@ -3530,7 +4262,7 @@ def buscar_profesionales(query):
         
         # Formatear resultados
         resultado = "━" * 30 + "\n"
-        resultado += "👥 **PROFESIONALES ENCONTRADOS**\n"
+        resultado += "👥 PROFESIONALES ENCONTRADOS\n"
         resultado += "━" * 30 + "\n\n"
         resultado += f"🔍 **Búsqueda:** _{query}_\n"
         resultado += f"📊 **Resultados:** {len(encontrados)} de {len(profesionales)}\n\n"
@@ -5361,7 +6093,12 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             else:
                 mensaje += "🏷️ TEMAS DEL DIA\n"
                 emojis_cat = {'Empleo': '💼', 'Networking': '🤝', 'Consulta': '❓', 
-                            'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋', 'General': '💬'}
+                            'Emprendimiento': '🚀', 'Evento': '📅', 'Saludo': '👋',
+                  'Oferta Laboral': '💼', 'Búsqueda Empleo': '🔍', 'Recomendación Profesional': '⭐',
+                  'Consulta Profesional': '❓', 'Servicios y Productos': '🛒', 'Capacitación': '📚',
+                  'Información': '📰', 'Opinión': '💭', 'Conversación': '💬', 'Construcción': '🏗️',
+                  'Finanzas': '💰', 'Tecnología': '💻', 'Inmobiliaria': '🏠', 'Seguridad': '🔒',
+                  'Energía': '⚡', 'Sector Marítimo': '⚓', 'Otro': '📌'}
                 for cat, count in categorias[:5]:
                     emoji = emojis_cat.get(cat, '📌')
                     mensaje += f"   {emoji} {cat}: {count}\n"
@@ -5742,7 +6479,7 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
-    logger.info(f"📊 Groq IA: {'✅' if ia_disponible else '❌'}")
+    logger.info(f"📊 Groq IA: {'✅' if GROQ_API_KEY else '❌'} | DeepSeek: {'✅' if deepseek_disponible else '❌'} | IA Global: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
     logger.info(f"💼 JSearch (empleos reales): {'✅' if jsearch_disponible else '❌'}")
     logger.info(f"🗄️ Base de datos: {'Supabase' if DATABASE_URL else 'SQLite local'}")
@@ -5851,6 +6588,19 @@ def main():
     
     # Handlers admin
     application.add_handler(CommandHandler("cobros_admin", cobros_admin_comando))
+    application.add_handler(CommandHandler("precios", precios_comando))
+    application.add_handler(CommandHandler("set_precios", set_precios_comando))
+    application.add_handler(CommandHandler("pagos_pendientes", pagos_pendientes_comando))
+    application.add_handler(CommandHandler("vencimientos", vencimientos_comando))
+    application.add_handler(CommandHandler("vencimientos_mes", vencimientos_mes_comando))
+    application.add_handler(CommandHandler("ingresos", ingresos_comando))
+    application.add_handler(CommandHandler("ingreso", ingresos_comando))  # alias
+    application.add_handler(CommandHandler("crecimiento_mes", crecimiento_mes_comando))
+    application.add_handler(CommandHandler("crecimiento_anual", crecimiento_anual_comando))
+    application.add_handler(CommandHandler("resumen_usuario", resumen_usuario_comando))
+    application.add_handler(CommandHandler("ver_topics", ver_topics_comando))
+    application.add_handler(CommandHandler("set_topic", set_topic_comando))
+    application.add_handler(CommandHandler("set_topic_emoji", set_topic_emoji_comando))
     application.add_handler(CommandHandler("generar_codigo", generar_codigo_comando))
     
     # Handlers RAG PDF
