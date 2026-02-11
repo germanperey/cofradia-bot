@@ -58,6 +58,7 @@ DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')  # Obtener en platform.dee
 TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
+COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+4bwiykq1T081MGRh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
@@ -1483,19 +1484,26 @@ def registrar_servicio_usado(user_id, servicio):
 # ==================== COMANDOS BÁSICOS ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start - Bienvenida"""
+    """Comando /start - Detecta si es usuario nuevo o registrado"""
     user = update.message.from_user
+    user_id = user.id
     
-    # Enviar SIN parse_mode para evitar errores con guiones bajos
-    mensaje = f"""🎉 Bienvenido/a {user.first_name} al Bot Cofradia Premium!
-
-============================
-📌 COMO EMPEZAR?
-============================
-
-PASO 1️⃣ Ve al grupo @CofradiadeNetworking
-PASO 2️⃣ Escribe: /registrarse
-PASO 3️⃣ Listo! Ahora puedo asistirte
+    # Owner siempre tiene acceso completo
+    if user_id == OWNER_ID:
+        await update.message.reply_text(
+            f"👑 Bienvenido Germán!\n\n"
+            f"Panel completo disponible.\n"
+            f"Escribe /cobros_admin para ver el panel de administración.\n"
+            f"Escribe /ayuda para ver todos los comandos."
+        )
+        return ConversationHandler.END
+    
+    # Verificar si el usuario ya está registrado (tiene suscripción)
+    es_registrado = verificar_suscripcion_activa(user_id)
+    
+    if es_registrado:
+        # Usuario ya registrado - bienvenida normal
+        mensaje = f"""🎉 Bienvenido/a {user.first_name} al Bot Cofradia Premium!
 
 ============================
 🛠️ QUE PUEDO HACER?
@@ -1509,9 +1517,82 @@ PASO 3️⃣ Listo! Ahora puedo asistirte
 🤖 Preguntarme - @Cofradia_Premium_Bot + pregunta
 
 Escribe /ayuda para ver todos los comandos.
-🚀 Registrate en el grupo para comenzar!
 """
-    await update.message.reply_text(mensaje)
+        await update.message.reply_text(mensaje)
+        return ConversationHandler.END
+    
+    # Usuario NO registrado - verificar si ya tiene solicitud pendiente
+    tiene_solicitud = False
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT estado FROM nuevos_miembros WHERE user_id = %s ORDER BY fecha_solicitud DESC LIMIT 1", (user_id,))
+            else:
+                c.execute("SELECT estado FROM nuevos_miembros WHERE user_id = ? ORDER BY fecha_solicitud DESC LIMIT 1", (user_id,))
+            resultado = c.fetchone()
+            if resultado:
+                estado = resultado['estado'] if DATABASE_URL else resultado[0]
+                if estado == 'pendiente':
+                    tiene_solicitud = True
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Error verificando solicitud: {e}")
+    
+    if tiene_solicitud:
+        await update.message.reply_text(
+            "⏳ Ya tienes una solicitud de ingreso pendiente.\n\n"
+            "El administrador está revisando tu solicitud.\n"
+            "Te notificaremos cuando sea aprobada."
+        )
+        return ConversationHandler.END
+    
+    # Usuario nuevo sin solicitud - iniciar onboarding
+    context.user_data['onboard_user_id'] = user_id
+    context.user_data['onboard_username'] = user.username or ''
+    context.user_data['onboard_activo'] = True
+    
+    await update.message.reply_text(
+        f"⚓ Bienvenido/a {user.first_name} a Cofradía de Networking!\n\n"
+        f"Cofradía es un grupo exclusivo de Marinos en materia laboral, "
+        f"para fortalecer apoyos, fomentar el intercambio comercial y cultivar la amistad.\n\n"
+        f"Para solicitar tu ingreso, necesito que respondas 3 breves preguntas.\n\n"
+        f"📝 Pregunta 1 de 3:\n"
+        f"¿Cuál es tu Nombre y Apellido completo?"
+    )
+    
+    return ONBOARD_NOMBRE
+
+
+async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja cualquier texto de usuario no registrado en chat privado"""
+    user = update.message.from_user
+    user_id = user.id
+    
+    # Si está en medio del onboarding, no interferir
+    if context.user_data.get('onboard_activo'):
+        return
+    
+    # Owner y registrados no pasan por aquí
+    if user_id == OWNER_ID or verificar_suscripcion_activa(user_id):
+        return
+    
+    # Usuario no registrado escribiendo algo - redirigir a /start
+    context.user_data['onboard_user_id'] = user_id
+    context.user_data['onboard_username'] = user.username or ''
+    context.user_data['onboard_activo'] = True
+    
+    await update.message.reply_text(
+        f"⚓ Hola {user.first_name}! Veo que aún no eres miembro de Cofradía de Networking.\n\n"
+        f"Cofradía es un grupo exclusivo de Marinos en materia laboral, "
+        f"para fortalecer apoyos, fomentar el intercambio comercial y cultivar la amistad.\n\n"
+        f"Para solicitar tu ingreso, necesito que respondas 3 breves preguntas.\n\n"
+        f"📝 Pregunta 1 de 3:\n"
+        f"¿Cuál es tu Nombre y Apellido completo?"
+    )
+    
+    return ONBOARD_NOMBRE
 
 
 @solo_chat_privado
@@ -6223,46 +6304,53 @@ Participamos de un grupo de camaradas, cuyo único propósito es apoyar, colabor
 
 
 async def manejar_solicitud_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja solicitudes de ingreso al grupo (ChatJoinRequest)"""
+    """Maneja solicitudes de ingreso via ChatJoinRequest (fallback si enlace tiene aprobación activa)"""
     join_request = update.chat_join_request
     user = join_request.from_user
     
-    logger.info(f"📨 Solicitud de ingreso: {user.first_name} {user.last_name or ''} (ID: {user.id})")
+    logger.info(f"📨 ChatJoinRequest recibido: {user.first_name} {user.last_name or ''} (ID: {user.id})")
     
+    # Verificar si ya completó el onboarding
     try:
-        # Enviar mensaje al usuario con la primera pregunta
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"⚓ Bienvenido al proceso de ingreso a Cofradía de Networking!\n\n"
-                 f"Para completar tu solicitud, necesito que respondas 3 preguntas.\n\n"
-                 f"📝 Pregunta 1 de 3:\n"
-                 f"¿Cuál es tu Nombre y Apellido completo?"
-        )
-        
-        # Guardar datos del solicitante
-        context.user_data['onboard_user_id'] = user.id
-        context.user_data['onboard_username'] = user.username or ''
-        context.user_data['onboard_chat_id'] = join_request.chat.id
-        context.user_data['onboard_activo'] = True
-        
-        logger.info(f"✅ Preguntas de onboarding enviadas a {user.first_name}")
-        return ONBOARD_NOMBRE
-        
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT estado FROM nuevos_miembros WHERE user_id = %s AND estado = 'aprobado' LIMIT 1", (user.id,))
+            else:
+                c.execute("SELECT estado FROM nuevos_miembros WHERE user_id = ? AND estado = 'aprobado' LIMIT 1", (user.id,))
+            resultado = c.fetchone()
+            conn.close()
+            
+            if resultado:
+                # Ya fue aprobado por el bot, aprobar automáticamente
+                try:
+                    await context.bot.approve_chat_join_request(
+                        chat_id=join_request.chat.id,
+                        user_id=user.id
+                    )
+                    logger.info(f"✅ Auto-aprobado (ya verificado): {user.first_name}")
+                except Exception as e:
+                    logger.warning(f"Error auto-aprobando: {e}")
+                return
     except Exception as e:
-        logger.error(f"❌ Error enviando preguntas de onboarding: {e}")
-        # Notificar al owner que no se pudo contactar al usuario
-        try:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"⚠️ Solicitud de ingreso de {user.first_name} {user.last_name or ''} "
-                     f"(@{user.username or 'sin_username'}, ID: {user.id})\n\n"
-                     f"No se pudo enviar las preguntas de onboarding. "
-                     f"El usuario debe iniciar chat con el bot primero.\n\n"
-                     f"Para aprobar manualmente: /aprobar_solicitud {user.id}"
-            )
-        except:
-            pass
-        return ConversationHandler.END
+        logger.warning(f"Error verificando miembro: {e}")
+    
+    # No fue aprobado aún - notificar al owner
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"📨 SOLICITUD DIRECTA AL GRUPO\n\n"
+                 f"👤 {user.first_name} {user.last_name or ''}\n"
+                 f"📱 @{user.username or 'sin_username'}\n"
+                 f"🆔 ID: {user.id}\n\n"
+                 f"⚠️ Este usuario solicitó ingresar directamente por el enlace.\n"
+                 f"No completó las 3 preguntas del bot.\n\n"
+                 f"Pídele que primero escriba a @Cofradia_Premium_Bot\n"
+                 f"o aprueba manualmente: /aprobar_solicitud {user.id}"
+        )
+    except:
+        pass
 
 
 async def onboard_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6387,8 +6475,72 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def onboard_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancela el proceso de onboarding"""
     context.user_data['onboard_activo'] = False
-    await update.message.reply_text("❌ Proceso de registro cancelado.")
+    await update.message.reply_text("❌ Proceso de registro cancelado.\n\nSi deseas reiniciar, escribe /start")
     return ConversationHandler.END
+
+
+async def detectar_nuevo_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detecta cuando un nuevo miembro ingresa al grupo y envía bienvenida si fue aprobado"""
+    if not update.message or not update.message.new_chat_members:
+        return
+    
+    for miembro in update.message.new_chat_members:
+        if miembro.is_bot:
+            continue
+        
+        user_id = miembro.id
+        logger.info(f"👤 Nuevo miembro detectado: {miembro.first_name} (ID: {user_id})")
+        
+        # Buscar si fue aprobado por el onboarding
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""SELECT nombre, apellido, generacion FROM nuevos_miembros 
+                                WHERE user_id = %s AND estado = 'aprobado' 
+                                ORDER BY fecha_aprobacion DESC LIMIT 1""", (user_id,))
+                    resultado = c.fetchone()
+                else:
+                    c.execute("""SELECT nombre, apellido, generacion FROM nuevos_miembros 
+                                WHERE user_id = ? AND estado = 'aprobado' 
+                                ORDER BY fecha_aprobacion DESC LIMIT 1""", (user_id,))
+                    resultado = c.fetchone()
+                conn.close()
+                
+                if resultado:
+                    if DATABASE_URL:
+                        nombre = resultado['nombre']
+                        apellido = resultado['apellido']
+                        generacion = resultado['generacion']
+                    else:
+                        nombre = resultado[0]
+                        apellido = resultado[1]
+                        generacion = resultado[2]
+                    
+                    # Enviar mensaje de bienvenida al grupo
+                    bienvenida = MENSAJE_BIENVENIDA.format(
+                        nombre=nombre,
+                        apellido=apellido,
+                        generacion=generacion
+                    )
+                    
+                    await update.message.reply_text(bienvenida)
+                    logger.info(f"✅ Bienvenida enviada para {nombre} {apellido}")
+                    
+                    # Registrar suscripción si no la tiene
+                    if not verificar_suscripcion_activa(user_id):
+                        registrar_usuario_suscripcion(user_id, nombre, miembro.username or '', 
+                                                     es_admin=False, last_name=apellido)
+                else:
+                    # No fue aprobado por onboarding - bienvenida genérica
+                    nombre = f"{miembro.first_name or ''} {miembro.last_name or ''}".strip()
+                    await update.message.reply_text(
+                        f"👋 Bienvenido/a {nombre} a Cofradía de Networking!\n\n"
+                        f"Para activar tu cuenta, escríbele a @Cofradia_Premium_Bot"
+                    )
+        except Exception as e:
+            logger.error(f"Error en bienvenida nuevo miembro: {e}")
 
 
 async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6467,15 +6619,32 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
             apellido = miembro[1]
             generacion = miembro[2]
         
-        # Aprobar la solicitud en Telegram
+        # Aprobar la solicitud: enviar link del grupo al usuario
+        # (Ya no necesitamos approve_chat_join_request porque el flujo es por el bot)
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"🎉 ¡Felicitaciones {nombre}! Tu solicitud ha sido APROBADA!\n\n"
+                     f"⚓ Ya puedes ingresar al grupo Cofradía de Networking:\n\n"
+                     f"👉 {COFRADIA_INVITE_LINK}\n\n"
+                     f"Te esperamos! Recuerda presentarte al grupo para que los cofrades te conozcan."
+            )
+        except Exception as e:
+            logger.warning(f"No se pudo enviar link al usuario: {e}")
+            await update.message.reply_text(
+                f"⚠️ No se pudo enviar el link al usuario {nombre} {apellido}.\n"
+                f"Envíale manualmente el link: {COFRADIA_INVITE_LINK}"
+            )
+        
+        # Si el enlace tiene aprobación activa, aprobar también en Telegram
         try:
             if COFRADIA_GROUP_ID:
                 await context.bot.approve_chat_join_request(
                     chat_id=COFRADIA_GROUP_ID,
                     user_id=target_user_id
                 )
-        except Exception as e:
-            logger.warning(f"No se pudo aprobar automáticamente: {e}")
+        except Exception:
+            pass  # Puede fallar si no hay solicitud pendiente en Telegram
         
         # Actualizar estado en BD
         if DATABASE_URL:
@@ -6487,32 +6656,29 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
         conn.commit()
         conn.close()
         
-        # Enviar mensaje de bienvenida al grupo
-        bienvenida = MENSAJE_BIENVENIDA.format(
-            nombre=nombre,
-            apellido=apellido,
-            generacion=generacion
-        )
+        # El mensaje de bienvenida se enviará automáticamente cuando el usuario
+        # ingrese al grupo (detectado por detectar_nuevo_miembro)
         
-        if COFRADIA_GROUP_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=COFRADIA_GROUP_ID,
-                    text=bienvenida
-                )
-            except Exception as e:
-                logger.error(f"Error enviando bienvenida al grupo: {e}")
-        
-        # Notificar al usuario
+        # Registrar al usuario con suscripción de prueba
         try:
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=f"🎉 ¡Tu solicitud ha sido aprobada! Ya puedes acceder al grupo Cofradía de Networking."
+            registrar_usuario_suscripcion(
+                user_id=target_user_id,
+                first_name=nombre,
+                username='',
+                es_admin=False,
+                dias_gratis=DIAS_PRUEBA_GRATIS,
+                last_name=apellido
             )
-        except:
-            pass
+            logger.info(f"✅ Suscripción creada para {nombre} {apellido}")
+        except Exception as e:
+            logger.warning(f"Error registrando suscripción: {e}")
         
-        await update.message.reply_text(f"✅ Solicitud de {nombre} {apellido} aprobada. Bienvenida enviada al grupo.")
+        await update.message.reply_text(
+            f"✅ Solicitud de {nombre} {apellido} (Gen {generacion}) APROBADA.\n"
+            f"📨 Link del grupo enviado al usuario.\n"
+            f"📝 Suscripción de {DIAS_PRUEBA_GRATIS} días activada.\n"
+            f"💬 Mensaje de bienvenida se publicará cuando ingrese al grupo."
+        )
         
     except Exception as e:
         logger.error(f"Error aprobando solicitud: {e}")
@@ -6598,8 +6764,7 @@ def main():
     
     application.post_init = setup_commands
     
-    # Handlers básicos
-    application.add_handler(CommandHandler("start", start))
+    # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
@@ -6657,18 +6822,30 @@ def main():
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
     
     # Onboarding: ConversationHandler para preguntas de ingreso
+    # /start es el entry point - detecta si es usuario nuevo o registrado
     onboarding_conv = ConversationHandler(
-        entry_points=[ChatJoinRequestHandler(manejar_solicitud_ingreso)],
+        entry_points=[
+            CommandHandler("start", start),
+        ],
         states={
             ONBOARD_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_nombre)],
             ONBOARD_GENERACION: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_generacion)],
             ONBOARD_RECOMENDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_recomendado)],
         },
-        fallbacks=[CommandHandler("cancelar", onboard_cancelar)],
+        fallbacks=[
+            CommandHandler("cancelar", onboard_cancelar),
+            CommandHandler("start", start),  # Permite reiniciar con /start
+        ],
         per_user=True,
         per_chat=True,
     )
     application.add_handler(onboarding_conv)
+    
+    # ChatJoinRequest handler (fallback si alguien solicita por link con aprobación)
+    application.add_handler(ChatJoinRequestHandler(manejar_solicitud_ingreso))
+    
+    # Detectar nuevos miembros que ingresan al grupo (para bienvenida)
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, detectar_nuevo_miembro))
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(callback_plan, pattern='^plan_'))
@@ -6680,6 +6857,20 @@ def main():
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
+    
+    # Catch-all: si un usuario no registrado escribe algo en privado sin /start
+    async def redirigir_no_registrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Redirige a usuarios no registrados que escriben sin /start"""
+        if not update.message or not update.effective_user:
+            return
+        user_id = update.effective_user.id
+        if user_id == OWNER_ID or verificar_suscripcion_activa(user_id):
+            return  # No interferir con usuarios registrados
+        await update.message.reply_text(
+            "⚓ Para solicitar ingreso a Cofradía de Networking, "
+            "escribe /start y responde las 3 preguntas."
+        )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, redirigir_no_registrado))
     
     # Programar tarea de cumpleaños diaria a las 8:00 AM (hora Chile)
     job_queue = application.job_queue
