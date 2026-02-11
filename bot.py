@@ -14,6 +14,7 @@ import secrets
 import string
 import threading
 import base64
+import asyncio
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, time
@@ -7075,18 +7076,18 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook anterior para evitar error Conflict en Render"""
+        """Eliminar webhook anterior + configurar comandos del menú"""
+        # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
             logger.info("🧹 Webhook anterior eliminado - sin conflictos")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
-    
-    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
-    
-    # Configurar comandos (SIN mostrar mi_cuenta, renovar, activar - son privados)
-    async def setup_commands(app):
-        # Comandos disponibles en chat privado con el bot
+        
+        # PASO 2: Esperar un momento para que Telegram procese la eliminación
+        await asyncio.sleep(2)
+        
+        # PASO 3: Configurar comandos del menú
         commands = [
             BotCommand("start", "Iniciar bot"),
             BotCommand("ayuda", "Ver todos los comandos"),
@@ -7111,7 +7112,6 @@ def main():
             
             if COFRADIA_GROUP_ID:
                 from telegram import BotCommandScopeChat
-                # Comandos visibles en el grupo (botón Menú)
                 comandos_grupo = [
                     BotCommand("buscar", "Buscar en historial"),
                     BotCommand("buscar_ia", "Busqueda con IA"),
@@ -7137,7 +7137,7 @@ def main():
         except Exception as e:
             logger.warning(f"Error configurando comandos: {e}")
     
-    application.post_init = setup_commands
+    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
