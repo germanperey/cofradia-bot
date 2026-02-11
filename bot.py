@@ -1611,6 +1611,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 BUSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Busqueda con IA
+/rag_consulta [pregunta] - Consultar base de conocimiento (PDFs y documentos indexados)
 /buscar_profesional [area] - Buscar profesionales
 /buscar_apoyo [area] - Buscar en busqueda laboral
 /buscar_especialista_sec [esp], [ciudad] - Buscar en SEC
@@ -4623,6 +4624,10 @@ def subir_pdf_a_drive(file_bytes, filename):
             file_id = resp.json().get('id')
             logger.info(f"📄 PDF subido a Drive: {filename} ({file_id})")
             return file_id, "subido"
+        elif resp.status_code == 403:
+            error_msg = resp.json().get('error', {}).get('message', 'Sin permisos')
+            logger.error(f"Error 403 subiendo PDF: {error_msg}")
+            return None, f"Error HTTP 403 - {error_msg[:100]}"
         else:
             logger.error(f"Error subiendo PDF: {resp.status_code} {resp.text[:300]}")
             return None, f"Error HTTP {resp.status_code}"
@@ -4661,22 +4666,22 @@ def verificar_espacio_drive(headers=None):
         return None
 
 
-def listar_pdfs_rag():
-    """Lista todos los PDFs indexados en el sistema RAG (desde BD + Drive)"""
+def listar_pdfs_rag(incluir_drive=False):
+    """Lista todos los PDFs indexados en el sistema RAG (desde BD, opcionalmente Drive)"""
     pdfs = []
     
-    # Primero listar desde la base de datos (siempre disponible)
+    # Primero listar desde la base de datos (siempre disponible, rápido)
     try:
         conn = get_db_connection()
         if conn:
             c = conn.cursor()
             if DATABASE_URL:
                 c.execute("""SELECT source, COUNT(*) as chunks, MAX(fecha_indexado) as ultimo
-                            FROM rag_chunks WHERE source LIKE '%.pdf'
+                            FROM rag_chunks WHERE source LIKE 'PDF:%%'
                             GROUP BY source ORDER BY ultimo DESC""")
             else:
                 c.execute("""SELECT source, COUNT(*) as chunks, MAX(fecha_indexado) as ultimo
-                            FROM rag_chunks WHERE source LIKE '%.pdf'
+                            FROM rag_chunks WHERE source LIKE 'PDF:%'
                             GROUP BY source ORDER BY ultimo DESC""")
             resultados = c.fetchall()
             conn.close()
@@ -4687,37 +4692,39 @@ def listar_pdfs_rag():
                     pdfs.append({'name': nombre, 'chunks': r['chunks'], 
                                 'modified': str(r['ultimo'])[:16], 'origen': 'BD'})
                 else:
-                    nombre = r[0].replace('PDF:', '') if r[0].startswith('PDF:') else r[0]
+                    nombre = r[0].replace('PDF:', '') if str(r[0]).startswith('PDF:') else r[0]
                     pdfs.append({'name': nombre, 'chunks': r[1], 
                                 'modified': str(r[2])[:16], 'origen': 'BD'})
     except Exception as e:
         logger.warning(f"Error listando PDFs desde BD: {e}")
     
-    # Intentar también listar desde Drive (como complemento)
-    try:
-        headers = obtener_drive_auth_headers()
-        if headers:
-            rag_folder_id = obtener_carpeta_rag_pdf()
-            if rag_folder_id:
-                query = f"'{rag_folder_id}' in parents and mimeType = 'application/pdf' and trashed = false"
-                search_url = "https://www.googleapis.com/drive/v3/files"
-                params = {
-                    'q': query,
-                    'fields': 'files(id, name, size, createdTime, modifiedTime)',
-                    'orderBy': 'modifiedTime desc',
-                    'pageSize': 100
-                }
-                resp = requests.get(search_url, headers=headers, params=params, timeout=30)
-                archivos_drive = resp.json().get('files', [])
-                
-                # Agregar los que están en Drive pero no en BD
-                nombres_bd = {p['name'] for p in pdfs}
-                for archivo in archivos_drive:
-                    if archivo['name'] not in nombres_bd:
-                        pdfs.append({'name': archivo['name'], 'size': archivo.get('size', 0),
-                                    'modified': archivo.get('modifiedTime', '')[:16], 'origen': 'Drive'})
-    except Exception as e:
-        logger.warning(f"Error listando PDFs desde Drive: {e}")
+    # Solo consultar Drive si se pide explícitamente (evita bloquear rag_status)
+    if incluir_drive:
+        try:
+            headers = obtener_drive_auth_headers()
+            if headers:
+                rag_folder_id = obtener_carpeta_rag_pdf()
+                if rag_folder_id:
+                    query = f"'{rag_folder_id}' in parents and mimeType = 'application/pdf' and trashed = false"
+                    search_url = "https://www.googleapis.com/drive/v3/files"
+                    params = {
+                        'q': query,
+                        'fields': 'files(id, name, size, createdTime, modifiedTime)',
+                        'orderBy': 'modifiedTime desc',
+                        'pageSize': 100
+                    }
+                    resp = requests.get(search_url, headers=headers, params=params, timeout=10)
+                    archivos_drive = resp.json().get('files', [])
+                    
+                    # Agregar los que están en Drive pero no en BD
+                    nombres_bd = {p['name'] for p in pdfs}
+                    for archivo in archivos_drive:
+                        if archivo['name'] not in nombres_bd:
+                            pdfs.append({'name': archivo['name'], 'size': archivo.get('size', 0),
+                                        'modified': archivo.get('modifiedTime', '')[:16], 'origen': 'Drive',
+                                        'id': archivo.get('id', '')})
+        except Exception as e:
+            logger.warning(f"Error listando PDFs desde Drive: {e}")
     
     return pdfs
 
@@ -4912,23 +4919,29 @@ def indexar_pdf_en_rag(filename, texto, file_id=None):
 
 
 def indexar_todos_pdfs_rag():
-    """Indexa (o re-indexa) todos los PDFs de la carpeta INBESTU/RAG_PDF"""
+    """Re-indexa PDFs desde Drive (los que están en BD ya están indexados)"""
     try:
-        pdfs = listar_pdfs_rag()
-        if not pdfs:
-            logger.info("RAG PDF: No hay PDFs para indexar en INBESTU/RAG_PDF")
+        # Solo obtener PDFs de Drive para re-indexar
+        pdfs = listar_pdfs_rag(incluir_drive=True)
+        pdfs_drive = [p for p in pdfs if p.get('origen') == 'Drive' and p.get('id')]
+        
+        if not pdfs_drive:
+            logger.info("RAG PDF: No hay PDFs nuevos en Drive para indexar")
             return 0
         
         total_chunks = 0
         pdfs_procesados = 0
         pdfs_error = 0
         
-        for pdf_info in pdfs:
-            file_id = pdf_info['id']
+        for pdf_info in pdfs_drive:
+            file_id = pdf_info.get('id', '')
             filename = pdf_info['name']
             
+            if not file_id:
+                continue
+            
             try:
-                logger.info(f"📄 Indexando PDF: {filename}...")
+                logger.info(f"📄 Indexando PDF desde Drive: {filename}...")
                 
                 # Descargar PDF
                 contenido = descargar_pdf_drive(file_id)
@@ -4982,7 +4995,7 @@ def obtener_estadisticas_rag():
             stats['por_fuente'] = [(r['source'], r['total']) for r in c.fetchall()]
             
             # Total PDFs
-            c.execute("SELECT COUNT(DISTINCT source) as total FROM rag_chunks WHERE source LIKE 'PDF:%'")
+            c.execute("SELECT COUNT(DISTINCT source) as total FROM rag_chunks WHERE source LIKE 'PDF:%%'")
             stats['total_pdfs'] = c.fetchone()['total']
             
             # Tamaño de datos RAG en BD (texto de chunks + keywords)
@@ -5042,10 +5055,10 @@ def obtener_estadisticas_rag():
         
         conn.close()
         
-        # Info de PDFs desde BD (ya no depende de Drive)
-        pdfs_indexados = listar_pdfs_rag()
+        # Info de PDFs desde BD (NO consultar Drive para mantener velocidad)
+        pdfs_indexados = listar_pdfs_rag(incluir_drive=False)
         stats['pdfs_lista'] = pdfs_indexados
-        stats['pdfs_en_drive'] = sum(1 for p in pdfs_indexados if p.get('origen') == 'Drive')
+        stats['pdfs_en_drive'] = 0  # Se muestra solo si Drive responde rápido
         
         return stats
     except Exception as e:
@@ -5190,7 +5203,12 @@ async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TY
                 except:
                     pass
             else:
-                drive_status = f"⚠️ Drive backup omitido ({status_drive})"
+                if 'HTTP 403' in str(status_drive):
+                    drive_status = (f"⚠️ Drive backup omitido (Error 403: Sin permisos de escritura)\n"
+                                  f"   💡 Comparte la carpeta INBESTU con la Service Account como Editor\n"
+                                  f"   💡 Usa /rag_status para ver el diagnostico completo")
+                else:
+                    drive_status = f"⚠️ Drive backup omitido ({status_drive})"
                 logger.warning(f"Drive backup falló para {filename}: {status_drive}")
         except Exception as e:
             drive_status = f"⚠️ Drive backup omitido ({str(e)[:50]})"
@@ -5229,7 +5247,7 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         stats = obtener_estadisticas_rag()
         
         if not stats:
-            await msg.edit_text("❌ Error obteniendo estadisticas RAG")
+            await msg.edit_text("❌ Error obteniendo estadisticas RAG.\nVerifica que la base de datos esté activa.")
             return
         
         resultado = "━" * 30 + "\n"
@@ -5237,14 +5255,21 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         resultado += "━" * 30 + "\n\n"
         
         # Stats generales
-        resultado += f"📊 Total chunks indexados: {stats['total_chunks']}\n"
-        resultado += f"📄 PDFs indexados: {stats['total_pdfs']}\n\n"
+        total_chunks = stats.get('total_chunks', 0)
+        total_pdfs = stats.get('total_pdfs', 0)
+        resultado += f"📊 Total chunks indexados: {total_chunks}\n"
+        resultado += f"📄 PDFs indexados: {total_pdfs}\n\n"
         
         # Almacenamiento RAG
-        rag_mb = stats.get('rag_data_bytes', 0) / (1024 * 1024)
-        rag_table_mb = stats.get('rag_table_bytes', 0) / (1024 * 1024)
-        db_total_mb = stats.get('db_total_bytes', 0) / (1024 * 1024)
-        db_limite_mb = stats.get('db_limite_bytes', 0) / (1024 * 1024)
+        rag_data_bytes = stats.get('rag_data_bytes', 0)
+        rag_table_bytes = stats.get('rag_table_bytes', 0)
+        db_total_bytes = stats.get('db_total_bytes', 0)
+        db_limite_bytes = stats.get('db_limite_bytes', 500 * 1024 * 1024)
+        
+        rag_mb = rag_data_bytes / (1024 * 1024) if rag_data_bytes else 0
+        rag_table_mb = rag_table_bytes / (1024 * 1024) if rag_table_bytes else 0
+        db_total_mb = db_total_bytes / (1024 * 1024) if db_total_bytes else 0
+        db_limite_mb = db_limite_bytes / (1024 * 1024) if db_limite_bytes else 500
         
         resultado += "💾 ALMACENAMIENTO\n"
         if db_total_mb > 0:
@@ -5252,7 +5277,7 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             resultado += f"   📦 BD total: {db_total_mb:.1f} MB de {db_limite_mb:.0f} MB ({db_pct:.1f}%)\n"
             
             # Barra visual de uso
-            bloques_llenos = int(db_pct / 5)  # 20 bloques = 100%
+            bloques_llenos = min(20, int(db_pct / 5))
             bloques_vacios = 20 - bloques_llenos
             if db_pct < 50:
                 color = "🟢"
@@ -5262,37 +5287,96 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 color = "🔴"
             barra = "▓" * bloques_llenos + "░" * bloques_vacios
             resultado += f"   {color} [{barra}] {db_pct:.1f}%\n"
+        else:
+            resultado += f"   📦 BD: (tamaño no disponible en SQLite)\n"
         
         if rag_table_mb > 0:
             resultado += f"   🧠 Tabla RAG: {rag_table_mb:.1f} MB\n"
         resultado += f"   📝 Texto indexado: {rag_mb:.2f} MB\n"
         
         # Estimación de capacidad
-        if stats['total_pdfs'] > 0 and rag_mb > 0:
-            mb_por_pdf = rag_mb / stats['total_pdfs']
+        if total_pdfs > 0 and rag_mb > 0:
+            mb_por_pdf = rag_mb / total_pdfs
             espacio_libre_mb = db_limite_mb - db_total_mb if db_total_mb > 0 else db_limite_mb - rag_mb
             pdfs_estimados = int(espacio_libre_mb / mb_por_pdf) if mb_por_pdf > 0 else 999
             resultado += f"   📈 Promedio por PDF: {mb_por_pdf:.2f} MB\n"
-            resultado += f"   🔮 Capacidad estimada: ~{pdfs_estimados} PDFs mas\n"
+            resultado += f"   🔮 Capacidad estimada: ~{pdfs_estimados:,} PDFs mas\n"
         resultado += "\n"
         
         # Detalle por fuente
-        if stats.get('por_fuente'):
+        por_fuente = stats.get('por_fuente', [])
+        if por_fuente:
             resultado += "📁 FUENTES INDEXADAS:\n"
-            for fuente_data in stats['por_fuente']:
-                fuente = fuente_data[0] if isinstance(fuente_data, tuple) else fuente_data
-                total = fuente_data[1] if isinstance(fuente_data, tuple) else 0
-                if str(fuente).startswith('PDF:'):
-                    nombre_pdf = str(fuente).replace('PDF:', '')
-                    resultado += f"   📄 {nombre_pdf}: {total} chunks\n"
-                else:
-                    resultado += f"   📊 {fuente}: {total} chunks\n"
+            for fuente_data in por_fuente:
+                try:
+                    if isinstance(fuente_data, (list, tuple)):
+                        fuente = str(fuente_data[0])
+                        total = fuente_data[1]
+                    elif isinstance(fuente_data, dict):
+                        fuente = str(fuente_data.get('source', ''))
+                        total = fuente_data.get('total', 0)
+                    else:
+                        continue
+                    
+                    if fuente.startswith('PDF:'):
+                        nombre_pdf = fuente.replace('PDF:', '')
+                        resultado += f"   📄 {nombre_pdf}: {total} chunks\n"
+                    else:
+                        resultado += f"   📊 {fuente}: {total} chunks\n"
+                except Exception:
+                    continue
             resultado += "\n"
         
-        # Info Drive (si hay PDFs en Drive)
-        pdfs_drive = stats.get('pdfs_en_drive', 0)
-        if pdfs_drive > 0:
-            resultado += f"☁️ Backup en Drive: {pdfs_drive} PDFs\n\n"
+        # Diagnóstico de Drive (rápido)
+        resultado += "☁️ BACKUP GOOGLE DRIVE:\n"
+        try:
+            headers = obtener_drive_auth_headers()
+            if headers:
+                # Test rápido: listar archivos con timeout corto
+                test_url = "https://www.googleapis.com/drive/v3/about?fields=storageQuota"
+                test_resp = requests.get(test_url, headers=headers, timeout=5)
+                if test_resp.status_code == 200:
+                    quota = test_resp.json().get('storageQuota', {})
+                    usado_gb = int(quota.get('usage', 0)) / (1024**3)
+                    limite_gb = int(quota.get('limit', 0)) / (1024**3)
+                    if limite_gb > 0:
+                        resultado += f"   ✅ Conectado ({usado_gb:.1f} GB de {limite_gb:.0f} GB)\n"
+                    else:
+                        resultado += f"   ✅ Conectado (uso: {usado_gb:.1f} GB)\n"
+                    
+                    # Test de escritura: intentar acceder a la carpeta RAG_PDF
+                    rag_id = obtener_carpeta_rag_pdf()
+                    if rag_id:
+                        resultado += f"   📁 Carpeta RAG_PDF: OK\n"
+                        # Test de permisos de escritura
+                        test_meta = {'name': '.test_write', 'parents': [rag_id]}
+                        wr = requests.post("https://www.googleapis.com/drive/v3/files",
+                                          headers={**headers, 'Content-Type': 'application/json'},
+                                          json=test_meta, timeout=5)
+                        if wr.status_code in [200, 201]:
+                            # Eliminar archivo de prueba
+                            test_id = wr.json().get('id')
+                            if test_id:
+                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{test_id}",
+                                              headers=headers, timeout=5)
+                            resultado += f"   ✅ Permisos de escritura: OK\n"
+                        else:
+                            resultado += f"   ❌ Sin permisos de escritura (HTTP {wr.status_code})\n"
+                            resultado += f"   💡 Comparte la carpeta INBESTU con la Service Account como Editor\n"
+                    else:
+                        resultado += f"   ⚠️ Carpeta RAG_PDF no encontrada\n"
+                elif test_resp.status_code == 403:
+                    resultado += f"   ❌ Error 403: Sin permisos en Drive\n"
+                    resultado += f"   💡 Verifica que la Service Account tenga acceso\n"
+                else:
+                    resultado += f"   ⚠️ Error HTTP {test_resp.status_code}\n"
+            else:
+                resultado += f"   ⚠️ Sin credenciales de Google Drive configuradas\n"
+        except requests.exceptions.Timeout:
+            resultado += f"   ⚠️ Timeout conectando a Drive (no afecta RAG)\n"
+        except Exception as e:
+            resultado += f"   ⚠️ {str(e)[:60]}\n"
+        resultado += "\n"
         
         resultado += "━" * 30 + "\n"
         resultado += "📤 Envia un PDF al bot para indexarlo\n"
@@ -5304,7 +5388,9 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     except Exception as e:
         logger.error(f"Error en rag_status: {e}")
-        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await msg.edit_text(f"❌ Error en rag_status: {str(e)[:200]}")
 
 
 @requiere_suscripcion
