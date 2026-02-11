@@ -1611,7 +1611,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 BUSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Busqueda con IA
-/rag_consulta [pregunta] - Consultar base de conocimiento (PDFs y documentos indexados)
+/rag_consulta [pregunta] - Busqueda IA en documentos (similar a /buscar_ia)
 /buscar_profesional [area] - Buscar profesionales
 /buscar_apoyo [area] - Buscar en busqueda laboral
 /buscar_especialista_sec [esp], [ciudad] - Buscar en SEC
@@ -1661,6 +1661,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /rag_reindexar - Re-indexar documentos
 /eliminar_pdf [nombre] - Eliminar PDF indexado
 """
+    
     await update.message.reply_text(texto)
 
 
@@ -4988,15 +4989,15 @@ def obtener_estadisticas_rag():
         if DATABASE_URL:
             # Total chunks
             c.execute("SELECT COUNT(*) as total FROM rag_chunks")
-            stats['total_chunks'] = c.fetchone()['total']
+            stats['total_chunks'] = int(c.fetchone()['total'] or 0)
             
             # Por fuente
             c.execute("SELECT source, COUNT(*) as total FROM rag_chunks GROUP BY source ORDER BY total DESC")
-            stats['por_fuente'] = [(r['source'], r['total']) for r in c.fetchall()]
+            stats['por_fuente'] = [(r['source'], int(r['total'])) for r in c.fetchall()]
             
             # Total PDFs
             c.execute("SELECT COUNT(DISTINCT source) as total FROM rag_chunks WHERE source LIKE 'PDF:%%'")
-            stats['total_pdfs'] = c.fetchone()['total']
+            stats['total_pdfs'] = int(c.fetchone()['total'] or 0)
             
             # Tamaño de datos RAG en BD (texto de chunks + keywords)
             c.execute("""SELECT 
@@ -5005,9 +5006,9 @@ def obtener_estadisticas_rag():
                 COALESCE(SUM(LENGTH(metadata)), 0) as metadata_bytes
                 FROM rag_chunks""")
             size_row = c.fetchone()
-            stats['rag_texto_bytes'] = size_row['texto_bytes'] or 0
-            stats['rag_keywords_bytes'] = size_row['keywords_bytes'] or 0
-            stats['rag_metadata_bytes'] = size_row['metadata_bytes'] or 0
+            stats['rag_texto_bytes'] = int(size_row['texto_bytes'] or 0)
+            stats['rag_keywords_bytes'] = int(size_row['keywords_bytes'] or 0)
+            stats['rag_metadata_bytes'] = int(size_row['metadata_bytes'] or 0)
             
             # Tamaño total de la BD (todas las tablas)
             c.execute("""SELECT 
@@ -5015,12 +5016,12 @@ def obtener_estadisticas_rag():
                 FROM information_schema.tables 
                 WHERE table_schema = 'public'""")
             db_size = c.fetchone()
-            stats['db_total_bytes'] = db_size['total_bytes'] if db_size and db_size['total_bytes'] else 0
+            stats['db_total_bytes'] = int(db_size['total_bytes']) if db_size and db_size['total_bytes'] else 0
             
             # Tamaño solo de rag_chunks
             c.execute("SELECT pg_total_relation_size('rag_chunks') as rag_bytes")
             rag_table = c.fetchone()
-            stats['rag_table_bytes'] = rag_table['rag_bytes'] if rag_table and rag_table['rag_bytes'] else 0
+            stats['rag_table_bytes'] = int(rag_table['rag_bytes']) if rag_table and rag_table['rag_bytes'] else 0
             
         else:
             c.execute("SELECT COUNT(*) FROM rag_chunks")
@@ -5047,8 +5048,8 @@ def obtener_estadisticas_rag():
             stats['db_total_bytes'] = 0
             stats['rag_table_bytes'] = stats['rag_texto_bytes'] + stats['rag_keywords_bytes'] + stats['rag_metadata_bytes']
         
-        # Calcular totales RAG
-        stats['rag_data_bytes'] = stats['rag_texto_bytes'] + stats['rag_keywords_bytes'] + stats['rag_metadata_bytes']
+        # Calcular totales RAG (asegurar int para evitar Decimal)
+        stats['rag_data_bytes'] = int(stats['rag_texto_bytes']) + int(stats['rag_keywords_bytes']) + int(stats['rag_metadata_bytes'])
         
         # Límite según plan (Supabase free = 500 MB)
         stats['db_limite_bytes'] = 500 * 1024 * 1024  # 500 MB
