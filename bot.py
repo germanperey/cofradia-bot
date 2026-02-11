@@ -1634,6 +1634,31 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ============================
 💡 TIP: Mencioname en el grupo:
 @Cofradia_Premium_Bot tu pregunta?
+
+💡 Los comandos empiezan con /
+   Las palabras no llevan tilde
+   y van unidas por el signo _
+"""
+    
+    # Agregar comandos admin solo para el owner
+    if user_id == OWNER_ID:
+        texto += """
+👑 COMANDOS ADMIN
+============================
+/aprobar_solicitud [ID] - Aprobar ingreso
+/editar_usuario [ID] [campo] [valor] - Editar datos
+   Campos: nombre, apellido, generacion
+/eliminar_solicitud [ID] - Eliminar usuario
+/cobros_admin - Panel de cobros
+/ver_solicitudes - Ver solicitudes pendientes
+/generar_codigo - Generar codigo de activacion
+/ver_topics - Ver topics del grupo
+
+🧠 RAG (Base de conocimiento)
+/rag_status - Estado del sistema RAG
+/rag_consulta [pregunta] - Consultar RAG
+/rag_reindexar - Re-indexar documentos
+/eliminar_pdf [nombre] - Eliminar PDF indexado
 """
     await update.message.reply_text(texto)
 
@@ -7048,6 +7073,282 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+async def editar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /editar_usuario [user_id] [campo] [valor] - Editar datos de un usuario (solo owner)
+    Campos válidos: nombre, apellido, generacion
+    Ejemplos:
+        /editar_usuario 13031156 nombre Marcelo
+        /editar_usuario 13031156 apellido Villegas Soto
+        /editar_usuario 13031156 generacion 1995
+    """
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "📝 EDITAR DATOS DE USUARIO\n"
+            "━" * 30 + "\n\n"
+            "Uso: /editar_usuario [ID] [campo] [valor]\n\n"
+            "Campos editables:\n"
+            "  nombre - Nombre del usuario\n"
+            "  apellido - Apellido(s) del usuario\n"
+            "  generacion - Año de generación\n\n"
+            "Ejemplos:\n"
+            "  /editar_usuario 13031156 nombre Marcelo\n"
+            "  /editar_usuario 13031156 apellido Villegas Soto\n"
+            "  /editar_usuario 13031156 generacion 1995"
+        )
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ El ID debe ser un número.")
+        return
+    
+    campo = context.args[1].lower()
+    valor = ' '.join(context.args[2:])
+    
+    campos_validos = {'nombre': 'nombre', 'apellido': 'apellido', 'generacion': 'generacion'}
+    
+    if campo not in campos_validos:
+        await update.message.reply_text(
+            f"❌ Campo '{campo}' no válido.\n\n"
+            f"Campos editables: nombre, apellido, generacion"
+        )
+        return
+    
+    # Validar generación si es el campo
+    if campo == 'generacion':
+        if not valor.isdigit() or len(valor) != 4:
+            await update.message.reply_text("❌ La generación debe ser un año de 4 dígitos.")
+            return
+        anio = int(valor)
+        if anio < 1950 or anio > 2025:
+            await update.message.reply_text("❌ El año debe estar entre 1950 y 2025.")
+            return
+    
+    columna_db = campos_validos[campo]
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión a BD")
+            return
+        
+        c = conn.cursor()
+        cambios_realizados = []
+        
+        # 1. Actualizar en nuevos_miembros
+        if DATABASE_URL:
+            c.execute(f"SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = %s ORDER BY fecha_solicitud DESC LIMIT 1", (target_user_id,))
+        else:
+            c.execute(f"SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = ? ORDER BY fecha_solicitud DESC LIMIT 1", (target_user_id,))
+        
+        miembro = c.fetchone()
+        if miembro:
+            if DATABASE_URL:
+                valor_anterior = miembro[columna_db]
+                c.execute(f"UPDATE nuevos_miembros SET {columna_db} = %s WHERE user_id = %s", (valor, target_user_id))
+            else:
+                idx = {'nombre': 0, 'apellido': 1, 'generacion': 2}
+                valor_anterior = miembro[idx[campo]]
+                c.execute(f"UPDATE nuevos_miembros SET {columna_db} = ? WHERE user_id = ?", (valor, target_user_id))
+            cambios_realizados.append(f"nuevos_miembros.{columna_db}: '{valor_anterior}' → '{valor}'")
+        
+        # 2. Actualizar en suscripciones (mapear campos)
+        campo_suscripcion = None
+        if campo == 'nombre':
+            campo_suscripcion = 'first_name'
+        elif campo == 'apellido':
+            campo_suscripcion = 'last_name'
+        
+        if campo_suscripcion:
+            if DATABASE_URL:
+                c.execute(f"SELECT {campo_suscripcion} FROM suscripciones WHERE user_id = %s", (target_user_id,))
+                sub = c.fetchone()
+                if sub:
+                    valor_ant_sub = sub[campo_suscripcion]
+                    c.execute(f"UPDATE suscripciones SET {campo_suscripcion} = %s WHERE user_id = %s", (valor, target_user_id))
+                    cambios_realizados.append(f"suscripciones.{campo_suscripcion}: '{valor_ant_sub}' → '{valor}'")
+            else:
+                c.execute(f"SELECT {campo_suscripcion} FROM suscripciones WHERE user_id = ?", (target_user_id,))
+                sub = c.fetchone()
+                if sub:
+                    valor_ant_sub = sub[0]
+                    c.execute(f"UPDATE suscripciones SET {campo_suscripcion} = ? WHERE user_id = ?", (valor, target_user_id))
+                    cambios_realizados.append(f"suscripciones.{campo_suscripcion}: '{valor_ant_sub}' → '{valor}'")
+        
+        conn.commit()
+        conn.close()
+        
+        if cambios_realizados:
+            detalle = '\n'.join([f"  ✏️ {c}" for c in cambios_realizados])
+            await update.message.reply_text(
+                f"✅ USUARIO EDITADO\n"
+                f"━" * 30 + f"\n\n"
+                f"🆔 User ID: {target_user_id}\n"
+                f"📝 Cambios realizados:\n{detalle}"
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ No se encontró el usuario {target_user_id} en la base de datos.\n"
+                f"Verifica que el ID sea correcto."
+            )
+            
+    except Exception as e:
+        logger.error(f"Error editando usuario: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def eliminar_solicitud_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /eliminar_solicitud [user_id] - Eliminar usuario y revocar acceso (solo owner)"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args:
+        # Mostrar últimos usuarios aprobados para referencia
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""SELECT user_id, nombre, apellido, generacion, estado, fecha_solicitud 
+                               FROM nuevos_miembros ORDER BY fecha_solicitud DESC LIMIT 10""")
+                else:
+                    c.execute("""SELECT user_id, nombre, apellido, generacion, estado, fecha_solicitud 
+                               FROM nuevos_miembros ORDER BY fecha_solicitud DESC LIMIT 10""")
+                
+                registros = c.fetchall()
+                conn.close()
+                
+                if registros:
+                    texto = "🗑️ ELIMINAR SOLICITUD / USUARIO\n"
+                    texto += "━" * 30 + "\n\n"
+                    texto += "Uso: /eliminar_solicitud [ID]\n\n"
+                    texto += "📋 Últimos registros:\n\n"
+                    for r in registros:
+                        if DATABASE_URL:
+                            texto += (f"{'✅' if r['estado'] == 'aprobado' else '⏳'} "
+                                     f"{r['nombre']} {r['apellido']} (Gen {r['generacion']})\n"
+                                     f"   🆔 {r['user_id']} - Estado: {r['estado']}\n"
+                                     f"   /eliminar_solicitud {r['user_id']}\n\n")
+                        else:
+                            texto += (f"{'✅' if r[4] == 'aprobado' else '⏳'} "
+                                     f"{r[1]} {r[2]} (Gen {r[3]})\n"
+                                     f"   🆔 {r[0]} - Estado: {r[4]}\n"
+                                     f"   /eliminar_solicitud {r[0]}\n\n")
+                    await update.message.reply_text(texto)
+                else:
+                    await update.message.reply_text("No hay registros de miembros.")
+                return
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+            return
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ El ID debe ser un número.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión a BD")
+            return
+        
+        c = conn.cursor()
+        eliminados = []
+        
+        # Obtener datos del usuario antes de eliminar
+        if DATABASE_URL:
+            c.execute("SELECT nombre, apellido, generacion, estado FROM nuevos_miembros WHERE user_id = %s ORDER BY fecha_solicitud DESC LIMIT 1", (target_user_id,))
+        else:
+            c.execute("SELECT nombre, apellido, generacion, estado FROM nuevos_miembros WHERE user_id = ? ORDER BY fecha_solicitud DESC LIMIT 1", (target_user_id,))
+        
+        miembro = c.fetchone()
+        if not miembro:
+            await update.message.reply_text(f"⚠️ No se encontró usuario con ID {target_user_id}")
+            conn.close()
+            return
+        
+        if DATABASE_URL:
+            nombre = miembro['nombre']
+            apellido = miembro['apellido']
+            generacion = miembro['generacion']
+            estado = miembro['estado']
+        else:
+            nombre = miembro[0]
+            apellido = miembro[1]
+            generacion = miembro[2]
+            estado = miembro[3]
+        
+        # 1. Eliminar de nuevos_miembros
+        if DATABASE_URL:
+            c.execute("DELETE FROM nuevos_miembros WHERE user_id = %s", (target_user_id,))
+        else:
+            c.execute("DELETE FROM nuevos_miembros WHERE user_id = ?", (target_user_id,))
+        if c.rowcount > 0:
+            eliminados.append(f"nuevos_miembros ({c.rowcount} registros)")
+        
+        # 2. Eliminar suscripción
+        if DATABASE_URL:
+            c.execute("DELETE FROM suscripciones WHERE user_id = %s", (target_user_id,))
+        else:
+            c.execute("DELETE FROM suscripciones WHERE user_id = ?", (target_user_id,))
+        if c.rowcount > 0:
+            eliminados.append(f"suscripciones ({c.rowcount} registros)")
+        
+        conn.commit()
+        conn.close()
+        
+        # 3. Intentar banear del grupo (revocar acceso)
+        grupo_expulsado = False
+        try:
+            if COFRADIA_GROUP_ID:
+                await context.bot.ban_chat_member(
+                    chat_id=COFRADIA_GROUP_ID,
+                    user_id=target_user_id
+                )
+                # Desbanear inmediatamente para permitir re-ingreso futuro si se desea
+                await context.bot.unban_chat_member(
+                    chat_id=COFRADIA_GROUP_ID,
+                    user_id=target_user_id,
+                    only_if_banned=True
+                )
+                grupo_expulsado = True
+        except Exception as e:
+            logger.warning(f"No se pudo expulsar del grupo: {e}")
+        
+        # 4. Notificar al usuario
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"⚠️ Tu acceso a Cofradía de Networking ha sido revocado por el administrador.\n\n"
+                     f"Si crees que esto es un error, contacta al administrador."
+            )
+        except Exception:
+            pass
+        
+        # Respuesta al admin
+        detalle = '\n'.join([f"  🗑️ {e}" for e in eliminados])
+        await update.message.reply_text(
+            f"🗑️ USUARIO ELIMINADO\n"
+            f"━" * 30 + f"\n\n"
+            f"👤 {nombre} {apellido} (Gen {generacion})\n"
+            f"🆔 User ID: {target_user_id}\n"
+            f"📋 Estado anterior: {estado}\n\n"
+            f"Registros eliminados:\n{detalle}\n\n"
+            f"{'✅ Expulsado del grupo' if grupo_expulsado else '⚠️ No se pudo expulsar del grupo (puede que no esté)'}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error eliminando solicitud: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
@@ -7195,6 +7496,8 @@ def main():
     
     # Onboarding: Aprobar solicitudes
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
+    application.add_handler(CommandHandler("editar_usuario", editar_usuario_comando))
+    application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
     
     # Onboarding: ConversationHandler para preguntas de ingreso
     # /start es el entry point - detecta si es usuario nuevo o registrado
@@ -7262,12 +7565,26 @@ def main():
         ]
         for patron in patrones_peligrosos:
             if re.search(patron, mensaje.lower()):
-                await update.message.reply_text(
-                    "🔒 Por seguridad, no puedo modificar datos de usuarios a través del chat.\n\n"
-                    "Los datos personales solo se registran durante el proceso de onboarding "
-                    "(las 5 preguntas de ingreso) y son proporcionados directamente por cada usuario.\n\n"
-                    "Si necesitas corregir datos, el usuario debe reiniciar su proceso con /start"
-                )
+                # Si es el owner, guiarlo al comando correcto
+                if es_owner:
+                    await update.message.reply_text(
+                        "🔒 Por seguridad, no modifico datos de usuarios a través del chat.\n\n"
+                        "Como administrador, usa estos comandos:\n\n"
+                        "📝 Editar datos:\n"
+                        "  /editar_usuario [ID] nombre [nuevo nombre]\n"
+                        "  /editar_usuario [ID] apellido [nuevo apellido]\n"
+                        "  /editar_usuario [ID] generacion [año]\n\n"
+                        "🗑️ Eliminar usuario:\n"
+                        "  /eliminar_solicitud [ID]\n\n"
+                        "Ejemplo: /editar_usuario 13031156 apellido Villegas"
+                    )
+                else:
+                    await update.message.reply_text(
+                        "🔒 Por seguridad, no puedo modificar datos de usuarios a través del chat.\n\n"
+                        "Los datos personales solo se registran durante el proceso de onboarding "
+                        "(las 5 preguntas de ingreso) y son proporcionados directamente por cada usuario.\n\n"
+                        "Si necesitas corregir datos, contacta al administrador."
+                    )
                 return
         
         # PENDIENTE 5: Interpretar preguntas naturales sobre comandos
@@ -7320,6 +7637,28 @@ def main():
                 f"   Ejemplo: /empleo gerente\n"
                 f"   Ejemplo: /empleo ingeniero\n\n"
                 f"💡 Recuerda: los comandos empiezan con / las palabras no llevan tilde y van unidas por _"
+            )
+            return
+        
+        # Detectar consultas admin (solo owner)
+        if es_owner and any(p in msg_lower for p in ['editar usuario', 'editar datos', 'corregir nombre',
+                'corregir datos', 'cambiar nombre', 'eliminar usuario', 'eliminar solicitud',
+                'borrar usuario', 'como edito', 'cómo edito', 'como elimino', 'cómo elimino']):
+            await update.message.reply_text(
+                f"👑 {user_name}, como administrador tienes estos comandos:\n\n"
+                f"📝 EDITAR DATOS DE USUARIO:\n"
+                f"  /editar_usuario [ID] nombre [valor]\n"
+                f"  /editar_usuario [ID] apellido [valor]\n"
+                f"  /editar_usuario [ID] generacion [año]\n\n"
+                f"  Ejemplo: /editar_usuario 13031156 nombre Marcelo\n"
+                f"  Ejemplo: /editar_usuario 13031156 apellido Villegas Soto\n\n"
+                f"🗑️ ELIMINAR USUARIO:\n"
+                f"  /eliminar_solicitud [ID]\n"
+                f"  (Elimina registros y revoca acceso al grupo)\n\n"
+                f"📋 VER SOLICITUDES:\n"
+                f"  /ver_solicitudes - Ver pendientes\n"
+                f"  /eliminar_solicitud - Ver últimos registros\n\n"
+                f"💡 Los comandos empiezan con / las palabras no llevan tilde y van unidas por _"
             )
             return
         
