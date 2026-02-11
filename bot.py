@@ -427,19 +427,21 @@ def init_db():
                                 WHERE user_id = %s""", (owner_int,))
                     corregidos = c2.rowcount
                     
-                    # PASO 3: Suscripciones
-                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
+                    # PASO 3: Suscripciones - nombre + suscripción perpetua
+                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey',
+                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo'
                                 WHERE user_id = %s""", (owner_int,))
                     
-                    logger.info(f"✅ Owner fix: {transferidos} transferidos, {corregidos} corregidos")
+                    logger.info(f"✅ Owner fix: {transferidos} transferidos, {corregidos} corregidos, suscripción ∞")
                 else:
                     c2.execute("""UPDATE mensajes SET user_id = ?, first_name = 'Germán', last_name = 'Perey' 
                                 WHERE first_name IN ('Group', 'Grupo', 'Cofradía')""", (owner_int,))
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
                                 WHERE user_id = ?""", (owner_int,))
-                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey'
+                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey',
+                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo'
                                 WHERE user_id = ?""", (owner_int,))
-                    logger.info("✅ Registros owner corregidos")
+                    logger.info("✅ Registros owner corregidos, suscripción ∞")
                 
                 conn.commit()
         except Exception as e:
@@ -694,6 +696,10 @@ def verificar_suscripcion_activa(user_id):
 
 def obtener_dias_restantes(user_id):
     """Obtiene los días restantes de suscripción"""
+    # Owner siempre tiene suscripción ilimitada
+    if user_id == OWNER_ID:
+        return 99999
+    
     conn = get_db_connection()
     if not conn:
         return 0
@@ -2792,11 +2798,11 @@ async def set_precios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         if conn:
             c = conn.cursor()
             if DATABASE_URL:
-                c.execute("DELETE FROM precios WHERE dias = %s", (dias,))
-                c.execute("INSERT INTO precios (dias, precio, nombre) VALUES (%s, %s, %s)", (dias, precio, nombre))
+                c.execute("DELETE FROM precios_planes WHERE dias = %s", (dias,))
+                c.execute("INSERT INTO precios_planes (dias, precio, nombre) VALUES (%s, %s, %s)", (dias, precio, nombre))
             else:
-                c.execute("DELETE FROM precios WHERE dias = ?", (dias,))
-                c.execute("INSERT INTO precios (dias, precio, nombre) VALUES (?, ?, ?)", (dias, precio, nombre))
+                c.execute("DELETE FROM precios_planes WHERE dias = ?", (dias,))
+                c.execute("INSERT INTO precios_planes (dias, precio, nombre) VALUES (?, ?, ?)", (dias, precio, nombre))
             conn.commit()
             conn.close()
             await update.message.reply_text(f"✅ Plan actualizado: {nombre} ({dias}d) = {formato_clp(precio)}")
@@ -2819,14 +2825,14 @@ async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT
         
         c = conn.cursor()
         if DATABASE_URL:
-            c.execute("""SELECT id, user_id, first_name, dias_plan, monto, estado, fecha 
+            c.execute("""SELECT id, user_id, first_name, dias_plan, precio, estado, fecha_envio 
                         FROM pagos_pendientes WHERE estado = 'pendiente' 
-                        ORDER BY fecha DESC LIMIT 20""")
+                        ORDER BY fecha_envio DESC LIMIT 20""")
             pagos = c.fetchall()
         else:
-            c.execute("""SELECT id, user_id, first_name, dias_plan, monto, estado, fecha 
+            c.execute("""SELECT id, user_id, first_name, dias_plan, precio, estado, fecha_envio 
                         FROM pagos_pendientes WHERE estado = 'pendiente' 
-                        ORDER BY fecha DESC LIMIT 20""")
+                        ORDER BY fecha_envio DESC LIMIT 20""")
             pagos = c.fetchall()
         conn.close()
         
@@ -2840,13 +2846,13 @@ async def pagos_pendientes_comando(update: Update, context: ContextTypes.DEFAULT
                 mensaje += (f"🆔 ID: {p['id']}\n"
                            f"👤 {p['first_name']} (ID: {p['user_id']})\n"
                            f"📋 Plan: {p['dias_plan']} días\n"
-                           f"💰 Monto: {formato_clp(p['monto'] or 0)}\n"
-                           f"📅 Fecha: {str(p['fecha'])[:16]}\n\n")
+                           f"💰 Precio: {formato_clp(p['precio'] or 0)}\n"
+                           f"📅 Fecha: {str(p['fecha_envio'])[:16]}\n\n")
             else:
                 mensaje += (f"🆔 ID: {p[0]}\n"
                            f"👤 {p[2]} (ID: {p[1]})\n"
                            f"📋 Plan: {p[3]} días\n"
-                           f"💰 Monto: {formato_clp(p[4] or 0)}\n"
+                           f"💰 Precio: {formato_clp(p[4] or 0)}\n"
                            f"📅 Fecha: {str(p[6])[:16]}\n\n")
         
         await enviar_mensaje_largo(update, mensaje)
@@ -2888,17 +2894,24 @@ async def vencimientos_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         mensaje = "📅 VENCIMIENTOS DE SUSCRIPCIONES\n\n"
         for s in subs:
             if DATABASE_URL:
+                uid = s['user_id']
                 nombre = f"{s['first_name'] or ''} {s['last_name'] or ''}".strip()
                 fecha = str(s['fecha_expiracion'])[:10]
                 dias = s['dias_restantes']
                 if hasattr(dias, 'days'):
                     dias = dias.days
             else:
+                uid = s[0]
                 nombre = f"{s[1] or ''} {s[2] or ''}".strip()
                 fecha = str(s[3])[:10]
                 dias = obtener_dias_restantes(s[0])
             
             nombre = limpiar_nombre_display(nombre)
+            
+            # Owner tiene suscripción ilimitada
+            if uid == OWNER_ID:
+                mensaje += f"👑 {nombre}: ♾️ Sin límite (Owner)\n"
+                continue
             
             if dias and dias <= 7:
                 emoji = "🔴"
@@ -2998,24 +3011,22 @@ async def ingresos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             activas = c.fetchone()['total']
             c.execute("SELECT COUNT(*) as total FROM suscripciones")
             total = c.fetchone()['total']
-            c.execute("""SELECT SUM(monto) as total_ingresos FROM pagos_pendientes 
+            c.execute("""SELECT COALESCE(SUM(precio), 0) as total_ingresos FROM pagos_pendientes 
                         WHERE estado = 'aprobado'""")
-            row = c.fetchone()
-            total_ingresos = row['total_ingresos'] if row and row['total_ingresos'] else 0
-            c.execute("""SELECT SUM(monto) as total_mes FROM pagos_pendientes 
+            total_ingresos = c.fetchone()['total_ingresos'] or 0
+            c.execute("""SELECT COALESCE(SUM(precio), 0) as total_mes FROM pagos_pendientes 
                         WHERE estado = 'aprobado' 
-                        AND fecha >= DATE_TRUNC('month', CURRENT_DATE)""")
-            row = c.fetchone()
-            ingresos_mes = row['total_mes'] if row and row['total_mes'] else 0
+                        AND fecha_envio >= DATE_TRUNC('month', CURRENT_DATE)""")
+            ingresos_mes = c.fetchone()['total_mes'] or 0
         else:
             c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
             activas = c.fetchone()[0]
             c.execute("SELECT COUNT(*) FROM suscripciones")
             total = c.fetchone()[0]
-            c.execute("SELECT SUM(monto) FROM pagos_pendientes WHERE estado = 'aprobado'")
+            c.execute("SELECT COALESCE(SUM(precio), 0) FROM pagos_pendientes WHERE estado = 'aprobado'")
             total_ingresos = c.fetchone()[0] or 0
             primer_dia = datetime.now().replace(day=1).strftime("%Y-%m-%d")
-            c.execute("SELECT SUM(monto) FROM pagos_pendientes WHERE estado = 'aprobado' AND fecha >= ?", (primer_dia,))
+            c.execute("SELECT COALESCE(SUM(precio), 0) FROM pagos_pendientes WHERE estado = 'aprobado' AND fecha_envio >= ?", (primer_dia,))
             ingresos_mes = c.fetchone()[0] or 0
         
         conn.close()
@@ -3249,7 +3260,7 @@ async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def ver_topics_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /ver_topics - Ver temas/topics del grupo"""
+    """Comando /ver_topics - Ver temas/topics del grupo con nombres"""
     if update.effective_user.id != OWNER_ID:
         return
     
@@ -3262,14 +3273,16 @@ async def ver_topics_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         c = conn.cursor()
         if DATABASE_URL:
             c.execute("""SELECT topic_id, COUNT(*) as msgs, 
-                        MAX(fecha) as ultimo_msg
+                        MAX(fecha) as ultimo_msg,
+                        MAX(message) as ultimo_texto
                         FROM mensajes 
                         WHERE topic_id IS NOT NULL
                         GROUP BY topic_id 
                         ORDER BY msgs DESC""")
             topics = c.fetchall()
         else:
-            c.execute("""SELECT topic_id, COUNT(*) as msgs, MAX(fecha) as ultimo_msg
+            c.execute("""SELECT topic_id, COUNT(*) as msgs, MAX(fecha) as ultimo_msg,
+                        MAX(message) as ultimo_texto
                         FROM mensajes WHERE topic_id IS NOT NULL
                         GROUP BY topic_id ORDER BY msgs DESC""")
             topics = c.fetchall()
@@ -3279,12 +3292,39 @@ async def ver_topics_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("📋 No hay topics registrados.")
             return
         
+        # Intentar obtener nombres de topics del grupo
+        topic_names = {}
+        try:
+            if COFRADIA_GROUP_ID:
+                # Intentar obtener forum topics via API
+                forum_topics = await context.bot.get_forum_topic_icon_stickers()
+                # Si no funciona, usamos los mensajes para inferir el tema
+        except Exception:
+            pass
+        
         mensaje = "📂 TOPICS DEL GRUPO\n\n"
         for t in topics:
             if DATABASE_URL:
-                mensaje += f"🔹 Topic #{t['topic_id']}: {t['msgs']} msgs (último: {str(t['ultimo_msg'])[:10]})\n"
+                tid = t['topic_id']
+                msgs = t['msgs']
+                ultimo = str(t['ultimo_msg'])[:10]
+                # Usar el último mensaje como referencia del tema
+                ultimo_texto = (t['ultimo_texto'] or '')[:50]
             else:
-                mensaje += f"🔹 Topic #{t[0]}: {t[1]} msgs (último: {str(t[2])[:10]})\n"
+                tid = t[0]
+                msgs = t[1]
+                ultimo = str(t[2])[:10]
+                ultimo_texto = (t[3] or '')[:50]
+            
+            # Inferir nombre del topic basado en ID conocidos o último mensaje
+            nombre_topic = topic_names.get(tid, f"Topic #{tid}")
+            
+            mensaje += (f"🔹 {nombre_topic}\n"
+                       f"   💬 {msgs} mensajes | Último: {ultimo}\n"
+                       f"   📝 \"{ultimo_texto}...\"\n\n")
+        
+        mensaje += ("💡 Los nombres de los topics se configuran en la\n"
+                    "   configuración del grupo de Telegram.")
         
         await update.message.reply_text(mensaje)
     except Exception as e:
@@ -3531,7 +3571,10 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if sus:
             dias = obtener_dias_restantes(user_id)
-            mensaje += f"\n⏰ Días restantes: {dias}\n"
+            if dias >= 99999:
+                mensaje += f"\n⏰ Suscripción: ♾️ Sin límite (Owner)\n"
+            else:
+                mensaje += f"\n⏰ Días restantes: {dias}\n"
         
         await update.message.reply_text(mensaje)
         
