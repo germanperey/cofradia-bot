@@ -2208,8 +2208,8 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     consulta = ' '.join(context.args)
     msg = await update.message.reply_text("🔍 Buscando en todas las fuentes de conocimiento...")
     
-    # Búsqueda unificada en todas las fuentes
-    resultados = busqueda_unificada(consulta, limit_historial=15, limit_rag=10)
+    # Búsqueda unificada en todas las fuentes (máximo contexto)
+    resultados = busqueda_unificada(consulta, limit_historial=15, limit_rag=30)
     
     tiene_historial = bool(resultados.get('historial'))
     tiene_rag = bool(resultados.get('rag'))
@@ -2260,11 +2260,11 @@ INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
 {contexto_completo}
 
 INSTRUCCIONES:
-1. Analiza TODA la información encontrada (mensajes del grupo Y documentos indexados)
-2. Sintetiza una respuesta completa y útil combinando todas las fuentes
+1. Analiza TODA la información encontrada y sintetiza una respuesta completa
+2. Combina información de todas las fuentes de forma natural y coherente
 3. Si hay datos de contacto, profesiones o recomendaciones, inclúyelos
-4. Menciona las fuentes: "Según los mensajes del grupo..." o "Según los documentos indexados..."
-5. Si la información es insuficiente, indícalo y sugiere comandos alternativos
+4. Responde siempre de forma útil y positiva con la información disponible
+5. NO menciones qué fuentes no tuvieron resultados, solo usa lo que hay
 6. NO inventes información que no esté en las fuentes
 7. No uses asteriscos ni guiones bajos para formato
 8. Máximo 400 palabras
@@ -2696,8 +2696,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
             return
         
-        # BÚSQUEDA UNIFICADA en todas las fuentes
-        resultados_unificados = busqueda_unificada(pregunta, limit_historial=8, limit_rag=10)
+        # BÚSQUEDA UNIFICADA en todas las fuentes (máximo contexto)
+        resultados_unificados = busqueda_unificada(pregunta, limit_historial=10, limit_rag=25)
         contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
         
@@ -2709,25 +2709,22 @@ PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
 {contexto_completo}
 
 INSTRUCCIONES PRIORITARIAS:
-1. Analiza TODA la información de TODAS las fuentes (historial del grupo, documentos PDF, libros, base de datos de profesionales)
-2. Si encuentras información relevante en los documentos indexados (libros, PDFs), ÚSALA para responder
-3. Si la pregunta es sobre un libro, autor o tema específico, busca en los fragmentos de documentos
-4. Cita las fuentes: "Según los mensajes del grupo..." o "Según los documentos indexados..."
+1. Analiza TODA la información de TODAS las fuentes y responde de forma completa
+2. Si encuentras información relevante en documentos, libros o historial, ÚSALA
+3. Complementa con tu conocimiento general cuando sea útil para dar una mejor respuesta
+4. NO menciones qué fuentes no tuvieron resultados — responde naturalmente con lo que hay
 5. Si la pregunta es sobre SERVICIOS o PROVEEDORES, sugiere /buscar_profesional [profesión]
 6. Si la pregunta es sobre EMPLEOS, sugiere /empleo [cargo]
-7. Para búsquedas más profundas, sugiere /buscar_ia [tema] o /rag_consulta [tema]
-8. Responde de forma útil, concisa y en máximo 2-3 párrafos
-9. No uses asteriscos ni guiones bajos para formato
-10. NO inventes información que no esté en las fuentes proporcionadas"""
+7. Responde de forma útil, completa y en máximo 3 párrafos
+8. No uses asteriscos ni guiones bajos para formato
+9. NO inventes información específica que no esté en las fuentes proporcionadas"""
 
-        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.5)
+        respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         
         await msg.delete()
         
         if respuesta:
             respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
-            if fuentes:
-                respuesta_limpia += f"\n\n📚 Fuentes: {fuentes}"
             await enviar_mensaje_largo(update, respuesta_limpia)
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
@@ -5435,8 +5432,8 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = await update.message.reply_text(f"🧠 Buscando en todas las fuentes: {query}...")
     
     try:
-        # Búsqueda unificada
-        resultados = busqueda_unificada(query, limit_historial=8, limit_rag=12)
+        # Búsqueda unificada (máximo contexto posible)
+        resultados = busqueda_unificada(query, limit_historial=10, limit_rag=30)
         
         tiene_historial = bool(resultados.get('historial'))
         tiene_rag = bool(resultados.get('rag'))
@@ -5463,17 +5460,17 @@ INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
 {contexto_completo}
 
 INSTRUCCIONES:
-1. Responde basándote en TODA la información proporcionada (documentos + historial)
-2. Si la pregunta es sobre un libro o documento específico, prioriza los fragmentos del RAG
-3. Sé conciso, directo y útil
+1. Responde basándote en TODA la información proporcionada
+2. Si la pregunta es sobre un libro o documento específico, prioriza los fragmentos relevantes
+3. Sé completo, directo y útil — usa TODOS los fragmentos disponibles
 4. Si hay datos de contacto o profesiones, inclúyelos
 5. No uses asteriscos ni guiones bajos para formato
-6. Indica de qué fuente proviene la información cuando sea relevante
-7. Si la información es insuficiente, indícalo claramente
-8. Si la pregunta se relaciona con servicios profesionales, sugiere /buscar_profesional
-9. Máximo 400 palabras"""
+6. NO menciones qué fuentes no tuvieron resultados, responde con lo que hay
+7. Si la pregunta se relaciona con servicios profesionales, sugiere /buscar_profesional
+8. Complementa con tu conocimiento general cuando sea útil
+9. Máximo 500 palabras"""
             
-            respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.3)
+            respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.3)
             
             if respuesta:
                 respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
@@ -5786,7 +5783,10 @@ def detectar_columna_anio_egreso(df):
 # ==================== SISTEMA RAG (MEMORIA SEMÁNTICA) ====================
 
 def indexar_google_drive_rag():
-    """Indexa datos del Excel de Google Drive en chunks para RAG"""
+    """Indexa datos del Excel de Google Drive en chunks para RAG.
+    IMPORTANTE: Solo borra y re-crea chunks con source='BD_Grupo_Laboral'.
+    NUNCA toca los chunks de PDFs (source LIKE 'PDF:%').
+    """
     try:
         df = obtener_datos_excel_drive()
         if df is None or len(df) == 0:
@@ -5799,11 +5799,13 @@ def indexar_google_drive_rag():
         
         c = conn.cursor()
         
-        # Limpiar chunks anteriores
+        # SOLO limpiar chunks del Excel (PRESERVAR PDFs y otros)
         if DATABASE_URL:
-            c.execute("DELETE FROM rag_chunks")
+            c.execute("DELETE FROM rag_chunks WHERE source = %s", ('BD_Grupo_Laboral',))
         else:
-            c.execute("DELETE FROM rag_chunks")
+            c.execute("DELETE FROM rag_chunks WHERE source = ?", ('BD_Grupo_Laboral',))
+        
+        logger.info("🔄 RAG: Chunks de Excel eliminados para re-indexar (PDFs preservados)")
         
         chunks_creados = 0
         
@@ -6045,7 +6047,7 @@ def buscar_rag(query, limit=5):
         return []
 
 
-def busqueda_unificada(query, limit_historial=10, limit_rag=12):
+def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Retorna dict con resultados de: historial (mensajes grupo), RAG (PDFs indexados).
     """
@@ -6077,39 +6079,69 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=12):
 
 
 def formatear_contexto_unificado(resultados, query):
-    """Formatea resultados de búsqueda unificada en contexto para el LLM"""
+    """Formatea resultados de búsqueda unificada en contexto para el LLM.
+    Incluye el máximo de información posible para respuestas completas."""
     contexto = ""
     
     # Historial del grupo
     if resultados.get('historial'):
         contexto += "\n\n=== MENSAJES DEL GRUPO (conversaciones de usuarios) ===\n"
-        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:8], 1):
+        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:10], 1):
             nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
             fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
-            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:300]}\n"
+            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:400]}\n"
     
-    # RAG (PDFs y documentos)
+    # RAG (PDFs y documentos) - incluir TODOS los fragmentos encontrados
     if resultados.get('rag'):
         contexto += "\n\n=== DOCUMENTOS INDEXADOS (PDFs, libros, guías, base de datos profesionales) ===\n"
-        for i, chunk in enumerate(resultados['rag'][:10], 1):
-            contexto += f"[Fragmento {i}]: {chunk[:500]}\n\n"
+        for i, chunk in enumerate(resultados['rag'], 1):
+            contexto += f"[Fragmento {i}]: {chunk[:600]}\n\n"
     
     return contexto
 
 
 async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job programado para re-indexar RAG cada 6 horas (Excel + PDFs)"""
-    logger.info("🔄 Ejecutando re-indexación RAG...")
+    """Job programado para re-indexar RAG cada 6 horas.
+    SOLO re-indexa Excel. Los PDFs se preservan en la BD.
+    """
+    logger.info("🔄 Ejecutando re-indexación RAG (solo Excel, PDFs preservados)...")
     
-    # 1. Indexar Excel de BD Grupo Laboral
+    # Contar PDFs antes para verificar que no se pierdan
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as total FROM rag_chunks WHERE source LIKE 'PDF:%%'")
+                pdfs_antes = int(c.fetchone()['total'] or 0)
+            else:
+                c.execute("SELECT COUNT(*) as total FROM rag_chunks WHERE source LIKE 'PDF:%'")
+                pdfs_antes = c.fetchone()[0] if c.fetchone() else 0
+            conn.close()
+            logger.info(f"🔒 PDFs en BD antes de re-indexar Excel: {pdfs_antes} chunks")
+    except:
+        pdfs_antes = -1
+    
+    # 1. Re-indexar SOLO Excel de BD Grupo Laboral (NO borra PDFs)
     indexar_google_drive_rag()
     
-    # 2. Indexar PDFs de INBESTU/RAG_PDF
+    # 2. Verificar PDFs siguen intactos
     try:
-        chunks_pdf = indexar_todos_pdfs_rag()
-        logger.info(f"🧠 RAG PDFs: {chunks_pdf} chunks indexados")
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as total FROM rag_chunks WHERE source LIKE 'PDF:%%'")
+                pdfs_despues = int(c.fetchone()['total'] or 0)
+            else:
+                c.execute("SELECT COUNT(*) as total FROM rag_chunks WHERE source LIKE 'PDF:%'")
+                pdfs_despues = c.fetchone()[0] if c.fetchone() else 0
+            conn.close()
+            logger.info(f"🔒 PDFs en BD después de re-indexar: {pdfs_despues} chunks (antes: {pdfs_antes})")
+            if pdfs_antes > 0 and pdfs_despues < pdfs_antes:
+                logger.error(f"⚠️ ALERTA: Se perdieron chunks de PDFs! Antes={pdfs_antes}, Después={pdfs_despues}")
     except Exception as e:
-        logger.error(f"Error indexando PDFs en job RAG: {e}")
+        logger.warning(f"Error verificando PDFs: {e}")
 
 
 # ==================== SCRAPER SEC (SUPERINTENDENCIA ELECTRICIDAD Y COMBUSTIBLES) ====================
@@ -8081,14 +8113,14 @@ Pregunta de {user_name}: {mensaje}"""
             )
         logger.info("🌙 Tarea de resumen nocturno programada para las 20:00 Chile")
         
-        # RAG indexación cada 6 horas
+        # RAG indexación cada 6 horas (Excel only, preserva PDFs)
         job_queue.run_repeating(
             indexar_rag_job,
             interval=21600,  # 6 horas en segundos
-            first=60,  # Primera ejecución después de 60 segundos
+            first=300,  # Primera ejecución después de 5 minutos (no inmediato)
             name='rag_indexacion'
         )
-        logger.info("🧠 Tarea de indexación RAG programada cada 6 horas")
+        logger.info("🧠 Tarea de indexación RAG programada cada 6 horas (primera en 5 min)")
     
     logger.info("✅ Bot iniciado!")
     
