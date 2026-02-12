@@ -1008,10 +1008,11 @@ def obtener_precios():
 def limpiar_nombre_display(nombre):
     """Limpia un nombre para mostrar, reemplazando nombres de grupo/canal"""
     if not nombre:
-        return "Sin Nombre"
+        return "Usuario"
     nombre = str(nombre).replace('_', ' ').strip()
     if not nombre or nombre.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 
-                                          'cofradía de networking', 'usuario', 'anónimo', 'sin nombre']:
+                                          'cofradía de networking', 'usuario', 'anónimo', 'sin nombre',
+                                          'no name', 'none', 'null']:
         return "Germán Perey"  # Solo el owner postea como admin anónimo
     return nombre
 
@@ -1667,14 +1668,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /registrarse - Registrar usuario"""
+    """Comando /registrarse - Redirige al proceso de onboarding"""
     user = update.message.from_user
-    
-    if es_chat_privado(update):
-        await update.message.reply_text(
-            "❌ Debes usar /registrarse en el grupo @Cofradia_de_Networking"
-        )
-        return
     
     # Verificar si ya está registrado con cuenta activa
     if verificar_suscripcion_activa(user.id):
@@ -1684,49 +1679,13 @@ async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
-    # Verificar si es admin del grupo o el owner
-    es_admin = False
-    if user.id == OWNER_ID:
-        es_admin = True
-    else:
-        try:
-            chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-            es_admin = chat_member.status in ['creator', 'administrator']
-        except Exception as e:
-            logger.warning(f"No se pudo verificar admin status: {e}")
-            es_admin = False
-    
-    # Registrar usuario con last_name
-    nombre_display = user.username or user.first_name or "Usuario"
-    nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
-    
-    if registrar_usuario_suscripcion(
-        user.id, 
-        user.first_name or "Sin nombre", 
-        user.username or "sin_username", 
-        es_admin,
-        last_name=user.last_name or ''
-    ):
-        await update.message.reply_text(
-            f"✅ {nombre_completo}, estas registrado!\n\n"
-            f"🚀 Ya puedes usar tu bot asistente.\n"
-            f"📱 Inicia un chat privado conmigo: @Cofradia_Premium_Bot\n"
-            f"💡 Escribeme: /start"
-        )
-        
-        # Enviar mensaje privado
-        try:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=f"🎉 Bienvenido/a {nombre_completo}!\n\n"
-                     f"Tu cuenta esta activa.\n"
-                     f"Usa /ayuda para ver los comandos disponibles.\n"
-                     f"Usa /mi_cuenta para ver el estado de tu suscripcion."
-            )
-        except Exception as e:
-            logger.info(f"No se pudo enviar MP a {user.id}: {e}")
-    else:
-        await update.message.reply_text("❌ Hubo un error al registrarte. Intenta de nuevo.")
+    # TODOS los usuarios nuevos deben pasar por onboarding (5 preguntas)
+    await update.message.reply_text(
+        "⚓ Para registrarte en Cofradía de Networking debes completar "
+        "un breve proceso de verificación (5 preguntas).\n\n"
+        "👉 Escríbeme en privado a @Cofradia_Premium_Bot y presiona /start\n\n"
+        "O haz clic aquí: https://t.me/Cofradia_Premium_Bot?start=registro"
+    )
 
 
 @solo_chat_privado
@@ -1946,7 +1905,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             por_categoria = [(r['categoria'], r['count']) for r in por_categoria] if por_categoria else []
         else:
             por_dia = [(r[0], r[1]) for r in por_dia] if por_dia else []
-            usuarios_activos = [(r[0].strip() if r[0] else 'Sin Nombre', r[1]) for r in usuarios_activos] if usuarios_activos else []
+            usuarios_activos = [(r[0].strip() if r[0] else f'ID:{r[1] if len(r) > 1 else "?"}', r[1]) for r in usuarios_activos] if usuarios_activos else []
             por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
         
         if not por_dia and not usuarios_activos:
@@ -2027,8 +1986,8 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Limpiar nombres: filtrar Group, agregar apellido
             nombres_limpios = []
             for u in usuarios_activos[:8]:
-                n = str(u[0]).replace('_', ' ').strip() if u[0] else 'Sin Nombre'
-                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking', 'usuario']:
+                n = str(u[0]).replace('_', ' ').strip() if u[0] else 'Usuario'
+                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking', 'usuario', 'sin nombre', 'no name']:
                     n = 'Germán Perey'
                 nombres_limpios.append(n[:25])
             nombres = nombres_limpios
@@ -2783,12 +2742,12 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         first_name = "Germán"
         last_name = "Perey"
     
-    # Si el nombre parece ser un grupo/canal, usar username
+    # Si el nombre parece ser un grupo/canal, usar username o ID
     if first_name.lower() in ['group', 'grupo', 'channel', 'canal'] or not first_name:
         if user.username:
             first_name = user.username
         else:
-            first_name = "Sin Nombre"
+            first_name = f"ID_{user_id}"
     
     guardar_mensaje(
         user_id,
@@ -7020,8 +6979,20 @@ async def onboard_generacion(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe quién recomendó al solicitante y avanza a pregunta 4"""
+    """Recibe quién recomendó al solicitante - requiere mínimo nombre + apellido"""
     recomendado = update.message.text.strip()
+    
+    # Validar mínimo 2 palabras (nombre + apellido)
+    partes = recomendado.split()
+    if len(partes) < 2:
+        await update.message.reply_text(
+            "❌ Por favor indica al menos un nombre y un apellido de quien te recomendó.\n\n"
+            "Ejemplo: Pedro González\n\n"
+            "📝 Pregunta 3 de 5:\n"
+            "¿Quién te recomendó el grupo Cofradía?"
+        )
+        return ONBOARD_RECOMENDADO
+    
     context.user_data['onboard_recomendado'] = recomendado
     
     nombre = context.user_data.get('onboard_nombre', '')
@@ -7233,11 +7204,13 @@ async def detectar_nuevo_miembro(update: Update, context: ContextTypes.DEFAULT_T
                         registrar_usuario_suscripcion(user_id, nombre, miembro.username or '', 
                                                      es_admin=False, last_name=apellido)
                 else:
-                    # No fue aprobado por onboarding - bienvenida genérica
-                    nombre = f"{miembro.first_name or ''} {miembro.last_name or ''}".strip()
+                    # No fue aprobado por onboarding - pedir que complete el proceso
+                    nombre = f"{miembro.first_name or ''} {miembro.last_name or ''}".strip() or "Nuevo miembro"
                     await update.message.reply_text(
                         f"👋 Bienvenido/a {nombre} a Cofradía de Networking!\n\n"
-                        f"Para activar tu cuenta, escríbele a @Cofradia_Premium_Bot"
+                        f"Para activar tu cuenta y acceder a todos los servicios, "
+                        f"completa tu registro en privado:\n\n"
+                        f"👉 https://t.me/Cofradia_Premium_Bot?start=registro"
                     )
         except Exception as e:
             logger.error(f"Error en bienvenida nuevo miembro: {e}")
@@ -7698,7 +7671,7 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook anterior + configurar comandos del menú"""
+        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
         # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
@@ -7709,12 +7682,42 @@ def main():
         # PASO 2: Esperar un momento para que Telegram procese la eliminación
         await asyncio.sleep(2)
         
+        # PASO 2.5: Limpiar registros con nombres vacíos o "Sin nombre" en la BD
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                nombres_invalidos = ['', 'Sin nombre', 'Sin Nombre', 'no name', 'No Name', 'None', 'null']
+                for nombre_malo in nombres_invalidos:
+                    if DATABASE_URL:
+                        # En suscripciones: poner username si existe, sino ID
+                        c.execute("""UPDATE suscripciones 
+                                    SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
+                                    WHERE first_name = %s OR first_name IS NULL""", (nombre_malo,))
+                        # En mensajes: poner username si existe
+                        c.execute("""UPDATE mensajes 
+                                    SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
+                                    WHERE first_name = %s OR first_name IS NULL""", (nombre_malo,))
+                    else:
+                        c.execute("""UPDATE suscripciones 
+                                    SET first_name = COALESCE(NULLIF(username, ''), 'ID_' || CAST(user_id AS TEXT))
+                                    WHERE first_name = ? OR first_name IS NULL""", (nombre_malo,))
+                        c.execute("""UPDATE mensajes 
+                                    SET first_name = COALESCE(NULLIF(username, ''), 'ID_' || CAST(user_id AS TEXT))
+                                    WHERE first_name = ? OR first_name IS NULL""", (nombre_malo,))
+                conn.commit()
+                conn.close()
+                logger.info("🧹 Nombres vacíos/inválidos limpiados en BD")
+        except Exception as e:
+            logger.warning(f"Error limpiando nombres: {e}")
+        
         # PASO 3: Configurar comandos del menú
         commands = [
             BotCommand("start", "Iniciar bot"),
             BotCommand("ayuda", "Ver todos los comandos"),
             BotCommand("buscar", "Buscar en historial del grupo"),
             BotCommand("buscar_ia", "Busqueda inteligente con IA"),
+            BotCommand("rag_consulta", "Consultar documentos y libros"),
             BotCommand("buscar_profesional", "Buscar profesionales en Cofradia"),
             BotCommand("buscar_apoyo", "Buscar cofrades en busqueda laboral"),
             BotCommand("empleo", "Buscar ofertas de empleo"),
@@ -7737,6 +7740,7 @@ def main():
                 comandos_grupo = [
                     BotCommand("buscar", "Buscar en historial"),
                     BotCommand("buscar_ia", "Busqueda con IA"),
+                    BotCommand("rag_consulta", "Consultar documentos y libros"),
                     BotCommand("buscar_profesional", "Buscar profesionales"),
                     BotCommand("buscar_apoyo", "Cofrades en busqueda laboral"),
                     BotCommand("empleo", "Buscar empleos"),
