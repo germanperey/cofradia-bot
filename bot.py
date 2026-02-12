@@ -1006,14 +1006,19 @@ def obtener_precios():
 
 
 def limpiar_nombre_display(nombre):
-    """Limpia un nombre para mostrar, reemplazando nombres de grupo/canal"""
+    """Limpia un nombre para mostrar"""
     if not nombre:
         return "Usuario"
     nombre = str(nombre).replace('_', ' ').strip()
-    if not nombre or nombre.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 
-                                          'cofradía de networking', 'usuario', 'anónimo', 'sin nombre',
-                                          'no name', 'none', 'null']:
-        return "Germán Perey"  # Solo el owner postea como admin anónimo
+    if not nombre:
+        return "Usuario"
+    # Solo estos son admin anónimo del grupo (Telegram envía el nombre del grupo/canal)
+    if nombre.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 
+                           'cofradía de networking']:
+        return "Germán Perey"
+    # Nombres genéricos inválidos — NO son Germán, son usuarios reales sin nombre
+    if nombre.lower() in ['usuario', 'anónimo', 'sin nombre', 'no name', 'none', 'null']:
+        return "Usuario"
     return nombre
 
 
@@ -1987,8 +1992,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nombres_limpios = []
             for u in usuarios_activos[:8]:
                 n = str(u[0]).replace('_', ' ').strip() if u[0] else 'Usuario'
-                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking', 'usuario', 'sin nombre', 'no name']:
+                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking']:
                     n = 'Germán Perey'
+                elif n.lower() in ['usuario', 'sin nombre', 'no name', 'none', 'null']:
+                    n = 'Usuario'
                 nombres_limpios.append(n[:25])
             nombres = nombres_limpios
             mensajes_u = [u[1] for u in usuarios_activos[:8]]
@@ -7682,7 +7689,7 @@ def main():
         # PASO 2: Esperar un momento para que Telegram procese la eliminación
         await asyncio.sleep(2)
         
-        # PASO 2.5: Limpiar registros con nombres vacíos o "Sin nombre" en la BD
+        # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
             conn = get_db_connection()
             if conn:
@@ -7690,11 +7697,9 @@ def main():
                 nombres_invalidos = ['', 'Sin nombre', 'Sin Nombre', 'no name', 'No Name', 'None', 'null']
                 for nombre_malo in nombres_invalidos:
                     if DATABASE_URL:
-                        # En suscripciones: poner username si existe, sino ID
                         c.execute("""UPDATE suscripciones 
                                     SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
                                     WHERE first_name = %s OR first_name IS NULL""", (nombre_malo,))
-                        # En mensajes: poner username si existe
                         c.execute("""UPDATE mensajes 
                                     SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
                                     WHERE first_name = %s OR first_name IS NULL""", (nombre_malo,))
@@ -7705,6 +7710,23 @@ def main():
                         c.execute("""UPDATE mensajes 
                                     SET first_name = COALESCE(NULLIF(username, ''), 'ID_' || CAST(user_id AS TEXT))
                                     WHERE first_name = ? OR first_name IS NULL""", (nombre_malo,))
+                
+                # Fix: corregir registros que fueron incorrectamente asignados como "Germán" pero NO son el owner
+                if DATABASE_URL:
+                    c.execute("""UPDATE suscripciones 
+                                SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
+                                WHERE first_name = 'Germán' AND user_id != %s""", (OWNER_ID,))
+                    c.execute("""UPDATE mensajes 
+                                SET first_name = COALESCE(NULLIF(username, ''), CONCAT('ID_', CAST(user_id AS TEXT)))
+                                WHERE first_name = 'Germán' AND user_id != %s""", (OWNER_ID,))
+                else:
+                    c.execute("""UPDATE suscripciones 
+                                SET first_name = COALESCE(NULLIF(username, ''), 'ID_' || CAST(user_id AS TEXT))
+                                WHERE first_name = 'Germán' AND user_id != ?""", (OWNER_ID,))
+                    c.execute("""UPDATE mensajes 
+                                SET first_name = COALESCE(NULLIF(username, ''), 'ID_' || CAST(user_id AS TEXT))
+                                WHERE first_name = 'Germán' AND user_id != ?""", (OWNER_ID,))
+                
                 conn.commit()
                 conn.close()
                 logger.info("🧹 Nombres vacíos/inválidos limpiados en BD")
