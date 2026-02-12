@@ -1658,6 +1658,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🧠 RAG (Base de conocimiento)
 /rag_status - Estado del sistema RAG
 /rag_consulta [pregunta] - Consultar RAG
+/rag_backup - Verificar integridad datos RAG
 /rag_reindexar - Re-indexar documentos
 /eliminar_pdf [nombre] - Eliminar PDF indexado
 """
@@ -2194,86 +2195,106 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /buscar_ia - Búsqueda inteligente en el historial del grupo con IA"""
+    """Comando /buscar_ia - Búsqueda inteligente UNIFICADA (historial + RAG + IA)"""
     if not context.args:
         await update.message.reply_text(
             "❌ Uso: /buscar_ia [tu consulta]\n\n"
             "Ejemplo: /buscar_ia aniversario\n\n"
-            "Este comando busca en el historial del grupo y usa IA para analizar los resultados."
+            "Busca en TODAS las fuentes: historial del grupo, "
+            "documentos PDF indexados, y base de datos de profesionales."
         )
         return
     
     consulta = ' '.join(context.args)
-    msg = await update.message.reply_text("🔍 Buscando en el historial del grupo...")
+    msg = await update.message.reply_text("🔍 Buscando en todas las fuentes de conocimiento...")
     
-    # Buscar en el historial del grupo
-    topic_id = update.message.message_thread_id if hasattr(update.message, 'message_thread_id') else None
-    resultados = buscar_en_historial(consulta, topic_id, limit=15)
+    # Búsqueda unificada en todas las fuentes
+    resultados = busqueda_unificada(consulta, limit_historial=15, limit_rag=10)
     
-    if not resultados:
+    tiene_historial = bool(resultados.get('historial'))
+    tiene_rag = bool(resultados.get('rag'))
+    
+    if not tiene_historial and not tiene_rag:
         await msg.edit_text(
-            f"❌ No se encontraron mensajes relacionados con: {consulta}\n\n"
-            f"💡 Intenta con otras palabras clave."
+            f"❌ No se encontraron resultados para: {consulta}\n\n"
+            f"💡 Intenta con otras palabras clave.\n"
+            f"💡 Usa /rag_status para ver documentos indexados."
         )
         return
     
-    # Si no hay IA disponible, mostrar resultados sin análisis
+    fuentes = ', '.join(resultados.get('fuentes_usadas', []))
+    
+    # Si no hay IA, mostrar resultados crudos
     if not ia_disponible:
         await msg.delete()
         mensaje = f"🔍 RESULTADOS PARA: {consulta}\n"
-        mensaje += f"📊 Encontrados: {len(resultados)} mensajes\n\n"
+        mensaje += f"📊 Fuentes: {fuentes}\n\n"
         
-        for nombre, texto, fecha in resultados[:10]:
-            nombre_limpio = limpiar_nombre_display(nombre)
-            fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
-            texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
-            mensaje += f"👤 {nombre_limpio} ({fecha_str})\n{texto_corto}\n\n"
+        if tiene_historial:
+            mensaje += "💬 HISTORIAL DEL GRUPO:\n"
+            for nombre, texto, fecha in resultados['historial'][:8]:
+                nombre_limpio = limpiar_nombre_display(nombre)
+                fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
+                texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
+                mensaje += f"  {nombre_limpio} ({fecha_str}): {texto_corto}\n\n"
+        
+        if tiene_rag:
+            mensaje += "📄 DOCUMENTOS:\n"
+            for i, chunk in enumerate(resultados['rag'][:5], 1):
+                mensaje += f"  [{i}] {chunk[:200]}...\n\n"
         
         await enviar_mensaje_largo(update, mensaje)
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
         return
     
-    # Preparar contexto con los mensajes encontrados
+    # Preparar contexto COMPLETO para la IA
     await msg.edit_text("🧠 Analizando resultados con IA...")
     
-    contexto_mensajes = ""
-    for i, (nombre, texto, fecha) in enumerate(resultados, 1):
-        fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
-        contexto_mensajes += f"{i}. {nombre} ({fecha_str}): {texto[:300]}\n\n"
+    contexto_completo = formatear_contexto_unificado(resultados, consulta)
     
-    prompt = f"""Eres el asistente de Cofradía de Networking. El usuario busca información sobre: "{consulta}"
+    prompt = f"""Eres el asistente de IA de Cofradía de Networking, comunidad profesional de oficiales de la Armada de Chile.
 
-MENSAJES ENCONTRADOS EN EL HISTORIAL DEL GRUPO:
-{contexto_mensajes}
+PREGUNTA DEL USUARIO: "{consulta}"
+
+INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
+{contexto_completo}
 
 INSTRUCCIONES:
-1. Analiza los mensajes encontrados y extrae la información relevante sobre "{consulta}"
-2. Resume los puntos más importantes mencionados por los miembros
-3. Si hay fechas, eventos o datos específicos, destácalos
-4. Menciona quiénes aportaron información relevante
-5. Si los mensajes no son relevantes para la búsqueda, indícalo honestamente
+1. Analiza TODA la información encontrada (mensajes del grupo Y documentos indexados)
+2. Sintetiza una respuesta completa y útil combinando todas las fuentes
+3. Si hay datos de contacto, profesiones o recomendaciones, inclúyelos
+4. Menciona las fuentes: "Según los mensajes del grupo..." o "Según los documentos indexados..."
+5. Si la información es insuficiente, indícalo y sugiere comandos alternativos
+6. NO inventes información que no esté en las fuentes
+7. No uses asteriscos ni guiones bajos para formato
+8. Máximo 400 palabras
 
-Responde de forma organizada y útil. NO inventes información que no esté en los mensajes."""
+REGLA: NUNCA modifiques datos de usuarios."""
 
     respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.3)
     
     await msg.delete()
     
     if respuesta:
-        mensaje_final = f"🔍 **BÚSQUEDA:** _{consulta}_\n"
-        mensaje_final += f"📊 **Mensajes analizados:** {len(resultados)}\n"
+        respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
+        mensaje_final = f"🔍 BÚSQUEDA IA: {consulta}\n"
+        mensaje_final += f"📊 Fuentes consultadas: {fuentes}\n"
         mensaje_final += "━" * 25 + "\n\n"
-        mensaje_final += respuesta
+        mensaje_final += respuesta_limpia
         
         await enviar_mensaje_largo(update, mensaje_final)
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
     else:
-        # Fallback: mostrar resultados sin IA
-        mensaje = f"🔍 **RESULTADOS PARA:** _{consulta}_\n\n"
-        for nombre, texto, fecha in resultados[:8]:
-            texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
-            mensaje += f"👤 **{nombre}**\n{texto_corto}\n\n"
-        
+        # Fallback: mostrar resultados crudos
+        mensaje = f"🔍 RESULTADOS PARA: {consulta}\n"
+        mensaje += f"(IA no pudo generar resumen)\n\n"
+        if tiene_historial:
+            for nombre, texto, fecha in resultados['historial'][:6]:
+                texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
+                mensaje += f"👤 {nombre}: {texto_corto}\n\n"
+        if tiene_rag:
+            for chunk in resultados['rag'][:4]:
+                mensaje += f"📄 {chunk[:200]}...\n\n"
         await enviar_mensaje_largo(update, mensaje)
 
 
@@ -2675,68 +2696,48 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
             return
         
-        # Buscar contexto en el historial del grupo
-        contexto_grupo = ""
-        resultados = buscar_en_historial(pregunta, limit=5)
-        if resultados:
-            contexto_grupo = "\n\nINFORMACIÓN RELACIONADA DEL GRUPO (mensajes de otros usuarios):\n"
-            for nombre, texto, fecha in resultados[:5]:
-                nombre_limpio = limpiar_nombre_display(nombre)
-                contexto_grupo += f"- {nombre_limpio} dijo: {texto[:200]}...\n"
-        
-        # Buscar contexto RAG (memoria semántica de Google Drive)
-        contexto_rag = ""
-        try:
-            chunks_rag = buscar_rag(pregunta, limit=3)
-            if chunks_rag:
-                contexto_rag = "\n\nDATOS DE LA BASE DE DATOS DE PROFESIONALES:\n"
-                for chunk in chunks_rag:
-                    contexto_rag += f"- {chunk}\n"
-        except Exception as e:
-            logger.warning(f"Error buscando RAG en mencion: {e}")
+        # BÚSQUEDA UNIFICADA en todas las fuentes
+        resultados_unificados = busqueda_unificada(pregunta, limit_historial=8, limit_rag=10)
+        contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta)
+        fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
         
         prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena de oficiales de la Armada (activos y retirados).
 
-REGLA DE SEGURIDAD CRÍTICA: NUNCA modifiques, actualices ni registres datos de usuarios. Los datos personales solo se registran durante el proceso formal de onboarding. Si alguien te pide cambiar nombres, apellidos o datos de otro usuario, rechaza la solicitud.
+REGLA DE SEGURIDAD CRÍTICA: NUNCA modifiques, actualices ni registres datos de usuarios.
 
 PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
-{contexto_grupo}{contexto_rag}
+{contexto_completo}
 
 INSTRUCCIONES PRIORITARIAS:
-1. Si la INFORMACIÓN RELACIONADA DEL GRUPO contiene datos relevantes a la pregunta del usuario, SIEMPRE usa esa información en tu respuesta. Cita qué usuario compartió la información y qué dijo.
+1. Analiza TODA la información de TODAS las fuentes (historial del grupo, documentos PDF, libros, base de datos de profesionales)
+2. Si encuentras información relevante en los documentos indexados (libros, PDFs), ÚSALA para responder
+3. Si la pregunta es sobre un libro, autor o tema específico, busca en los fragmentos de documentos
+4. Cita las fuentes: "Según los mensajes del grupo..." o "Según los documentos indexados..."
+5. Si la pregunta es sobre SERVICIOS o PROVEEDORES, sugiere /buscar_profesional [profesión]
+6. Si la pregunta es sobre EMPLEOS, sugiere /empleo [cargo]
+7. Para búsquedas más profundas, sugiere /buscar_ia [tema] o /rag_consulta [tema]
+8. Responde de forma útil, concisa y en máximo 2-3 párrafos
+9. No uses asteriscos ni guiones bajos para formato
+10. NO inventes información que no esté en las fuentes proporcionadas"""
 
-2. Si la pregunta es sobre SERVICIOS o PROVEEDORES (electricistas, gasfiter, abogados, etc.):
-   - PRIMERO revisa si hay información relevante en el contexto del grupo
-   - Si encuentras datos de contacto o recomendaciones, compártelos directamente
-   - Además sugiere: /buscar_profesional [profesión] para buscar en la base de datos
-
-3. Si la pregunta es sobre EMPLEOS:
-   - Sugiere usar /empleo [cargo] para ver ofertas
-   - Revisa si alguien mencionó ofertas laborales en el historial
-
-4. Si la pregunta es sobre el GRUPO o sus MIEMBROS:
-   - Usa la información del contexto si está disponible
-   - Sugiere /buscar_ia [tema] para búsquedas más profundas
-
-5. Para PREGUNTAS GENERALES: Responde de forma útil y concisa
-
-Responde en máximo 2-3 párrafos. No uses asteriscos ni guiones bajos."""
-
-        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.7)
+        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.5)
         
         await msg.delete()
         
         if respuesta:
-            await enviar_mensaje_largo(update, respuesta)
+            respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
+            if fuentes:
+                respuesta_limpia += f"\n\n📚 Fuentes: {fuentes}"
+            await enviar_mensaje_largo(update, respuesta_limpia)
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text(
                 "❌ No pude generar respuesta.\n\n"
-                "💡 **Comandos útiles:**\n"
-                "• /buscar_profesional [profesión]\n"
-                "• /empleo [cargo]\n"
-                "• /buscar_ia [tema]",
-                parse_mode='Markdown'
+                "Comandos útiles:\n"
+                "/buscar_profesional [profesión]\n"
+                "/empleo [cargo]\n"
+                "/buscar_ia [tema]\n"
+                "/rag_consulta [tema]"
             )
             
     except Exception as e:
@@ -4499,13 +4500,19 @@ def obtener_o_crear_carpeta_drive(nombre_carpeta, parent_id=None):
         if not headers:
             return None
         
-        # Buscar carpeta existente
+        # Buscar carpeta existente (incluir Shared Drives)
         query = f"name = '{nombre_carpeta}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         if parent_id:
             query += f" and '{parent_id}' in parents"
         
         search_url = "https://www.googleapis.com/drive/v3/files"
-        params = {'q': query, 'fields': 'files(id, name)'}
+        params = {
+            'q': query, 
+            'fields': 'files(id, name, driveId)',
+            'includeItemsFromAllDrives': 'true',
+            'supportsAllDrives': 'true',
+            'corpora': 'allDrives' if not parent_id else 'allDrives'
+        }
         resp = requests.get(search_url, headers=headers, params=params, timeout=30)
         archivos = resp.json().get('files', [])
         
@@ -4521,7 +4528,7 @@ def obtener_o_crear_carpeta_drive(nombre_carpeta, parent_id=None):
         if parent_id:
             metadata['parents'] = [parent_id]
         
-        create_url = "https://www.googleapis.com/drive/v3/files"
+        create_url = "https://www.googleapis.com/drive/v3/files?supportsAllDrives=true"
         resp = requests.post(create_url, headers={**headers, 'Content-Type': 'application/json'},
                            json=metadata, timeout=30)
         
@@ -4576,20 +4583,27 @@ def subir_pdf_a_drive(file_bytes, filename):
         # Verificar si ya existe un archivo con el mismo nombre
         query = f"name = '{filename}' and '{rag_folder_id}' in parents and trashed = false"
         search_url = "https://www.googleapis.com/drive/v3/files"
-        params = {'q': query, 'fields': 'files(id, name)'}
+        params = {
+            'q': query, 
+            'fields': 'files(id, name)',
+            'includeItemsFromAllDrives': 'true',
+            'supportsAllDrives': 'true'
+        }
         resp = requests.get(search_url, headers=headers, params=params, timeout=30)
         existentes = resp.json().get('files', [])
         
         if existentes:
             # Actualizar archivo existente
             file_id = existentes[0]['id']
-            upload_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media"
+            upload_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media&supportsAllDrives=true"
             resp = requests.patch(upload_url, 
                                 headers={**headers, 'Content-Type': 'application/pdf'},
                                 data=file_bytes, timeout=120)
             if resp.status_code == 200:
                 logger.info(f"📄 PDF actualizado en Drive: {filename} ({file_id})")
                 return file_id, "actualizado"
+            else:
+                logger.warning(f"Error actualizando PDF en Drive: {resp.status_code} {resp.text[:200]}")
         
         # Subir archivo nuevo (multipart upload)
         import io
@@ -4616,7 +4630,7 @@ def subir_pdf_a_drive(file_bytes, filename):
         body.write(b'\r\n')
         body.write(f'--{boundary}--\r\n'.encode())
         
-        upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true"
         resp = requests.post(upload_url,
                            headers={**headers, 'Content-Type': f'multipart/related; boundary={boundary}'},
                            data=body.getvalue(), timeout=120)
@@ -4626,8 +4640,14 @@ def subir_pdf_a_drive(file_bytes, filename):
             logger.info(f"📄 PDF subido a Drive: {filename} ({file_id})")
             return file_id, "subido"
         elif resp.status_code == 403:
-            error_msg = resp.json().get('error', {}).get('message', 'Sin permisos')
-            logger.error(f"Error 403 subiendo PDF: {error_msg}")
+            error_detail = resp.json().get('error', {})
+            error_msg = error_detail.get('message', 'Sin permisos')
+            errors_list = error_detail.get('errors', [])
+            reason = errors_list[0].get('reason', '') if errors_list else ''
+            logger.error(f"Error 403 subiendo PDF: {error_msg} (reason: {reason})")
+            
+            if 'insufficientPermissions' in reason or 'forbidden' in reason.lower():
+                return None, f"Error HTTP 403 - Service Account sin permisos de Editor en la carpeta"
             return None, f"Error HTTP 403 - {error_msg[:100]}"
         else:
             logger.error(f"Error subiendo PDF: {resp.status_code} {resp.text[:300]}")
@@ -4712,7 +4732,9 @@ def listar_pdfs_rag(incluir_drive=False):
                         'q': query,
                         'fields': 'files(id, name, size, createdTime, modifiedTime)',
                         'orderBy': 'modifiedTime desc',
-                        'pageSize': 100
+                        'pageSize': 100,
+                        'includeItemsFromAllDrives': 'true',
+                        'supportsAllDrives': 'true'
                     }
                     resp = requests.get(search_url, headers=headers, params=params, timeout=10)
                     archivos_drive = resp.json().get('files', [])
@@ -4737,7 +4759,7 @@ def descargar_pdf_drive(file_id):
         if not headers:
             return None
         
-        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
         resp = requests.get(download_url, headers=headers, timeout=120)
         
         if resp.status_code == 200:
@@ -5351,14 +5373,14 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         resultado += f"   📁 Carpeta RAG_PDF: OK\n"
                         # Test de permisos de escritura
                         test_meta = {'name': '.test_write', 'parents': [rag_id]}
-                        wr = requests.post("https://www.googleapis.com/drive/v3/files",
+                        wr = requests.post("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true",
                                           headers={**headers, 'Content-Type': 'application/json'},
                                           json=test_meta, timeout=5)
                         if wr.status_code in [200, 201]:
                             # Eliminar archivo de prueba
                             test_id = wr.json().get('id')
                             if test_id:
-                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{test_id}",
+                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{test_id}?supportsAllDrives=true",
                                               headers=headers, timeout=5)
                             resultado += f"   ✅ Permisos de escritura: OK\n"
                         else:
@@ -5396,85 +5418,187 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @requiere_suscripcion
 async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /rag_consulta - Consulta directa al sistema RAG con IA"""
+    """Comando /rag_consulta - Consulta UNIFICADA al sistema de conocimiento con IA"""
     if not context.args:
         await update.message.reply_text(
             "❌ Uso: /rag_consulta [tu pregunta]\n\n"
             "Ejemplos:\n"
             "  /rag_consulta reglas del grupo\n"
-            "  /rag_consulta tarifas recomendadas\n"
+            "  /rag_consulta libro de Milei\n"
             "  /rag_consulta como hacer networking\n\n"
-            "Busca en todos los PDFs y datos indexados."
+            "Busca en TODAS las fuentes: PDFs indexados, "
+            "historial del grupo y base de datos."
         )
         return
     
     query = ' '.join(context.args)
-    msg = await update.message.reply_text(f"🧠 Buscando en RAG: {query}...")
+    msg = await update.message.reply_text(f"🧠 Buscando en todas las fuentes: {query}...")
     
     try:
-        # Buscar en RAG
-        resultados = buscar_rag(query, limit=8)
+        # Búsqueda unificada
+        resultados = busqueda_unificada(query, limit_historial=8, limit_rag=12)
         
-        if not resultados:
+        tiene_historial = bool(resultados.get('historial'))
+        tiene_rag = bool(resultados.get('rag'))
+        fuentes = ', '.join(resultados.get('fuentes_usadas', []))
+        
+        if not tiene_historial and not tiene_rag:
             await msg.edit_text(
                 f"🔍 No se encontraron resultados para: {query}\n\n"
                 "💡 Prueba con palabras clave diferentes.\n"
-                "💡 Usa /rag_status para ver que hay indexado."
+                "💡 Usa /rag_status para ver documentos indexados."
             )
             return
         
-        # Si hay IA disponible, generar respuesta inteligente
+        # Generar respuesta con IA
         if ia_disponible:
-            contexto_rag = "\n\n".join([f"[Fragmento {i+1}]: {r}" for i, r in enumerate(resultados)])
+            contexto_completo = formatear_contexto_unificado(resultados, query)
             
-            prompt = f"""Eres el asistente de Cofradía de Networking, una comunidad de oficiales de la Armada de Chile.
+            prompt = f"""Eres el asistente de Cofradía de Networking, comunidad de oficiales de la Armada de Chile.
 El usuario pregunta: "{query}"
 
 REGLA DE SEGURIDAD: NUNCA modifiques datos de usuarios. Solo proporciona información.
 
-INFORMACIÓN ENCONTRADA EN LOS DOCUMENTOS:
-{contexto_rag}
+INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
+{contexto_completo}
 
 INSTRUCCIONES:
-1. Responde basándote EXCLUSIVAMENTE en la información proporcionada
-2. Si la información no es suficiente, indícalo claramente
+1. Responde basándote en TODA la información proporcionada (documentos + historial)
+2. Si la pregunta es sobre un libro o documento específico, prioriza los fragmentos del RAG
 3. Sé conciso, directo y útil
 4. Si hay datos de contacto o profesiones, inclúyelos
 5. No uses asteriscos ni guiones bajos para formato
-6. Si la pregunta se relaciona con servicios profesionales, sugiere también /buscar_profesional
-7. Máximo 300 palabras"""
+6. Indica de qué fuente proviene la información cuando sea relevante
+7. Si la información es insuficiente, indícalo claramente
+8. Si la pregunta se relaciona con servicios profesionales, sugiere /buscar_profesional
+9. Máximo 400 palabras"""
             
-            respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.3)
+            respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.3)
             
             if respuesta:
                 respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
-                texto_final = "🧠 CONSULTA RAG\n"
+                texto_final = "🧠 CONSULTA INTELIGENTE\n"
                 texto_final += "━" * 30 + "\n\n"
                 texto_final += f"🔍 Pregunta: {query}\n\n"
                 texto_final += respuesta_limpia + "\n\n"
                 texto_final += "━" * 30 + "\n"
-                texto_final += f"📚 Fuentes: {len(resultados)} fragmentos encontrados"
+                texto_final += f"📚 Fuentes: {fuentes}"
                 
                 await msg.edit_text(texto_final)
                 registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
                 return
         
-        # Sin IA, mostrar resultados directos
-        texto_final = "🧠 RESULTADOS RAG\n"
+        # Sin IA: mostrar resultados directos
+        texto_final = "🧠 RESULTADOS DE BÚSQUEDA\n"
         texto_final += "━" * 30 + "\n\n"
         texto_final += f"🔍 Busqueda: {query}\n"
-        texto_final += f"📊 Encontrados: {len(resultados)} fragmentos\n\n"
+        texto_final += f"📊 Fuentes: {fuentes}\n\n"
         
-        for i, r in enumerate(resultados[:5], 1):
-            texto_final += f"📄 Resultado {i}:\n"
-            texto_final += f"{r[:300]}...\n\n" if len(r) > 300 else f"{r}\n\n"
+        if tiene_rag:
+            texto_final += "📄 DOCUMENTOS:\n"
+            for i, r in enumerate(resultados['rag'][:5], 1):
+                texto_final += f"  [{i}] {r[:250]}...\n\n" if len(r) > 250 else f"  [{i}] {r}\n\n"
+        
+        if tiene_historial:
+            texto_final += "💬 HISTORIAL:\n"
+            for nombre, texto, fecha in resultados['historial'][:5]:
+                texto_final += f"  {nombre}: {texto[:150]}...\n\n"
         
         await msg.edit_text(texto_final)
         registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
         
     except Exception as e:
         logger.error(f"Error en rag_consulta: {e}")
-        await msg.edit_text(f"❌ Error consultando RAG: {str(e)[:200]}")
+        await msg.edit_text(f"❌ Error consultando: {str(e)[:200]}")
+
+
+async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_backup - Verificar integridad de datos RAG (solo admin)"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Comando solo disponible para el administrador.")
+        return
+    
+    msg = await update.message.reply_text("🔍 Verificando integridad de datos RAG en Supabase...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ No se pudo conectar a la base de datos.")
+            return
+        
+        c = conn.cursor()
+        resultado = "━" * 30 + "\n"
+        resultado += "🔒 VERIFICACIÓN INTEGRIDAD RAG\n"
+        resultado += "━" * 30 + "\n\n"
+        
+        if DATABASE_URL:
+            # Total chunks
+            c.execute("SELECT COUNT(*) as total FROM rag_chunks")
+            total = int(c.fetchone()['total'] or 0)
+            resultado += f"📊 Total chunks en Supabase: {total:,}\n\n"
+            
+            # Por fuente
+            c.execute("""SELECT source, COUNT(*) as chunks, 
+                        MIN(fecha_indexado) as primera, MAX(fecha_indexado) as ultima,
+                        SUM(LENGTH(chunk_text)) as bytes_texto
+                        FROM rag_chunks 
+                        GROUP BY source 
+                        ORDER BY ultima DESC""")
+            fuentes = c.fetchall()
+            
+            resultado += "📄 DOCUMENTOS INDEXADOS:\n"
+            total_bytes = 0
+            pdf_count = 0
+            for f in fuentes:
+                nombre = f['source']
+                chunks = int(f['chunks'])
+                bytes_t = int(f['bytes_texto'] or 0)
+                total_bytes += bytes_t
+                kb = bytes_t / 1024
+                primera = str(f['primera'])[:16] if f['primera'] else '?'
+                ultima = str(f['ultima'])[:16] if f['ultima'] else '?'
+                
+                if nombre.startswith('PDF:'):
+                    pdf_count += 1
+                    nombre_corto = nombre.replace('PDF:', '')[:40]
+                    resultado += f"  📕 {nombre_corto}\n"
+                    resultado += f"     {chunks} chunks | {kb:.0f} KB | {ultima}\n"
+                else:
+                    resultado += f"  📊 {nombre[:40]}\n"
+                    resultado += f"     {chunks} chunks | {kb:.0f} KB\n"
+            
+            resultado += f"\n📈 RESUMEN:\n"
+            resultado += f"  📚 PDFs/Libros: {pdf_count}\n"
+            resultado += f"  📊 Total fuentes: {len(fuentes)}\n"
+            resultado += f"  🧩 Total chunks: {total:,}\n"
+            resultado += f"  💾 Texto total: {total_bytes / (1024*1024):.1f} MB\n"
+            
+            # Tamaño tabla
+            c.execute("SELECT pg_total_relation_size('rag_chunks') as size")
+            table_size = int(c.fetchone()['size'] or 0)
+            resultado += f"  📦 Tabla RAG en disco: {table_size / (1024*1024):.1f} MB\n"
+            
+            resultado += f"\n✅ DATOS SEGUROS EN SUPABASE\n"
+            resultado += f"Los {pdf_count} libros/PDFs están indexados\n"
+            resultado += f"en la base de datos PostgreSQL.\n"
+            resultado += f"El backup de Drive es complementario.\n"
+        else:
+            c.execute("SELECT COUNT(*) FROM rag_chunks")
+            total = c.fetchone()[0]
+            resultado += f"📊 Total chunks (SQLite): {total}\n"
+            resultado += "⚠️ Usar Supabase para persistencia\n"
+        
+        conn.close()
+        
+        resultado += "\n" + "━" * 30 + "\n"
+        resultado += "💡 /rag_status - Estado general\n"
+        resultado += "💡 /rag_reindexar - Re-indexar todo"
+        
+        await msg.edit_text(resultado)
+        
+    except Exception as e:
+        logger.error(f"Error en rag_backup: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def rag_reindexar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5755,7 +5879,7 @@ def indexar_google_drive_rag():
 
 
 def buscar_rag(query, limit=5):
-    """Busca en chunks RAG con scoring por relevancia (TF-IDF simplificado)"""
+    """Busca en chunks RAG con scoring por relevancia mejorado"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5763,53 +5887,56 @@ def buscar_rag(query, limit=5):
         
         c = conn.cursor()
         
-        # Normalizar query: quitar tildes, lowercase, stemming básico español
         import unicodedata
         def normalizar(texto):
             texto = unicodedata.normalize('NFKD', texto.lower())
-            texto = ''.join(c for c in texto if not unicodedata.combining(c))
+            texto = ''.join(ch for ch in texto if not unicodedata.combining(ch))
             return texto
         
         def stem_es(palabra):
-            """Stemming básico español - remueve sufijos comunes"""
+            """Stemming básico español - NO aplicar a palabras cortas o nombres propios"""
+            if len(palabra) <= 5:
+                return palabra
             for sufijo in ['iones', 'cion', 'mente', 'ando', 'endo', 'idos', 'idas',
                           'ador', 'ores', 'ista', 'ismo', 'able', 'ible',
-                          'ando', 'iendo', 'ados', 'adas', 'ores', 'eras',
-                          'ando', 'ales', 'ares', 'eros', 'ante', 'ente']:
+                          'iendo', 'ados', 'adas', 'eras', 'ales', 'ares', 'eros', 'ante', 'ente']:
                 if len(palabra) > len(sufijo) + 3 and palabra.endswith(sufijo):
                     return palabra[:-len(sufijo)]
-            for sufijo in ['ar', 'er', 'ir', 'es', 'os', 'as', 'an', 'en']:
-                if len(palabra) > len(sufijo) + 3 and palabra.endswith(sufijo):
+            for sufijo in ['ar', 'er', 'ir', 'es', 'os', 'as']:
+                if len(palabra) > len(sufijo) + 4 and palabra.endswith(sufijo):
                     return palabra[:-len(sufijo)]
             return palabra
         
-        STOPWORDS_ES = {'de', 'la', 'el', 'en', 'los', 'las', 'del', 'al', 'un', 'una',
-                       'por', 'con', 'para', 'que', 'es', 'se', 'no', 'su', 'lo', 'como',
-                       'mas', 'pero', 'sus', 'le', 'ya', 'este', 'si', 'ha', 'son',
-                       'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre'}
+        STOPWORDS = {'de', 'la', 'el', 'en', 'los', 'las', 'del', 'al', 'un', 'una',
+                    'por', 'con', 'para', 'que', 'es', 'se', 'no', 'su', 'lo', 'como',
+                    'mas', 'pero', 'sus', 'le', 'ya', 'este', 'si', 'ha', 'son',
+                    'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre',
+                    'a', 'y', 'o', 'e', 'u', 'the', 'of', 'and', 'to', 'in'}
         
         query_norm = normalizar(query)
-        palabras_query = [p for p in query_norm.split() if len(p) > 2 and p not in STOPWORDS_ES]
-        stems_query = [stem_es(p) for p in palabras_query]
+        palabras_originales = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
+        stems = [stem_es(p) for p in palabras_originales]
         
-        if not palabras_query:
+        # Unificar: buscar con palabras originales + stems (sin duplicados)
+        terminos_busqueda = list(set(palabras_originales + stems))
+        
+        if not terminos_busqueda:
             conn.close()
             return []
         
-        # Buscar chunks que contengan al menos una palabra
+        # Construir WHERE: buscar en keywords, chunk_text Y source
         condiciones = []
         params = []
-        for stem in stems_query:
+        for term in terminos_busqueda:
             if DATABASE_URL:
-                condiciones.append("(LOWER(keywords) LIKE %s OR LOWER(chunk_text) LIKE %s)")
-                params.extend([f'%{stem}%', f'%{stem}%'])
+                condiciones.append("(LOWER(keywords) LIKE %s OR LOWER(chunk_text) LIKE %s OR LOWER(source) LIKE %s)")
+                params.extend([f'%{term}%', f'%{term}%', f'%{term}%'])
             else:
-                condiciones.append("(LOWER(keywords) LIKE ? OR LOWER(chunk_text) LIKE ?)")
-                params.extend([f'%{stem}%', f'%{stem}%'])
+                condiciones.append("(LOWER(keywords) LIKE ? OR LOWER(chunk_text) LIKE ? OR LOWER(source) LIKE ?)")
+                params.extend([f'%{term}%', f'%{term}%', f'%{term}%'])
         
         where_clause = " OR ".join(condiciones)
-        # Traer más candidatos para luego rankear
-        max_candidates = limit * 5
+        max_candidates = limit * 15  # Traer MUCHOS más para rankear bien
         
         if DATABASE_URL:
             c.execute(f"""SELECT chunk_text, keywords, metadata, source FROM rag_chunks 
@@ -5835,52 +5962,75 @@ def buscar_rag(query, limit=5):
             else:
                 texto = fila[0] or ''
                 keywords = fila[1] or ''
-                source = fila[3] or ''
+                source = fila[3] if len(fila) > 3 else ''
             
             texto_norm = normalizar(texto)
             keywords_norm = normalizar(keywords)
+            source_norm = normalizar(source)
             
-            score = 0
+            score = 0.0
             matches = 0
             
-            for i, stem in enumerate(stems_query):
-                palabra_original = palabras_query[i] if i < len(palabras_query) else stem
+            for palabra in palabras_originales:
+                # Match en source/filename (máximo peso - indica relevancia del documento)
+                if palabra in source_norm:
+                    score += 5.0
+                    matches += 1
                 
-                # Match exacto en keywords (más peso)
-                if stem in keywords_norm:
+                # Match exacto en keywords
+                if palabra in keywords_norm:
                     score += 3.0
                     matches += 1
                 
-                # Match exacto de palabra original en texto
-                if palabra_original in texto_norm:
+                # Match exacto en texto
+                if palabra in texto_norm:
                     score += 2.0
                     matches += 1
-                elif stem in texto_norm:
-                    score += 1.0
-                    matches += 1
+                    # Bonus si aparece múltiples veces
+                    ocurrencias = texto_norm.count(palabra)
+                    if ocurrencias > 1:
+                        score += min(ocurrencias * 0.5, 3.0)
+            
+            # Buscar también por stems (menor peso)
+            for stem in stems:
+                if stem not in palabras_originales:  # No contar doble
+                    if stem in keywords_norm:
+                        score += 1.5
+                        matches += 1
+                    elif stem in texto_norm:
+                        score += 0.8
+                        matches += 1
             
             # Bonus por múltiples matches (relevancia compuesta)
-            if matches >= 2:
+            if matches >= 3:
+                score *= 1.0 + (matches * 0.4)
+            elif matches >= 2:
                 score *= 1.0 + (matches * 0.3)
             
-            # Bonus por PDFs (documentos más estructurados)
+            # Bonus PDFs (documentos más estructurados)
             if source.startswith('PDF:'):
-                score *= 1.1
+                score *= 1.15
             
-            # Penalizar chunks muy cortos
+            # Penalizar chunks muy cortos (poco información)
             if len(texto) < 100:
-                score *= 0.5
+                score *= 0.4
+            elif len(texto) < 200:
+                score *= 0.7
+            
+            # Bonus chunks con más contenido (más contexto)
+            if len(texto) > 500:
+                score *= 1.1
             
             if score > 0:
                 scored.append((texto, score, source))
         
-        # Ordenar por score y deduplicar
+        # Ordenar por score descendente
         scored.sort(key=lambda x: x[1], reverse=True)
         
+        # Deduplicar por primeros 100 chars
         seen = set()
         resultados = []
         for texto, score, source in scored:
-            # Deduplicar por primeros 100 chars
             key = texto[:100]
             if key not in seen:
                 seen.add(key)
@@ -5893,6 +6043,58 @@ def buscar_rag(query, limit=5):
     except Exception as e:
         logger.error(f"Error buscando RAG: {e}")
         return []
+
+
+def busqueda_unificada(query, limit_historial=10, limit_rag=12):
+    """Busca en TODAS las fuentes de conocimiento simultáneamente.
+    Retorna dict con resultados de: historial (mensajes grupo), RAG (PDFs indexados).
+    """
+    resultados = {
+        'historial': [],
+        'rag': [],
+        'fuentes_usadas': [],
+    }
+    
+    # 1. Historial del grupo (mensajes de usuarios)
+    try:
+        historial = buscar_en_historial(query, limit=limit_historial)
+        if historial:
+            resultados['historial'] = historial
+            resultados['fuentes_usadas'].append(f"Historial ({len(historial)} msgs)")
+    except Exception as e:
+        logger.warning(f"Error buscando historial unificado: {e}")
+    
+    # 2. RAG (PDFs indexados + Excel indexado en BD)
+    try:
+        chunks_rag = buscar_rag(query, limit=limit_rag)
+        if chunks_rag:
+            resultados['rag'] = chunks_rag
+            resultados['fuentes_usadas'].append(f"RAG/Documentos ({len(chunks_rag)} fragmentos)")
+    except Exception as e:
+        logger.warning(f"Error buscando RAG unificado: {e}")
+    
+    return resultados
+
+
+def formatear_contexto_unificado(resultados, query):
+    """Formatea resultados de búsqueda unificada en contexto para el LLM"""
+    contexto = ""
+    
+    # Historial del grupo
+    if resultados.get('historial'):
+        contexto += "\n\n=== MENSAJES DEL GRUPO (conversaciones de usuarios) ===\n"
+        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:8], 1):
+            nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
+            fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
+            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:300]}\n"
+    
+    # RAG (PDFs y documentos)
+    if resultados.get('rag'):
+        contexto += "\n\n=== DOCUMENTOS INDEXADOS (PDFs, libros, guías, base de datos profesionales) ===\n"
+        for i, chunk in enumerate(resultados['rag'][:10], 1):
+            contexto += f"[Fragmento {i}]: {chunk[:500]}\n\n"
+    
+    return contexto
 
 
 async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
@@ -7579,6 +7781,7 @@ def main():
     application.add_handler(CommandHandler("rag_status", rag_status_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
+    application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
     
     # Onboarding: Aprobar solicitudes
