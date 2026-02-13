@@ -5226,7 +5226,7 @@ async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TY
 
 @requiere_suscripcion
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /rag_status - Ver estado del sistema RAG"""
+    """Comando /rag_status - Ver estado del sistema RAG (paginado para 100+ PDFs)"""
     msg = await update.message.reply_text("🔍 Consultando estado del sistema RAG...")
     
     try:
@@ -5236,17 +5236,17 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await msg.edit_text("❌ Error obteniendo estadisticas RAG.\nVerifica que la base de datos esté activa.")
             return
         
+        # ===== MENSAJE 1: RESUMEN GENERAL =====
         resultado = "━" * 30 + "\n"
         resultado += "🧠 ESTADO DEL SISTEMA RAG\n"
         resultado += "━" * 30 + "\n\n"
         
-        # Stats generales
         total_chunks = stats.get('total_chunks', 0)
         total_pdfs = stats.get('total_pdfs', 0)
-        resultado += f"📊 Total chunks indexados: {total_chunks}\n"
-        resultado += f"📄 PDFs indexados: {total_pdfs}\n\n"
+        resultado += f"📊 Total chunks indexados: {total_chunks:,}\n"
+        resultado += f"📄 PDFs/Libros indexados: {total_pdfs}\n\n"
         
-        # Almacenamiento RAG
+        # Almacenamiento
         rag_data_bytes = stats.get('rag_data_bytes', 0)
         rag_table_bytes = stats.get('rag_table_bytes', 0)
         db_total_bytes = stats.get('db_total_bytes', 0)
@@ -5261,16 +5261,9 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if db_total_mb > 0:
             db_pct = (db_total_mb / db_limite_mb) * 100 if db_limite_mb > 0 else 0
             resultado += f"   📦 BD total: {db_total_mb:.1f} MB de {db_limite_mb:.0f} MB ({db_pct:.1f}%)\n"
-            
-            # Barra visual de uso
             bloques_llenos = min(20, int(db_pct / 5))
             bloques_vacios = 20 - bloques_llenos
-            if db_pct < 50:
-                color = "🟢"
-            elif db_pct < 80:
-                color = "🟡"
-            else:
-                color = "🔴"
+            color = "🟢" if db_pct < 50 else ("🟡" if db_pct < 80 else "🔴")
             barra = "▓" * bloques_llenos + "░" * bloques_vacios
             resultado += f"   {color} [{barra}] {db_pct:.1f}%\n"
         else:
@@ -5280,7 +5273,6 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             resultado += f"   🧠 Tabla RAG: {rag_table_mb:.1f} MB\n"
         resultado += f"   📝 Texto indexado: {rag_mb:.2f} MB\n"
         
-        # Estimación de capacidad
         if total_pdfs > 0 and rag_mb > 0:
             mb_por_pdf = rag_mb / total_pdfs
             espacio_libre_mb = db_limite_mb - db_total_mb if db_total_mb > 0 else db_limite_mb - rag_mb
@@ -5289,10 +5281,67 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             resultado += f"   🔮 Capacidad estimada: ~{pdfs_estimados:,} PDFs mas\n"
         resultado += "\n"
         
-        # Detalle por fuente
+        # Diagnóstico de Drive (rápido)
+        resultado += "☁️ BACKUP GOOGLE DRIVE:\n"
+        try:
+            headers = obtener_drive_auth_headers()
+            if headers:
+                test_url = "https://www.googleapis.com/drive/v3/about?fields=storageQuota"
+                test_resp = requests.get(test_url, headers=headers, timeout=5)
+                if test_resp.status_code == 200:
+                    quota = test_resp.json().get('storageQuota', {})
+                    usado_gb = int(quota.get('usage', 0)) / (1024**3)
+                    limite_gb = int(quota.get('limit', 0)) / (1024**3)
+                    if limite_gb > 0:
+                        resultado += f"   ✅ Conectado ({usado_gb:.1f} GB de {limite_gb:.0f} GB)\n"
+                    else:
+                        resultado += f"   ✅ Conectado (uso: {usado_gb:.1f} GB)\n"
+                    
+                    rag_id = obtener_carpeta_rag_pdf()
+                    if rag_id:
+                        resultado += f"   📁 Carpeta RAG_PDF: OK\n"
+                        test_meta = {'name': '.test_write', 'parents': [rag_id]}
+                        wr = requests.post("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true",
+                                          headers={**headers, 'Content-Type': 'application/json'},
+                                          json=test_meta, timeout=5)
+                        if wr.status_code in [200, 201]:
+                            test_id = wr.json().get('id')
+                            if test_id:
+                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{test_id}?supportsAllDrives=true",
+                                              headers=headers, timeout=5)
+                            resultado += f"   ✅ Permisos de escritura: OK\n"
+                        else:
+                            resultado += f"   ❌ Sin permisos escritura (HTTP {wr.status_code})\n"
+                            resultado += f"   💡 Comparte INBESTU con Service Account como Editor\n"
+                    else:
+                        resultado += f"   ⚠️ Carpeta RAG_PDF no encontrada\n"
+                elif test_resp.status_code == 403:
+                    resultado += f"   ❌ Error 403: Sin permisos en Drive\n"
+                else:
+                    resultado += f"   ⚠️ Error HTTP {test_resp.status_code}\n"
+            else:
+                resultado += f"   ⚠️ Sin credenciales Drive configuradas\n"
+        except requests.exceptions.Timeout:
+            resultado += f"   ⚠️ Timeout conectando a Drive\n"
+        except Exception as e:
+            resultado += f"   ⚠️ {str(e)[:50]}\n"
+        resultado += "\n"
+        
+        resultado += "━" * 30 + "\n"
+        resultado += "📤 Envia un PDF al bot para indexarlo\n"
+        resultado += "💡 /rag_consulta [pregunta]\n"
+        resultado += "💡 /eliminar_pdf - Ver/eliminar PDFs\n"
+        resultado += "💡 /rag_backup - Ver detalle de cada libro"
+        
+        # Enviar mensaje 1 (resumen)
+        await msg.edit_text(resultado)
+        
+        # ===== MENSAJE 2+: LISTA DE FUENTES (paginada) =====
         por_fuente = stats.get('por_fuente', [])
         if por_fuente:
-            resultado += "📁 FUENTES INDEXADAS:\n"
+            # Separar PDFs y otras fuentes
+            pdfs_lista = []
+            otras_lista = []
             for fuente_data in por_fuente:
                 try:
                     if isinstance(fuente_data, (list, tuple)):
@@ -5305,72 +5354,40 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         continue
                     
                     if fuente.startswith('PDF:'):
-                        nombre_pdf = fuente.replace('PDF:', '')
-                        resultado += f"   📄 {nombre_pdf}: {total} chunks\n"
+                        nombre_corto = fuente.replace('PDF:', '')[:45]
+                        pdfs_lista.append(f"📄 {nombre_corto}: {total}")
                     else:
-                        resultado += f"   📊 {fuente}: {total} chunks\n"
-                except Exception:
+                        otras_lista.append(f"📊 {fuente[:45]}: {total}")
+                except:
                     continue
-            resultado += "\n"
-        
-        # Diagnóstico de Drive (rápido)
-        resultado += "☁️ BACKUP GOOGLE DRIVE:\n"
-        try:
-            headers = obtener_drive_auth_headers()
-            if headers:
-                # Test rápido: listar archivos con timeout corto
-                test_url = "https://www.googleapis.com/drive/v3/about?fields=storageQuota"
-                test_resp = requests.get(test_url, headers=headers, timeout=5)
-                if test_resp.status_code == 200:
-                    quota = test_resp.json().get('storageQuota', {})
-                    usado_gb = int(quota.get('usage', 0)) / (1024**3)
-                    limite_gb = int(quota.get('limit', 0)) / (1024**3)
-                    if limite_gb > 0:
-                        resultado += f"   ✅ Conectado ({usado_gb:.1f} GB de {limite_gb:.0f} GB)\n"
-                    else:
-                        resultado += f"   ✅ Conectado (uso: {usado_gb:.1f} GB)\n"
-                    
-                    # Test de escritura: intentar acceder a la carpeta RAG_PDF
-                    rag_id = obtener_carpeta_rag_pdf()
-                    if rag_id:
-                        resultado += f"   📁 Carpeta RAG_PDF: OK\n"
-                        # Test de permisos de escritura
-                        test_meta = {'name': '.test_write', 'parents': [rag_id]}
-                        wr = requests.post("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true",
-                                          headers={**headers, 'Content-Type': 'application/json'},
-                                          json=test_meta, timeout=5)
-                        if wr.status_code in [200, 201]:
-                            # Eliminar archivo de prueba
-                            test_id = wr.json().get('id')
-                            if test_id:
-                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{test_id}?supportsAllDrives=true",
-                                              headers=headers, timeout=5)
-                            resultado += f"   ✅ Permisos de escritura: OK\n"
-                        else:
-                            resultado += f"   ❌ Sin permisos de escritura (HTTP {wr.status_code})\n"
-                            resultado += f"   💡 Comparte la carpeta INBESTU con la Service Account como Editor\n"
-                    else:
-                        resultado += f"   ⚠️ Carpeta RAG_PDF no encontrada\n"
-                elif test_resp.status_code == 403:
-                    resultado += f"   ❌ Error 403: Sin permisos en Drive\n"
-                    resultado += f"   💡 Verifica que la Service Account tenga acceso\n"
-                else:
-                    resultado += f"   ⚠️ Error HTTP {test_resp.status_code}\n"
-            else:
-                resultado += f"   ⚠️ Sin credenciales de Google Drive configuradas\n"
-        except requests.exceptions.Timeout:
-            resultado += f"   ⚠️ Timeout conectando a Drive (no afecta RAG)\n"
-        except Exception as e:
-            resultado += f"   ⚠️ {str(e)[:60]}\n"
-        resultado += "\n"
-        
-        resultado += "━" * 30 + "\n"
-        resultado += "📤 Envia un PDF al bot para indexarlo\n"
-        resultado += "💡 /rag_consulta [pregunta]\n"
-        resultado += "💡 /eliminar_pdf - Ver/eliminar PDFs\n"
-        resultado += "💡 /rag_reindexar - Re-indexar todo"
-        
-        await msg.edit_text(resultado)
+            
+            # Construir lista paginada (máx ~3800 chars por mensaje)
+            paginas = []
+            pagina_actual = f"📁 FUENTES INDEXADAS ({len(pdfs_lista)} PDFs)\n\n"
+            
+            # Primero las otras fuentes
+            for linea in otras_lista:
+                pagina_actual += linea + " chunks\n"
+            if otras_lista:
+                pagina_actual += "\n"
+            
+            # Luego los PDFs
+            for i, linea in enumerate(pdfs_lista, 1):
+                nueva_linea = f"{i:3d}. {linea} chunks\n"
+                if len(pagina_actual) + len(nueva_linea) > 3800:
+                    paginas.append(pagina_actual)
+                    pagina_actual = f"📁 FUENTES (cont. pag {len(paginas)+1})\n\n"
+                pagina_actual += nueva_linea
+            
+            if pagina_actual.strip():
+                paginas.append(pagina_actual)
+            
+            # Enviar cada página como mensaje separado
+            for pagina in paginas:
+                try:
+                    await update.message.reply_text(pagina)
+                except Exception as e:
+                    logger.warning(f"Error enviando página rag_status: {e}")
         
     except Exception as e:
         logger.error(f"Error en rag_status: {e}")
@@ -5476,7 +5493,7 @@ INSTRUCCIONES:
 
 
 async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /rag_backup - Verificar integridad de datos RAG (solo admin)"""
+    """Comando /rag_backup - Verificar integridad de datos RAG (solo admin) - paginado"""
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ Comando solo disponible para el administrador.")
         return
@@ -5490,15 +5507,11 @@ async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         
         c = conn.cursor()
-        resultado = "━" * 30 + "\n"
-        resultado += "🔒 VERIFICACIÓN INTEGRIDAD RAG\n"
-        resultado += "━" * 30 + "\n\n"
         
         if DATABASE_URL:
             # Total chunks
             c.execute("SELECT COUNT(*) as total FROM rag_chunks")
             total = int(c.fetchone()['total'] or 0)
-            resultado += f"📊 Total chunks en Supabase: {total:,}\n\n"
             
             # Por fuente
             c.execute("""SELECT source, COUNT(*) as chunks, 
@@ -5509,55 +5522,87 @@ async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         ORDER BY ultima DESC""")
             fuentes = c.fetchall()
             
-            resultado += "📄 DOCUMENTOS INDEXADOS:\n"
-            total_bytes = 0
-            pdf_count = 0
-            for f in fuentes:
-                nombre = f['source']
-                chunks = int(f['chunks'])
-                bytes_t = int(f['bytes_texto'] or 0)
-                total_bytes += bytes_t
-                kb = bytes_t / 1024
-                primera = str(f['primera'])[:16] if f['primera'] else '?'
-                ultima = str(f['ultima'])[:16] if f['ultima'] else '?'
-                
-                if nombre.startswith('PDF:'):
-                    pdf_count += 1
-                    nombre_corto = nombre.replace('PDF:', '')[:40]
-                    resultado += f"  📕 {nombre_corto}\n"
-                    resultado += f"     {chunks} chunks | {kb:.0f} KB | {ultima}\n"
-                else:
-                    resultado += f"  📊 {nombre[:40]}\n"
-                    resultado += f"     {chunks} chunks | {kb:.0f} KB\n"
-            
-            resultado += f"\n📈 RESUMEN:\n"
-            resultado += f"  📚 PDFs/Libros: {pdf_count}\n"
-            resultado += f"  📊 Total fuentes: {len(fuentes)}\n"
-            resultado += f"  🧩 Total chunks: {total:,}\n"
-            resultado += f"  💾 Texto total: {total_bytes / (1024*1024):.1f} MB\n"
-            
             # Tamaño tabla
             c.execute("SELECT pg_total_relation_size('rag_chunks') as size")
             table_size = int(c.fetchone()['size'] or 0)
-            resultado += f"  📦 Tabla RAG en disco: {table_size / (1024*1024):.1f} MB\n"
-            
-            resultado += f"\n✅ DATOS SEGUROS EN SUPABASE\n"
-            resultado += f"Los {pdf_count} libros/PDFs están indexados\n"
-            resultado += f"en la base de datos PostgreSQL.\n"
-            resultado += f"El backup de Drive es complementario.\n"
         else:
             c.execute("SELECT COUNT(*) FROM rag_chunks")
             total = c.fetchone()[0]
-            resultado += f"📊 Total chunks (SQLite): {total}\n"
-            resultado += "⚠️ Usar Supabase para persistencia\n"
+            fuentes = []
+            table_size = 0
         
         conn.close()
         
-        resultado += "\n" + "━" * 30 + "\n"
-        resultado += "💡 /rag_status - Estado general\n"
-        resultado += "💡 /rag_reindexar - Re-indexar todo"
+        # ===== MENSAJE 1: RESUMEN =====
+        resumen = "━" * 30 + "\n"
+        resumen += "🔒 VERIFICACIÓN INTEGRIDAD RAG\n"
+        resumen += "━" * 30 + "\n\n"
+        resumen += f"📊 Total chunks en Supabase: {total:,}\n\n"
         
-        await msg.edit_text(resultado)
+        total_bytes = 0
+        pdf_count = 0
+        for f in fuentes:
+            if DATABASE_URL:
+                bytes_t = int(f['bytes_texto'] or 0)
+                nombre = f['source']
+            else:
+                bytes_t = 0
+                nombre = ''
+            total_bytes += bytes_t
+            if nombre.startswith('PDF:'):
+                pdf_count += 1
+        
+        resumen += f"📈 RESUMEN:\n"
+        resumen += f"  📚 PDFs/Libros: {pdf_count}\n"
+        resumen += f"  📊 Total fuentes: {len(fuentes)}\n"
+        resumen += f"  🧩 Total chunks: {total:,}\n"
+        resumen += f"  💾 Texto total: {total_bytes / (1024*1024):.1f} MB\n"
+        if table_size > 0:
+            resumen += f"  📦 Tabla RAG en disco: {table_size / (1024*1024):.1f} MB\n"
+        resumen += f"\n✅ DATOS SEGUROS EN SUPABASE\n"
+        resumen += f"Los {pdf_count} libros/PDFs están indexados\n"
+        resumen += f"en la base de datos PostgreSQL.\n"
+        resumen += "━" * 30
+        
+        await msg.edit_text(resumen)
+        
+        # ===== MENSAJES 2+: DETALLE POR FUENTE (paginado) =====
+        if fuentes:
+            paginas = []
+            pagina_actual = f"📄 DETALLE ({len(fuentes)} fuentes)\n\n"
+            num = 0
+            
+            for f in fuentes:
+                if DATABASE_URL:
+                    nombre = f['source']
+                    chunks = int(f['chunks'])
+                    bytes_t = int(f['bytes_texto'] or 0)
+                    ultima = str(f['ultima'])[:10] if f['ultima'] else '?'
+                else:
+                    continue
+                
+                kb = bytes_t / 1024
+                num += 1
+                
+                if nombre.startswith('PDF:'):
+                    nombre_corto = nombre.replace('PDF:', '')[:42]
+                    linea = f"{num:3d}. 📕 {nombre_corto}\n     {chunks} chunks | {kb:.0f} KB | {ultima}\n"
+                else:
+                    linea = f"{num:3d}. 📊 {nombre[:42]}\n     {chunks} chunks | {kb:.0f} KB\n"
+                
+                if len(pagina_actual) + len(linea) > 3800:
+                    paginas.append(pagina_actual)
+                    pagina_actual = f"📄 DETALLE (cont. pag {len(paginas)+1})\n\n"
+                pagina_actual += linea
+            
+            if pagina_actual.strip():
+                paginas.append(pagina_actual)
+            
+            for pagina in paginas:
+                try:
+                    await update.message.reply_text(pagina)
+                except Exception as e:
+                    logger.warning(f"Error enviando página rag_backup: {e}")
         
     except Exception as e:
         logger.error(f"Error en rag_backup: {e}")
@@ -5611,23 +5656,34 @@ async def eliminar_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     if not context.args:
-        # Listar PDFs disponibles desde BD
+        # Listar PDFs disponibles desde BD (paginado)
         pdfs = listar_pdfs_rag()
         if not pdfs:
             await update.message.reply_text("📁 No hay PDFs indexados en el sistema RAG")
             return
         
-        msg = "📁 PDFs indexados en RAG:\n\n"
+        # Construir lista paginada
+        paginas = []
+        pagina_actual = f"📁 PDFs indexados ({len(pdfs)} total)\n\n"
+        
         for i, pdf in enumerate(pdfs, 1):
             chunks = pdf.get('chunks', '?')
-            modified = pdf.get('modified', '')
             origen = pdf.get('origen', '')
-            msg += f"{i}. {pdf['name']} ({chunks} chunks) [{origen}]\n"
-            if modified:
-                msg += f"   📅 {modified}\n"
-        msg += "\n💡 Uso: /eliminar_pdf [nombre exacto del archivo]"
+            linea = f"{i}. {pdf['name']} ({chunks} ch) [{origen}]\n"
+            
+            if len(pagina_actual) + len(linea) > 3800:
+                paginas.append(pagina_actual)
+                pagina_actual = f"📁 PDFs (cont. pag {len(paginas)+1})\n\n"
+            pagina_actual += linea
         
-        await update.message.reply_text(msg)
+        pagina_actual += "\n💡 Uso: /eliminar_pdf [nombre exacto]"
+        paginas.append(pagina_actual)
+        
+        for pagina in paginas:
+            try:
+                await update.message.reply_text(pagina)
+            except Exception as e:
+                logger.warning(f"Error enviando lista PDFs: {e}")
         return
     
     filename = ' '.join(context.args)
