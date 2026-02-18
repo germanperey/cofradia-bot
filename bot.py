@@ -826,6 +826,174 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
         return None
 
 
+# Mapeo de comandos por voz → comandos reales del bot
+COMANDOS_VOZ = {
+    'buscar': 'buscar',
+    'buscar ia': 'buscar_ia',
+    'buscar inteligente': 'buscar_ia',
+    'búsqueda ia': 'buscar_ia',
+    'búsqueda inteligente': 'buscar_ia',
+    'rag consulta': 'rag_consulta',
+    'consulta rag': 'rag_consulta',
+    'consultar documentos': 'rag_consulta',
+    'consultar libros': 'rag_consulta',
+    'buscar profesional': 'buscar_profesional',
+    'buscar profesionales': 'buscar_profesional',
+    'buscar apoyo': 'buscar_apoyo',
+    'buscar especialista': 'buscar_especialista_sec',
+    'buscar especialista sec': 'buscar_especialista_sec',
+    'empleo': 'empleo',
+    'buscar empleo': 'empleo',
+    'mi tarjeta': 'mi_tarjeta',
+    'tarjeta': 'mi_tarjeta',
+    'directorio': 'directorio',
+    'conectar': 'conectar',
+    'conexiones': 'conectar',
+    'alertas': 'alertas',
+    'mis alertas': 'alertas',
+    'publicar': 'publicar',
+    'anuncios': 'anuncios',
+    'eventos': 'eventos',
+    'consultas': 'consultas',
+    'mis recomendaciones': 'mis_recomendaciones',
+    'recomendaciones': 'mis_recomendaciones',
+    'gráficos': 'graficos',
+    'graficos': 'graficos',
+    'estadísticas': 'estadisticas',
+    'estadisticas': 'estadisticas',
+    'top usuarios': 'top_usuarios',
+    'ranking': 'top_usuarios',
+    'mi perfil': 'mi_perfil',
+    'perfil': 'mi_perfil',
+    'resumen': 'resumen',
+    'resumen semanal': 'resumen_semanal',
+    'resumen mes': 'resumen_mes',
+    'resumen mensual': 'resumen_mes',
+    'dotación': 'dotacion',
+    'dotacion': 'dotacion',
+    'categorías': 'categorias',
+    'categorias': 'categorias',
+    'cumpleaños': 'cumpleanos_mes',
+    'cumpleaños mes': 'cumpleanos_mes',
+    'cumpleanos': 'cumpleanos_mes',
+    'mi cuenta': 'mi_cuenta',
+    'ayuda': 'ayuda',
+    # Admin commands
+    'rag status': 'rag_status',
+    'estado rag': 'rag_status',
+    'rag backup': 'rag_backup',
+    'respaldo rag': 'rag_backup',
+    'ver solicitudes': 'ver_solicitudes',
+    'solicitudes': 'ver_solicitudes',
+    'cobros admin': 'cobros_admin',
+    'panel admin': 'cobros_admin',
+    'ver topics': 'ver_topics',
+}
+
+
+def detectar_comando_por_voz(texto_transcrito: str):
+    """Detecta si el texto transcrito contiene 'comando [nombre]' y extrae argumentos.
+    Returns: (nombre_comando, argumentos) o None"""
+    texto_lower = texto_transcrito.lower().strip()
+    
+    # Patrones para detectar intención de comando
+    # "comando buscar profesional ingeniería"
+    # "cofradía bot comando estadísticas"
+    # "bot comando buscar ia logística"
+    prefijos = [
+        'comando ', 'commando ', 'bot comando ', 'cofradia bot comando ',
+        'cofradía bot comando ', 'ejecuta comando ', 'ejecutar comando ',
+        'ejecuta ', 'ejecutar '
+    ]
+    
+    texto_sin_prefijo = None
+    for prefijo in prefijos:
+        if prefijo in texto_lower:
+            idx = texto_lower.index(prefijo) + len(prefijo)
+            texto_sin_prefijo = texto_lower[idx:].strip()
+            break
+    
+    if not texto_sin_prefijo:
+        return None
+    
+    # Buscar el comando más largo que coincida (greedy match)
+    mejor_match = None
+    mejor_longitud = 0
+    
+    for voz_cmd, real_cmd in COMANDOS_VOZ.items():
+        if texto_sin_prefijo.startswith(voz_cmd):
+            if len(voz_cmd) > mejor_longitud:
+                mejor_longitud = len(voz_cmd)
+                argumentos = texto_sin_prefijo[len(voz_cmd):].strip()
+                # Limpiar puntuación residual de la transcripción
+                argumentos = argumentos.strip('.,;:!?')
+                mejor_match = (real_cmd, argumentos)
+    
+    return mejor_match
+
+
+async def ejecutar_comando_voz(comando: str, argumentos: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Ejecuta un comando del bot por voz y retorna texto para TTS"""
+    try:
+        # Mapeo de comandos a funciones
+        funciones_comando = {
+            'buscar': buscar_historial,
+            'buscar_ia': buscar_ia_comando,
+            'rag_consulta': rag_consulta_comando,
+            'buscar_profesional': buscar_profesional_comando,
+            'buscar_apoyo': buscar_apoyo_comando,
+            'buscar_especialista_sec': buscar_especialista_sec_comando,
+            'empleo': empleo_comando,
+            'mi_tarjeta': mi_tarjeta_comando,
+            'directorio': directorio_comando,
+            'conectar': conectar_comando,
+            'alertas': alertas_comando,
+            'anuncios': anuncios_comando,
+            'eventos': eventos_comando,
+            'consultas': consultas_comando,
+            'mis_recomendaciones': mis_recomendaciones_comando,
+            'graficos': graficos_comando,
+            'estadisticas': estadisticas_comando,
+            'top_usuarios': top_usuarios_comando,
+            'mi_perfil': mi_perfil_comando,
+            'resumen': resumen_comando,
+            'resumen_semanal': resumen_semanal_comando,
+            'resumen_mes': resumen_mes_comando,
+            'dotacion': dotacion_comando,
+            'categorias': categorias_comando,
+            'cumpleanos_mes': cumpleanos_mes_comando,
+            'mi_cuenta': mi_cuenta_comando,
+            'ayuda': ayuda,
+            'rag_status': rag_status_comando,
+            'rag_backup': rag_backup_comando,
+            'ver_solicitudes': ver_solicitudes_comando,
+            'cobros_admin': cobros_admin_comando,
+            'ver_topics': ver_topics_comando,
+        }
+        
+        func = funciones_comando.get(comando)
+        if not func:
+            await update.message.reply_text(f"❌ Comando '{comando}' no reconocido por voz.")
+            return None
+        
+        # Simular context.args con los argumentos extraídos
+        original_args = context.args
+        context.args = argumentos.split() if argumentos else []
+        
+        try:
+            await func(update, context)
+        finally:
+            # Restaurar args originales
+            context.args = original_args
+        
+        return f"Comando {comando} ejecutado correctamente con argumentos: {argumentos}" if argumentos else f"Comando {comando} ejecutado correctamente."
+    
+    except Exception as e:
+        logger.warning(f"Error ejecutando comando voz '{comando}': {e}")
+        await update.message.reply_text(f"❌ Error ejecutando /{comando}: {str(e)[:100]}")
+        return None
+
+
 async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja mensajes de voz: transcribe con Whisper, responde con IA, genera audio"""
     user = update.effective_user
@@ -877,6 +1045,42 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         
         await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
+        
+        # PASO 2.5: Detectar si el usuario dijo "comando [nombre]" para ejecutar un comando real
+        comando_detectado = detectar_comando_por_voz(texto_transcrito)
+        if comando_detectado:
+            comando_nombre, argumentos = comando_detectado
+            await msg.edit_text(f"🎤 Detectado: /{comando_nombre} {argumentos}\n⚙️ Ejecutando comando...")
+            
+            # Simular ejecución del comando inyectando como texto
+            try:
+                texto_comando = f"/{comando_nombre} {argumentos}".strip()
+                # Crear un mensaje falso con el comando para que Telegram lo procese
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"🎤 Comando de voz detectado:\n`{texto_comando}`\n\nEjecutando...",
+                    parse_mode='Markdown'
+                )
+                # Ejecutar el comando directamente llamando la función correspondiente
+                resultado_cmd = await ejecutar_comando_voz(comando_nombre, argumentos, update, context)
+                if resultado_cmd:
+                    # Generar audio de la respuesta del comando
+                    try:
+                        audio_file = await generar_audio_tts(resultado_cmd[:1500])
+                        if audio_file:
+                            with open(audio_file, 'rb') as f:
+                                await update.message.reply_voice(voice=f, caption="🔊 Respuesta de voz")
+                            try:
+                                os.remove(audio_file)
+                            except:
+                                pass
+                    except:
+                        pass
+                registrar_servicio_usado(user_id, 'voz_comando')
+                return
+            except Exception as e:
+                logger.warning(f"Error ejecutando comando por voz: {e}")
+                # Si falla, continuar con procesamiento normal de IA
         
         # PASO 3: Procesar consulta con IA (reutilizar lógica existente)
         resultados = busqueda_unificada(texto_transcrito, limit_historial=5, limit_rag=15)
