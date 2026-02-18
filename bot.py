@@ -580,6 +580,206 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     return None
 
 
+# ==================== FUNCIONES DE VOZ (STT + TTS) ====================
+
+# Configuración de voz
+VOZ_TTS = os.environ.get('VOZ_TTS', 'es-CL-CatalinaNeural')  # Voz chilena femenina
+GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
+
+def transcribir_audio_groq(audio_bytes: bytes, filename: str = "audio.ogg") -> str:
+    """Transcribe audio a texto usando Groq Whisper API"""
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY no disponible para Whisper")
+        return None
+    
+    try:
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        files = {
+            'file': (filename, audio_bytes, 'audio/ogg'),
+        }
+        data = {
+            'model': GROQ_WHISPER_MODEL,
+            'language': 'es',  # Español
+            'response_format': 'json',
+            'temperature': 0.0,
+            'prompt': 'Transcripción de mensaje de voz en español chileno sobre networking profesional.'
+        }
+        
+        response = requests.post(GROQ_WHISPER_URL, headers=headers, files=files, data=data, timeout=30)
+        
+        if response.status_code == 200:
+            resultado = response.json()
+            texto = resultado.get('text', '').strip()
+            if texto:
+                logger.info(f"🎤 Whisper transcribió: {texto[:80]}...")
+                return texto
+            else:
+                logger.warning("Whisper devolvió texto vacío")
+                return None
+        else:
+            logger.error(f"Error Whisper API: {response.status_code} - {response.text[:200]}")
+            return None
+    except Exception as e:
+        logger.error(f"Error transcribiendo audio: {e}")
+        return None
+
+
+async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3") -> str:
+    """Genera audio MP3 a partir de texto usando edge-tts"""
+    try:
+        import edge_tts
+        
+        # Limitar texto para evitar audios muy largos (máx ~2000 chars)
+        if len(texto) > 2000:
+            texto = texto[:1997] + "..."
+        
+        communicate = edge_tts.Communicate(texto, VOZ_TTS, rate="+5%")
+        await communicate.save(filename)
+        
+        # Verificar que se generó el archivo
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+            logger.info(f"🔊 Audio TTS generado: {os.path.getsize(filename)} bytes")
+            return filename
+        else:
+            logger.warning("edge-tts no generó archivo válido")
+            return None
+    except ImportError:
+        logger.warning("⚠️ edge-tts no instalado. Instalar con: pip install edge-tts")
+        return None
+    except Exception as e:
+        logger.error(f"Error generando TTS: {e}")
+        return None
+
+
+async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja mensajes de voz: transcribe con Whisper, responde con IA, genera audio"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    es_privado = es_chat_privado(update)
+    
+    # Verificar suscripción (excepto owner)
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        if es_privado:
+            await update.message.reply_text(
+                "👋 ¡Hola! Para usar el asistente de voz necesitas una cuenta activa.\n\n"
+                "👉 Escribe /start para registrarte."
+            )
+        return
+    
+    # No interferir con onboarding
+    if context.user_data.get('onboard_activo'):
+        return
+    
+    msg = await update.message.reply_text("🎤 Escuchando tu mensaje de voz...")
+    
+    try:
+        # PASO 1: Descargar audio de Telegram
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            await msg.edit_text("❌ No se pudo obtener el audio.")
+            return
+        
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+        
+        if not audio_bytes or len(audio_bytes) < 100:
+            await msg.edit_text("❌ El audio está vacío o es muy corto.")
+            return
+        
+        await msg.edit_text("🎤 Transcribiendo tu mensaje...")
+        
+        # PASO 2: Transcribir con Groq Whisper
+        texto_transcrito = transcribir_audio_groq(bytes(audio_bytes))
+        
+        if not texto_transcrito:
+            await msg.edit_text(
+                "❌ No pude entender el audio. Intenta:\n"
+                "• Hablar más cerca del micrófono\n"
+                "• Reducir el ruido de fondo\n"
+                "• Enviar un mensaje más largo"
+            )
+            return
+        
+        await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
+        
+        # PASO 3: Procesar consulta con IA (reutilizar lógica existente)
+        resultados = busqueda_unificada(texto_transcrito, limit_historial=5, limit_rag=15)
+        contexto = formatear_contexto_unificado(resultados, texto_transcrito)
+        
+        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking, un grupo exclusivo de oficiales de la Armada de Chile.
+Responde en español de forma clara, concisa y amigable. Tu respuesta será convertida a audio, así que:
+- Usa frases cortas y naturales
+- No uses emojis, asteriscos ni formatos especiales
+- No uses listas con viñetas ni numeraciones
+- Habla de forma conversacional, como si estuvieras hablando por teléfono
+- Máximo 3-4 oraciones
+
+NO menciones qué fuentes no tuvieron resultados, solo usa lo que hay.
+Complementa con tu conocimiento general cuando sea útil.
+
+{contexto}
+
+Pregunta de {user.first_name} (mensaje de voz): {texto_transcrito}"""
+
+        respuesta_texto = llamar_groq(prompt, max_tokens=600, temperature=0.7)
+        
+        if not respuesta_texto:
+            respuesta_texto = llamar_deepseek(prompt, max_tokens=600, temperature=0.7) if 'llamar_deepseek' in dir() else None
+        
+        if not respuesta_texto:
+            respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
+        
+        # PASO 4: Enviar respuesta en texto
+        texto_respuesta_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}"
+        try:
+            await msg.edit_text(texto_respuesta_display, parse_mode='Markdown')
+        except Exception:
+            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}")
+        
+        # PASO 5: Generar y enviar audio de respuesta
+        try:
+            audio_file = await generar_audio_tts(respuesta_texto)
+            if audio_file:
+                with open(audio_file, 'rb') as f:
+                    await update.message.reply_voice(
+                        voice=f,
+                        caption="🔊 Respuesta de voz"
+                    )
+                # Limpiar archivo temporal
+                try:
+                    os.remove(audio_file)
+                except:
+                    pass
+        except Exception as e:
+            logger.warning(f"No se pudo enviar audio TTS: {e}")
+            # No es crítico - ya se envió la respuesta en texto
+        
+        # Registrar uso del servicio
+        registrar_servicio_usado(user_id, 'voz')
+        
+        # Guardar mensaje en historial si es grupo
+        if not es_privado:
+            guardar_mensaje(
+                user_id,
+                user.username or "sin_username",
+                user.first_name or "Usuario",
+                f"[AUDIO] {texto_transcrito}",
+                update.message.message_thread_id if hasattr(update.message, 'message_thread_id') else None,
+                last_name=user.last_name or ''
+            )
+        
+    except Exception as e:
+        logger.error(f"Error procesando voz: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        try:
+            await msg.edit_text(f"❌ Error procesando audio: {str(e)[:100]}")
+        except:
+            pass
+
+
 # ==================== FUNCIONES DE GEMINI OCR ====================
 
 def analizar_imagen_ocr(image_bytes: bytes, precio_esperado: int) -> dict:
@@ -1637,6 +1837,11 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👥 GRUPO
 /dotacion - Total de integrantes
+
+🎤 VOZ
+Envia un mensaje de voz al bot y te
+respondera con texto y audio!
+Funciona en privado y en el grupo.
 
 ============================
 💡 TIP: Mencioname en el grupo:
@@ -7042,8 +7247,41 @@ async def onboard_generacion(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe quién recomendó al solicitante - requiere mínimo nombre + apellido"""
+    """Recibe quién recomendó al solicitante - requiere mínimo nombre + apellido, sin respuestas genéricas"""
     recomendado = update.message.text.strip()
+    recomendado_lower = recomendado.lower()
+    
+    # Palabras/frases prohibidas (respuestas evasivas o genéricas)
+    frases_prohibidas = [
+        'un amigo', 'un carreta', 'recomendado', 'whatsapp', 'whasapp', 'whats app',
+        'no me acuerdo', 'no recuerdo', 'no sé', 'no se', 'no lo sé',
+        'un oficial', 'un marino', 'un compañero', 'alguien', 'nadie',
+        'no lo recuerdo', 'no tengo idea', 'un conocido', 'un amig'
+    ]
+    
+    # Verificar si contiene signo +
+    if '+' in recomendado:
+        await update.message.reply_text(
+            "❌ No se permiten signos especiales (+) en esta respuesta.\n\n"
+            "Por favor indica el nombre y apellido de la persona que te recomendó.\n\n"
+            "Ejemplo: Pedro González\n\n"
+            "📝 Pregunta 3 de 5:\n"
+            "¿Quién te recomendó el grupo Cofradía?"
+        )
+        return ONBOARD_RECOMENDADO
+    
+    # Verificar frases prohibidas
+    for frase in frases_prohibidas:
+        if frase in recomendado_lower:
+            await update.message.reply_text(
+                f"❌ Por favor indica el nombre real de quien te recomendó.\n\n"
+                f"No se aceptan respuestas genéricas como \"{frase}\".\n"
+                f"Necesitamos al menos un nombre y un apellido.\n\n"
+                f"Ejemplo: Pedro González\n\n"
+                f"📝 Pregunta 3 de 5:\n"
+                f"¿Quién te recomendó el grupo Cofradía?"
+            )
+            return ONBOARD_RECOMENDADO
     
     # Validar mínimo 2 palabras (nombre + apellido)
     partes = recomendado.split()
@@ -7939,6 +8177,9 @@ def main():
     # Mensajes y documentos
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
+    
+    # Handler de mensajes de voz (privado y grupo)
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
     

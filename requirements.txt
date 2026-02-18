@@ -12,3 +12,4 @@ oauth2client
 beautifulsoup4
 lxml
 PyPDF2
+edge-tts
