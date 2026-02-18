@@ -300,7 +300,94 @@ def init_db():
                 fecha_aprobacion TIMESTAMP
             )''')
             
-            logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada con migraciones v2.0")
+            # === NUEVAS TABLAS v3.0 ===
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS tarjetas_profesional (
+                user_id BIGINT PRIMARY KEY,
+                nombre_completo TEXT,
+                profesion TEXT,
+                empresa TEXT,
+                servicios TEXT,
+                telefono TEXT,
+                email TEXT,
+                ciudad TEXT,
+                linkedin TEXT,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS alertas_usuario (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                palabras_clave TEXT,
+                activa BOOLEAN DEFAULT TRUE,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS anuncios (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                nombre_autor TEXT,
+                categoria TEXT DEFAULT 'general',
+                titulo TEXT,
+                descripcion TEXT,
+                contacto TEXT,
+                fecha_publicacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_expiracion TIMESTAMP,
+                activo BOOLEAN DEFAULT TRUE
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS eventos (
+                id SERIAL PRIMARY KEY,
+                titulo TEXT,
+                descripcion TEXT,
+                fecha_evento TIMESTAMP,
+                lugar TEXT,
+                creado_por BIGINT,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                activo BOOLEAN DEFAULT TRUE
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS eventos_asistencia (
+                id SERIAL PRIMARY KEY,
+                evento_id INTEGER REFERENCES eventos(id),
+                user_id BIGINT,
+                nombre TEXT,
+                confirmado BOOLEAN DEFAULT TRUE,
+                fecha_confirmacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS recomendaciones (
+                id SERIAL PRIMARY KEY,
+                autor_id BIGINT,
+                autor_nombre TEXT,
+                destinatario_id BIGINT,
+                destinatario_nombre TEXT,
+                texto TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                nombre_autor TEXT,
+                titulo TEXT,
+                descripcion TEXT,
+                anonima BOOLEAN DEFAULT FALSE,
+                resuelta BOOLEAN DEFAULT FALSE,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS respuestas_consultas (
+                id SERIAL PRIMARY KEY,
+                consulta_id INTEGER REFERENCES consultas_cofrades(id),
+                user_id BIGINT,
+                nombre_autor TEXT,
+                respuesta TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada con migraciones v3.0")
         else:
             # SQLite (fallback local)
             c.execute('''CREATE TABLE IF NOT EXISTS mensajes (
@@ -408,7 +495,94 @@ def init_db():
                 fecha_aprobacion DATETIME
             )''')
             
-            logger.info("✅ Base de datos SQLite inicializada con migraciones v2.0 (modo local)")
+            # === NUEVAS TABLAS v3.0 ===
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS tarjetas_profesional (
+                user_id INTEGER PRIMARY KEY,
+                nombre_completo TEXT,
+                profesion TEXT,
+                empresa TEXT,
+                servicios TEXT,
+                telefono TEXT,
+                email TEXT,
+                ciudad TEXT,
+                linkedin TEXT,
+                fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+                fecha_actualizacion DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS alertas_usuario (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                palabras_clave TEXT,
+                activa INTEGER DEFAULT 1,
+                fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS anuncios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                nombre_autor TEXT,
+                categoria TEXT DEFAULT 'general',
+                titulo TEXT,
+                descripcion TEXT,
+                contacto TEXT,
+                fecha_publicacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+                fecha_expiracion DATETIME,
+                activo INTEGER DEFAULT 1
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS eventos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                titulo TEXT,
+                descripcion TEXT,
+                fecha_evento DATETIME,
+                lugar TEXT,
+                creado_por INTEGER,
+                fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+                activo INTEGER DEFAULT 1
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS eventos_asistencia (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evento_id INTEGER,
+                user_id INTEGER,
+                nombre TEXT,
+                confirmado INTEGER DEFAULT 1,
+                fecha_confirmacion DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS recomendaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                autor_id INTEGER,
+                autor_nombre TEXT,
+                destinatario_id INTEGER,
+                destinatario_nombre TEXT,
+                texto TEXT,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                nombre_autor TEXT,
+                titulo TEXT,
+                descripcion TEXT,
+                anonima INTEGER DEFAULT 0,
+                resuelta INTEGER DEFAULT 0,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS respuestas_consultas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                consulta_id INTEGER,
+                user_id INTEGER,
+                nombre_autor TEXT,
+                respuesta TEXT,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            logger.info("✅ Base de datos SQLite inicializada con migraciones v3.0 (modo local)")
         
         # Fix: Transferir mensajes "Group" (admin anónimo) y corregir owner
         try:
@@ -1817,18 +1991,43 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 BUSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Busqueda con IA
-/rag_consulta [pregunta] - Busqueda IA en documentos (similar a /buscar_ia)
+/rag_consulta [pregunta] - Busqueda en documentos
 /buscar_profesional [area] - Buscar profesionales
 /buscar_apoyo [area] - Buscar en busqueda laboral
-/buscar_especialista_sec [esp], [ciudad] - Buscar en SEC
+/buscar_especialista_sec [esp], [ciudad] - SEC
 /empleo [cargo] - Buscar empleos
 
+📇 DIRECTORIO PROFESIONAL
+/mi_tarjeta - Crear/ver tu tarjeta profesional
+/directorio [busqueda] - Buscar en directorio
+/conectar - Conexiones inteligentes sugeridas
+/recomendar @user [texto] - Recomendar cofrade
+/mis_recomendaciones - Ver recomendaciones
+
+📢 COMUNIDAD
+/publicar [cat] titulo | desc - Publicar anuncio
+/anuncios [categoria] - Ver tablon de anuncios
+/consultar titulo | desc - Consulta profesional
+/consultas - Ver consultas abiertas
+/responder [ID] [resp] - Responder consulta
+/ver_consulta [ID] - Ver consulta completa
+/encuesta pregunta | opc1 | opc2 - Crear encuesta
+
+📅 EVENTOS
+/eventos - Ver proximos eventos
+/asistir [ID] - Confirmar asistencia
+
+🔔 ALERTAS
+/alertas - Ver/gestionar alertas
+/alertas [palabras] - Crear alerta
+
 📊 ESTADISTICAS
-/graficos - Ver graficos de actividad y KPIs
+/graficos - Graficos de actividad y KPIs
 /estadisticas - Estadisticas generales
 /categorias - Categorias de mensajes
 /top_usuarios - Ranking de participacion
 /mi_perfil - Tu perfil de actividad
+/cumpleanos_mes - Cumpleanos del mes
 
 📋 RESUMENES
 /resumen - Resumen del dia
@@ -1841,15 +2040,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎤 VOZ
 Envia un mensaje de voz al bot y te
 respondera con texto y audio!
-Funciona en privado y en el grupo.
 
 ============================
-💡 TIP: Mencioname en el grupo:
-@Cofradia_Premium_Bot tu pregunta?
-
-💡 Los comandos empiezan con /
-   Las palabras no llevan tilde
-   y van unidas por el signo _
+💡 Mencioname: @Cofradia_Premium_Bot
 """
     
     # Agregar comandos admin solo para el owner
@@ -1865,6 +2058,7 @@ Funciona en privado y en el grupo.
 /ver_solicitudes - Ver solicitudes pendientes
 /generar_codigo - Generar codigo de activacion
 /ver_topics - Ver topics del grupo
+/nuevo_evento fecha | titulo | lugar | desc - Crear evento
 
 🧠 RAG (Base de conocimiento)
 /rag_status - Estado del sistema RAG
@@ -2988,6 +3182,13 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
                 conn.close()
         except Exception:
             pass
+    
+    # Verificar alertas de otros usuarios (en background, no bloquea)
+    try:
+        nombre_display = f"{first_name} {last_name}".strip()
+        asyncio.create_task(verificar_alertas_mensaje(user_id, update.message.text, nombre_display, context))
+    except Exception:
+        pass
 
 
 # ==================== COMANDOS ADMIN ====================
@@ -7085,6 +7286,1183 @@ Máximo 100 palabras. Sin introducción. No uses asteriscos ni guiones bajos."""
 
 # ==================== MAIN ====================
 
+# ==================== 1. DIRECTORIO PROFESIONAL ====================
+
+@requiere_suscripcion
+async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mi_tarjeta - Crear/ver tarjeta profesional"""
+    user = update.effective_user
+    user_id = user.id
+    
+    if not context.args:
+        # Mostrar tarjeta actual
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+                else:
+                    c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+                tarjeta = c.fetchone()
+                conn.close()
+                
+                if tarjeta:
+                    t = tarjeta if not DATABASE_URL else tarjeta
+                    nombre = t['nombre_completo'] if DATABASE_URL else t[1]
+                    profesion = t['profesion'] if DATABASE_URL else t[2]
+                    empresa = t['empresa'] if DATABASE_URL else t[3]
+                    servicios = t['servicios'] if DATABASE_URL else t[4]
+                    telefono = t['telefono'] if DATABASE_URL else t[5]
+                    email = t['email'] if DATABASE_URL else t[6]
+                    ciudad = t['ciudad'] if DATABASE_URL else t[7]
+                    linkedin = t['linkedin'] if DATABASE_URL else t[8]
+                    
+                    msg = f"📇 TU TARJETA PROFESIONAL\n{'━' * 28}\n\n"
+                    msg += f"👤 {nombre}\n"
+                    if profesion: msg += f"💼 {profesion}\n"
+                    if empresa: msg += f"🏢 {empresa}\n"
+                    if servicios: msg += f"🛠️ {servicios}\n"
+                    if ciudad: msg += f"📍 {ciudad}\n"
+                    if telefono: msg += f"📱 {telefono}\n"
+                    if email: msg += f"📧 {email}\n"
+                    if linkedin: msg += f"🔗 {linkedin}\n"
+                    msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
+                    msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
+                    await update.message.reply_text(msg)
+                else:
+                    await update.message.reply_text(
+                        "📇 Aún no tienes tarjeta profesional.\n\n"
+                        "Créala paso a paso:\n"
+                        "/mi_tarjeta profesion Ingeniero Civil Industrial\n"
+                        "/mi_tarjeta empresa ACME S.A.\n"
+                        "/mi_tarjeta servicios Consultoría en logística\n"
+                        "/mi_tarjeta telefono +56912345678\n"
+                        "/mi_tarjeta email tu@correo.com\n"
+                        "/mi_tarjeta ciudad Santiago\n"
+                        "/mi_tarjeta linkedin linkedin.com/in/tuperfil\n\n"
+                        "💡 Cada campo es opcional."
+                    )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        return
+    
+    # Editar campo
+    campo = context.args[0].lower()
+    campos_validos = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin']
+    
+    if campo not in campos_validos:
+        await update.message.reply_text(f"❌ Campo no válido. Usa: {', '.join(campos_validos)}")
+        return
+    
+    valor = ' '.join(context.args[1:])
+    if not valor:
+        await update.message.reply_text(f"❌ Uso: /mi_tarjeta {campo} [valor]")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            
+            if DATABASE_URL:
+                c.execute("""INSERT INTO tarjetas_profesional (user_id, nombre_completo, """ + campo + """)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (user_id) DO UPDATE SET """ + campo + """ = %s, 
+                            nombre_completo = %s, fecha_actualizacion = CURRENT_TIMESTAMP""",
+                         (user_id, nombre_completo, valor, valor, nombre_completo))
+            else:
+                c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+                if c.fetchone():
+                    c.execute(f"UPDATE tarjetas_profesional SET {campo} = ?, nombre_completo = ?, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = ?",
+                             (valor, nombre_completo, user_id))
+                else:
+                    c.execute(f"INSERT INTO tarjetas_profesional (user_id, nombre_completo, {campo}) VALUES (?, ?, ?)",
+                             (user_id, nombre_completo, valor))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ {campo.capitalize()} actualizado: {valor}\n\nVer tarjeta: /mi_tarjeta")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def directorio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /directorio [búsqueda] - Buscar en directorio profesional"""
+    busqueda = ' '.join(context.args).lower() if context.args else ''
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        if busqueda:
+            if DATABASE_URL:
+                c.execute("""SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email 
+                            FROM tarjetas_profesional 
+                            WHERE LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s 
+                            OR LOWER(servicios) LIKE %s OR LOWER(nombre_completo) LIKE %s
+                            OR LOWER(ciudad) LIKE %s
+                            ORDER BY nombre_completo LIMIT 15""",
+                         tuple(f"%{busqueda}%" for _ in range(5)))
+            else:
+                c.execute("""SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email 
+                            FROM tarjetas_profesional 
+                            WHERE LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? 
+                            OR LOWER(servicios) LIKE ? OR LOWER(nombre_completo) LIKE ?
+                            OR LOWER(ciudad) LIKE ?
+                            ORDER BY nombre_completo LIMIT 15""",
+                         tuple(f"%{busqueda}%" for _ in range(5)))
+        else:
+            if DATABASE_URL:
+                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo LIMIT 20")
+            else:
+                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo LIMIT 20")
+        
+        resultados = c.fetchall()
+        conn.close()
+        
+        if not resultados:
+            await update.message.reply_text(f"📇 No se encontraron tarjetas{f' para: {busqueda}' if busqueda else ''}.\n\n💡 Crea tu tarjeta: /mi_tarjeta")
+            return
+        
+        msg = f"📇 DIRECTORIO PROFESIONAL{f' — {busqueda}' if busqueda else ''}\n{'━' * 28}\n\n"
+        for r in resultados:
+            nombre = r['nombre_completo'] if DATABASE_URL else r[0]
+            prof = r['profesion'] if DATABASE_URL else r[1]
+            emp = r['empresa'] if DATABASE_URL else r[2]
+            serv = r['servicios'] if DATABASE_URL else r[3]
+            ciudad = r['ciudad'] if DATABASE_URL else r[4]
+            msg += f"👤 {nombre}\n"
+            if prof: msg += f"   💼 {prof}\n"
+            if emp: msg += f"   🏢 {emp}\n"
+            if serv: msg += f"   🛠️ {serv[:60]}\n"
+            if ciudad: msg += f"   📍 {ciudad}\n"
+            msg += "\n"
+        
+        msg += f"📊 {len(resultados)} resultado(s)\n💡 /mi_tarjeta para crear/editar tu tarjeta"
+        await enviar_mensaje_largo(update, msg)
+        registrar_servicio_usado(update.effective_user.id, 'directorio')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== 2. ALERTAS PERSONALIZADAS ====================
+
+@requiere_suscripcion
+async def alertas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /alertas [palabras] - Configurar alertas de palabras clave"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        # Mostrar alertas actuales
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("SELECT id, palabras_clave, activa FROM alertas_usuario WHERE user_id = %s ORDER BY id", (user_id,))
+                else:
+                    c.execute("SELECT id, palabras_clave, activa FROM alertas_usuario WHERE user_id = ? ORDER BY id", (user_id,))
+                alertas = c.fetchall()
+                conn.close()
+                
+                if alertas:
+                    msg = "🔔 TUS ALERTAS ACTIVAS\n\n"
+                    for a in alertas:
+                        aid = a['id'] if DATABASE_URL else a[0]
+                        palabras = a['palabras_clave'] if DATABASE_URL else a[1]
+                        activa = a['activa'] if DATABASE_URL else a[2]
+                        estado = "✅" if activa else "⏸️"
+                        msg += f"{estado} #{aid}: {palabras}\n"
+                    msg += "\n💡 Agregar: /alertas empleo gerente logística\n"
+                    msg += "💡 Eliminar: /alertas eliminar [#ID]"
+                else:
+                    msg = "🔔 No tienes alertas configuradas.\n\n"
+                    msg += "Cuando alguien publique en el grupo un mensaje con tus palabras clave, te avisaré en privado.\n\n"
+                    msg += "💡 Crear alerta: /alertas empleo gerente logística\n"
+                    msg += "Puedes poner varias palabras separadas por espacio."
+                await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        return
+    
+    # Eliminar alerta
+    if context.args[0].lower() == 'eliminar' and len(context.args) > 1:
+        try:
+            alerta_id = int(context.args[1].replace('#', ''))
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("DELETE FROM alertas_usuario WHERE id = %s AND user_id = %s", (alerta_id, user_id))
+                else:
+                    c.execute("DELETE FROM alertas_usuario WHERE id = ? AND user_id = ?", (alerta_id, user_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ Alerta #{alerta_id} eliminada.")
+        except:
+            await update.message.reply_text("❌ Uso: /alertas eliminar [#ID]")
+        return
+    
+    # Crear nueva alerta
+    palabras = ' '.join(context.args).lower()
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as total FROM alertas_usuario WHERE user_id = %s", (user_id,))
+                count = c.fetchone()['total']
+            else:
+                c.execute("SELECT COUNT(*) FROM alertas_usuario WHERE user_id = ?", (user_id,))
+                count = c.fetchone()[0]
+            
+            if count >= 10:
+                conn.close()
+                await update.message.reply_text("❌ Máximo 10 alertas por usuario. Elimina alguna primero.")
+                return
+            
+            if DATABASE_URL:
+                c.execute("INSERT INTO alertas_usuario (user_id, palabras_clave) VALUES (%s, %s)", (user_id, palabras))
+            else:
+                c.execute("INSERT INTO alertas_usuario (user_id, palabras_clave) VALUES (?, ?)", (user_id, palabras))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Alerta creada: \"{palabras}\"\n\nTe avisaré cuando se mencionen estas palabras en el grupo.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def verificar_alertas_mensaje(user_id_autor, texto_mensaje, nombre_autor, context):
+    """Verifica si un mensaje del grupo coincide con alertas de usuarios"""
+    if not texto_mensaje or len(texto_mensaje) < 5:
+        return
+    texto_lower = texto_mensaje.lower()
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT user_id, palabras_clave FROM alertas_usuario WHERE activa = TRUE")
+        else:
+            c.execute("SELECT user_id, palabras_clave FROM alertas_usuario WHERE activa = 1")
+        alertas = c.fetchall()
+        conn.close()
+        
+        for alerta in alertas:
+            alert_user_id = alerta['user_id'] if DATABASE_URL else alerta[0]
+            palabras = alerta['palabras_clave'] if DATABASE_URL else alerta[1]
+            
+            if alert_user_id == user_id_autor:
+                continue
+            
+            palabras_lista = palabras.lower().split()
+            if any(p in texto_lower for p in palabras_lista):
+                palabras_encontradas = [p for p in palabras_lista if p in texto_lower]
+                try:
+                    await context.bot.send_message(
+                        chat_id=alert_user_id,
+                        text=f"🔔 ALERTA: Se mencionó \"{', '.join(palabras_encontradas)}\" en el grupo\n\n"
+                             f"👤 {nombre_autor} escribió:\n"
+                             f"📝 {texto_mensaje[:300]}{'...' if len(texto_mensaje) > 300 else ''}\n\n"
+                             f"💡 /alertas para gestionar tus alertas"
+                    )
+                except:
+                    pass
+    except Exception as e:
+        logger.debug(f"Error verificando alertas: {e}")
+
+
+# ==================== 3. TABLÓN DE ANUNCIOS ====================
+
+@requiere_suscripcion
+async def publicar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /publicar [categoría] [título] | [descripción] - Publicar anuncio"""
+    user = update.effective_user
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📢 PUBLICAR ANUNCIO\n\n"
+            "Formato:\n"
+            "/publicar [categoría] [título] | [descripción]\n\n"
+            "Categorías: servicio, empleo, necesidad, venta, otro\n\n"
+            "Ejemplo:\n"
+            "/publicar servicio Asesoría Legal | Ofrezco servicios de asesoría legal para empresas. Contacto: 912345678"
+        )
+        return
+    
+    texto = ' '.join(context.args)
+    categorias_validas = ['servicio', 'empleo', 'necesidad', 'venta', 'otro']
+    
+    primera_palabra = context.args[0].lower()
+    if primera_palabra in categorias_validas:
+        categoria = primera_palabra
+        texto = ' '.join(context.args[1:])
+    else:
+        categoria = 'otro'
+    
+    if '|' in texto:
+        partes = texto.split('|', 1)
+        titulo = partes[0].strip()
+        descripcion = partes[1].strip()
+    else:
+        titulo = texto[:80]
+        descripcion = texto
+    
+    if len(titulo) < 5:
+        await update.message.reply_text("❌ El título debe tener al menos 5 caracteres.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            fecha_exp = datetime.now() + timedelta(days=30)
+            
+            if DATABASE_URL:
+                c.execute("""INSERT INTO anuncios (user_id, nombre_autor, categoria, titulo, descripcion, contacto, fecha_expiracion)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                         (user.id, nombre, categoria, titulo, descripcion, f"@{user.username}" if user.username else nombre, fecha_exp))
+            else:
+                c.execute("""INSERT INTO anuncios (user_id, nombre_autor, categoria, titulo, descripcion, contacto, fecha_expiracion)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                         (user.id, nombre, categoria, titulo, descripcion, f"@{user.username}" if user.username else nombre, fecha_exp.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ Anuncio publicado!\n\n"
+                f"📌 {titulo}\n"
+                f"📂 Categoría: {categoria}\n"
+                f"⏰ Vigencia: 30 días\n\n"
+                f"Los cofrades pueden verlo con /anuncios"
+            )
+            registrar_servicio_usado(user.id, 'publicar')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def anuncios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /anuncios [categoría] - Ver tablón de anuncios"""
+    categoria = context.args[0].lower() if context.args else None
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            if categoria:
+                c.execute("""SELECT titulo, descripcion, nombre_autor, contacto, categoria, fecha_publicacion 
+                            FROM anuncios WHERE activo = TRUE AND fecha_expiracion > CURRENT_TIMESTAMP AND categoria = %s
+                            ORDER BY fecha_publicacion DESC LIMIT 15""", (categoria,))
+            else:
+                c.execute("""SELECT titulo, descripcion, nombre_autor, contacto, categoria, fecha_publicacion 
+                            FROM anuncios WHERE activo = TRUE AND fecha_expiracion > CURRENT_TIMESTAMP
+                            ORDER BY fecha_publicacion DESC LIMIT 15""")
+        else:
+            if categoria:
+                c.execute("""SELECT titulo, descripcion, nombre_autor, contacto, categoria, fecha_publicacion 
+                            FROM anuncios WHERE activo = 1 AND categoria = ?
+                            ORDER BY fecha_publicacion DESC LIMIT 15""", (categoria,))
+            else:
+                c.execute("""SELECT titulo, descripcion, nombre_autor, contacto, categoria, fecha_publicacion 
+                            FROM anuncios WHERE activo = 1
+                            ORDER BY fecha_publicacion DESC LIMIT 15""")
+        
+        anuncios = c.fetchall()
+        conn.close()
+        
+        if not anuncios:
+            await update.message.reply_text(f"📢 No hay anuncios activos{f' en {categoria}' if categoria else ''}.\n\n💡 Publica uno: /publicar")
+            return
+        
+        msg = f"📢 TABLÓN DE ANUNCIOS{f' — {categoria}' if categoria else ''}\n{'━' * 28}\n\n"
+        for a in anuncios:
+            titulo = a['titulo'] if DATABASE_URL else a[0]
+            desc = a['descripcion'] if DATABASE_URL else a[1]
+            autor = a['nombre_autor'] if DATABASE_URL else a[2]
+            contacto = a['contacto'] if DATABASE_URL else a[3]
+            cat = a['categoria'] if DATABASE_URL else a[4]
+            msg += f"📌 {titulo}\n"
+            msg += f"   📂 {cat} | 👤 {autor}\n"
+            if desc and desc != titulo: msg += f"   📝 {desc[:100]}\n"
+            msg += f"   📱 {contacto}\n\n"
+        
+        msg += "💡 Filtrar: /anuncios servicio\n💡 Publicar: /publicar"
+        await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== 4. CONEXIONES INTELIGENTES ====================
+
+@requiere_suscripcion
+async def conectar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /conectar - Sugerir conexiones profesionales"""
+    user_id = update.effective_user.id
+    msg = await update.message.reply_text("🔗 Analizando tu perfil y buscando conexiones...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        # Obtener perfil del usuario
+        if DATABASE_URL:
+            c.execute("SELECT profesion, empresa, servicios, ciudad FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT profesion, empresa, servicios, ciudad FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+        mi_tarjeta = c.fetchone()
+        
+        if not mi_tarjeta:
+            conn.close()
+            await msg.edit_text("📇 Primero crea tu tarjeta profesional con /mi_tarjeta para que pueda sugerirte conexiones.\n\n"
+                               "Ejemplo: /mi_tarjeta profesion Ingeniero Civil")
+            return
+        
+        mi_prof = (mi_tarjeta['profesion'] if DATABASE_URL else mi_tarjeta[0]) or ''
+        mi_emp = (mi_tarjeta['empresa'] if DATABASE_URL else mi_tarjeta[1]) or ''
+        mi_serv = (mi_tarjeta['servicios'] if DATABASE_URL else mi_tarjeta[2]) or ''
+        mi_ciudad = (mi_tarjeta['ciudad'] if DATABASE_URL else mi_tarjeta[3]) or ''
+        
+        # Buscar conexiones potenciales con IA
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, servicios, ciudad 
+                        FROM tarjetas_profesional WHERE user_id != %s LIMIT 50""", (user_id,))
+        else:
+            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, servicios, ciudad 
+                        FROM tarjetas_profesional WHERE user_id != ? LIMIT 50""", (user_id,))
+        otros = c.fetchall()
+        conn.close()
+        
+        if not otros:
+            await msg.edit_text("📇 Aún no hay suficientes tarjetas en el directorio.\n\nInvita a tus compañeros a crear su tarjeta con /mi_tarjeta")
+            return
+        
+        # Construir prompt para IA
+        otros_texto = "\n".join([
+            f"- {o['nombre_completo'] if DATABASE_URL else o[1]}: {o['profesion'] if DATABASE_URL else o[2] or '?'} en {o['empresa'] if DATABASE_URL else o[3] or '?'}, {o['servicios'] if DATABASE_URL else o[4] or ''}, {o['ciudad'] if DATABASE_URL else o[5] or ''}"
+            for o in otros[:30]
+        ])
+        
+        prompt = f"""Analiza el perfil profesional y sugiere las 5 mejores conexiones de networking.
+
+MI PERFIL:
+- Profesión: {mi_prof}
+- Empresa: {mi_emp}
+- Servicios: {mi_serv}
+- Ciudad: {mi_ciudad}
+
+OTROS PROFESIONALES EN COFRADÍA:
+{otros_texto}
+
+Para cada conexión sugerida, indica brevemente por qué sería útil conectarse (sinergia comercial, misma industria, servicios complementarios, misma ciudad, etc).
+Responde en español, de forma concisa. No uses asteriscos ni formatos."""
+
+        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.5)
+        if not respuesta:
+            respuesta = "No pude generar sugerencias en este momento."
+        
+        await msg.edit_text(f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n{respuesta}\n\n💡 /directorio para ver el directorio completo")
+        registrar_servicio_usado(user_id, 'conectar')
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== 5. CUMPLEAÑOS MEJORADO ====================
+
+@requiere_suscripcion
+async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /cumpleanos_mes - Cumpleaños del mes actual"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        mes_actual = datetime.now().month
+        
+        if DATABASE_URL:
+            c.execute("""SELECT "Nombre", "Apellido Paterno", "Fecha de Nacimiento" 
+                        FROM bd_grupo_laboral 
+                        WHERE EXTRACT(MONTH FROM "Fecha de Nacimiento"::date) = %s
+                        ORDER BY EXTRACT(DAY FROM "Fecha de Nacimiento"::date)""", (mes_actual,))
+        else:
+            await update.message.reply_text("❌ Esta función requiere Supabase (base de datos de Drive).")
+            return
+        
+        cumples = c.fetchall()
+        conn.close()
+    except:
+        # Fallback: buscar en rag_chunks
+        cumples = []
+    
+    if not cumples:
+        meses = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+        await update.message.reply_text(f"🎂 No se encontraron cumpleaños para {meses[datetime.now().month]}.\n\n"
+                                        "💡 Los cumpleaños se obtienen de la base de datos del grupo.")
+        return
+    
+    meses = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+             'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+    msg = f"🎂 CUMPLEAÑOS DE {meses[mes_actual].upper()}\n{'━' * 28}\n\n"
+    for c in cumples:
+        nombre = c['Nombre'] if DATABASE_URL else c[0]
+        apellido = c['Apellido Paterno'] if DATABASE_URL else c[1]
+        fecha = str(c['Fecha de Nacimiento'] if DATABASE_URL else c[2])[:10]
+        dia = fecha.split('-')[2] if '-' in fecha else '?'
+        msg += f"🎂 {dia}/{mes_actual} — {nombre} {apellido}\n"
+    
+    msg += f"\n🎉 {len(cumples)} cumpleaños este mes"
+    await enviar_mensaje_largo(update, msg)
+
+
+# ==================== 6. ENCUESTAS ====================
+
+async def encuesta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /encuesta [pregunta] | [opción1] | [opción2] | ... - Crear encuesta"""
+    if update.effective_user.id != OWNER_ID:
+        if not verificar_suscripcion_activa(update.effective_user.id):
+            await update.message.reply_text("❌ Necesitas una suscripción activa.")
+            return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📊 CREAR ENCUESTA\n\n"
+            "Formato:\n"
+            "/encuesta Pregunta? | Opción 1 | Opción 2 | Opción 3\n\n"
+            "Ejemplo:\n"
+            "/encuesta ¿Cuándo prefieren la junta? | Viernes 18:00 | Sábado 12:00 | Domingo 11:00"
+        )
+        return
+    
+    texto = ' '.join(context.args)
+    partes = [p.strip() for p in texto.split('|')]
+    
+    if len(partes) < 3:
+        await update.message.reply_text("❌ Necesitas al menos una pregunta y 2 opciones separadas por |")
+        return
+    
+    pregunta = partes[0]
+    opciones = partes[1:10]  # Máximo 10 opciones (límite Telegram)
+    
+    try:
+        await context.bot.send_poll(
+            chat_id=update.effective_chat.id,
+            question=pregunta,
+            options=opciones,
+            is_anonymous=False,
+            allows_multiple_answers=False
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error creando encuesta: {str(e)[:100]}")
+
+
+# ==================== 7. AGENDA DE EVENTOS ====================
+
+async def nuevo_evento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /nuevo_evento - Crear evento (solo admin)"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador puede crear eventos.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📅 CREAR EVENTO\n\n"
+            "Formato:\n"
+            "/nuevo_evento [fecha DD/MM/YYYY HH:MM] | [título] | [lugar] | [descripción]\n\n"
+            "Ejemplo:\n"
+            "/nuevo_evento 15/03/2026 19:00 | Junta de Cofradía | Club Naval Valparaíso | Cena de camaradería y networking"
+        )
+        return
+    
+    texto = ' '.join(context.args)
+    partes = [p.strip() for p in texto.split('|')]
+    
+    if len(partes) < 3:
+        await update.message.reply_text("❌ Formato: /nuevo_evento [fecha] | [título] | [lugar] | [descripción]")
+        return
+    
+    fecha_str = partes[0]
+    titulo = partes[1]
+    lugar = partes[2]
+    descripcion = partes[3] if len(partes) > 3 else ''
+    
+    # Parsear fecha
+    try:
+        for fmt in ['%d/%m/%Y %H:%M', '%d-%m-%Y %H:%M', '%Y-%m-%d %H:%M']:
+            try:
+                fecha_evento = datetime.strptime(fecha_str, fmt)
+                break
+            except:
+                continue
+        else:
+            await update.message.reply_text("❌ Formato de fecha no válido. Usa DD/MM/YYYY HH:MM")
+            return
+    except:
+        await update.message.reply_text("❌ Formato de fecha no válido. Usa DD/MM/YYYY HH:MM")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("""INSERT INTO eventos (titulo, descripcion, fecha_evento, lugar, creado_por)
+                            VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                         (titulo, descripcion, fecha_evento, lugar, OWNER_ID))
+                evento_id = c.fetchone()['id']
+            else:
+                c.execute("""INSERT INTO eventos (titulo, descripcion, fecha_evento, lugar, creado_por)
+                            VALUES (?, ?, ?, ?, ?)""",
+                         (titulo, descripcion, fecha_evento.strftime("%Y-%m-%d %H:%M:%S"), lugar, OWNER_ID))
+                evento_id = c.lastrowid
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ Evento #{evento_id} creado!\n\n"
+                f"📅 {titulo}\n"
+                f"📆 {fecha_evento.strftime('%d/%m/%Y %H:%M')}\n"
+                f"📍 {lugar}\n"
+                f"{'📝 ' + descripcion if descripcion else ''}\n\n"
+                f"Los cofrades pueden verlo con /eventos\n"
+                f"y confirmar asistencia con /asistir {evento_id}"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def eventos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /eventos - Ver próximos eventos"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT e.id, e.titulo, e.descripcion, e.fecha_evento, e.lugar,
+                        (SELECT COUNT(*) FROM eventos_asistencia WHERE evento_id = e.id) as asistentes
+                        FROM eventos e WHERE e.activo = TRUE AND e.fecha_evento > CURRENT_TIMESTAMP
+                        ORDER BY e.fecha_evento LIMIT 10""")
+        else:
+            c.execute("""SELECT e.id, e.titulo, e.descripcion, e.fecha_evento, e.lugar,
+                        (SELECT COUNT(*) FROM eventos_asistencia WHERE evento_id = e.id) as asistentes
+                        FROM eventos e WHERE e.activo = 1
+                        ORDER BY e.fecha_evento LIMIT 10""")
+        
+        eventos = c.fetchall()
+        conn.close()
+        
+        if not eventos:
+            await update.message.reply_text("📅 No hay eventos próximos programados.")
+            return
+        
+        msg = f"📅 PRÓXIMOS EVENTOS\n{'━' * 28}\n\n"
+        for e in eventos:
+            eid = e['id'] if DATABASE_URL else e[0]
+            titulo = e['titulo'] if DATABASE_URL else e[1]
+            desc = e['descripcion'] if DATABASE_URL else e[2]
+            fecha = e['fecha_evento'] if DATABASE_URL else e[3]
+            lugar = e['lugar'] if DATABASE_URL else e[4]
+            asist = e['asistentes'] if DATABASE_URL else e[5]
+            
+            fecha_str = str(fecha)[:16] if fecha else '?'
+            msg += f"📌 #{eid} {titulo}\n"
+            msg += f"   📆 {fecha_str}\n"
+            msg += f"   📍 {lugar}\n"
+            if desc: msg += f"   📝 {desc[:80]}\n"
+            msg += f"   👥 {asist} confirmado(s)\n"
+            msg += f"   ✅ /asistir {eid}\n\n"
+        
+        await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def asistir_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /asistir [ID] - Confirmar asistencia a evento"""
+    if not context.args:
+        await update.message.reply_text("❌ Uso: /asistir [ID del evento]\n\nVer eventos: /eventos")
+        return
+    
+    try:
+        evento_id = int(context.args[0])
+        user = update.effective_user
+        nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            # Verificar evento existe
+            if DATABASE_URL:
+                c.execute("SELECT titulo FROM eventos WHERE id = %s AND activo = TRUE", (evento_id,))
+            else:
+                c.execute("SELECT titulo FROM eventos WHERE id = ? AND activo = 1", (evento_id,))
+            evento = c.fetchone()
+            
+            if not evento:
+                conn.close()
+                await update.message.reply_text("❌ Evento no encontrado.")
+                return
+            
+            titulo = evento['titulo'] if DATABASE_URL else evento[0]
+            
+            # Verificar si ya confirmó
+            if DATABASE_URL:
+                c.execute("SELECT id FROM eventos_asistencia WHERE evento_id = %s AND user_id = %s", (evento_id, user.id))
+            else:
+                c.execute("SELECT id FROM eventos_asistencia WHERE evento_id = ? AND user_id = ?", (evento_id, user.id))
+            
+            if c.fetchone():
+                conn.close()
+                await update.message.reply_text(f"✅ Ya habías confirmado tu asistencia a \"{titulo}\"")
+                return
+            
+            if DATABASE_URL:
+                c.execute("INSERT INTO eventos_asistencia (evento_id, user_id, nombre) VALUES (%s, %s, %s)",
+                         (evento_id, user.id, nombre))
+            else:
+                c.execute("INSERT INTO eventos_asistencia (evento_id, user_id, nombre) VALUES (?, ?, ?)",
+                         (evento_id, user.id, nombre))
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(f"✅ Asistencia confirmada a \"{titulo}\"\n\n📅 Te recordaremos 24h antes.")
+    except ValueError:
+        await update.message.reply_text("❌ Uso: /asistir [número ID]")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== 8. RECOMENDACIONES ====================
+
+@requiere_suscripcion
+async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /recomendar @usuario Texto - Recomendar a un cofrade"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "⭐ RECOMENDAR COFRADE\n\n"
+            "Formato: /recomendar @usuario Excelente profesional\n\n"
+            "Tu recomendación aparecerá en su tarjeta profesional."
+        )
+        return
+    
+    user = update.effective_user
+    objetivo_username = context.args[0].replace('@', '').lower()
+    texto_rec = ' '.join(context.args[1:])
+    
+    if len(texto_rec) < 10:
+        await update.message.reply_text("❌ La recomendación debe tener al menos 10 caracteres.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            # Buscar usuario destinatario
+            if DATABASE_URL:
+                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
+            else:
+                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
+            dest = c.fetchone()
+            
+            if not dest:
+                conn.close()
+                await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
+                return
+            
+            dest_id = dest['user_id'] if DATABASE_URL else dest[0]
+            dest_nombre = f"{dest['first_name'] if DATABASE_URL else dest[1]} {dest['last_name'] if DATABASE_URL else dest[2]}".strip()
+            autor_nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            
+            if dest_id == user.id:
+                conn.close()
+                await update.message.reply_text("❌ No puedes recomendarte a ti mismo.")
+                return
+            
+            if DATABASE_URL:
+                c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (%s, %s, %s, %s, %s)",
+                         (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
+            else:
+                c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (?, ?, ?, ?, ?)",
+                         (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(f"⭐ Recomendación enviada para {dest_nombre}!\n\nAparecerá en su perfil profesional.")
+            
+            # Notificar al destinatario
+            try:
+                await context.bot.send_message(
+                    chat_id=dest_id,
+                    text=f"⭐ {autor_nombre} te ha dejado una recomendación:\n\n\"{texto_rec[:300]}\"\n\n💡 Ver tus recomendaciones: /mis_recomendaciones"
+                )
+            except:
+                pass
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def mis_recomendaciones_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mis_recomendaciones - Ver recomendaciones recibidas"""
+    user_id = update.effective_user.id
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT autor_nombre, texto, fecha FROM recomendaciones WHERE destinatario_id = %s ORDER BY fecha DESC LIMIT 10", (user_id,))
+            else:
+                c.execute("SELECT autor_nombre, texto, fecha FROM recomendaciones WHERE destinatario_id = ? ORDER BY fecha DESC LIMIT 10", (user_id,))
+            recs = c.fetchall()
+            conn.close()
+            
+            if not recs:
+                await update.message.reply_text("⭐ Aún no tienes recomendaciones.\n\nPide a tus cofrades que te recomienden con /recomendar")
+                return
+            
+            msg = f"⭐ TUS RECOMENDACIONES ({len(recs)})\n{'━' * 28}\n\n"
+            for r in recs:
+                autor = r['autor_nombre'] if DATABASE_URL else r[0]
+                texto = r['texto'] if DATABASE_URL else r[1]
+                msg += f"👤 {autor}:\n\"{texto[:150]}\"\n\n"
+            
+            await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== 9. NEWSLETTER SEMANAL ====================
+
+async def generar_newsletter_semanal(context):
+    """Job: Genera y envía newsletter semanal los lunes a las 9AM"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        
+        datos = {}
+        
+        if DATABASE_URL:
+            # Mensajes de la semana
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha > CURRENT_TIMESTAMP - INTERVAL '7 days'")
+            datos['mensajes_semana'] = c.fetchone()['total']
+            
+            # Usuarios activos
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha > CURRENT_TIMESTAMP - INTERVAL '7 days'")
+            datos['usuarios_activos'] = c.fetchone()['total']
+            
+            # Nuevos miembros
+            c.execute("SELECT COUNT(*) as total FROM nuevos_miembros WHERE estado = 'aprobado' AND fecha_aprobacion > CURRENT_TIMESTAMP - INTERVAL '7 days'")
+            datos['nuevos_miembros'] = c.fetchone()['total']
+            
+            # Top 3 participantes
+            c.execute("""SELECT first_name || ' ' || COALESCE(last_name, '') as nombre, COUNT(*) as msgs 
+                        FROM mensajes WHERE fecha > CURRENT_TIMESTAMP - INTERVAL '7 days' 
+                        GROUP BY first_name, last_name ORDER BY msgs DESC LIMIT 3""")
+            datos['top_3'] = [(r['nombre'].strip(), r['msgs']) for r in c.fetchall()]
+            
+            # Anuncios nuevos
+            c.execute("SELECT COUNT(*) as total FROM anuncios WHERE fecha_publicacion > CURRENT_TIMESTAMP - INTERVAL '7 days' AND activo = TRUE")
+            datos['anuncios_nuevos'] = c.fetchone()['total']
+            
+            # Eventos próximos
+            c.execute("SELECT titulo, fecha_evento FROM eventos WHERE activo = TRUE AND fecha_evento > CURRENT_TIMESTAMP ORDER BY fecha_evento LIMIT 3")
+            datos['eventos'] = [(r['titulo'], str(r['fecha_evento'])[:10]) for r in c.fetchall()]
+            
+            # Total miembros
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+            datos['total_activos'] = c.fetchone()['total']
+        
+        conn.close()
+        
+        # Generar newsletter
+        newsletter = f"📰 NEWSLETTER SEMANAL COFRADÍA\n{'━' * 30}\n\n"
+        newsletter += f"📊 ACTIVIDAD DE LA SEMANA\n"
+        newsletter += f"💬 {datos.get('mensajes_semana', 0)} mensajes\n"
+        newsletter += f"👥 {datos.get('usuarios_activos', 0)} cofrades activos\n"
+        newsletter += f"🆕 {datos.get('nuevos_miembros', 0)} nuevos miembros\n\n"
+        
+        top = datos.get('top_3', [])
+        if top:
+            newsletter += "🏆 TOP PARTICIPANTES\n"
+            medallas = ['🥇', '🥈', '🥉']
+            for i, (nombre, msgs) in enumerate(top):
+                nombre_limpio = limpiar_nombre_display(nombre)
+                newsletter += f"{medallas[i]} {nombre_limpio}: {msgs} msgs\n"
+            newsletter += "\n"
+        
+        if datos.get('anuncios_nuevos', 0) > 0:
+            newsletter += f"📢 {datos['anuncios_nuevos']} anuncios nuevos — /anuncios\n\n"
+        
+        eventos = datos.get('eventos', [])
+        if eventos:
+            newsletter += "📅 PRÓXIMOS EVENTOS\n"
+            for titulo, fecha in eventos:
+                newsletter += f"📌 {titulo} — {fecha}\n"
+            newsletter += "Ver detalles: /eventos\n\n"
+        
+        newsletter += f"👥 Total miembros activos: {datos.get('total_activos', 0)}\n\n"
+        newsletter += "💡 ¿Sabías que puedes crear tu tarjeta profesional? /mi_tarjeta\n"
+        newsletter += "━" * 30
+        
+        # Enviar al grupo
+        if COFRADIA_GROUP_ID:
+            try:
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=newsletter)
+                logger.info("📰 Newsletter semanal enviada al grupo")
+            except Exception as e:
+                logger.error(f"Error enviando newsletter: {e}")
+    except Exception as e:
+        logger.error(f"Error generando newsletter: {e}")
+
+
+# ==================== 10. CONSULTAS ENTRE COFRADES ====================
+
+@requiere_suscripcion
+async def consultar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /consultar [título] | [descripción] - Publicar consulta profesional"""
+    if not context.args:
+        await update.message.reply_text(
+            "❓ CONSULTAS PROFESIONALES\n\n"
+            "Publica una consulta para que otros cofrades te ayuden.\n\n"
+            "Formato:\n"
+            "/consultar [título] | [descripción detallada]\n\n"
+            "Ejemplo:\n"
+            "/consultar Abogado laboral | Necesito asesoría sobre finiquito. ¿Alguien conoce un buen abogado?\n\n"
+            "Para consulta anónima agrega 'anónimo' al inicio:\n"
+            "/consultar anónimo Consulta médica | ¿Alguien recomienda traumatólogo en Santiago?"
+        )
+        return
+    
+    user = update.effective_user
+    texto = ' '.join(context.args)
+    
+    anonima = False
+    if texto.lower().startswith('anónim') or texto.lower().startswith('anonim'):
+        anonima = True
+        texto = re.sub(r'^an[oó]nim[oa]?\s*', '', texto, flags=re.IGNORECASE).strip()
+    
+    if '|' in texto:
+        partes = texto.split('|', 1)
+        titulo = partes[0].strip()
+        descripcion = partes[1].strip()
+    else:
+        titulo = texto[:80]
+        descripcion = texto
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            
+            if DATABASE_URL:
+                c.execute("""INSERT INTO consultas_cofrades (user_id, nombre_autor, titulo, descripcion, anonima)
+                            VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                         (user.id, nombre, titulo, descripcion, anonima))
+                consulta_id = c.fetchone()['id']
+            else:
+                c.execute("""INSERT INTO consultas_cofrades (user_id, nombre_autor, titulo, descripcion, anonima)
+                            VALUES (?, ?, ?, ?, ?)""",
+                         (user.id, nombre, titulo, descripcion, 1 if anonima else 0))
+                consulta_id = c.lastrowid
+            conn.commit()
+            conn.close()
+            
+            autor_display = "Anónimo" if anonima else nombre
+            await update.message.reply_text(
+                f"✅ Consulta #{consulta_id} publicada!\n\n"
+                f"❓ {titulo}\n"
+                f"👤 {autor_display}\n\n"
+                f"Los cofrades pueden responder con:\n"
+                f"/responder {consulta_id} [tu respuesta]"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def consultas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /consultas - Ver consultas abiertas"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT c.id, c.titulo, c.nombre_autor, c.anonima, c.fecha,
+                        (SELECT COUNT(*) FROM respuestas_consultas WHERE consulta_id = c.id) as resp_count
+                        FROM consultas_cofrades c WHERE c.resuelta = FALSE
+                        ORDER BY c.fecha DESC LIMIT 15""")
+        else:
+            c.execute("""SELECT c.id, c.titulo, c.nombre_autor, c.anonima, c.fecha,
+                        (SELECT COUNT(*) FROM respuestas_consultas WHERE consulta_id = c.id) as resp_count
+                        FROM consultas_cofrades c WHERE c.resuelta = 0
+                        ORDER BY c.fecha DESC LIMIT 15""")
+        
+        consultas = c.fetchall()
+        conn.close()
+        
+        if not consultas:
+            await update.message.reply_text("❓ No hay consultas abiertas.\n\n💡 Publica una: /consultar")
+            return
+        
+        msg = f"❓ CONSULTAS ABIERTAS\n{'━' * 28}\n\n"
+        for cq in consultas:
+            cid = cq['id'] if DATABASE_URL else cq[0]
+            titulo = cq['titulo'] if DATABASE_URL else cq[1]
+            autor = cq['nombre_autor'] if DATABASE_URL else cq[2]
+            anonima = cq['anonima'] if DATABASE_URL else cq[3]
+            resps = cq['resp_count'] if DATABASE_URL else cq[5]
+            autor_display = "Anónimo" if anonima else autor
+            msg += f"❓ #{cid} {titulo}\n"
+            msg += f"   👤 {autor_display} | 💬 {resps} respuesta(s)\n"
+            msg += f"   ➡️ /responder {cid} [tu respuesta]\n\n"
+        
+        await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def responder_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /responder [ID] [respuesta] - Responder a una consulta"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("❌ Uso: /responder [ID consulta] [tu respuesta]")
+        return
+    
+    try:
+        consulta_id = int(context.args[0])
+        respuesta_texto = ' '.join(context.args[1:])
+        user = update.effective_user
+        nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            
+            # Verificar consulta existe
+            if DATABASE_URL:
+                c.execute("SELECT titulo, user_id, nombre_autor FROM consultas_cofrades WHERE id = %s", (consulta_id,))
+            else:
+                c.execute("SELECT titulo, user_id, nombre_autor FROM consultas_cofrades WHERE id = ?", (consulta_id,))
+            consulta = c.fetchone()
+            
+            if not consulta:
+                conn.close()
+                await update.message.reply_text("❌ Consulta no encontrada.")
+                return
+            
+            titulo = consulta['titulo'] if DATABASE_URL else consulta[0]
+            autor_id = consulta['user_id'] if DATABASE_URL else consulta[1]
+            
+            if DATABASE_URL:
+                c.execute("INSERT INTO respuestas_consultas (consulta_id, user_id, nombre_autor, respuesta) VALUES (%s, %s, %s, %s)",
+                         (consulta_id, user.id, nombre, respuesta_texto[:1000]))
+            else:
+                c.execute("INSERT INTO respuestas_consultas (consulta_id, user_id, nombre_autor, respuesta) VALUES (?, ?, ?, ?)",
+                         (consulta_id, user.id, nombre, respuesta_texto[:1000]))
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(f"✅ Respuesta enviada a consulta #{consulta_id}: \"{titulo}\"")
+            
+            # Notificar al autor
+            try:
+                await context.bot.send_message(
+                    chat_id=autor_id,
+                    text=f"💬 Nueva respuesta a tu consulta #{consulta_id}:\n\"{titulo}\"\n\n"
+                         f"👤 {nombre} respondió:\n{respuesta_texto[:300]}\n\n"
+                         f"Ver todas: /ver_consulta {consulta_id}"
+                )
+            except:
+                pass
+    except ValueError:
+        await update.message.reply_text("❌ Uso: /responder [número ID] [tu respuesta]")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+@requiere_suscripcion
+async def ver_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /ver_consulta [ID] - Ver consulta con respuestas"""
+    if not context.args:
+        await update.message.reply_text("❌ Uso: /ver_consulta [ID]")
+        return
+    
+    try:
+        consulta_id = int(context.args[0])
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT titulo, descripcion, nombre_autor, anonima, fecha FROM consultas_cofrades WHERE id = %s", (consulta_id,))
+        else:
+            c.execute("SELECT titulo, descripcion, nombre_autor, anonima, fecha FROM consultas_cofrades WHERE id = ?", (consulta_id,))
+        consulta = c.fetchone()
+        
+        if not consulta:
+            conn.close()
+            await update.message.reply_text("❌ Consulta no encontrada.")
+            return
+        
+        titulo = consulta['titulo'] if DATABASE_URL else consulta[0]
+        desc = consulta['descripcion'] if DATABASE_URL else consulta[1]
+        autor = consulta['nombre_autor'] if DATABASE_URL else consulta[2]
+        anonima = consulta['anonima'] if DATABASE_URL else consulta[3]
+        
+        if DATABASE_URL:
+            c.execute("SELECT nombre_autor, respuesta, fecha FROM respuestas_consultas WHERE consulta_id = %s ORDER BY fecha", (consulta_id,))
+        else:
+            c.execute("SELECT nombre_autor, respuesta, fecha FROM respuestas_consultas WHERE consulta_id = ? ORDER BY fecha", (consulta_id,))
+        respuestas = c.fetchall()
+        conn.close()
+        
+        autor_display = "Anónimo" if anonima else autor
+        msg = f"❓ CONSULTA #{consulta_id}\n{'━' * 28}\n\n"
+        msg += f"📌 {titulo}\n👤 {autor_display}\n📝 {desc}\n\n"
+        
+        if respuestas:
+            msg += f"💬 RESPUESTAS ({len(respuestas)}):\n\n"
+            for r in respuestas:
+                r_autor = r['nombre_autor'] if DATABASE_URL else r[0]
+                r_texto = r['respuesta'] if DATABASE_URL else r[1]
+                msg += f"👤 {r_autor}:\n{r_texto[:200]}\n\n"
+        else:
+            msg += "💬 Sin respuestas aún.\n"
+        
+        msg += f"\n➡️ /responder {consulta_id} [tu respuesta]"
+        await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
 # ==================== SISTEMA DE ONBOARDING ====================
 
 MENSAJE_BIENVENIDA = """⚓ Bienvenido/a <b>{nombre} {apellido}</b>, Generación <b>{generacion}</b>, pasas a formar parte de este selecto grupo de camaradas, donde prima la sana convivencia y la ayuda colectiva en materia laboral. Es importante que cada uno se presente para conocerlos y saber a qué se dedican...
@@ -8037,15 +9415,24 @@ def main():
             BotCommand("buscar_profesional", "Buscar profesionales en Cofradia"),
             BotCommand("buscar_apoyo", "Buscar cofrades en busqueda laboral"),
             BotCommand("empleo", "Buscar ofertas de empleo"),
+            BotCommand("mi_tarjeta", "Tu tarjeta profesional"),
+            BotCommand("directorio", "Directorio de profesionales"),
+            BotCommand("conectar", "Conexiones inteligentes"),
+            BotCommand("alertas", "Alertas de palabras clave"),
+            BotCommand("publicar", "Publicar anuncio"),
+            BotCommand("anuncios", "Ver tablon de anuncios"),
+            BotCommand("eventos", "Ver proximos eventos"),
+            BotCommand("consultar", "Consulta profesional"),
+            BotCommand("consultas", "Ver consultas abiertas"),
+            BotCommand("recomendar", "Recomendar a un cofrade"),
             BotCommand("graficos", "Ver graficos de actividad"),
             BotCommand("estadisticas", "Estadisticas del grupo"),
             BotCommand("top_usuarios", "Ranking de participacion"),
             BotCommand("mi_perfil", "Tu perfil de actividad"),
             BotCommand("mi_cuenta", "Estado de tu suscripcion"),
-            BotCommand("categorias", "Categorias de mensajes"),
+            BotCommand("cumpleanos_mes", "Cumpleanos del mes"),
             BotCommand("resumen", "Resumen del dia"),
             BotCommand("resumen_semanal", "Resumen de 7 dias"),
-            BotCommand("resumen_mes", "Resumen mensual"),
             BotCommand("dotacion", "Total de integrantes"),
         ]
         try:
@@ -8060,11 +9447,13 @@ def main():
                     BotCommand("buscar_profesional", "Buscar profesionales"),
                     BotCommand("buscar_apoyo", "Cofrades en busqueda laboral"),
                     BotCommand("empleo", "Buscar empleos"),
+                    BotCommand("directorio", "Directorio profesional"),
+                    BotCommand("anuncios", "Tablon de anuncios"),
+                    BotCommand("eventos", "Proximos eventos"),
+                    BotCommand("consultas", "Consultas abiertas"),
                     BotCommand("graficos", "Graficos de actividad"),
                     BotCommand("estadisticas", "Estadisticas del grupo"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
-                    BotCommand("categorias", "Categorias de mensajes"),
-                    BotCommand("resumen", "Resumen del dia"),
                     BotCommand("mi_perfil", "Tu perfil de actividad"),
                     BotCommand("dotacion", "Total de integrantes"),
                     BotCommand("ayuda", "Ver todos los comandos"),
@@ -8135,6 +9524,25 @@ def main():
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
+    
+    # Handlers v3.0: Directorio, Alertas, Anuncios, Eventos, Consultas
+    application.add_handler(CommandHandler("mi_tarjeta", mi_tarjeta_comando))
+    application.add_handler(CommandHandler("directorio", directorio_comando))
+    application.add_handler(CommandHandler("alertas", alertas_comando))
+    application.add_handler(CommandHandler("publicar", publicar_comando))
+    application.add_handler(CommandHandler("anuncios", anuncios_comando))
+    application.add_handler(CommandHandler("conectar", conectar_comando))
+    application.add_handler(CommandHandler("cumpleanos_mes", cumpleanos_mes_comando))
+    application.add_handler(CommandHandler("encuesta", encuesta_comando))
+    application.add_handler(CommandHandler("nuevo_evento", nuevo_evento_comando))
+    application.add_handler(CommandHandler("eventos", eventos_comando))
+    application.add_handler(CommandHandler("asistir", asistir_comando))
+    application.add_handler(CommandHandler("recomendar", recomendar_comando))
+    application.add_handler(CommandHandler("mis_recomendaciones", mis_recomendaciones_comando))
+    application.add_handler(CommandHandler("consultar", consultar_comando))
+    application.add_handler(CommandHandler("consultas", consultas_comando))
+    application.add_handler(CommandHandler("responder", responder_consulta_comando))
+    application.add_handler(CommandHandler("ver_consulta", ver_consulta_comando))
     
     # Onboarding: Aprobar solicitudes
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
@@ -8444,6 +9852,78 @@ Pregunta de {user_name}: {mensaje}"""
             name='rag_indexacion'
         )
         logger.info("🧠 Tarea de indexación RAG programada cada 6 horas (primera en 5 min)")
+        
+        # Newsletter semanal: lunes a las 9:00 AM Chile
+        try:
+            job_queue.run_daily(
+                generar_newsletter_semanal,
+                time=dt_time(hour=12, minute=0),  # 12:00 UTC = 9:00 Chile
+                days=(0,),  # Solo lunes
+                name='newsletter_semanal'
+            )
+            logger.info("📰 Newsletter semanal programada: lunes 9:00 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar newsletter: {e}")
+        
+        # Recordatorio de eventos: diario a las 10:00 AM Chile
+        async def recordar_eventos_proximos(context):
+            """Envía recordatorio de eventos que ocurren mañana"""
+            try:
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""SELECT e.id, e.titulo, e.fecha_evento, e.lugar,
+                                array_agg(ea.user_id) as asistentes_ids
+                                FROM eventos e
+                                LEFT JOIN eventos_asistencia ea ON ea.evento_id = e.id
+                                WHERE e.activo = TRUE 
+                                AND e.fecha_evento::date = (CURRENT_DATE + INTERVAL '1 day')::date
+                                GROUP BY e.id, e.titulo, e.fecha_evento, e.lugar""")
+                    eventos_manana = c.fetchall()
+                    conn.close()
+                    
+                    for ev in eventos_manana:
+                        titulo = ev['titulo']
+                        fecha = str(ev['fecha_evento'])[:16]
+                        lugar = ev['lugar']
+                        ids = ev['asistentes_ids'] or []
+                        
+                        for uid in ids:
+                            if uid:
+                                try:
+                                    await context.bot.send_message(
+                                        chat_id=uid,
+                                        text=f"📅 RECORDATORIO: Mañana tienes un evento!\n\n"
+                                             f"📌 {titulo}\n📆 {fecha}\n📍 {lugar}\n\n"
+                                             f"Ver detalles: /eventos"
+                                    )
+                                except:
+                                    pass
+                        
+                        # Notificar al owner también
+                        if OWNER_ID:
+                            asistentes_count = len([x for x in ids if x])
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=OWNER_ID,
+                                    text=f"📅 Mañana: {titulo}\n📍 {lugar}\n👥 {asistentes_count} confirmados"
+                                )
+                            except:
+                                pass
+            except Exception as e:
+                logger.debug(f"Error recordando eventos: {e}")
+        
+        try:
+            job_queue.run_daily(
+                recordar_eventos_proximos,
+                time=dt_time(hour=13, minute=0),  # 13:00 UTC = 10:00 Chile
+                name='recordatorio_eventos'
+            )
+            logger.info("📅 Recordatorio de eventos programado: diario 10:00 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar recordatorio eventos: {e}")
     
     logger.info("✅ Bot iniciado!")
     
