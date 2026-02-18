@@ -828,11 +828,13 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
 
 # Mapeo de comandos por voz → comandos reales del bot
 COMANDOS_VOZ = {
+    # Búsqueda
     'buscar': 'buscar',
     'buscar ia': 'buscar_ia',
     'buscar inteligente': 'buscar_ia',
     'búsqueda ia': 'buscar_ia',
     'búsqueda inteligente': 'buscar_ia',
+    'busqueda ia': 'buscar_ia',
     'rag consulta': 'rag_consulta',
     'consulta rag': 'rag_consulta',
     'consultar documentos': 'rag_consulta',
@@ -844,19 +846,27 @@ COMANDOS_VOZ = {
     'buscar especialista sec': 'buscar_especialista_sec',
     'empleo': 'empleo',
     'buscar empleo': 'empleo',
+    # Directorio
     'mi tarjeta': 'mi_tarjeta',
     'tarjeta': 'mi_tarjeta',
     'directorio': 'directorio',
     'conectar': 'conectar',
     'conexiones': 'conectar',
+    'conexiones inteligentes': 'conectar',
+    # Alertas
     'alertas': 'alertas',
     'mis alertas': 'alertas',
+    'alerta': 'alertas',
+    # Comunidad
     'publicar': 'publicar',
     'anuncios': 'anuncios',
     'eventos': 'eventos',
     'consultas': 'consultas',
+    'consultas abiertas': 'consultas',
     'mis recomendaciones': 'mis_recomendaciones',
     'recomendaciones': 'mis_recomendaciones',
+    'encuesta': 'encuesta',
+    # Estadísticas
     'gráficos': 'graficos',
     'graficos': 'graficos',
     'estadísticas': 'estadisticas',
@@ -865,58 +875,79 @@ COMANDOS_VOZ = {
     'ranking': 'top_usuarios',
     'mi perfil': 'mi_perfil',
     'perfil': 'mi_perfil',
+    # Resúmenes
     'resumen': 'resumen',
+    'resumen del día': 'resumen',
+    'resumen del dia': 'resumen',
     'resumen semanal': 'resumen_semanal',
+    'resumen de la semana': 'resumen_semanal',
     'resumen mes': 'resumen_mes',
     'resumen mensual': 'resumen_mes',
+    'resumen del mes': 'resumen_mes',
+    # Grupo
     'dotación': 'dotacion',
     'dotacion': 'dotacion',
     'categorías': 'categorias',
     'categorias': 'categorias',
     'cumpleaños': 'cumpleanos_mes',
     'cumpleaños mes': 'cumpleanos_mes',
+    'cumpleaños del mes': 'cumpleanos_mes',
     'cumpleanos': 'cumpleanos_mes',
+    'cumpleanos mes': 'cumpleanos_mes',
     'mi cuenta': 'mi_cuenta',
     'ayuda': 'ayuda',
-    # Admin commands
+    # Admin
     'rag status': 'rag_status',
     'estado rag': 'rag_status',
+    'estado del rag': 'rag_status',
     'rag backup': 'rag_backup',
     'respaldo rag': 'rag_backup',
+    'backup rag': 'rag_backup',
     'ver solicitudes': 'ver_solicitudes',
     'solicitudes': 'ver_solicitudes',
+    'solicitudes pendientes': 'ver_solicitudes',
     'cobros admin': 'cobros_admin',
     'panel admin': 'cobros_admin',
+    'panel de cobros': 'cobros_admin',
     'ver topics': 'ver_topics',
+    'topics': 'ver_topics',
+    'rag reindexar': 'rag_reindexar',
+    'reindexar': 'rag_reindexar',
+    'reindexar rag': 'rag_reindexar',
 }
 
 
 def detectar_comando_por_voz(texto_transcrito: str):
     """Detecta si el texto transcrito contiene 'comando [nombre]' y extrae argumentos.
+    Whisper transcribe con puntuación: 'Cofradía Bot, Comando, Resumen, Mes.'
+    Debemos limpiar comas, puntos, etc. antes de buscar.
     Returns: (nombre_comando, argumentos) o None"""
-    texto_lower = texto_transcrito.lower().strip()
     
-    # Patrones para detectar intención de comando
-    # "comando buscar profesional ingeniería"
-    # "cofradía bot comando estadísticas"
-    # "bot comando buscar ia logística"
+    # PASO 1: Limpiar TODA la puntuación que Whisper agrega
+    texto_limpio = texto_transcrito.lower().strip()
+    texto_limpio = re.sub(r'[,.:;!?¿¡\-–—\"\'()…]', ' ', texto_limpio)  # Reemplazar puntuación por espacios
+    texto_limpio = re.sub(r'\s+', ' ', texto_limpio).strip()  # Colapsar espacios múltiples
+    
+    # PASO 2: Detectar la palabra "comando" en cualquier posición
     prefijos = [
-        'comando ', 'commando ', 'bot comando ', 'cofradia bot comando ',
-        'cofradía bot comando ', 'ejecuta comando ', 'ejecutar comando ',
+        'cofradía bot comando ', 'cofradia bot comando ',
+        'cofradía comando ', 'cofradia comando ',
+        'bot comando ', 'comando ', 'commando ',
+        'ejecuta comando ', 'ejecutar comando ',
         'ejecuta ', 'ejecutar '
     ]
     
     texto_sin_prefijo = None
     for prefijo in prefijos:
-        if prefijo in texto_lower:
-            idx = texto_lower.index(prefijo) + len(prefijo)
-            texto_sin_prefijo = texto_lower[idx:].strip()
+        if prefijo in texto_limpio:
+            idx = texto_limpio.index(prefijo) + len(prefijo)
+            texto_sin_prefijo = texto_limpio[idx:].strip()
             break
     
     if not texto_sin_prefijo:
         return None
     
-    # Buscar el comando más largo que coincida (greedy match)
+    # PASO 3: Buscar el comando más largo que coincida (greedy match)
     mejor_match = None
     mejor_longitud = 0
     
@@ -925,9 +956,24 @@ def detectar_comando_por_voz(texto_transcrito: str):
             if len(voz_cmd) > mejor_longitud:
                 mejor_longitud = len(voz_cmd)
                 argumentos = texto_sin_prefijo[len(voz_cmd):].strip()
-                # Limpiar puntuación residual de la transcripción
-                argumentos = argumentos.strip('.,;:!?')
                 mejor_match = (real_cmd, argumentos)
+    
+    # PASO 4: Si no hubo match exacto, intentar match flexible (palabras individuales)
+    if not mejor_match:
+        palabras_restantes = texto_sin_prefijo.split()
+        if palabras_restantes:
+            # Intentar con 1 palabra, luego 2, luego 3
+            for n_palabras in [3, 2, 1]:
+                if len(palabras_restantes) >= n_palabras:
+                    intento = ' '.join(palabras_restantes[:n_palabras])
+                    if intento in COMANDOS_VOZ:
+                        real_cmd = COMANDOS_VOZ[intento]
+                        argumentos = ' '.join(palabras_restantes[n_palabras:]).strip()
+                        mejor_match = (real_cmd, argumentos)
+                        break
+    
+    if mejor_match:
+        logger.info(f"🎤 Comando por voz detectado: /{mejor_match[0]} {mejor_match[1]} (de: '{texto_transcrito[:80]}')")
     
     return mejor_match
 
