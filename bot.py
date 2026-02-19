@@ -37,6 +37,20 @@ except ImportError:
     bs4_disponible = False
     logging.warning("⚠️ beautifulsoup4 no instalado - SEC scraper no disponible")
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    pil_disponible = True
+except ImportError:
+    pil_disponible = False
+    logging.warning("⚠️ Pillow no instalado - tarjetas imagen no disponibles")
+
+try:
+    import qrcode
+    qr_disponible = True
+except ImportError:
+    qr_disponible = False
+    logging.warning("⚠️ qrcode no instalado - QR en tarjetas no disponible")
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, 
@@ -914,6 +928,7 @@ COMANDOS_VOZ = {
     'rag reindexar': 'rag_reindexar',
     'reindexar': 'rag_reindexar',
     'reindexar rag': 'rag_reindexar',
+    'buscar usuario': 'buscar_usuario',
 }
 
 
@@ -1025,6 +1040,7 @@ async def ejecutar_comando_voz(comando: str, argumentos: str, update: Update, co
             'ver_solicitudes': aprobar_solicitud_comando,
             'cobros_admin': cobros_admin_comando,
             'ver_topics': ver_topics_comando,
+            'buscar_usuario': buscar_usuario_comando,
         }
         
         func = funciones_comando.get(comando)
@@ -1100,6 +1116,17 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
+        # FILTRO: Solo responder si el audio contiene la palabra "bot" (palabra completa)
+        texto_check = re.sub(r'[,.:;!?¿¡\-–—\"\'()…]', ' ', texto_transcrito.lower())
+        palabras_audio = texto_check.split()
+        if 'bot' not in palabras_audio:
+            # No lo nombraron — silenciosamente ignorar y borrar mensaje de "escuchando"
+            try:
+                await msg.delete()
+            except:
+                pass
+            return
+        
         await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
         
         # PASO 2.5: Detectar si el usuario dijo "comando [nombre]" para ejecutar un comando real
@@ -1142,13 +1169,15 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         resultados = busqueda_unificada(texto_transcrito, limit_historial=5, limit_rag=15)
         contexto = formatear_contexto_unificado(resultados, texto_transcrito)
         
-        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking, un grupo exclusivo de oficiales de la Armada de Chile.
-Responde en español de forma clara, concisa y amigable. Tu respuesta será convertida a audio, así que:
+        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking. SIEMPRE hablas en PRIMERA PERSONA (yo, me, mi).
+SIEMPRE inicias tu respuesta diciendo el nombre "{user.first_name}" al comienzo para que sea cercano y personal.
+Tu respuesta será convertida a audio, así que:
 - Usa frases cortas y naturales
 - No uses emojis, asteriscos ni formatos especiales
 - No uses listas con viñetas ni numeraciones
 - Habla de forma conversacional, como si estuvieras hablando por teléfono
 - Máximo 3-4 oraciones
+- Ejemplo de tono: "{user.first_name}, yo encontré que..." o "{user.first_name}, te cuento que..."
 
 NO menciones qué fuentes no tuvieron resultados, solo usa lo que hay.
 Complementa con tu conocimiento general cuando sea útil.
@@ -2314,6 +2343,7 @@ respondera con texto y audio!
 /editar_usuario [ID] [campo] [valor] - Editar datos
    Campos: nombre, apellido, generacion
 /eliminar_solicitud [ID] - Eliminar usuario
+/buscar_usuario [nombre] - Buscar ID de usuario
 /cobros_admin - Panel de cobros
 /ver_solicitudes - Ver solicitudes pendientes
 /generar_codigo - Generar codigo de activacion
@@ -3452,6 +3482,117 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ==================== COMANDOS ADMIN ====================
+
+async def buscar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_usuario [nombre] - Buscar ID de usuario por nombre (admin)"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 Uso: /buscar_usuario [nombre o apellido]\n\n"
+            "Ejemplo:\n"
+            "/buscar_usuario Pérez\n"
+            "/buscar_usuario Juan Carlos\n"
+            "/buscar_usuario @username"
+        )
+        return
+    
+    busqueda = ' '.join(context.args).lower().replace('@', '')
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        
+        resultados = []
+        
+        # Buscar en suscripciones
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, last_name, username, estado, fecha_expiracion 
+                        FROM suscripciones 
+                        WHERE LOWER(first_name) LIKE %s OR LOWER(COALESCE(last_name,'')) LIKE %s 
+                        OR LOWER(COALESCE(username,'')) LIKE %s
+                        ORDER BY first_name LIMIT 15""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        else:
+            c.execute("""SELECT user_id, first_name, last_name, username, estado, fecha_expiracion 
+                        FROM suscripciones 
+                        WHERE LOWER(first_name) LIKE ? OR LOWER(COALESCE(last_name,'')) LIKE ? 
+                        OR LOWER(COALESCE(username,'')) LIKE ?
+                        ORDER BY first_name LIMIT 15""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        
+        for r in c.fetchall():
+            uid = r['user_id'] if DATABASE_URL else r[0]
+            fname = r['first_name'] if DATABASE_URL else r[1]
+            lname = r['last_name'] if DATABASE_URL else r[2]
+            uname = r['username'] if DATABASE_URL else r[3]
+            estado = r['estado'] if DATABASE_URL else r[4]
+            exp = r['fecha_expiracion'] if DATABASE_URL else r[5]
+            resultados.append({
+                'uid': uid, 'nombre': f"{fname or ''} {lname or ''}".strip(),
+                'username': uname, 'estado': estado, 'exp': str(exp)[:10] if exp else '?',
+                'origen': 'suscripción'
+            })
+        
+        # Buscar también en nuevos_miembros (solicitudes)
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, nombre, apellido, username, estado, generacion 
+                        FROM nuevos_miembros 
+                        WHERE LOWER(COALESCE(nombre,'')) LIKE %s OR LOWER(COALESCE(apellido,'')) LIKE %s 
+                        OR LOWER(COALESCE(username,'')) LIKE %s
+                        ORDER BY nombre LIMIT 10""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        else:
+            c.execute("""SELECT user_id, nombre, apellido, username, estado, generacion 
+                        FROM nuevos_miembros 
+                        WHERE LOWER(COALESCE(nombre,'')) LIKE ? OR LOWER(COALESCE(apellido,'')) LIKE ? 
+                        OR LOWER(COALESCE(username,'')) LIKE ?
+                        ORDER BY nombre LIMIT 10""",
+                     (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+        
+        for r in c.fetchall():
+            uid = r['user_id'] if DATABASE_URL else r[0]
+            nombre = r['nombre'] if DATABASE_URL else r[1]
+            apellido = r['apellido'] if DATABASE_URL else r[2]
+            uname = r['username'] if DATABASE_URL else r[3]
+            estado = r['estado'] if DATABASE_URL else r[4]
+            gen = r['generacion'] if DATABASE_URL else r[5]
+            # Evitar duplicados
+            if not any(x['uid'] == uid for x in resultados):
+                resultados.append({
+                    'uid': uid, 'nombre': f"{nombre or ''} {apellido or ''}".strip(),
+                    'username': uname, 'estado': estado, 'exp': f"Gen: {gen}" if gen else '?',
+                    'origen': 'solicitud'
+                })
+        
+        conn.close()
+        
+        if not resultados:
+            await update.message.reply_text(f"❌ No se encontró ningún usuario con: \"{busqueda}\"")
+            return
+        
+        msg = f"🔍 USUARIOS ENCONTRADOS: \"{busqueda}\"\n{'━' * 30}\n\n"
+        for r in resultados:
+            estado_icon = "✅" if r['estado'] == 'activo' else "⏳" if r['estado'] == 'pendiente' else "❌"
+            msg += f"{estado_icon} {r['nombre']}\n"
+            msg += f"   🆔 {r['uid']}\n"
+            if r['username']: msg += f"   👤 @{r['username']}\n"
+            msg += f"   📋 {r['estado']} | {r['exp']} ({r['origen']})\n\n"
+        
+        msg += f"📊 {len(resultados)} resultado(s)\n\n"
+        msg += "💡 Usa el ID para:\n"
+        msg += "/aprobar_solicitud [ID]\n"
+        msg += "/editar_usuario [ID] [campo] [valor]\n"
+        msg += "/eliminar_solicitud [ID]"
+        
+        await enviar_mensaje_largo(update, msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
 
 async def cobros_admin_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /cobros_admin - Panel admin"""
@@ -7548,6 +7689,145 @@ Máximo 100 palabras. Sin introducción. No uses asteriscos ni guiones bajos."""
 
 # ==================== 1. DIRECTORIO PROFESIONAL ====================
 
+def generar_tarjeta_imagen(datos: dict) -> BytesIO:
+    """Genera una imagen PNG profesional de tarjeta de presentación con QR y logo"""
+    if not pil_disponible:
+        return None
+    
+    # Dimensiones tarjeta (ratio business card)
+    W, H = 900, 520
+    
+    # Colores
+    AZUL_OSCURO = (15, 47, 89)
+    AZUL_MEDIO = (30, 80, 140)
+    AZUL_CLARO = (52, 120, 195)
+    BLANCO = (255, 255, 255)
+    GRIS_CLARO = (245, 247, 250)
+    GRIS_TEXTO = (80, 80, 80)
+    GRIS_SUTIL = (150, 155, 165)
+    DORADO = (195, 165, 90)
+    
+    img = Image.new('RGB', (W, H), BLANCO)
+    draw = ImageDraw.Draw(img)
+    
+    # --- Fuentes (Ubuntu/Render tiene DejaVu) ---
+    def cargar_fuente(size, bold=False):
+        rutas = [
+            f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
+            f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else '-Regular'}.ttf",
+            f"/usr/share/fonts/truetype/freefont/FreeSans{'Bold' if bold else ''}.ttf",
+        ]
+        for ruta in rutas:
+            try:
+                return ImageFont.truetype(ruta, size)
+            except:
+                continue
+        return ImageFont.load_default()
+    
+    font_nombre = cargar_fuente(32, bold=True)
+    font_profesion = cargar_fuente(18, bold=True)
+    font_campo = cargar_fuente(15)
+    font_label = cargar_fuente(12, bold=True)
+    font_miembro = cargar_fuente(13)
+    font_cofradia_title = cargar_fuente(14, bold=True)
+    
+    # --- Fondo: franja superior azul oscuro ---
+    draw.rectangle([0, 0, W, 130], fill=AZUL_OSCURO)
+    # Línea dorada decorativa
+    draw.rectangle([0, 130, W, 134], fill=DORADO)
+    
+    # --- Logo Cofradía (ancla estilizada) en la franja superior ---
+    # Dibujar ancla simplificada
+    cx_logo, cy_logo = 60, 65
+    # Aro superior del ancla
+    draw.ellipse([cx_logo-12, cy_logo-35, cx_logo+12, cy_logo-10], outline=DORADO, width=3)
+    # Barra vertical
+    draw.line([cx_logo, cy_logo-10, cx_logo, cy_logo+25], fill=DORADO, width=3)
+    # Barra horizontal
+    draw.line([cx_logo-20, cy_logo+10, cx_logo+20, cy_logo+10], fill=DORADO, width=3)
+    # Curvas inferiores del ancla
+    draw.arc([cx_logo-25, cy_logo+5, cx_logo, cy_logo+30], 0, 180, fill=DORADO, width=3)
+    draw.arc([cx_logo, cy_logo+5, cx_logo+25, cy_logo+30], 0, 180, fill=DORADO, width=3)
+    
+    # Texto "COFRADÍA DE NETWORKING" al lado del logo
+    draw.text((95, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
+    draw.text((95, 58), "Red Profesional de Oficiales", fill=GRIS_SUTIL, font=font_campo)
+    
+    # --- Nombre grande en azul (sobre fondo blanco) ---
+    nombre = datos.get('nombre_completo', 'Sin nombre')
+    y_nombre = 155
+    draw.text((40, y_nombre), nombre, fill=AZUL_MEDIO, font=font_nombre)
+    
+    # --- Profesión debajo del nombre ---
+    profesion = datos.get('profesion', '')
+    if profesion:
+        draw.text((40, y_nombre + 42), profesion.upper(), fill=AZUL_CLARO, font=font_profesion)
+    
+    # --- Línea separadora sutil ---
+    y_sep = y_nombre + 72
+    draw.line([40, y_sep, 560, y_sep], fill=(220, 225, 235), width=1)
+    
+    # --- Campos de información ---
+    y_info = y_sep + 15
+    campos = [
+        ('empresa', '🏢', datos.get('empresa', '')),
+        ('servicios', '🛠️', datos.get('servicios', '')),
+        ('ciudad', '📍', datos.get('ciudad', '')),
+        ('telefono', '📱', datos.get('telefono', '')),
+        ('email', '📧', datos.get('email', '')),
+        ('linkedin', '🔗', datos.get('linkedin', '')),
+    ]
+    
+    for label, icono, valor in campos:
+        if valor:
+            # Icono como texto (emoji) puede no renderizarse bien, usar label
+            label_display = {'empresa': 'Empresa', 'servicios': 'Servicios', 'ciudad': 'Ciudad',
+                           'telefono': 'Teléfono', 'email': 'Email', 'linkedin': 'LinkedIn'}.get(label, label)
+            draw.text((42, y_info), f"{label_display}:", fill=GRIS_SUTIL, font=font_label)
+            draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
+            y_info += 24
+    
+    # --- QR Code (lado derecho) ---
+    qr_x, qr_y = 630, 155
+    qr_size = 160
+    
+    username = datos.get('username', '')
+    if username:
+        qr_url = f"https://t.me/{username}"
+    else:
+        qr_url = f"https://t.me/Cofradia_Premium_Bot"
+    
+    if qr_disponible:
+        try:
+            qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=1)
+            qr.add_data(qr_url)
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color=AZUL_OSCURO, back_color=BLANCO).convert('RGB')
+            qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR)
+            img.paste(qr_img, (qr_x, qr_y))
+            # Marco alrededor del QR
+            draw.rectangle([qr_x-3, qr_y-3, qr_x+qr_size+3, qr_y+qr_size+3], outline=AZUL_CLARO, width=2)
+        except Exception as e:
+            logger.debug(f"Error generando QR: {e}")
+    
+    # --- "Miembro Cofradía" debajo del QR ---
+    draw.text((qr_x + 18, qr_y + qr_size + 10), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
+    
+    # --- Franja inferior ---
+    draw.rectangle([0, H-35, W, H], fill=AZUL_OSCURO)
+    draw.text((40, H-27), "cofradía de networking", fill=GRIS_SUTIL, font=font_miembro)
+    draw.text((W-250, H-27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
+    
+    # --- Borde sutil alrededor de toda la tarjeta ---
+    draw.rectangle([0, 0, W-1, H-1], outline=(200, 205, 215), width=1)
+    
+    # Exportar a BytesIO
+    buffer = BytesIO()
+    img.save(buffer, format='PNG', quality=95)
+    buffer.seek(0)
+    return buffer
+
+
 @requiere_suscripcion
 async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /mi_tarjeta - Crear/ver tarjeta profesional"""
@@ -7578,18 +7858,44 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     ciudad = t['ciudad'] if DATABASE_URL else t[7]
                     linkedin = t['linkedin'] if DATABASE_URL else t[8]
                     
-                    msg = f"📇 TU TARJETA PROFESIONAL\n{'━' * 28}\n\n"
-                    msg += f"👤 {nombre}\n"
-                    if profesion: msg += f"💼 {profesion}\n"
-                    if empresa: msg += f"🏢 {empresa}\n"
-                    if servicios: msg += f"🛠️ {servicios}\n"
-                    if ciudad: msg += f"📍 {ciudad}\n"
-                    if telefono: msg += f"📱 {telefono}\n"
-                    if email: msg += f"📧 {email}\n"
-                    if linkedin: msg += f"🔗 {linkedin}\n"
-                    msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
-                    msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
-                    await update.message.reply_text(msg)
+                    # Enviar tarjeta como IMAGEN profesional
+                    datos_tarjeta = {
+                        'nombre_completo': nombre or f"{user.first_name or ''} {user.last_name or ''}".strip(),
+                        'profesion': profesion, 'empresa': empresa,
+                        'servicios': servicios, 'telefono': telefono,
+                        'email': email, 'ciudad': ciudad, 'linkedin': linkedin,
+                        'username': user.username or ''
+                    }
+                    
+                    img_buffer = None
+                    try:
+                        img_buffer = generar_tarjeta_imagen(datos_tarjeta)
+                    except Exception as e:
+                        logger.warning(f"Error generando tarjeta imagen: {e}")
+                    
+                    if img_buffer:
+                        await update.message.reply_photo(
+                            photo=img_buffer,
+                            caption=f"📇 Tarjeta de {nombre}\n\n"
+                                    f"💡 Comparte esta imagen con quien quieras!\n"
+                                    f"📱 El código QR lleva a tu perfil de Telegram.\n\n"
+                                    f"✏️ Editar: /mi_tarjeta [campo] [valor]\n"
+                                    f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
+                        )
+                    else:
+                        # Fallback: enviar como texto si no hay PIL
+                        msg = f"📇 TU TARJETA PROFESIONAL\n{'━' * 28}\n\n"
+                        msg += f"👤 {nombre}\n"
+                        if profesion: msg += f"💼 {profesion}\n"
+                        if empresa: msg += f"🏢 {empresa}\n"
+                        if servicios: msg += f"🛠️ {servicios}\n"
+                        if ciudad: msg += f"📍 {ciudad}\n"
+                        if telefono: msg += f"📱 {telefono}\n"
+                        if email: msg += f"📧 {email}\n"
+                        if linkedin: msg += f"🔗 {linkedin}\n"
+                        msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
+                        msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
+                        await update.message.reply_text(msg)
                 else:
                     await update.message.reply_text(
                         "📇 Aún no tienes tarjeta profesional.\n\n"
@@ -9808,6 +10114,7 @@ def main():
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
     application.add_handler(CommandHandler("editar_usuario", editar_usuario_comando))
     application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
+    application.add_handler(CommandHandler("buscar_usuario", buscar_usuario_comando))
     
     # Onboarding: ConversationHandler para preguntas de ingreso
     # /start es el entry point - detecta si es usuario nuevo o registrado

@@ -13,3 +13,4 @@ beautifulsoup4
 lxml
 PyPDF2
 edge-tts
+qrcode[pil]
