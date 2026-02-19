@@ -402,6 +402,41 @@ def init_db():
             )''')
             
             logger.info("✅ Base de datos PostgreSQL (Supabase) inicializada con migraciones v3.0")
+            
+            # === NUEVAS TABLAS v4.0: Cofradía Coins y Servicios Premium ===
+            c.execute('''CREATE TABLE IF NOT EXISTS cofradia_coins (
+                user_id BIGINT PRIMARY KEY,
+                balance INTEGER DEFAULT 0,
+                total_ganado INTEGER DEFAULT 0,
+                total_gastado INTEGER DEFAULT 0,
+                fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS coins_historial (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                cantidad INTEGER,
+                tipo TEXT,
+                descripcion TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS precios_servicios (
+                servicio TEXT PRIMARY KEY,
+                precio_pesos INTEGER DEFAULT 0,
+                precio_coins INTEGER DEFAULT 0,
+                descripcion TEXT,
+                activo BOOLEAN DEFAULT TRUE
+            )''')
+            for srv, pesos, coins, desc in [
+                ('generar_cv', 5000, 50, 'Generador de CV profesional con IA'),
+                ('entrevista', 3000, 30, 'Simulador de entrevista laboral'),
+                ('analisis_linkedin', 3000, 30, 'Análisis de perfil LinkedIn con IA'),
+                ('mi_dashboard', 2000, 20, 'Dashboard personal de networking'),
+                ('mentor', 5000, 50, 'Plan de mentoría IA personalizado'),
+            ]:
+                c.execute("""INSERT INTO precios_servicios (servicio, precio_pesos, precio_coins, descripcion)
+                            VALUES (%s, %s, %s, %s) ON CONFLICT (servicio) DO NOTHING""", (srv, pesos, coins, desc))
+            conn.commit()
+            logger.info("✅ Tablas v4.0 (Coins, Precios) inicializadas")
         else:
             # SQLite (fallback local)
             c.execute('''CREATE TABLE IF NOT EXISTS mensajes (
@@ -597,6 +632,33 @@ def init_db():
             )''')
             
             logger.info("✅ Base de datos SQLite inicializada con migraciones v3.0 (modo local)")
+            
+            # === NUEVAS TABLAS v4.0 SQLite ===
+            c.execute('''CREATE TABLE IF NOT EXISTS cofradia_coins (
+                user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0,
+                total_ganado INTEGER DEFAULT 0, total_gastado INTEGER DEFAULT 0,
+                fecha_actualizacion DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS coins_historial (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+                cantidad INTEGER, tipo TEXT, descripcion TEXT,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS precios_servicios (
+                servicio TEXT PRIMARY KEY, precio_pesos INTEGER DEFAULT 0,
+                precio_coins INTEGER DEFAULT 0, descripcion TEXT, activo INTEGER DEFAULT 1
+            )''')
+            for srv, pesos, coins, desc in [
+                ('generar_cv', 5000, 50, 'Generador de CV profesional con IA'),
+                ('entrevista', 3000, 30, 'Simulador de entrevista laboral'),
+                ('analisis_linkedin', 3000, 30, 'Análisis de perfil LinkedIn con IA'),
+                ('mi_dashboard', 2000, 20, 'Dashboard personal de networking'),
+                ('mentor', 5000, 50, 'Plan de mentoría IA personalizado'),
+            ]:
+                c.execute("INSERT OR IGNORE INTO precios_servicios (servicio, precio_pesos, precio_coins, descripcion) VALUES (?,?,?,?)",
+                         (srv, pesos, coins, desc))
+            conn.commit()
+            logger.info("✅ Tablas v4.0 SQLite inicializadas")
         
         # Fix: Transferir mensajes "Group" (admin anónimo) y corregir owner
         try:
@@ -929,6 +991,25 @@ COMANDOS_VOZ = {
     'reindexar': 'rag_reindexar',
     'reindexar rag': 'rag_reindexar',
     'buscar usuario': 'buscar_usuario',
+    # v4.0 Premium
+    'finanzas': 'finanzas',
+    'consulta financiera': 'finanzas',
+    'asesor financiero': 'finanzas',
+    'generar cv': 'generar_cv',
+    'generar currículum': 'generar_cv',
+    'curriculum': 'generar_cv',
+    'entrevista': 'entrevista',
+    'simulador entrevista': 'entrevista',
+    'análisis linkedin': 'analisis_linkedin',
+    'analisis linkedin': 'analisis_linkedin',
+    'mi dashboard': 'mi_dashboard',
+    'dashboard': 'mi_dashboard',
+    'mentor': 'mentor',
+    'mentoría': 'mentor',
+    'mentoria': 'mentor',
+    'mis coins': 'mis_coins',
+    'coins': 'mis_coins',
+    'monedas': 'mis_coins',
 }
 
 
@@ -1041,6 +1122,13 @@ async def ejecutar_comando_voz(comando: str, argumentos: str, update: Update, co
             'cobros_admin': cobros_admin_comando,
             'ver_topics': ver_topics_comando,
             'buscar_usuario': buscar_usuario_comando,
+            'finanzas': finanzas_comando,
+            'generar_cv': generar_cv_comando,
+            'entrevista': entrevista_comando,
+            'analisis_linkedin': analisis_linkedin_comando,
+            'mi_dashboard': mi_dashboard_comando,
+            'mentor': mentor_comando,
+            'mis_coins': mis_coins_comando,
         }
         
         func = funciones_comando.get(comando)
@@ -2325,8 +2413,21 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /estadisticas - Estadisticas generales
 /categorias - Categorias de mensajes
 /top_usuarios - Ranking de participacion
-/mi_perfil - Tu perfil de actividad
+/mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes - Cumpleanos del mes
+
+💰 ASISTENTE FINANCIERO
+/finanzas [consulta] - Asesoría basada en libros (gratis)
+
+💎 SERVICIOS PREMIUM (Coins o pesos)
+/generar_cv [orientación] - CV profesional con IA
+/entrevista [cargo] - Simulador de entrevista
+/analisis_linkedin - Análisis de perfil profesional
+/mi_dashboard - Dashboard de networking
+/mentor - Plan de mentoría personalizado
+
+🪙 COFRADÍA COINS
+/mis_coins - Balance y servicios canjeables
 
 📋 RESUMENES
 /resumen - Resumen del dia
@@ -2366,6 +2467,10 @@ respondera con texto y audio!
 /rag_backup - Verificar integridad datos RAG
 /rag_reindexar - Re-indexar documentos
 /eliminar_pdf [nombre] - Eliminar PDF indexado
+
+💰 PRECIOS Y COINS
+/set_precio [srv] [pesos] [coins] - Editar precios
+/dar_coins [user_id] [cant] - Regalar coins
 """
     
     await update.message.reply_text(texto)
@@ -3487,6 +3592,9 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         nombre_display = f"{first_name} {last_name}".strip()
         asyncio.create_task(verificar_alertas_mensaje(user_id, update.message.text, nombre_display, context))
+        
+        # Cofradía Coins: +1 por mensaje en grupo
+        otorgar_coins(user_id, 1, 'Mensaje en grupo')
     except Exception:
         pass
 
@@ -4456,8 +4564,13 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         conn.close()
         
+        # === v4.0: Coins y Trust Score ===
+        coins_info = get_coins_balance(user.id)
+        trust = calcular_trust_score(user.id)
+        
         mensaje = f"👤 MI PERFIL\n\n"
         mensaje += f"📛 Nombre: {nombre_display}\n"
+        mensaje += f"🏅 Trust Score: {trust['score']}/100 {trust['nivel']}\n"
         mensaje += f"📝 Mensajes totales: {total_msgs}\n"
         
         if top_cats:
@@ -4472,7 +4585,46 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 mensaje += f"\n⏰ Días restantes: {dias}\n"
         
-        await update.message.reply_text(mensaje)
+        # Cofradía Coins
+        mensaje += f"\n🪙 COFRADÍA COINS\n"
+        mensaje += f"  💰 Balance: {coins_info['balance']} Coins\n"
+        mensaje += f"  📈 Ganados: {coins_info['total_ganado']} | 📉 Gastados: {coins_info['total_gastado']}\n"
+        
+        # Servicios canjeables
+        try:
+            conn2 = get_db_connection()
+            if conn2:
+                c2 = conn2.cursor()
+                if DATABASE_URL:
+                    c2.execute("SELECT servicio, precio_coins, descripcion FROM precios_servicios WHERE activo = TRUE ORDER BY precio_coins")
+                else:
+                    c2.execute("SELECT servicio, precio_coins, descripcion FROM precios_servicios WHERE activo = 1 ORDER BY precio_coins")
+                servicios_premium = c2.fetchall()
+                conn2.close()
+                
+                if servicios_premium:
+                    mensaje += "\n🛒 SERVICIOS CANJEABLES\n"
+                    for s in servicios_premium:
+                        srv = s['servicio'] if DATABASE_URL else s[0]
+                        pc = s['precio_coins'] if DATABASE_URL else s[1]
+                        desc = s['descripcion'] if DATABASE_URL else s[2]
+                        if coins_info['balance'] >= pc:
+                            mensaje += f"  ✅ /{srv} ({pc} coins) — {desc}\n"
+                        else:
+                            faltan = pc - coins_info['balance']
+                            mensaje += f"  🔒 /{srv} ({pc} coins, faltan {faltan}) — {desc}\n"
+        except:
+            pass
+        
+        # Cómo ganar más
+        mensaje += "\n💡 GANAR MÁS COINS\n"
+        mensaje += "  💬 Mensaje en grupo: +1\n"
+        mensaje += "  💡 Responder consulta: +10\n"
+        mensaje += "  ⭐ Recomendar cofrade: +5\n"
+        mensaje += "  📅 Asistir evento: +20\n"
+        mensaje += "  📇 Crear tarjeta: +15\n"
+        
+        await enviar_mensaje_largo(update, mensaje)
         
     except Exception as e:
         logger.error(f"Error en mi_perfil: {e}")
@@ -8168,6 +8320,7 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             conn.commit()
             conn.close()
             await update.message.reply_text(f"✅ {campo.capitalize()} actualizado: {valor}\n\nVer tarjeta: /mi_tarjeta")
+            otorgar_coins(user_id, 15, 'Actualizar tarjeta profesional')
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
@@ -8832,6 +8985,7 @@ async def asistir_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             
             await update.message.reply_text(f"✅ Asistencia confirmada a \"{titulo}\"\n\n📅 Te recordaremos 24h antes.")
+            otorgar_coins(user_id, 20, f'Asistir evento: {titulo}')
     except ValueError:
         await update.message.reply_text("❌ Uso: /asistir [número ID]")
     except Exception as e:
@@ -8894,6 +9048,7 @@ async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             conn.close()
             
             await update.message.reply_text(f"⭐ Recomendación enviada para {dest_nombre}!\n\nAparecerá en su perfil profesional.")
+            otorgar_coins(update.effective_user.id, 5, f'Recomendar a {dest_nombre}')
             
             # Notificar al destinatario
             try:
@@ -9175,6 +9330,7 @@ async def responder_consulta_comando(update: Update, context: ContextTypes.DEFAU
             conn.close()
             
             await update.message.reply_text(f"✅ Respuesta enviada a consulta #{consulta_id}: \"{titulo}\"")
+            otorgar_coins(update.effective_user.id, 10, f'Responder consulta #{consulta_id}')
             
             # Notificar al autor
             try:
@@ -9246,6 +9402,762 @@ async def ver_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         await enviar_mensaje_largo(update, msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== SISTEMA COFRADÍA COINS v4.0 ====================
+
+def otorgar_coins(user_id: int, cantidad: int, descripcion: str):
+    """Otorga Cofradía Coins a un usuario"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""INSERT INTO cofradia_coins (user_id, balance, total_ganado)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                        balance = cofradia_coins.balance + %s,
+                        total_ganado = cofradia_coins.total_ganado + %s,
+                        fecha_actualizacion = CURRENT_TIMESTAMP""",
+                     (user_id, cantidad, cantidad, cantidad, cantidad))
+            c.execute("INSERT INTO coins_historial (user_id, cantidad, tipo, descripcion) VALUES (%s, %s, %s, %s)",
+                     (user_id, cantidad, 'ganado', descripcion))
+        else:
+            c.execute("SELECT user_id FROM cofradia_coins WHERE user_id = ?", (user_id,))
+            if c.fetchone():
+                c.execute("UPDATE cofradia_coins SET balance = balance + ?, total_ganado = total_ganado + ?, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = ?",
+                         (cantidad, cantidad, user_id))
+            else:
+                c.execute("INSERT INTO cofradia_coins (user_id, balance, total_ganado) VALUES (?, ?, ?)",
+                         (user_id, cantidad, cantidad))
+            c.execute("INSERT INTO coins_historial (user_id, cantidad, tipo, descripcion) VALUES (?, ?, ?, ?)",
+                     (user_id, cantidad, 'ganado', descripcion))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.debug(f"Error otorgando coins: {e}")
+        return False
+
+
+def gastar_coins(user_id: int, cantidad: int, descripcion: str) -> bool:
+    """Gasta Cofradía Coins. Retorna True si tenía suficiente."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT balance FROM cofradia_coins WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT balance FROM cofradia_coins WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        balance = (row['balance'] if DATABASE_URL else row[0]) if row else 0
+        if balance < cantidad:
+            conn.close()
+            return False
+        if DATABASE_URL:
+            c.execute("UPDATE cofradia_coins SET balance = balance - %s, total_gastado = total_gastado + %s, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = %s",
+                     (cantidad, cantidad, user_id))
+            c.execute("INSERT INTO coins_historial (user_id, cantidad, tipo, descripcion) VALUES (%s, %s, %s, %s)",
+                     (user_id, -cantidad, 'gastado', descripcion))
+        else:
+            c.execute("UPDATE cofradia_coins SET balance = balance - ?, total_gastado = total_gastado + ?, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = ?",
+                     (cantidad, cantidad, user_id))
+            c.execute("INSERT INTO coins_historial (user_id, cantidad, tipo, descripcion) VALUES (?, ?, ?, ?)",
+                     (user_id, -cantidad, 'gastado', descripcion))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+
+def get_coins_balance(user_id: int) -> dict:
+    """Obtiene balance de coins"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {'balance': 0, 'total_ganado': 0, 'total_gastado': 0}
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT balance, total_ganado, total_gastado FROM cofradia_coins WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT balance, total_ganado, total_gastado FROM cofradia_coins WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {'balance': row['balance'] if DATABASE_URL else row[0],
+                    'total_ganado': row['total_ganado'] if DATABASE_URL else row[1],
+                    'total_gastado': row['total_gastado'] if DATABASE_URL else row[2]}
+        return {'balance': 0, 'total_ganado': 0, 'total_gastado': 0}
+    except:
+        return {'balance': 0, 'total_ganado': 0, 'total_gastado': 0}
+
+
+def get_precio_servicio(servicio: str) -> dict:
+    """Obtiene precio de un servicio premium"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT precio_pesos, precio_coins, descripcion FROM precios_servicios WHERE servicio = %s", (servicio,))
+        else:
+            c.execute("SELECT precio_pesos, precio_coins, descripcion FROM precios_servicios WHERE servicio = ?", (servicio,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {'pesos': row['precio_pesos'] if DATABASE_URL else row[0],
+                    'coins': row['precio_coins'] if DATABASE_URL else row[1],
+                    'desc': row['descripcion'] if DATABASE_URL else row[2]}
+        return None
+    except:
+        return None
+
+
+def calcular_trust_score(user_id: int) -> dict:
+    """Calcula el Trust Score de un usuario (0-100)"""
+    score = 0
+    detalles = {}
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {'score': 0, 'nivel': '⚪ Nuevo', 'detalles': {}}
+        c = conn.cursor()
+
+        # Antigüedad (máx 20 pts)
+        if DATABASE_URL:
+            c.execute("SELECT fecha_registro FROM suscripciones WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT fecha_registro FROM suscripciones WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if row:
+            fecha = row['fecha_registro'] if DATABASE_URL else row[0]
+            if fecha:
+                try:
+                    dias = (datetime.now() - datetime.fromisoformat(str(fecha)[:19])).days
+                    pts = min(20, dias // 15)
+                    score += pts
+                    detalles['Antigüedad'] = pts
+                except:
+                    pass
+
+        # Mensajes (máx 20 pts)
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE user_id = %s", (str(user_id),))
+            msgs = c.fetchone()['t']
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE user_id = ?", (str(user_id),))
+            msgs = c.fetchone()[0]
+        pts = min(20, msgs // 10)
+        score += pts
+        detalles['Participación'] = pts
+
+        # Recomendaciones recibidas (máx 20 pts)
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                recs = c.fetchone()['t']
+            else:
+                c.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                recs = c.fetchone()[0]
+            pts = min(20, recs * 5)
+            score += pts
+            detalles['Recomendaciones'] = pts
+        except:
+            pass
+
+        # Consultas respondidas (máx 20 pts)
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as t FROM respuestas_consultas WHERE user_id = %s", (user_id,))
+                resps = c.fetchone()['t']
+            else:
+                c.execute("SELECT COUNT(*) FROM respuestas_consultas WHERE user_id = ?", (user_id,))
+                resps = c.fetchone()[0]
+            pts = min(20, resps * 4)
+            score += pts
+            detalles['Ayuda a otros'] = pts
+        except:
+            pass
+
+        # Tarjeta profesional (10 pts)
+        if DATABASE_URL:
+            c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+        if c.fetchone():
+            score += 10
+            detalles['Tarjeta profesional'] = 10
+
+        # Coins ganados (máx 10 pts)
+        coins = get_coins_balance(user_id)
+        pts = min(10, coins['total_ganado'] // 20)
+        score += pts
+        detalles['Actividad Coins'] = pts
+
+        conn.close()
+        score = min(score, 100)
+
+        if score >= 80: nivel = '🏆 Embajador'
+        elif score >= 60: nivel = '⭐ Destacado'
+        elif score >= 40: nivel = '🔵 Activo'
+        elif score >= 20: nivel = '🟢 Participante'
+        else: nivel = '⚪ Nuevo'
+
+        return {'score': score, 'nivel': nivel, 'detalles': detalles}
+    except:
+        return {'score': 0, 'nivel': '⚪ Nuevo', 'detalles': {}}
+
+
+# ==================== NIVEL 2: ASISTENTE FINANCIERO (gratis) ====================
+
+@requiere_suscripcion
+async def finanzas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /finanzas [consulta] - Asistente financiero basado en libros RAG"""
+    if not context.args:
+        await update.message.reply_text(
+            "💰 ASISTENTE FINANCIERO\n"
+            "Consulta basada en los 100+ libros de la biblioteca.\n\n"
+            "Ejemplos:\n"
+            "/finanzas qué dice Kiyosaki sobre inversiones\n"
+            "/finanzas cómo diversificar con 5 millones\n"
+            "/finanzas conviene APV o fondo mutuo\n\n"
+            "💡 Gratuito — ganas 1 Coin por consulta."
+        )
+        return
+    consulta = ' '.join(context.args)
+    msg = await update.message.reply_text("💰 Consultando biblioteca financiera...")
+    try:
+        resultados = busqueda_unificada(consulta, limit_historial=0, limit_rag=25)
+        contexto = formatear_contexto_unificado(resultados, consulta)
+        nombre = update.effective_user.first_name
+        prompt = f"""Eres un asesor financiero experto. Responde en primera persona, con ejemplos en pesos chilenos.
+Inicia tu respuesta con el nombre "{nombre}". Sé claro, práctico y conciso (máx 6 oraciones).
+Al final sugiere 1-2 libros de la biblioteca que profundicen el tema.
+No uses asteriscos, emojis ni formatos especiales.
+
+{contexto}
+
+Consulta de {nombre}: {consulta}"""
+        respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.5)
+        if not respuesta:
+            respuesta = "No pude generar una respuesta en este momento."
+        await msg.edit_text(f"💰 CONSULTA FINANCIERA\n{'━' * 28}\n\n{respuesta}")
+        otorgar_coins(update.effective_user.id, 1, 'Consulta financiera')
+        registrar_servicio_usado(update.effective_user.id, 'finanzas')
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 2: GENERADOR CV (premium) ====================
+
+@requiere_suscripcion
+async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /generar_cv [orientación] - CV profesional con IA"""
+    user_id = update.effective_user.id
+    orientacion = ' '.join(context.args) if context.args else ''
+    if user_id != OWNER_ID:
+        precio = get_precio_servicio('generar_cv')
+        if precio:
+            coins = get_coins_balance(user_id)
+            if coins['balance'] >= precio['coins']:
+                if not gastar_coins(user_id, precio['coins'], 'Servicio: generar_cv'):
+                    await update.message.reply_text("❌ Error procesando coins.")
+                    return
+                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
+            else:
+                faltan = precio['coins'] - coins['balance']
+                await update.message.reply_text(
+                    f"💎 SERVICIO PREMIUM: {precio['desc']}\n\n"
+                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Cofradía Coins\n"
+                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
+                    f"💡 Cómo ganar Coins:\n"
+                    f"  💬 Mensaje en grupo: +1\n  💡 Responder consulta: +10\n"
+                    f"  ⭐ Recomendar cofrade: +5\n  📅 Asistir evento: +20\n"
+                    f"  📇 Crear tarjeta: +15\n\n📱 Pago en pesos: contacta al admin."
+                )
+                return
+    # Obtener tarjeta
+    conn = get_db_connection()
+    tarjeta = {}
+    if conn:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+        t = c.fetchone()
+        if t:
+            tarjeta = {'nombre': t['nombre_completo'] if DATABASE_URL else t[1],
+                       'profesion': t['profesion'] if DATABASE_URL else t[2],
+                       'empresa': t['empresa'] if DATABASE_URL else t[3],
+                       'servicios': t['servicios'] if DATABASE_URL else t[4],
+                       'telefono': t['telefono'] if DATABASE_URL else t[5],
+                       'email': t['email'] if DATABASE_URL else t[6],
+                       'ciudad': t['ciudad'] if DATABASE_URL else t[7],
+                       'linkedin': t['linkedin'] if DATABASE_URL else t[8]}
+        conn.close()
+    if not tarjeta:
+        await update.message.reply_text("❌ Primero crea tu tarjeta profesional con /mi_tarjeta")
+        return
+    msg = await update.message.reply_text("📄 Generando tu CV profesional...")
+    try:
+        prompt = f"""Genera un CV profesional completo en español para esta persona.
+{f'Orientado a: {orientacion}' if orientacion else ''}
+Nombre: {tarjeta.get('nombre','')}, Profesión: {tarjeta.get('profesion','')},
+Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')},
+Ciudad: {tarjeta.get('ciudad','')}, Tel: {tarjeta.get('telefono','')},
+Email: {tarjeta.get('email','')}, LinkedIn: {tarjeta.get('linkedin','')}
+Secciones: Perfil Profesional, Experiencia, Habilidades, Formación, Competencias.
+Realista. No inventes datos. No uses asteriscos. Usa guiones para estructura."""
+        cv = llamar_groq(prompt, max_tokens=1500, temperature=0.6)
+        if cv:
+            await msg.edit_text(f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n💡 Copia y personaliza en Word.")
+            registrar_servicio_usado(user_id, 'generar_cv')
+        else:
+            await msg.edit_text("❌ Error generando CV.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 2: SIMULADOR ENTREVISTAS (premium) ====================
+
+@requiere_suscripcion
+async def entrevista_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /entrevista [cargo] - Simulador de entrevista laboral"""
+    user_id = update.effective_user.id
+    cargo = ' '.join(context.args) if context.args else ''
+    if not cargo:
+        await update.message.reply_text(
+            "🎯 SIMULADOR DE ENTREVISTA\n\n"
+            "Uso: /entrevista [cargo al que postulas]\n\n"
+            "Ejemplos:\n"
+            "/entrevista Gerente de Logística\n"
+            "/entrevista Analista Financiero Senior\n"
+            "/entrevista Director de Operaciones"
+        )
+        return
+    if user_id != OWNER_ID:
+        precio = get_precio_servicio('entrevista')
+        if precio:
+            coins = get_coins_balance(user_id)
+            if coins['balance'] >= precio['coins']:
+                if not gastar_coins(user_id, precio['coins'], 'Servicio: entrevista'):
+                    await update.message.reply_text("❌ Error procesando coins.")
+                    return
+                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
+            else:
+                faltan = precio['coins'] - coins['balance']
+                await update.message.reply_text(
+                    f"💎 SERVICIO PREMIUM: Simulador de entrevista\n\n"
+                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Coins\n"
+                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
+                    f"💡 /mis_coins para ver cómo ganar más."
+                )
+                return
+    msg = await update.message.reply_text(f"🎯 Preparando entrevista para: {cargo}...")
+    try:
+        prompt = f"""Simula una entrevista laboral profesional para: {cargo}.
+Genera 5 preguntas de entrevista (de básica a desafiante). Para cada una incluye:
+- La pregunta del entrevistador
+- Guía de respuesta ideal
+- Un tip práctico
+Español, profesional, realista. No uses asteriscos."""
+        resp = llamar_groq(prompt, max_tokens=1500, temperature=0.6)
+        if resp:
+            await msg.edit_text(f"🎯 SIMULADOR DE ENTREVISTA\n📋 Cargo: {cargo}\n{'━' * 30}\n\n{resp}")
+            registrar_servicio_usado(user_id, 'entrevista')
+        else:
+            await msg.edit_text("❌ Error generando entrevista.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 2: ANÁLISIS LINKEDIN (premium) ====================
+
+@requiere_suscripcion
+async def analisis_linkedin_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /analisis_linkedin - Análisis de perfil profesional con IA"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        precio = get_precio_servicio('analisis_linkedin')
+        if precio:
+            coins = get_coins_balance(user_id)
+            if coins['balance'] >= precio['coins']:
+                if not gastar_coins(user_id, precio['coins'], 'Servicio: analisis_linkedin'):
+                    await update.message.reply_text("❌ Error procesando coins.")
+                    return
+                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
+            else:
+                faltan = precio['coins'] - coins['balance']
+                await update.message.reply_text(
+                    f"💎 SERVICIO PREMIUM: Análisis LinkedIn\n\n"
+                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Coins\n"
+                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
+                    f"💡 /mis_coins para ver cómo ganar más."
+                )
+                return
+    conn = get_db_connection()
+    tarjeta = {}
+    if conn:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+        t = c.fetchone()
+        if t:
+            tarjeta = {'nombre': t['nombre_completo'] if DATABASE_URL else t[1],
+                       'profesion': t['profesion'] if DATABASE_URL else t[2],
+                       'empresa': t['empresa'] if DATABASE_URL else t[3],
+                       'servicios': t['servicios'] if DATABASE_URL else t[4],
+                       'linkedin': t['linkedin'] if DATABASE_URL else t[8]}
+        conn.close()
+    if not tarjeta:
+        await update.message.reply_text("❌ Crea tu tarjeta con /mi_tarjeta primero.")
+        return
+    msg = await update.message.reply_text("🔍 Analizando tu perfil profesional...")
+    try:
+        prompt = f"""Eres experto en LinkedIn y marca personal. Analiza este perfil:
+Nombre: {tarjeta.get('nombre','')}, Profesión: {tarjeta.get('profesion','')},
+Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')},
+LinkedIn: {tarjeta.get('linkedin','')}
+Genera: 1) Fortalezas del perfil, 2) Headline sugerido (120 chars),
+3) Resumen/About sugerido (3-4 oraciones), 4) 5 palabras clave a incluir,
+5) 3 acciones concretas para mejorar visibilidad. No uses asteriscos."""
+        resp = llamar_groq(prompt, max_tokens=1200, temperature=0.6)
+        if resp:
+            await msg.edit_text(f"🔍 ANÁLISIS DE PERFIL PROFESIONAL\n{'━' * 30}\n\n{resp}")
+            registrar_servicio_usado(user_id, 'analisis_linkedin')
+        else:
+            await msg.edit_text("❌ Error en el análisis.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 3: DASHBOARD PERSONAL (premium) ====================
+
+@requiere_suscripcion
+async def mi_dashboard_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mi_dashboard - Dashboard personal de networking"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        precio = get_precio_servicio('mi_dashboard')
+        if precio:
+            coins = get_coins_balance(user_id)
+            if coins['balance'] >= precio['coins']:
+                if not gastar_coins(user_id, precio['coins'], 'Servicio: mi_dashboard'):
+                    await update.message.reply_text("❌ Error procesando coins.")
+                    return
+                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
+            else:
+                faltan = precio['coins'] - coins['balance']
+                await update.message.reply_text(
+                    f"💎 SERVICIO PREMIUM: Dashboard Personal\n\n"
+                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Coins\n"
+                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
+                    f"💡 /mis_coins para ver cómo ganar más."
+                )
+                return
+    msg = await update.message.reply_text("📊 Generando tu dashboard...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        data = {}
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE user_id = %s", (str(user_id),))
+            data['mensajes'] = c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE autor_id = %s", (user_id,))
+            data['recs_dadas'] = c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+            data['recs_recibidas'] = c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM respuestas_consultas WHERE user_id = %s", (user_id,))
+            data['consultas_resp'] = c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM eventos_asistencia WHERE user_id = %s", (user_id,))
+            data['eventos'] = c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM anuncios WHERE user_id = %s", (user_id,))
+            data['anuncios'] = c.fetchone()['t']
+            c.execute("""SELECT COUNT(*) + 1 as rank FROM
+                        (SELECT user_id, COUNT(*) as msgs FROM mensajes GROUP BY user_id
+                        HAVING COUNT(*) > (SELECT COUNT(*) FROM mensajes WHERE user_id = %s)) sub""", (str(user_id),))
+            data['ranking'] = c.fetchone()['rank']
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE user_id = ?", (str(user_id),))
+            data['mensajes'] = c.fetchone()[0]
+            data['recs_dadas'] = data['recs_recibidas'] = data['consultas_resp'] = data['eventos'] = data['anuncios'] = 0
+            data['ranking'] = '?'
+        conn.close()
+        trust = calcular_trust_score(user_id)
+        coins_info = get_coins_balance(user_id)
+        nombre = f"{update.effective_user.first_name or ''} {update.effective_user.last_name or ''}".strip()
+        d = f"📊 DASHBOARD DE NETWORKING\n{'━' * 30}\n"
+        d += f"👤 {nombre}\n"
+        d += f"🏅 Trust Score: {trust['score']}/100 {trust['nivel']}\n"
+        d += f"🪙 Cofradía Coins: {coins_info['balance']}\n"
+        d += f"🏆 Ranking: #{data['ranking']}\n\n"
+        d += f"📈 MÉTRICAS\n"
+        d += f"  💬 Mensajes: {data['mensajes']}\n"
+        d += f"  ⭐ Recomendaciones dadas: {data['recs_dadas']}\n"
+        d += f"  ⭐ Recomendaciones recibidas: {data['recs_recibidas']}\n"
+        d += f"  💬 Consultas respondidas: {data['consultas_resp']}\n"
+        d += f"  📅 Eventos asistidos: {data['eventos']}\n"
+        d += f"  📢 Anuncios publicados: {data['anuncios']}\n\n"
+        d += f"🎯 TRUST SCORE DETALLE\n"
+        for k, v in trust['detalles'].items():
+            d += f"  {k}: {v}/20 pts\n"
+        await msg.edit_text(d)
+        registrar_servicio_usado(user_id, 'mi_dashboard')
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 3: REPORTE MERCADO LABORAL ====================
+
+async def generar_reporte_laboral(context):
+    """Job semanal: reporte de mercado laboral (viernes 10AM Chile)"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        profesiones = ciudades = categorias = []
+        total_tarjetas = 0
+        if DATABASE_URL:
+            c.execute("SELECT profesion, COUNT(*) as total FROM tarjetas_profesional WHERE profesion IS NOT NULL GROUP BY profesion ORDER BY total DESC LIMIT 5")
+            profesiones = [(r['profesion'], r['total']) for r in c.fetchall()]
+            c.execute("SELECT ciudad, COUNT(*) as total FROM tarjetas_profesional WHERE ciudad IS NOT NULL GROUP BY ciudad ORDER BY total DESC LIMIT 5")
+            ciudades = [(r['ciudad'], r['total']) for r in c.fetchall()]
+            c.execute("SELECT categoria, COUNT(*) as total FROM anuncios WHERE activo = TRUE GROUP BY categoria ORDER BY total DESC")
+            categorias = [(r['categoria'], r['total']) for r in c.fetchall()]
+            c.execute("SELECT COUNT(*) as t FROM tarjetas_profesional")
+            total_tarjetas = c.fetchone()['t']
+        conn.close()
+        rpt = f"📈 REPORTE LABORAL SEMANAL\n{'━' * 30}\n📅 {datetime.now().strftime('%d/%m/%Y')}\n\n"
+        if profesiones:
+            rpt += "🏢 PROFESIONES MÁS REPRESENTADAS\n"
+            for p, t in profesiones:
+                rpt += f"  {p}: {t} cofrades\n"
+            rpt += "\n"
+        if ciudades:
+            rpt += "📍 CIUDADES CON MÁS PROFESIONALES\n"
+            for ci, t in ciudades:
+                rpt += f"  {ci}: {t}\n"
+            rpt += "\n"
+        if categorias:
+            rpt += "📢 ANUNCIOS ACTIVOS POR CATEGORÍA\n"
+            for ca, t in categorias:
+                rpt += f"  {ca}: {t}\n"
+            rpt += "\n"
+        rpt += f"👥 Total directorio: {total_tarjetas} tarjetas\n\n"
+        rpt += "💡 /directorio para buscar profesionales"
+        if COFRADIA_GROUP_ID:
+            await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=rpt)
+            logger.info("📈 Reporte laboral semanal enviado")
+    except Exception as e:
+        logger.error(f"Error reporte laboral: {e}")
+
+
+# ==================== NIVEL 5: MENTORÍA IA (premium) ====================
+
+@requiere_suscripcion
+async def mentor_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mentor - Plan de mentoría IA personalizado"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        precio = get_precio_servicio('mentor')
+        if precio:
+            coins = get_coins_balance(user_id)
+            if coins['balance'] >= precio['coins']:
+                if not gastar_coins(user_id, precio['coins'], 'Servicio: mentor'):
+                    await update.message.reply_text("❌ Error procesando coins.")
+                    return
+                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
+            else:
+                faltan = precio['coins'] - coins['balance']
+                await update.message.reply_text(
+                    f"💎 SERVICIO PREMIUM: Mentoría IA\n\n"
+                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Coins\n"
+                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
+                    f"💡 /mis_coins para ver cómo ganar más."
+                )
+                return
+    conn = get_db_connection()
+    tarjeta = {}
+    if conn:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+        t = c.fetchone()
+        if t:
+            tarjeta = {'nombre': t['nombre_completo'] if DATABASE_URL else t[1],
+                       'profesion': t['profesion'] if DATABASE_URL else t[2],
+                       'empresa': t['empresa'] if DATABASE_URL else t[3],
+                       'servicios': t['servicios'] if DATABASE_URL else t[4]}
+        conn.close()
+    msg = await update.message.reply_text("🎓 Generando plan de mentoría personalizado...")
+    try:
+        trust = calcular_trust_score(user_id)
+        busq = tarjeta.get('profesion', 'liderazgo desarrollo profesional')
+        resultados_rag = busqueda_unificada(busq, limit_historial=0, limit_rag=10)
+        contexto_rag = formatear_contexto_unificado(resultados_rag, busq)
+        prompt = f"""Eres un mentor ejecutivo de alto nivel. Genera un PLAN DE DESARROLLO PROFESIONAL.
+PERFIL: {tarjeta.get('nombre', update.effective_user.first_name)}, {tarjeta.get('profesion','No especificada')},
+Empresa: {tarjeta.get('empresa','No especificada')}, Habilidades: {tarjeta.get('servicios','')},
+Trust Score: {trust['score']}/100 ({trust['nivel']})
+LIBROS DISPONIBLES: {contexto_rag}
+Genera: 1) DIAGNÓSTICO breve, 2) 3 metas a 6 meses, 3) 4 tareas concretas esta semana,
+4) 3 libros de la biblioteca con razón, 5) 3 acciones de networking en Cofradía.
+Concreto, práctico, motivador. No uses asteriscos."""
+        resp = llamar_groq(prompt, max_tokens=1500, temperature=0.6)
+        if resp:
+            await msg.edit_text(f"🎓 PLAN DE MENTORÍA PERSONALIZADO\n{'━' * 30}\n\n{resp}")
+            registrar_servicio_usado(user_id, 'mentor')
+        else:
+            await msg.edit_text("❌ Error generando plan.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ==================== NIVEL 5: COFRADÍA COINS COMANDOS ====================
+
+@requiere_suscripcion
+async def mis_coins_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mis_coins - Ver balance y servicios canjeables"""
+    user_id = update.effective_user.id
+    coins = get_coins_balance(user_id)
+    servicios = []
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT servicio, precio_coins, precio_pesos, descripcion FROM precios_servicios WHERE activo = TRUE ORDER BY precio_coins")
+            else:
+                c.execute("SELECT servicio, precio_coins, precio_pesos, descripcion FROM precios_servicios WHERE activo = 1 ORDER BY precio_coins")
+            servicios = c.fetchall()
+            conn.close()
+    except:
+        pass
+    msg = f"🪙 TUS COFRADÍA COINS\n{'━' * 28}\n\n"
+    msg += f"💰 Balance actual: {coins['balance']} Coins\n"
+    msg += f"📈 Total ganado: {coins['total_ganado']}\n"
+    msg += f"📉 Total gastado: {coins['total_gastado']}\n\n"
+    if servicios:
+        msg += "🛒 SERVICIOS CANJEABLES\n\n"
+        for s in servicios:
+            srv = s['servicio'] if DATABASE_URL else s[0]
+            precio_c = s['precio_coins'] if DATABASE_URL else s[1]
+            precio_p = s['precio_pesos'] if DATABASE_URL else s[2]
+            desc = s['descripcion'] if DATABASE_URL else s[3]
+            if coins['balance'] >= precio_c:
+                msg += f"  ✅ /{srv}: {precio_c} coins\n     {desc}\n\n"
+            else:
+                faltan = precio_c - coins['balance']
+                msg += f"  🔒 /{srv}: {precio_c} coins (faltan {faltan})\n     {desc} (${precio_p:,} CLP)\n\n"
+    msg += "💡 CÓMO GANAR COINS\n"
+    msg += "  💬 Mensaje en grupo: +1 coin\n"
+    msg += "  💡 Responder consulta: +10 coins\n"
+    msg += "  ⭐ Recomendar cofrade: +5 coins\n"
+    msg += "  📅 Asistir evento: +20 coins\n"
+    msg += "  📇 Crear tarjeta: +15 coins\n"
+    msg += "  💰 Consulta financiera: +1 coin\n"
+    msg += "  🔍 Búsqueda IA: +1 coin\n"
+    await enviar_mensaje_largo(update, msg)
+
+
+# ==================== NIVEL 4: NEWSLETTER EMAIL (placeholder) ====================
+
+async def generar_newsletter_email(context):
+    """Job: Newsletter por email (requiere SENDGRID_API_KEY en env vars)"""
+    sendgrid_key = os.environ.get('SENDGRID_API_KEY', '')
+    if not sendgrid_key:
+        return
+    # Se activa automáticamente cuando se configure la variable de entorno
+    logger.info("📧 Newsletter email: se ejecutará con SendGrid configurado")
+
+
+# ==================== ADMIN: PRECIOS Y COINS ====================
+
+async def set_precio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /set_precio [servicio] [pesos] [coins] - Admin: editar precios"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not context.args or len(context.args) < 3:
+        try:
+            conn = get_db_connection()
+            servicios_txt = ""
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("SELECT servicio, precio_pesos, precio_coins FROM precios_servicios ORDER BY servicio")
+                else:
+                    c.execute("SELECT servicio, precio_pesos, precio_coins FROM precios_servicios ORDER BY servicio")
+                for s in c.fetchall():
+                    srv = s['servicio'] if DATABASE_URL else s[0]
+                    pp = s['precio_pesos'] if DATABASE_URL else s[1]
+                    pc = s['precio_coins'] if DATABASE_URL else s[2]
+                    servicios_txt += f"  {srv}: ${pp:,} / {pc} coins\n"
+                conn.close()
+        except:
+            servicios_txt = ""
+        await update.message.reply_text(
+            f"💰 EDITAR PRECIOS\n\n"
+            f"Formato: /set_precio [servicio] [pesos] [coins]\n\n"
+            f"PRECIOS ACTUALES:\n{servicios_txt}\n"
+            f"Ejemplo: /set_precio generar_cv 7000 70"
+        )
+        return
+    servicio = context.args[0].lower()
+    try:
+        pesos = int(context.args[1])
+        coins = int(context.args[2])
+    except:
+        await update.message.reply_text("❌ Formato: /set_precio [servicio] [pesos] [coins]")
+        return
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("UPDATE precios_servicios SET precio_pesos = %s, precio_coins = %s WHERE servicio = %s", (pesos, coins, servicio))
+            else:
+                c.execute("UPDATE precios_servicios SET precio_pesos = ?, precio_coins = ? WHERE servicio = ?", (pesos, coins, servicio))
+            if c.rowcount == 0:
+                await update.message.reply_text(f"❌ Servicio '{servicio}' no encontrado.")
+            else:
+                conn.commit()
+                await update.message.reply_text(f"✅ Precio actualizado:\n{servicio}: ${pesos:,} CLP / {coins} Coins")
+            conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def dar_coins_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /dar_coins [user_id] [cantidad] - Admin: regalar coins"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Formato: /dar_coins [user_id] [cantidad]\nEjemplo: /dar_coins 123456789 100")
+        return
+    try:
+        target_id = int(context.args[0])
+        cantidad = int(context.args[1])
+    except:
+        await update.message.reply_text("❌ Formato: /dar_coins [user_id] [cantidad]")
+        return
+    if otorgar_coins(target_id, cantidad, f'Regalo admin'):
+        await update.message.reply_text(f"✅ {cantidad} Coins otorgados a {target_id}")
+    else:
+        await update.message.reply_text("❌ Error otorgando coins.")
 
 
 # ==================== SISTEMA DE ONBOARDING ====================
@@ -10335,6 +11247,17 @@ def main():
     application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
     application.add_handler(CommandHandler("buscar_usuario", buscar_usuario_comando))
     
+    # v4.0 handlers: Coins, Premium, Trust
+    application.add_handler(CommandHandler("finanzas", finanzas_comando))
+    application.add_handler(CommandHandler("generar_cv", generar_cv_comando))
+    application.add_handler(CommandHandler("entrevista", entrevista_comando))
+    application.add_handler(CommandHandler("analisis_linkedin", analisis_linkedin_comando))
+    application.add_handler(CommandHandler("mi_dashboard", mi_dashboard_comando))
+    application.add_handler(CommandHandler("mentor", mentor_comando))
+    application.add_handler(CommandHandler("mis_coins", mis_coins_comando))
+    application.add_handler(CommandHandler("set_precio", set_precio_comando))
+    application.add_handler(CommandHandler("dar_coins", dar_coins_comando))
+    
     # Onboarding: ConversationHandler para preguntas de ingreso
     # /start es el entry point - detecta si es usuario nuevo o registrado
     onboarding_conv = ConversationHandler(
@@ -10710,6 +11633,30 @@ Pregunta de {user_name}: {mensaje}"""
             logger.info("📅 Recordatorio de eventos programado: diario 10:00 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar recordatorio eventos: {e}")
+    
+        # Job: Reporte laboral semanal (viernes 10:00 AM Chile = 13:00 UTC)
+        try:
+            job_queue.run_daily(
+                generar_reporte_laboral,
+                time=dt_time(hour=13, minute=30),
+                days=(4,),  # Viernes
+                name='reporte_laboral'
+            )
+            logger.info("📈 Reporte laboral programado: viernes 10:30 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar reporte laboral: {e}")
+        
+        # Job: Newsletter email (lunes 10:00 AM Chile = 13:00 UTC)
+        try:
+            job_queue.run_daily(
+                generar_newsletter_email,
+                time=dt_time(hour=13, minute=15),
+                days=(0,),  # Lunes
+                name='newsletter_email'
+            )
+            logger.info("📧 Newsletter email programado: lunes 10:15 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar newsletter email: {e}")
     
     logger.info("✅ Bot iniciado!")
     
