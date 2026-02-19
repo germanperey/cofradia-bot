@@ -6,6 +6,7 @@ Desarrollado para @Cofradia_de_Networking
 """
 
 import os
+import math
 import re
 import io
 import json
@@ -79,7 +80,7 @@ BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
 
 # Estados de conversación para onboarding
-ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBOARD_PREGUNTA5 = range(5)
+ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBOARD_PREGUNTA5, ONBOARD_PREGUNTA6 = range(6)
 
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -276,6 +277,10 @@ def init_db():
                 pass
             try:
                 c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS last_name TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS fecha_incorporacion TIMESTAMP")
             except Exception:
                 pass
             
@@ -512,6 +517,10 @@ def init_db():
                 c.execute("ALTER TABLE suscripciones ADD COLUMN last_name TEXT DEFAULT ''")
             except Exception:
                 pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN fecha_incorporacion DATETIME")
+            except Exception:
+                pass
             
             c.execute('''CREATE TABLE IF NOT EXISTS rag_chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -696,6 +705,17 @@ def init_db():
                                 fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo'
                                 WHERE user_id = ?""", (owner_int,))
                     logger.info("✅ Registros owner corregidos, suscripción ∞")
+                
+                # Fijar fecha_incorporacion del fundador: 22-09-2020
+                try:
+                    if DATABASE_URL:
+                        c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
+                                    WHERE user_id = %s AND fecha_incorporacion IS NULL""", (owner_int,))
+                    else:
+                        c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
+                                    WHERE user_id = ? AND fecha_incorporacion IS NULL""", (owner_int,))
+                except:
+                    pass
                 
                 conn.commit()
         except Exception as e:
@@ -2290,6 +2310,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, Exception) as e:
             logger.debug(f"Error procesando deep link tarjeta: {e}")
     
+    # DEEP LINK: /start verificar_USERID → verificar autenticidad de usuario
+    if context.args and len(context.args) > 0 and context.args[0].startswith('verificar_'):
+        try:
+            target_id = int(context.args[0].replace('verificar_', ''))
+            stats = obtener_stats_tarjeta(target_id)
+            if stats['nombre_completo']:
+                estado_txt = '✅ Usuario ACTIVO' if stats['estado'] == 'activo' else '❌ Usuario ELIMINADO'
+                anio_gen = f"⚓ Generación: {stats['generacion']}\n" if stats['generacion'] else ""
+                verif = (f"🔒 VERIFICACIÓN DE USUARIO\n{'━' * 30}\n\n"
+                         f"👤 {stats['nombre_completo']}\n"
+                         f"{anio_gen}"
+                         f"📋 {estado_txt}\n"
+                         f"📅 Incorporación: {stats['fecha_incorporacion'] or 'No registrada'}\n\n"
+                         f"✅ Verificado por Cofradía de Networking")
+            else:
+                verif = "❌ USUARIO INEXISTENTE\n\nEste código no corresponde a ningún miembro de Cofradía."
+            await update.message.reply_text(verif)
+            return ConversationHandler.END
+        except:
+            pass
+    
     
     # Owner siempre tiene acceso completo
     if user_id == OWNER_ID:
@@ -2362,7 +2403,7 @@ Escribe /ayuda para ver todos los comandos.
         f"para fortalecer apoyos, fomentar el intercambio comercial y cultivar la amistad.\n\n"
         f"Para solicitar tu ingreso necesito que respondas 5 breves preguntas "
         f"(3 de información personal y 2 de verificación).\n\n"
-        f"📝 Pregunta 1 de 5:\n"
+        f"📝 Pregunta 1 de 6:\n"
         f"¿Cuál es tu Nombre y Apellido completo?\n"
         f"(Nombre + Apellido paterno + Apellido materno)"
     )
@@ -2394,7 +2435,7 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
         f"para fortalecer apoyos, fomentar el intercambio comercial y cultivar la amistad.\n\n"
         f"Para solicitar tu ingreso necesito que respondas 5 breves preguntas "
         f"(3 de información personal y 2 de verificación).\n\n"
-        f"📝 Pregunta 1 de 5:\n"
+        f"📝 Pregunta 1 de 6:\n"
         f"¿Cuál es tu Nombre y Apellido completo?\n"
         f"(Nombre + Apellido paterno + Apellido materno)"
     )
@@ -8096,6 +8137,97 @@ def generar_vcard(datos: dict) -> BytesIO:
     return buffer
 
 
+def generar_qr_verificacion(url: str, size: int = 65):
+    """Genera QR de verificación: fondo azul oscuro con puntos blancos"""
+    if not qr_disponible:
+        return None
+    try:
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=8, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="white", back_color="#0F2F59").convert('RGB')
+        qr_img = qr_img.resize((size, size), Image.NEAREST)
+        return qr_img
+    except:
+        return None
+
+
+def obtener_stats_tarjeta(user_id_param: int) -> dict:
+    """Obtiene antigüedad, recomendaciones y referidos para la tarjeta"""
+    stats = {'antiguedad': '0,0', 'recomendaciones': 0, 'referidos': 0,
+             'fecha_incorporacion': '', 'estado': 'activo', 'nombre_completo': '', 'generacion': ''}
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return stats
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT fecha_incorporacion, fecha_registro, estado, first_name, last_name FROM suscripciones WHERE user_id = %s", (user_id_param,))
+        else:
+            c.execute("SELECT fecha_incorporacion, fecha_registro, estado, first_name, last_name FROM suscripciones WHERE user_id = ?", (user_id_param,))
+        row = c.fetchone()
+        if row:
+            fecha_inc = (row['fecha_incorporacion'] if DATABASE_URL else row[0])
+            fecha_reg = (row['fecha_registro'] if DATABASE_URL else row[1])
+            estado = (row['estado'] if DATABASE_URL else row[2]) or 'activo'
+            fn = (row['first_name'] if DATABASE_URL else row[3]) or ''
+            ln = (row['last_name'] if DATABASE_URL else row[4]) or ''
+            stats['estado'] = estado
+            stats['nombre_completo'] = f"{fn} {ln}".strip()
+            fecha_base = fecha_inc or fecha_reg
+            if fecha_base:
+                try:
+                    fecha_str = str(fecha_base)[:19]
+                    if 'T' in fecha_str:
+                        fecha_dt = datetime.fromisoformat(fecha_str)
+                    else:
+                        fecha_dt = datetime.strptime(fecha_str[:10], '%Y-%m-%d')
+                    delta = datetime.now() - fecha_dt
+                    total_meses = delta.days // 30
+                    anios = total_meses // 12
+                    meses = total_meses % 12
+                    stats['antiguedad'] = f"{anios},{meses}"
+                    stats['fecha_incorporacion'] = fecha_dt.strftime('%d-%m-%Y')
+                except:
+                    pass
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT generacion FROM nuevos_miembros WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id_param,))
+            else:
+                c.execute("SELECT generacion FROM nuevos_miembros WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id_param,))
+            gen_row = c.fetchone()
+            if gen_row:
+                stats['generacion'] = (gen_row['generacion'] if DATABASE_URL else gen_row[0]) or ''
+        except:
+            pass
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id_param,))
+                stats['recomendaciones'] = c.fetchone()['t']
+            else:
+                c.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id_param,))
+                stats['recomendaciones'] = c.fetchone()[0]
+        except:
+            pass
+        try:
+            nb = stats['nombre_completo']
+            if nb and len(nb) > 3:
+                if DATABASE_URL:
+                    c.execute("SELECT COUNT(*) as t FROM nuevos_miembros WHERE LOWER(recomendado_por) LIKE %s AND estado = 'aprobado'",
+                             (f"%{nb.lower()[:20]}%",))
+                    stats['referidos'] = c.fetchone()['t']
+                else:
+                    c.execute("SELECT COUNT(*) FROM nuevos_miembros WHERE LOWER(recomendado_por) LIKE ? AND estado = 'aprobado'",
+                             (f"%{nb.lower()[:20]}%",))
+                    stats['referidos'] = c.fetchone()[0]
+        except:
+            pass
+        conn.close()
+    except:
+        pass
+    return stats
+
+
 def generar_qr_simple(url: str, size: int = 150):
     """Genera QR code limpio y escaneable — sin manipulación de píxeles"""
     if not qr_disponible:
@@ -8125,14 +8257,10 @@ def generar_qr_simple(url: str, size: int = 150):
 
 
 def generar_tarjeta_imagen(datos: dict) -> BytesIO:
-    """Genera una imagen PNG profesional de tarjeta de presentación con QR y logo"""
+    """Genera imagen PNG con QR verificación + iconos dorados de estadísticas"""
     if not pil_disponible:
         return None
-    
-    # Dimensiones tarjeta (ratio business card)
-    W, H = 900, 520
-    
-    # Colores
+    W, H = 900, 580
     AZUL_OSCURO = (15, 47, 89)
     AZUL_MEDIO = (30, 80, 140)
     AZUL_CLARO = (52, 120, 195)
@@ -8140,119 +8268,89 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     GRIS_TEXTO = (80, 80, 80)
     GRIS_SUTIL = (150, 155, 165)
     DORADO = (195, 165, 90)
-    
+    DORADO_OSCURO = (170, 140, 60)
     img = Image.new('RGB', (W, H), BLANCO)
     draw = ImageDraw.Draw(img)
-    
-    # --- Fuentes (Ubuntu/Render tiene DejaVu) ---
     def cargar_fuente(size, bold=False):
-        rutas = [
-            f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
-            f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else '-Regular'}.ttf",
-            f"/usr/share/fonts/truetype/freefont/FreeSans{'Bold' if bold else ''}.ttf",
-        ]
-        for ruta in rutas:
-            try:
-                return ImageFont.truetype(ruta, size)
-            except:
-                continue
+        rutas = [f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
+                 f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else '-Regular'}.ttf",
+                 f"/usr/share/fonts/truetype/freefont/FreeSans{'Bold' if bold else ''}.ttf"]
+        for r in rutas:
+            try: return ImageFont.truetype(r, size)
+            except: continue
         return ImageFont.load_default()
-    
     font_nombre = cargar_fuente(32, bold=True)
     font_profesion = cargar_fuente(18, bold=True)
     font_campo = cargar_fuente(15)
     font_label = cargar_fuente(12, bold=True)
     font_miembro = cargar_fuente(13)
     font_cofradia_title = cargar_fuente(14, bold=True)
-    
-    # --- Fondo: franja superior azul oscuro ---
+    font_stats_val = cargar_fuente(15, bold=True)
+    font_stats_lbl = cargar_fuente(11)
+    # --- Franja superior azul ---
     draw.rectangle([0, 0, W, 130], fill=AZUL_OSCURO)
-    # Línea dorada decorativa
     draw.rectangle([0, 130, W, 134], fill=DORADO)
-    
-    # --- Logo Cofradía (descargado desde URL, cacheado) ---
+    # --- Logo ---
     logo = descargar_logo_cofradia()
-    logo_end_x = 40  # Posición por defecto si no hay logo
+    logo_end_x = 40
     if logo:
         try:
-            # Ajustar logo a la franja (max 90px alto, proporcional)
             logo_h = 90
             ratio = logo_h / logo.height
             logo_w = int(logo.width * ratio)
             resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
             logo_resized = logo.resize((logo_w, logo_h), resample)
-            
-            # Pegar logo con transparencia sobre la franja azul
-            logo_x, logo_y = 30, 20
             if logo_resized.mode == 'RGBA':
-                img.paste(logo_resized, (logo_x, logo_y), logo_resized)
+                img.paste(logo_resized, (30, 20), logo_resized)
             else:
-                img.paste(logo_resized, (logo_x, logo_y))
-            logo_end_x = logo_x + logo_w + 15
-        except Exception as e:
-            logger.debug(f"Error pegando logo: {e}")
+                img.paste(logo_resized, (30, 20))
+            logo_end_x = 30 + logo_w + 15
+        except:
             logo_end_x = 40
-    
-    # Texto "COFRADÍA DE NETWORKING" al lado del logo
     draw.text((logo_end_x, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
     draw.text((logo_end_x, 58), "Red Profesional de Oficiales", fill=GRIS_SUTIL, font=font_campo)
-    
-    # --- Nombre grande en azul (sobre fondo blanco) ---
+    # --- QR VERIFICACIÓN (esquina superior derecha, discreto, azul+blanco) ---
+    user_id = datos.get('user_id', '')
+    if user_id:
+        verif_url = f"https://t.me/Cofradia_Premium_Bot?start=verificar_{user_id}"
+        qr_verif = generar_qr_verificacion(verif_url, size=65)
+        if qr_verif:
+            try:
+                img.paste(qr_verif, (W - 80, 12))
+            except:
+                pass
+    # --- Nombre ---
     nombre = datos.get('nombre_completo', 'Sin nombre')
     y_nombre = 155
     draw.text((40, y_nombre), nombre, fill=AZUL_MEDIO, font=font_nombre)
-    
-    # --- Profesión debajo del nombre ---
     profesion = datos.get('profesion', '')
     if profesion:
         draw.text((40, y_nombre + 42), profesion.upper(), fill=AZUL_CLARO, font=font_profesion)
-    
-    # --- Línea separadora sutil ---
     y_sep = y_nombre + 72
     draw.line([40, y_sep, 560, y_sep], fill=(220, 225, 235), width=1)
-    
-    # --- Campos de información ---
+    # --- Campos ---
     y_info = y_sep + 15
-    campos = [
-        ('empresa', datos.get('empresa', '')),
-        ('servicios', datos.get('servicios', '')),
-        ('ciudad', datos.get('ciudad', '')),
-        ('telefono', datos.get('telefono', '')),
-        ('email', datos.get('email', '')),
-        ('linkedin', datos.get('linkedin', '')),
-    ]
-    
-    labels_display = {
-        'empresa': 'Empresa', 'servicios': 'Servicios', 'ciudad': 'Ciudad',
-        'telefono': 'Teléfono', 'email': 'Email', 'linkedin': 'LinkedIn'
-    }
-    
+    campos = [('empresa', datos.get('empresa', '')), ('servicios', datos.get('servicios', '')),
+              ('ciudad', datos.get('ciudad', '')), ('telefono', datos.get('telefono', '')),
+              ('email', datos.get('email', '')), ('linkedin', datos.get('linkedin', ''))]
+    labels_d = {'empresa': 'Empresa', 'servicios': 'Servicios', 'ciudad': 'Ciudad',
+                'telefono': 'Teléfono', 'email': 'Email', 'linkedin': 'LinkedIn'}
     for label, valor in campos:
         if valor:
-            draw.text((42, y_info), f"{labels_display[label]}:", fill=GRIS_SUTIL, font=font_label)
+            draw.text((42, y_info), f"{labels_d[label]}:", fill=GRIS_SUTIL, font=font_label)
             draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
             y_info += 24
-    
-    # --- QR Code (lado derecho) ---
+    # --- QR principal (tarjeta compartible) ---
     qr_x, qr_y = 640, 155
     qr_size = 150
-    
-    username = datos.get('username', '')
-    user_id = datos.get('user_id', '')
-    
-    # Deep link: al escanear abre el bot y muestra la tarjeta de este usuario
     qr_url = f"https://t.me/Cofradia_Premium_Bot?start=tarjeta_{user_id}" if user_id else "https://t.me/Cofradia_Premium_Bot"
-    
     qr_img = generar_qr_simple(qr_url, size=qr_size)
     if qr_img:
         try:
             img.paste(qr_img, (qr_x, qr_y))
-            # Marco elegante alrededor del QR
             draw.rectangle([qr_x - 4, qr_y - 4, qr_x + qr_size + 4, qr_y + qr_size + 4], outline=AZUL_CLARO, width=2)
-        except Exception as e:
-            logger.debug(f"Error pegando QR: {e}")
-    
-    # --- Logo pequeño + "Miembro Cofradía" debajo del QR ---
+        except:
+            pass
     badge_y = qr_y + qr_size + 12
     if logo:
         try:
@@ -8261,27 +8359,59 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             mini_w = int(logo.width * ratio)
             resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
             mini_logo = logo.resize((mini_w, mini_h), resample)
-            mini_x = qr_x + (qr_size - mini_w - 100) // 2
             if mini_logo.mode == 'RGBA':
                 img.paste(mini_logo, (qr_x + 10, badge_y), mini_logo)
             else:
                 img.paste(mini_logo, (qr_x + 10, badge_y))
             draw.text((qr_x + 10 + mini_w + 8, badge_y + 7), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
-        except Exception as e:
-            logger.debug(f"Error pegando mini logo: {e}")
+        except:
             draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
     else:
         draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
-    
+    # === BARRA DE ESTADÍSTICAS — 3 iconos dorados ===
+    stats = obtener_stats_tarjeta(int(user_id)) if user_id else {'antiguedad': '0,0', 'recomendaciones': 0, 'referidos': 0}
+    bar_y = H - 78
+    draw.line([30, bar_y - 8, W - 30, bar_y - 8], fill=(220, 225, 235), width=1)
+    # ICONO 1: Reloj analógico dorado (antigüedad)
+    cx1, cy1 = 85, bar_y + 8
+    r = 15
+    draw.ellipse([cx1 - r, cy1 - r, cx1 + r, cy1 + r], outline=DORADO, width=2)
+    draw.line([cx1, cy1, cx1, cy1 - 10], fill=DORADO, width=2)
+    draw.line([cx1, cy1, cx1 + 7, cy1 + 3], fill=DORADO, width=2)
+    draw.ellipse([cx1 - 2, cy1 - 2, cx1 + 2, cy1 + 2], fill=DORADO)
+    for ang in [0, 90, 180, 270]:
+        rad = math.radians(ang)
+        mx = cx1 + int((r - 3) * math.sin(rad))
+        my = cy1 - int((r - 3) * math.cos(rad))
+        draw.ellipse([mx - 1, my - 1, mx + 1, my + 1], fill=DORADO)
+    draw.text((cx1 + r + 10, cy1 - 14), stats['antiguedad'], fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx1 + r + 10, cy1 + 3), "años", fill=GRIS_SUTIL, font=font_stats_lbl)
+    # ICONO 2: Estrella 5 puntas dorada (recomendaciones)
+    cx2, cy2 = 345, bar_y + 8
+    pts = []
+    for i in range(10):
+        ang = math.pi / 2 + i * math.pi / 5
+        rad_s = 15 if i % 2 == 0 else 7
+        pts.append((cx2 + rad_s * math.cos(ang), cy2 - rad_s * math.sin(ang)))
+    draw.polygon(pts, fill=DORADO, outline=DORADO_OSCURO)
+    draw.text((cx2 + 22, cy2 - 14), str(stats['recomendaciones']), fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx2 + 22, cy2 + 3), "recomendaciones", fill=GRIS_SUTIL, font=font_stats_lbl)
+    # ICONO 3: Trofeo dorado (referidos)
+    cx3, cy3 = 620, bar_y + 8
+    draw.arc([cx3 - 12, cy3 - 14, cx3 + 12, cy3 + 6], start=0, end=180, fill=DORADO, width=3)
+    draw.line([cx3 - 12, cy3 - 4, cx3 - 12, cy3 - 14], fill=DORADO, width=2)
+    draw.line([cx3 + 12, cy3 - 4, cx3 + 12, cy3 - 14], fill=DORADO, width=2)
+    draw.arc([cx3 - 18, cy3 - 10, cx3 - 8, cy3 + 2], start=180, end=0, fill=DORADO, width=2)
+    draw.arc([cx3 + 8, cy3 - 10, cx3 + 18, cy3 + 2], start=180, end=0, fill=DORADO, width=2)
+    draw.rectangle([cx3 - 3, cy3 + 4, cx3 + 3, cy3 + 11], fill=DORADO)
+    draw.rectangle([cx3 - 8, cy3 + 11, cx3 + 8, cy3 + 15], fill=DORADO)
+    draw.text((cx3 + 24, cy3 - 14), str(stats['referidos']), fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx3 + 24, cy3 + 3), "referidos", fill=GRIS_SUTIL, font=font_stats_lbl)
     # --- Franja inferior ---
     draw.rectangle([0, H - 35, W, H], fill=AZUL_OSCURO)
     draw.text((40, H - 27), "cofradía de networking", fill=GRIS_SUTIL, font=font_miembro)
     draw.text((W - 250, H - 27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
-    
-    # --- Borde sutil alrededor de toda la tarjeta ---
     draw.rectangle([0, 0, W - 1, H - 1], outline=(200, 205, 215), width=1)
-    
-    # Exportar a BytesIO
     buffer = BytesIO()
     img.save(buffer, format='PNG', quality=95)
     buffer.seek(0)
@@ -9048,6 +9178,9 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
         def get_col(row, idx):
             try:
                 val = row.iloc[idx] if idx < len(row) else ''
+                # Si es un Timestamp o datetime de pandas, retornar como objeto especial
+                if hasattr(val, 'month') and hasattr(val, 'day'):
+                    return val  # Retornar el datetime directamente
                 val_str = str(val).strip()
                 if val_str.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
                     return ''
@@ -9066,46 +9199,65 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
         filas_con_fecha = 0
         
         for idx, row in df.iterrows():
-            nombre = get_col(row, 2)    # Columna C
-            apellido = get_col(row, 3)  # Columna D
-            fecha_str = get_col(row, 23)  # Columna X (DD-MMM)
+            nombre = str(row.iloc[2]).strip() if len(row) > 2 and str(row.iloc[2]).strip().lower() not in ['nan', 'none', '', 'nat'] else ''
+            apellido = str(row.iloc[3]).strip() if len(row) > 3 and str(row.iloc[3]).strip().lower() not in ['nan', 'none', '', 'nat'] else ''
+            fecha_val = get_col(row, 23)  # Columna X
             
-            if not fecha_str or not nombre:
+            if not fecha_val or not nombre:
                 continue
             
             filas_con_fecha += 1
+            dia = 0
+            mes_num = 0
             
-            # Parsear DD-MMM: "15-Mar", "03-Jul", "7-Ene", "12-dic", "5/may", "28.feb"
             try:
-                fecha_clean = fecha_str.replace('/', '-').replace('.', '-').replace(' ', '-').strip()
-                partes = [p.strip() for p in fecha_clean.split('-') if p.strip()]
-                
-                if len(partes) >= 2:
-                    # Intentar: DD-MMM (número-texto)
-                    dia_str = partes[0]
-                    mes_str = partes[1].lower()
+                # CASO 1: pandas Timestamp / datetime object
+                if hasattr(fecha_val, 'month') and hasattr(fecha_val, 'day'):
+                    dia = fecha_val.day
+                    mes_num = fecha_val.month
+                else:
+                    fecha_str = str(fecha_val).strip()
                     
-                    # Si el primer elemento es texto y segundo número, invertir
-                    if not dia_str.isdigit() and len(partes) > 1:
-                        dia_str = partes[1]
-                        mes_str = partes[0].lower()
-                    
-                    dia = int(dia_str)
-                    mes_num = abrev_a_mes.get(mes_str[:3], 0)
-                    
-                    if mes_num == 0:
-                        # Intentar como número (DD-MM)
+                    # CASO 2: Formato ISO "2024-03-15" o "2024-03-15 00:00:00"
+                    if len(fecha_str) >= 10 and fecha_str[4] == '-':
                         try:
-                            mes_num = int(partes[1])
+                            dt = datetime.strptime(fecha_str[:10], '%Y-%m-%d')
+                            dia = dt.day
+                            mes_num = dt.month
                         except:
                             pass
                     
-                    if mes_num == mes_consulta and 1 <= dia <= 31:
-                        cumples.append({
-                            'nombre': f"{nombre} {apellido}".strip(),
-                            'dia': dia
-                        })
-            except (ValueError, IndexError):
+                    # CASO 3: DD-MMM (15-Mar, 03-Jul, 7-Ene)
+                    if mes_num == 0:
+                        fecha_clean = fecha_str.replace('/', '-').replace('.', '-').replace(' ', '-').strip()
+                        partes = [p.strip() for p in fecha_clean.split('-') if p.strip()]
+                        
+                        if len(partes) >= 2:
+                            dia_str = partes[0]
+                            mes_str = partes[1].lower()
+                            
+                            if not dia_str.isdigit() and len(partes) > 1:
+                                dia_str = partes[1]
+                                mes_str = partes[0].lower()
+                            
+                            try:
+                                dia = int(dia_str)
+                            except:
+                                dia = 0
+                            mes_num = abrev_a_mes.get(mes_str[:3], 0)
+                            
+                            if mes_num == 0:
+                                try:
+                                    mes_num = int(partes[1])
+                                except:
+                                    pass
+                
+                if mes_num == mes_consulta and 1 <= dia <= 31:
+                    cumples.append({
+                        'nombre': f"{nombre} {apellido}".strip(),
+                        'dia': dia
+                    })
+            except (ValueError, IndexError, TypeError):
                 continue
         
         logger.info(f"🎂 Filas con fecha: {filas_con_fecha}, Cumpleaños en mes {mes_consulta}: {len(cumples)}")
@@ -10077,15 +10229,60 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     msg = await update.message.reply_text("📄 Generando tu CV profesional...")
     try:
-        prompt = f"""Genera un CV profesional completo en español para esta persona.
-{f'Orientado a: {orientacion}' if orientacion else ''}
-Nombre: {tarjeta.get('nombre','')}, Profesión: {tarjeta.get('profesion','')},
-Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')},
-Ciudad: {tarjeta.get('ciudad','')}, Tel: {tarjeta.get('telefono','')},
-Email: {tarjeta.get('email','')}, LinkedIn: {tarjeta.get('linkedin','')}
-Secciones: Perfil Profesional, Experiencia, Habilidades, Formación, Competencias.
-Realista. No inventes datos. No uses asteriscos. Usa guiones para estructura."""
-        cv = llamar_groq(prompt, max_tokens=1500, temperature=0.6)
+        prompt = f"""Genera un Currículum Vitae PROFESIONAL de alto impacto en español.
+Debe estar diseñado para atraer a reclutadores y headhunters.
+{f'ORIENTACIÓN: Optimizado para postular a: {orientacion}' if orientacion else ''}
+
+DATOS DEL PROFESIONAL:
+- Nombre: {tarjeta.get('nombre', 'No disponible')}
+- Profesión/Cargo: {tarjeta.get('profesion', 'No disponible')}
+- Empresa actual: {tarjeta.get('empresa', 'No disponible')}
+- Servicios/Especialidades: {tarjeta.get('servicios', 'No disponible')}
+- Ciudad: {tarjeta.get('ciudad', 'Chile')}
+- Teléfono: {tarjeta.get('telefono', '')}
+- Email: {tarjeta.get('email', '')}
+- LinkedIn: {tarjeta.get('linkedin', '')}
+
+ESTRUCTURA OBLIGATORIA DEL CV:
+
+ENCABEZADO
+Nombre completo, datos de contacto, LinkedIn
+
+PERFIL PROFESIONAL (3-4 líneas)
+Resumen ejecutivo destacando valor diferenciador, años de experiencia estimados, 
+industria y logros clave. Debe captar la atención en 6 segundos.
+
+COMPETENCIAS CLAVE
+8-10 habilidades relevantes al cargo, organizadas en 2 columnas.
+Incluir competencias técnicas y blandas.
+
+EXPERIENCIA PROFESIONAL
+Basándote en empresa y profesión, generar 2-3 posiciones con:
+- Cargo - Empresa (Período estimado)
+- 3-4 logros cuantificables por posición (usar métricas: %, $, N)
+- Verbos de acción: Lideré, Implementé, Optimicé, Incrementé, Reduje
+
+FORMACIÓN ACADÉMICA
+Inferir formación coherente con la profesión.
+Incluir universidad y año estimado.
+
+CERTIFICACIONES Y DESARROLLO PROFESIONAL
+2-3 certificaciones relevantes al cargo.
+
+IDIOMAS
+Español nativo + inglés (nivel estimado según perfil).
+
+INFORMACIÓN ADICIONAL
+Miembro de Cofradía de Networking - Red Profesional de Oficiales de la Armada de Chile.
+
+REGLAS:
+- NO uses asteriscos ni negritas. Usa MAYÚSCULAS para títulos.
+- Usa guiones (-) para listas.
+- Sé realista, no inventes datos imposibles pero sí optimiza lo existente.
+- Redacción orientada a ATS (Applicant Tracking Systems).
+- Lenguaje profesional ejecutivo.
+- Máximo 2 páginas de contenido."""
+        cv = llamar_groq(prompt, max_tokens=2000, temperature=0.6)
         if cv:
             await msg.edit_text(f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n💡 Copia y personaliza en Word.")
             registrar_servicio_usado(user_id, 'generar_cv')
@@ -10620,7 +10817,7 @@ async def onboard_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Por favor ingresa tu nombre completo con al menos 3 palabras:\n"
             "Nombre + Apellido paterno + Apellido materno\n\n"
             "Ejemplo: Juan Carlos Pérez González\n\n"
-            "📝 Pregunta 1 de 5:\n"
+            "📝 Pregunta 1 de 6:\n"
             "¿Cuál es tu Nombre y Apellido completo?"
         )
         return ONBOARD_NOMBRE
@@ -10635,7 +10832,7 @@ async def onboard_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"✅ Gracias, {nombre}!\n\n"
-        f"📝 Pregunta 2 de 5:\n"
+        f"📝 Pregunta 2 de 6:\n"
         f"¿A qué Generación perteneces? (Año de Guardiamarina, ingresa 4 dígitos)\n\n"
         f"Ejemplo: 1995"
     )
@@ -10667,7 +10864,7 @@ async def onboard_generacion(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(
         f"✅ Generación {texto}!\n\n"
-        f"📝 Pregunta 3 de 5:\n"
+        f"📝 Pregunta 3 de 6:\n"
         f"¿Quién te recomendó el grupo Cofradía?"
     )
     
@@ -10693,7 +10890,7 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
             "❌ No se permiten signos especiales (+) en esta respuesta.\n\n"
             "Por favor indica el nombre y apellido de la persona que te recomendó.\n\n"
             "Ejemplo: Pedro González\n\n"
-            "📝 Pregunta 3 de 5:\n"
+            "📝 Pregunta 3 de 6:\n"
             "¿Quién te recomendó el grupo Cofradía?"
         )
         return ONBOARD_RECOMENDADO
@@ -10706,7 +10903,7 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"No se aceptan respuestas genéricas como \"{frase}\".\n"
                 f"Necesitamos al menos un nombre y un apellido.\n\n"
                 f"Ejemplo: Pedro González\n\n"
-                f"📝 Pregunta 3 de 5:\n"
+                f"📝 Pregunta 3 de 6:\n"
                 f"¿Quién te recomendó el grupo Cofradía?"
             )
             return ONBOARD_RECOMENDADO
@@ -10717,7 +10914,7 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "❌ Por favor indica al menos un nombre y un apellido de quien te recomendó.\n\n"
             "Ejemplo: Pedro González\n\n"
-            "📝 Pregunta 3 de 5:\n"
+            "📝 Pregunta 3 de 6:\n"
             "¿Quién te recomendó el grupo Cofradía?"
         )
         return ONBOARD_RECOMENDADO
@@ -10736,7 +10933,7 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await update.message.reply_text(
         f"✅ Gracias, {nombre}!\n\n"
-        f"🔍 Pregunta 4 de 5:\n"
+        f"🔍 Pregunta 4 de 6:\n"
         f"¿Qué aprendiste durante el primer año en la Escuela Naval?\n\n"
         f"Selecciona una alternativa:",
         reply_markup=reply_markup
@@ -10775,7 +10972,7 @@ async def onboard_pregunta4_callback(update: Update, context: ContextTypes.DEFAU
     
     await query.edit_message_text(
         f"{texto_feedback}"
-        f"🔍 Pregunta 5 de 5:\n"
+        f"🔍 Pregunta 5 de 6:\n"
         f"¿Cuál es la primera formación del día?\n\n"
         f"Selecciona una alternativa:",
         reply_markup=reply_markup
@@ -10785,12 +10982,44 @@ async def onboard_pregunta4_callback(update: Update, context: ContextTypes.DEFAU
 
 
 async def onboard_pregunta5_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback para pregunta 5 (Diana) - respuesta correcta: b"""
+    """Callback para pregunta 5 (Diana) - respuesta correcta: b → pasa a pregunta 6"""
     query = update.callback_query
     await query.answer()
     
     respuesta = query.data.replace("onboard_p5_", "")
     context.user_data['onboard_respuesta5'] = respuesta
+    
+    if respuesta == "b":
+        texto_feedback = "✅ Correcto!\n\n"
+    else:
+        texto_feedback = "📝 Respuesta registrada.\n\n"
+    
+    # Pregunta 6: Desayuno cadetes fines de semana (selección múltiple)
+    keyboard = [
+        [InlineKeyboardButton("a) Snack de algas + ración de combate 350 Grs.", callback_data="onboard_p6_a")],
+        [InlineKeyboardButton("b) Batido energético y frutas", callback_data="onboard_p6_b")],
+        [InlineKeyboardButton("c) Porridge y taza de leche", callback_data="onboard_p6_c")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"{texto_feedback}"
+        f"🔍 Pregunta 6 de 6:\n"
+        f"¿Cuál es el desayuno de los cadetes los fines de semana?\n\n"
+        f"Selecciona una alternativa:",
+        reply_markup=reply_markup
+    )
+    
+    return ONBOARD_PREGUNTA6
+
+
+async def onboard_pregunta6_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback para pregunta 6 (Porridge) - respuesta correcta: c"""
+    query = update.callback_query
+    await query.answer()
+    
+    respuesta = query.data.replace("onboard_p6_", "")
+    context.user_data['onboard_respuesta6'] = respuesta
     
     # Recopilar todos los datos
     nombre = context.user_data.get('onboard_nombre', '')
@@ -10800,12 +11029,14 @@ async def onboard_pregunta5_callback(update: Update, context: ContextTypes.DEFAU
     user_id = context.user_data.get('onboard_user_id', query.from_user.id)
     username = context.user_data.get('onboard_username', '')
     resp4 = context.user_data.get('onboard_respuesta4', '')
-    resp5 = respuesta
+    resp5 = context.user_data.get('onboard_respuesta5', '')
+    resp6 = respuesta
     
     # Evaluar respuestas de verificación
     p4_correcta = (resp4 == "c")  # La Campana
     p5_correcta = (resp5 == "b")  # Diana
-    verificacion_ok = p4_correcta and p5_correcta
+    p6_correcta = (resp6 == "c")  # Porridge y taza de leche
+    verificacion_ok = p4_correcta and p5_correcta and p6_correcta
     
     # Guardar en base de datos
     try:
@@ -10828,7 +11059,7 @@ async def onboard_pregunta5_callback(update: Update, context: ContextTypes.DEFAU
         logger.error(f"Error guardando nuevo miembro: {e}")
     
     # Confirmar al usuario
-    if respuesta == "b":
+    if resp6 == "c":
         texto_feedback = "✅ Correcto!\n\n"
     else:
         texto_feedback = "📝 Respuesta registrada.\n\n"
@@ -10846,6 +11077,7 @@ async def onboard_pregunta5_callback(update: Update, context: ContextTypes.DEFAU
     # Mapear letras a textos para el owner
     opciones_p4 = {"a": "Preparar legumbres", "b": "Saltar en paracaídas", "c": "La Campana ✅"}
     opciones_p5 = {"a": "Fondo", "b": "Diana ✅", "c": "Rancho"}
+    opciones_p6 = {"a": "Snack algas + ración combate", "b": "Batido energético", "c": "Porridge y leche ✅"}
     
     # Enviar al owner para aprobar
     verificacion_texto = "✅ APROBÓ" if verificacion_ok else "❌ FALLÓ"
@@ -10861,7 +11093,8 @@ async def onboard_pregunta5_callback(update: Update, context: ContextTypes.DEFAU
                  f"📱 Username: @{username}\n\n"
                  f"🔍 VERIFICACIÓN NAVAL: {verificacion_texto}\n"
                  f"   P4 (Escuela Naval): {opciones_p4.get(resp4, resp4)} {'✅' if p4_correcta else '❌'}\n"
-                 f"   P5 (Primera formación): {opciones_p5.get(resp5, resp5)} {'✅' if p5_correcta else '❌'}\n\n"
+                 f"   P5 (Primera formación): {opciones_p5.get(resp5, resp5)} {'✅' if p5_correcta else '❌'}\n"
+                 f"   P6 (Desayuno cadetes): {opciones_p6.get(resp6, resp6)} {'✅' if p6_correcta else '❌'}\n\n"
                  f"Para aprobar, usa:\n"
                  f"/aprobar_solicitud {user_id}"
         )
@@ -11115,11 +11348,13 @@ async def editar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_T
             "Campos editables:\n"
             "  nombre - Nombre del usuario\n"
             "  apellido - Apellido(s) del usuario\n"
-            "  generacion - Año de generación\n\n"
+            "  generacion - Año de generación\n"
+            "  antiguedad - Fecha incorporación (DD-MM-YYYY)\n\n"
             "Ejemplos:\n"
             "  /editar_usuario 13031156 nombre Marcelo\n"
             "  /editar_usuario 13031156 apellido Villegas Soto\n"
-            "  /editar_usuario 13031156 generacion 1995"
+            "  /editar_usuario 13031156 generacion 1995\n"
+            "  /editar_usuario 13031156 antiguedad 15-03-2021"
         )
         return
     
@@ -11132,12 +11367,68 @@ async def editar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_T
     campo = context.args[1].lower()
     valor = ' '.join(context.args[2:])
     
+    # Manejar campo especial: antiguedad (fecha_incorporacion)
+    if campo == 'antiguedad':
+        try:
+            # Parsear DD-MM-YYYY
+            fecha_inc = datetime.strptime(valor, '%d-%m-%Y')
+            fecha_iso = fecha_inc.strftime('%Y-%m-%d')
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Formato de fecha inválido.\n\n"
+                "Usa: DD-MM-YYYY\n"
+                "Ejemplo: /editar_usuario 13031156 antiguedad 15-03-2021"
+            )
+            return
+        
+        try:
+            conn = get_db_connection()
+            if not conn:
+                await update.message.reply_text("❌ Error de conexión a BD")
+                return
+            c = conn.cursor()
+            
+            # Obtener fecha_registro original (se mantiene siempre intacta)
+            if DATABASE_URL:
+                c.execute("SELECT fecha_registro, fecha_incorporacion FROM suscripciones WHERE user_id = %s", (target_user_id,))
+            else:
+                c.execute("SELECT fecha_registro, fecha_incorporacion FROM suscripciones WHERE user_id = ?", (target_user_id,))
+            row = c.fetchone()
+            
+            if not row:
+                await update.message.reply_text(f"⚠️ No se encontró usuario {target_user_id}")
+                conn.close()
+                return
+            
+            fecha_reg_original = (row['fecha_registro'] if DATABASE_URL else row[0])
+            fecha_inc_anterior = (row['fecha_incorporacion'] if DATABASE_URL else row[1])
+            
+            # Actualizar solo fecha_incorporacion (fecha_registro queda intacta)
+            if DATABASE_URL:
+                c.execute("UPDATE suscripciones SET fecha_incorporacion = %s WHERE user_id = %s", (fecha_iso, target_user_id))
+            else:
+                c.execute("UPDATE suscripciones SET fecha_incorporacion = ? WHERE user_id = ?", (fecha_iso, target_user_id))
+            
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ ANTIGÜEDAD EDITADA\n{'━' * 30}\n\n"
+                f"🆔 User ID: {target_user_id}\n"
+                f"📅 Fecha Activación (original): {str(fecha_reg_original)[:10]}\n"
+                f"📅 Fecha Incorporación: {str(fecha_inc_anterior)[:10] if fecha_inc_anterior else 'No tenía'} → {valor}\n\n"
+                f"💡 La fecha de Activación original se mantiene intacta."
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+        return
+    
     campos_validos = {'nombre': 'nombre', 'apellido': 'apellido', 'generacion': 'generacion'}
     
     if campo not in campos_validos:
         await update.message.reply_text(
             f"❌ Campo '{campo}' no válido.\n\n"
-            f"Campos editables: nombre, apellido, generacion"
+            f"Campos editables: nombre, apellido, generacion, antiguedad"
         )
         return
     
@@ -11623,6 +11914,7 @@ def main():
             ONBOARD_RECOMENDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_recomendado)],
             ONBOARD_PREGUNTA4: [CallbackQueryHandler(onboard_pregunta4_callback, pattern='^onboard_p4_')],
             ONBOARD_PREGUNTA5: [CallbackQueryHandler(onboard_pregunta5_callback, pattern='^onboard_p5_')],
+            ONBOARD_PREGUNTA6: [CallbackQueryHandler(onboard_pregunta6_callback, pattern='^onboard_p6_')],
         },
         fallbacks=[
             CommandHandler("cancelar", onboard_cancelar),
