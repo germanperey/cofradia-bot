@@ -7982,12 +7982,31 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
-            caption = f"📇 Tarjeta profesional de {nombre}\n"
+            # Caption con links clicables (HTML)
+            caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
             if empresa: caption += f"🏢 {empresa}\n"
-            caption += "\n🔗 Cofradía de Networking — Red Profesional de Oficiales"
+            if ciudad: caption += f"📍 {ciudad}\n"
+            if telefono: caption += f"📱 <a href=\"tel:{telefono.replace(' ', '')}\">{telefono}</a>\n"
+            if email: caption += f"📧 <a href=\"mailto:{email}\">{email}</a>\n"
+            if linkedin:
+                url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
+                caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+            caption += "\n🔗 Cofradía de Networking"
             
-            await update.message.reply_photo(photo=img_buffer, caption=caption)
+            await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
+            
+            # Enviar como archivo descargable
+            try:
+                img_buffer.seek(0)
+                nombre_archivo = re.sub(r'[^a-zA-Z0-9]', '_', nombre)[:30]
+                await update.message.reply_document(
+                    document=img_buffer,
+                    filename=f"Tarjeta_{nombre_archivo}.png",
+                    caption="📥 Imagen exportable — guárdala o compártela"
+                )
+            except Exception as e:
+                logger.debug(f"Error enviando documento tarjeta pública: {e}")
         else:
             # Fallback texto
             msg = f"📇 TARJETA PROFESIONAL\n{'━' * 28}\n\n"
@@ -8053,14 +8072,35 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
+                        # Construir caption con links clicables (HTML)
+                        caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
+                        if profesion: caption += f"💼 {profesion}\n"
+                        if empresa: caption += f"🏢 {empresa}\n"
+                        if ciudad: caption += f"📍 {ciudad}\n"
+                        if telefono: caption += f"📱 <a href=\"tel:{telefono.replace(' ', '')}\">{telefono}</a>\n"
+                        if email: caption += f"📧 <a href=\"mailto:{email}\">{email}</a>\n"
+                        if linkedin:
+                            url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
+                            caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+                        caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
+                        
                         await update.message.reply_photo(
                             photo=img_buffer,
-                            caption=f"📇 Tarjeta de {nombre}\n\n"
-                                    f"💡 Comparte esta imagen con quien quieras!\n"
-                                    f"📱 El código QR lleva a tu perfil de Telegram.\n\n"
-                                    f"✏️ Editar: /mi_tarjeta [campo] [valor]\n"
-                                    f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
+                            caption=caption,
+                            parse_mode='HTML'
                         )
+                        
+                        # Enviar también como archivo descargable (exportar imagen)
+                        try:
+                            img_buffer.seek(0)
+                            nombre_archivo = re.sub(r'[^a-zA-Z0-9]', '_', nombre)[:30]
+                            await update.message.reply_document(
+                                document=img_buffer,
+                                filename=f"Tarjeta_{nombre_archivo}.png",
+                                caption="📥 Imagen exportable — guárdala o compártela por cualquier medio"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Error enviando documento tarjeta: {e}")
                     else:
                         # Fallback: enviar como texto si no hay PIL
                         msg = f"📇 TU TARJETA PROFESIONAL\n{'━' * 28}\n\n"
