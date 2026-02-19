@@ -878,18 +878,51 @@ def transcribir_audio_groq(audio_bytes: bytes, filename: str = "audio.ogg") -> s
 
 
 async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio MP3 a partir de texto usando edge-tts"""
+    """Genera audio MP3 con voz natural usando edge-tts"""
     try:
         import edge_tts
         
-        # Limitar texto para evitar audios muy largos (máx ~2000 chars)
+        # Limitar texto
         if len(texto) > 2000:
             texto = texto[:1997] + "..."
         
-        communicate = edge_tts.Communicate(texto, VOZ_TTS, rate="+5%")
+        # Preprocesar texto para voz más natural:
+        # 1. Agregar pausas después de puntos (punto → punto + pausa)
+        # 2. Pausas en comas largas
+        # 3. Respiraciones naturales en listas
+        texto_voz = texto
+        
+        # Reemplazar emojis y símbolos que confunden al TTS
+        texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═]', '', texto_voz)
+        texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
+        
+        # Convertir abreviaciones comunes
+        texto_voz = texto_voz.replace(' ej:', ', por ejemplo:')
+        texto_voz = texto_voz.replace(' Ej:', ', por ejemplo:')
+        texto_voz = texto_voz.replace(' etc.', ', etcétera.')
+        texto_voz = texto_voz.replace(' vs ', ' versus ')
+        
+        # Pausas naturales: punto seguido → pausa más larga
+        texto_voz = texto_voz.replace('. ', '... ')
+        # Dos puntos → pausa media
+        texto_voz = texto_voz.replace(': ', ':... ')
+        # Punto y coma → pausa
+        texto_voz = texto_voz.replace('; ', ';... ')
+        
+        # Limpiar espacios múltiples
+        texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
+        
+        # Generar con voz más lenta y natural
+        # rate="-3%" → ligeramente más lento (natural)
+        # pitch="+1Hz" → tono ligeramente más cálido
+        communicate = edge_tts.Communicate(
+            texto_voz, 
+            VOZ_TTS, 
+            rate="-3%",
+            pitch="+1Hz"
+        )
         await communicate.save(filename)
         
-        # Verificar que se generó el archivo
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
             logger.info(f"🔊 Audio TTS generado: {os.path.getsize(filename)} bytes")
             return filename
@@ -2371,60 +2404,55 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
 
 @solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /ayuda - Lista de comandos (SOLO EN PRIVADO)"""
+    """Comando /ayuda - Lista de comandos con ejemplos expandibles"""
     user_id = update.effective_user.id
     
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
-🔍 BUSQUEDA
+🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
-/buscar_ia [consulta] - Busqueda con IA
-/rag_consulta [pregunta] - Busqueda en documentos
-/buscar_profesional [area] - Buscar profesionales
-/buscar_apoyo [area] - Buscar en busqueda laboral
-/buscar_especialista_sec [esp], [ciudad] - SEC
+/buscar_ia [consulta] - Búsqueda con IA
+/rag_consulta [pregunta] - Buscar en documentos
+/buscar_profesional [área] - Buscar profesionales
+/buscar_apoyo [área] - Buscar en bolsa laboral
 /empleo [cargo] - Buscar empleos
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
-/directorio [busqueda] - Buscar en directorio
+/directorio [búsqueda] - Buscar en directorio
 /conectar - Conexiones inteligentes sugeridas
 /recomendar @user [texto] - Recomendar cofrade
 /mis_recomendaciones - Ver recomendaciones
 
 📢 COMUNIDAD
 /publicar [cat] titulo | desc - Publicar anuncio
-/anuncios [categoria] - Ver tablon de anuncios
+/anuncios [categoría] - Ver tablón de anuncios
 /consultar titulo | desc - Consulta profesional
 /consultas - Ver consultas abiertas
 /responder [ID] [resp] - Responder consulta
-/ver_consulta [ID] - Ver consulta completa
 /encuesta pregunta | opc1 | opc2 - Crear encuesta
 
 📅 EVENTOS
-/eventos - Ver proximos eventos
+/eventos - Ver próximos eventos
 /asistir [ID] - Confirmar asistencia
 
 🔔 ALERTAS
 /alertas - Ver/gestionar alertas
 /alertas [palabras] - Crear alerta
 
-📊 ESTADISTICAS
-/graficos - Graficos de actividad y KPIs
-/estadisticas - Estadisticas generales
-/categorias - Categorias de mensajes
-/top_usuarios - Ranking de participacion
+📊 ESTADÍSTICAS
+/graficos - Gráficos de actividad y KPIs
+/estadisticas - Estadísticas generales
+/top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil, coins y trust score
-/cumpleanos_mes - Cumpleanos del mes
+/cumpleanos_mes [1-12] - Cumpleaños del mes
 
 💰 ASISTENTE FINANCIERO
 /finanzas [consulta] - Asesoría basada en libros (gratis)
 
 📊 TU DASHBOARD (GRATIS)
 ⭐ /mi_dashboard - Tu dashboard personal ⭐
-  Métricas, Trust Score, ranking, coins,
-  recomendaciones y cómo mejorar tu networking!
 
 💎 SERVICIOS PREMIUM (Coins o pesos)
 /generar_cv [orientación] - CV profesional ($2.500 / 25 coins)
@@ -2435,41 +2463,45 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🪙 COFRADÍA COINS
 /mis_coins - Balance y servicios canjeables
 
-📋 RESUMENES
-/resumen - Resumen del dia
-/resumen_semanal - Resumen de 7 dias
+📋 RESÚMENES
+/resumen - Resumen del día
+/resumen_semanal - Resumen de 7 días
 /resumen_mes - Resumen mensual
 
-👥 GRUPO
-/dotacion - Total de integrantes
-
-🎤 VOZ
-Envia un mensaje de voz al bot y te
-respondera con texto y audio!
+🎤 VOZ: Envía audio mencionando "Bot" y te respondo!
 
 ============================
-💡 Mencioname: @Cofradia_Premium_Bot
+💡 Toca un botón para ver ejemplos paso a paso:
 """
     
-    # Agregar comandos admin solo para el owner
+    # Botones expandibles por sección
+    keyboard = [
+        [InlineKeyboardButton("🔍 Ejemplos Búsqueda ＋", callback_data="ayuda_ej_busqueda")],
+        [InlineKeyboardButton("📇 Ejemplos Directorio ＋", callback_data="ayuda_ej_directorio")],
+        [InlineKeyboardButton("📢 Ejemplos Comunidad ＋", callback_data="ayuda_ej_comunidad")],
+        [InlineKeyboardButton("📊 Ejemplos Estadísticas ＋", callback_data="ayuda_ej_estadisticas")],
+        [InlineKeyboardButton("💎 Ejemplos Premium ＋", callback_data="ayuda_ej_premium")],
+        [InlineKeyboardButton("🪙 Ejemplos Coins ＋", callback_data="ayuda_ej_coins")],
+    ]
+    
+    await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Admin commands in separate message (no buttons needed)
     if user_id == OWNER_ID:
-        texto += """
+        admin_txt = """
 👑 COMANDOS ADMIN
 ============================
 /aprobar_solicitud [ID] - Aprobar ingreso
 /editar_usuario [ID] [campo] [valor] - Editar datos
-   Campos: nombre, apellido, generacion
 /eliminar_solicitud [ID] - Eliminar usuario
 /buscar_usuario [nombre] - Buscar ID de usuario
 /cobros_admin - Panel de cobros
 /ver_solicitudes - Ver solicitudes pendientes
-/generar_codigo - Generar codigo de activacion
-/ver_topics - Ver topics del grupo
-/nuevo_evento fecha | titulo | lugar | desc - Crear evento
+/generar_codigo - Generar código de activación
+/nuevo_evento fecha | título | lugar | desc - Crear evento
 
 🧠 RAG (Base de conocimiento)
 /rag_status - Estado del sistema RAG
-/rag_consulta [pregunta] - Consultar RAG
 /rag_backup - Verificar integridad datos RAG
 /rag_reindexar - Re-indexar documentos
 /eliminar_pdf [nombre] - Eliminar PDF indexado
@@ -2478,8 +2510,150 @@ respondera con texto y audio!
 /set_precio [srv] [pesos] [coins] - Editar precios
 /dar_coins [user_id] [cant] - Regalar coins
 """
+        await update.message.reply_text(admin_txt)
+
+
+# Diccionario de ejemplos para /ayuda
+AYUDA_EJEMPLOS = {
+    'busqueda': """🔍 EJEMPLOS DE BÚSQUEDA
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /buscar inversiones
+   Busca mensajes del grupo que contengan "inversiones"
+
+2️⃣ /buscar_ia cómo mejorar mi currículum
+   La IA busca en el historial y responde con contexto
+
+3️⃣ /rag_consulta qué dice Kiyosaki sobre deuda buena
+   Busca en los 100+ libros de la biblioteca
+
+4️⃣ /buscar_profesional abogado
+   Busca abogados en la base de datos de Drive
+
+5️⃣ /empleo gerente logística
+   Busca ofertas laborales de gerente de logística
+
+💡 Tip: Usa términos específicos para mejores resultados""",
+
+    'directorio': """📇 EJEMPLOS DE DIRECTORIO
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /mi_tarjeta
+   Paso 1: Escribe /mi_tarjeta para ver tu tarjeta
+   Paso 2: Si no tienes, te pedirá crearla
+   Paso 3: Recibes imagen + archivo descargable + contacto
+
+2️⃣ /mi_tarjeta profesion Ingeniero Civil
+   Actualiza tu profesión en la tarjeta
+
+3️⃣ /directorio consultoría
+   Muestra cofrades que ofrecen consultoría
+
+4️⃣ /conectar
+   La IA analiza tu perfil y sugiere 3 cofrades ideales
+
+5️⃣ /recomendar @juanperez Excelente profesional, muy confiable
+   Deja una recomendación pública (+5 coins para ti)
+
+💡 Tip: Completa todos los campos de tu tarjeta para aparecer en más búsquedas""",
+
+    'comunidad': """📢 EJEMPLOS DE COMUNIDAD
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /publicar servicios Asesoría Tributaria | Ofrezco asesoría en declaraciones de renta y planificación fiscal
+   Publica un anuncio en categoría "servicios"
+
+2️⃣ /anuncios servicios
+   Ver todos los anuncios de servicios activos
+
+3️⃣ /consultar Recomendación de contador | Necesito un contador para empresa PYME en Viña
+   Crea una consulta pública que otros cofrades pueden responder
+
+4️⃣ /responder 5 Te recomiendo a Juan Pérez, excelente contador
+   Responde a la consulta #5 (+10 coins)
+
+5️⃣ /encuesta ¿Cuándo hacemos la junta? | Viernes 19h | Sábado 12h | Domingo 11h
+   Crea una encuesta con 3 opciones
+
+💡 Tip: Las consultas respondidas te dan 10 Cofradía Coins""",
+
+    'estadisticas': """📊 EJEMPLOS DE ESTADÍSTICAS
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /graficos
+   Genera gráficos visuales de actividad del grupo
+
+2️⃣ /mi_perfil
+   Tu perfil completo: Trust Score, Coins, servicios canjeables y cómo ganar más
+
+3️⃣ /mi_dashboard
+   Dashboard detallado: ranking, métricas, recomendaciones (GRATIS)
+
+4️⃣ /cumpleanos_mes 3
+   Muestra todos los cumpleaños de Marzo
+
+5️⃣ /top_usuarios
+   Ranking de los cofrades más activos
+
+6️⃣ /alertas inversiones finanzas
+   Recibirás notificación cuando alguien hable de "inversiones" o "finanzas"
+
+💡 Tip: /mi_dashboard es gratis y te muestra todo lo que puedes mejorar""",
+
+    'premium': """💎 EJEMPLOS SERVICIOS PREMIUM
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /generar_cv logística marítima (25 coins / $2.500)
+   Paso 1: Necesitas tener tu /mi_tarjeta creada
+   Paso 2: Escribe /generar_cv y la orientación del CV
+   Paso 3: La IA genera un CV completo basado en tu perfil
+
+2️⃣ /entrevista Gerente de Operaciones (50 coins / $5.000)
+   La IA simula 5 preguntas de entrevista con guías de respuesta
+
+3️⃣ /analisis_linkedin (30 coins / $3.000)
+   Analiza tu perfil y sugiere headline, keywords y mejoras
+
+4️⃣ /mentor (40 coins / $4.000)
+   Plan de desarrollo: diagnóstico, metas, tareas semanales y lecturas recomendadas
+
+5️⃣ /finanzas conviene más APV o fondo mutuo (GRATIS)
+   Asesoría financiera basada en los 100+ libros de la biblioteca
+
+💡 Tip: Cada servicio se paga con Coins o pesos chilenos""",
+
+    'coins': """🪙 CÓMO FUNCIONAN LOS COFRADÍA COINS
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ /mis_coins
+   Ver tu balance, historial y qué servicios puedes canjear
+
+CÓMO GANAR COINS:
+  💬 Escribir en el grupo: +1 coin por mensaje
+  💡 Responder consulta (/responder): +10 coins
+  ⭐ Recomendar cofrade (/recomendar): +5 coins
+  📅 Asistir a evento (/asistir): +20 coins
+  📇 Crear/actualizar tarjeta: +15 coins
+  💰 Consulta financiera: +1 coin
+
+EJEMPLO PRÁCTICO:
+  Si envías 25 mensajes al grupo = 25 coins
+  + recomiendas a 1 cofrade = 5 coins
+  Total: 30 coins → alcanza para /analisis_linkedin
+
+💡 Tip: /mi_perfil te muestra cuánto te falta para cada servicio"""
+}
+
+
+async def callback_ayuda_ejemplos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback para mostrar ejemplos expandibles de /ayuda"""
+    query = update.callback_query
+    await query.answer()
     
-    await update.message.reply_text(texto)
+    seccion = query.data.replace('ayuda_ej_', '')
+    ejemplo = AYUDA_EJEMPLOS.get(seccion, 'Ejemplos no disponibles.')
+    
+    await query.message.reply_text(ejemplo)
 
 
 async def registrarse_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7883,6 +8057,45 @@ def descargar_logo_cofradia():
     return None
 
 
+def generar_vcard(datos: dict) -> BytesIO:
+    """Genera archivo vCard (.vcf) para guardar contacto en el teléfono"""
+    nombre_completo = datos.get('nombre_completo', '')
+    partes_nombre = nombre_completo.split(' ', 1)
+    first = partes_nombre[0] if partes_nombre else ''
+    last = partes_nombre[1] if len(partes_nombre) > 1 else ''
+    
+    telefono = datos.get('telefono', '').replace(' ', '')
+    email = datos.get('email', '')
+    empresa = datos.get('empresa', '')
+    profesion = datos.get('profesion', '')
+    ciudad = datos.get('ciudad', '')
+    linkedin = datos.get('linkedin', '')
+    
+    vcf = "BEGIN:VCARD\n"
+    vcf += "VERSION:3.0\n"
+    vcf += f"N:{last};{first};;;\n"
+    vcf += f"FN:{nombre_completo}\n"
+    if profesion:
+        vcf += f"TITLE:{profesion}\n"
+    if empresa:
+        vcf += f"ORG:{empresa}\n"
+    if telefono:
+        vcf += f"TEL;TYPE=CELL:{telefono}\n"
+    if email:
+        vcf += f"EMAIL:{email}\n"
+    if ciudad:
+        vcf += f"ADR;TYPE=WORK:;;{ciudad};;;;\n"
+    if linkedin:
+        url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
+        vcf += f"URL:{url_li}\n"
+    vcf += "NOTE:Contacto de Cofradía de Networking\n"
+    vcf += "END:VCARD\n"
+    
+    buffer = BytesIO(vcf.encode('utf-8'))
+    buffer.name = f"{re.sub(r'[^a-zA-Z0-9]', '_', nombre_completo)[:30]}.vcf"
+    return buffer
+
+
 def generar_qr_simple(url: str, size: int = 150):
     """Genera QR code limpio y escaneable — sin manipulación de píxeles"""
     if not qr_disponible:
@@ -8165,6 +8378,17 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
                 )
             except Exception as e:
                 logger.debug(f"Error enviando documento tarjeta pública: {e}")
+            
+            # Enviar vCard para guardar en contactos
+            try:
+                vcf_buffer = generar_vcard(datos_tarjeta)
+                await update.message.reply_document(
+                    document=vcf_buffer,
+                    filename=vcf_buffer.name,
+                    caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda"
+                )
+            except Exception as e:
+                logger.debug(f"Error enviando vCard: {e}")
         else:
             # Fallback texto
             msg = f"📇 TARJETA PROFESIONAL\n{'━' * 28}\n\n"
@@ -8259,6 +8483,17 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             )
                         except Exception as e:
                             logger.debug(f"Error enviando documento tarjeta: {e}")
+                        
+                        # Enviar vCard para guardar en contactos
+                        try:
+                            vcf_buffer = generar_vcard(datos_tarjeta)
+                            await update.message.reply_document(
+                                document=vcf_buffer,
+                                filename=vcf_buffer.name,
+                                caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Error enviando vCard: {e}")
                     else:
                         # Fallback: enviar como texto si no hay PIL
                         msg = f"📇 TU TARJETA PROFESIONAL\n{'━' * 28}\n\n"
@@ -8729,8 +8964,36 @@ Responde en español, de forma concisa. No uses asteriscos ni formatos."""
 
 @requiere_suscripcion
 async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /cumpleanos_mes - Cumpleaños del mes desde Google Drive (columna X: DD-MMM)"""
-    msg = await update.message.reply_text("🎂 Buscando cumpleaños del mes...")
+    """Comando /cumpleanos_mes [1-12] - Cumpleaños de un mes desde Google Drive (columna X: DD-MMM)"""
+    
+    # Parsear mes: si viene argumento usar ese, si no, mes actual
+    mes_consulta = datetime.now().month
+    if context.args:
+        try:
+            mes_input = int(context.args[0])
+            if 1 <= mes_input <= 12:
+                mes_consulta = mes_input
+            else:
+                await update.message.reply_text(
+                    "❌ Mes inválido. Usa un número del 1 al 12.\n\n"
+                    "Ejemplo:\n"
+                    "/cumpleanos_mes 3  →  Marzo\n"
+                    "/cumpleanos_mes 12  →  Diciembre"
+                )
+                return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Escribe un número del 1 al 12.\n\n"
+                "Ejemplo:\n"
+                "/cumpleanos_mes 3  →  Marzo\n"
+                "/cumpleanos_mes 12  →  Diciembre"
+            )
+            return
+    
+    meses_nombres = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+    
+    msg = await update.message.reply_text(f"🎂 Buscando cumpleaños de {meses_nombres[mes_consulta]}...")
     
     try:
         from oauth2client.service_account import ServiceAccountCredentials
@@ -8758,10 +9021,13 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
         archivos = response.json().get('files', [])
         
         if not archivos:
-            await msg.edit_text("❌ No se encontró el archivo BD Grupo Laboral.")
+            await msg.edit_text("❌ No se encontró el archivo BD Grupo Laboral en Drive.")
             return
         
         file_id = archivos[0]['id']
+        file_name = archivos[0]['name']
+        logger.info(f"🎂 Leyendo cumpleaños desde: {file_name}")
+        
         download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
         response = requests.get(download_url, headers=headers, timeout=60)
         
@@ -8770,35 +9036,35 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
             return
         
         df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
+        logger.info(f"🎂 Excel: {len(df)} filas, {len(df.columns)} columnas")
         
-        # Mapeo columnas: C=2 (Nombre), D=3 (Apellido), X=23 (Cumpleaños DD-MMM)
+        # Log primeras filas de columna X para debug
+        if len(df.columns) > 23:
+            col_x_name = df.columns[23]
+            logger.info(f"🎂 Columna X (idx 23): '{col_x_name}'")
+            muestras = df.iloc[:5, 23].tolist()
+            logger.info(f"🎂 Muestras col X: {muestras}")
+        
         def get_col(row, idx):
             try:
                 val = row.iloc[idx] if idx < len(row) else ''
-                val = str(val).strip()
-                if val.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
+                val_str = str(val).strip()
+                if val_str.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
                     return ''
-                return val
+                return val_str
             except:
                 return ''
         
-        mes_actual = datetime.now().month
-        meses_nombres = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-                         'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
-        
-        # Abreviaciones de meses en español e inglés para parsear DD-MMM
-        mes_abrev = {
-            1: ['ene', 'jan'], 2: ['feb'], 3: ['mar'], 4: ['abr', 'apr'],
-            5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['ago', 'aug'],
-            9: ['sep', 'sept'], 10: ['oct'], 11: ['nov'], 12: ['dic', 'dec']
+        # Abreviaciones de meses español/inglés → número
+        abrev_a_mes = {
+            'ene': 1, 'jan': 1, 'feb': 2, 'mar': 3, 'abr': 4, 'apr': 4,
+            'may': 5, 'jun': 6, 'jul': 7, 'ago': 8, 'aug': 8,
+            'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dic': 12, 'dec': 12
         }
-        # Invertir: abreviatura → número
-        abrev_a_mes = {}
-        for num, abrevs in mes_abrev.items():
-            for a in abrevs:
-                abrev_a_mes[a] = num
         
         cumples = []
+        filas_con_fecha = 0
+        
         for idx, row in df.iterrows():
             nombre = get_col(row, 2)    # Columna C
             apellido = get_col(row, 3)  # Columna D
@@ -8807,17 +9073,34 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
             if not fecha_str or not nombre:
                 continue
             
-            # Parsear DD-MMM (ej: "15-Mar", "03-Jul", "7-Ene", "12-dic")
+            filas_con_fecha += 1
+            
+            # Parsear DD-MMM: "15-Mar", "03-Jul", "7-Ene", "12-dic", "5/may", "28.feb"
             try:
-                # Limpiar y separar
-                fecha_clean = fecha_str.replace('/', '-').replace('.', '-').strip()
-                partes = fecha_clean.split('-')
+                fecha_clean = fecha_str.replace('/', '-').replace('.', '-').replace(' ', '-').strip()
+                partes = [p.strip() for p in fecha_clean.split('-') if p.strip()]
+                
                 if len(partes) >= 2:
-                    dia = int(partes[0].strip())
-                    mes_str = partes[1].strip().lower()[:3]
-                    mes_num = abrev_a_mes.get(mes_str, 0)
+                    # Intentar: DD-MMM (número-texto)
+                    dia_str = partes[0]
+                    mes_str = partes[1].lower()
                     
-                    if mes_num == mes_actual:
+                    # Si el primer elemento es texto y segundo número, invertir
+                    if not dia_str.isdigit() and len(partes) > 1:
+                        dia_str = partes[1]
+                        mes_str = partes[0].lower()
+                    
+                    dia = int(dia_str)
+                    mes_num = abrev_a_mes.get(mes_str[:3], 0)
+                    
+                    if mes_num == 0:
+                        # Intentar como número (DD-MM)
+                        try:
+                            mes_num = int(partes[1])
+                        except:
+                            pass
+                    
+                    if mes_num == mes_consulta and 1 <= dia <= 31:
                         cumples.append({
                             'nombre': f"{nombre} {apellido}".strip(),
                             'dia': dia
@@ -8825,21 +9108,28 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
             except (ValueError, IndexError):
                 continue
         
-        # Ordenar por día
+        logger.info(f"🎂 Filas con fecha: {filas_con_fecha}, Cumpleaños en mes {mes_consulta}: {len(cumples)}")
+        
         cumples.sort(key=lambda x: x['dia'])
         
         if not cumples:
             await msg.edit_text(
-                f"🎂 No se encontraron cumpleaños para {meses_nombres[mes_actual]}.\n\n"
-                f"💡 Los cumpleaños se leen de la columna X del archivo BD Grupo Laboral."
+                f"🎂 No se encontraron cumpleaños para {meses_nombres[mes_consulta]}.\n\n"
+                f"📊 Se revisaron {filas_con_fecha} registros con fecha en columna X.\n\n"
+                f"💡 Formato esperado en columna X: DD-MMM (ej: 15-Mar)\n"
+                f"💡 Consulta otro mes: /cumpleanos_mes [1-12]"
             )
             return
         
-        texto = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_actual].upper()}\n{'━' * 28}\n\n"
+        texto = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_consulta].upper()}\n{'━' * 28}\n\n"
         for c in cumples:
-            texto += f"🎂 {c['dia']:02d}/{mes_actual:02d} — {c['nombre']}\n"
+            hoy = datetime.now()
+            es_hoy = (c['dia'] == hoy.day and mes_consulta == hoy.month)
+            marca = " 🎉 ¡HOY!" if es_hoy else ""
+            texto += f"🎂 {c['dia']:02d}/{mes_consulta:02d} — {c['nombre']}{marca}\n"
         
-        texto += f"\n🎉 {len(cumples)} cumpleaños este mes"
+        texto += f"\n🎉 {len(cumples)} cumpleaños en {meses_nombres[mes_consulta]}"
+        texto += f"\n💡 Otro mes: /cumpleanos_mes [1-12]"
         
         await msg.edit_text(texto)
         
@@ -11353,6 +11643,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_plan, pattern='^plan_'))
     application.add_handler(CallbackQueryHandler(callback_generar_codigo, pattern='^gencodigo_'))
     application.add_handler(CallbackQueryHandler(callback_aprobar_rechazar, pattern='^(aprobar|rechazar)_'))
+    application.add_handler(CallbackQueryHandler(callback_ayuda_ejemplos, pattern='^ayuda_ej_'))
     
     # Mensajes y documentos
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
