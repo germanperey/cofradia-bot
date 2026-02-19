@@ -427,14 +427,16 @@ def init_db():
                 activo BOOLEAN DEFAULT TRUE
             )''')
             for srv, pesos, coins, desc in [
-                ('generar_cv', 5000, 50, 'Generador de CV profesional con IA'),
-                ('entrevista', 3000, 30, 'Simulador de entrevista laboral'),
+                ('generar_cv', 2500, 25, 'Generador de CV profesional con IA'),
+                ('entrevista', 5000, 50, 'Simulador de entrevista laboral'),
                 ('analisis_linkedin', 3000, 30, 'Análisis de perfil LinkedIn con IA'),
-                ('mi_dashboard', 2000, 20, 'Dashboard personal de networking'),
-                ('mentor', 5000, 50, 'Plan de mentoría IA personalizado'),
+                ('mentor', 4000, 40, 'Plan de mentoría IA personalizado'),
             ]:
                 c.execute("""INSERT INTO precios_servicios (servicio, precio_pesos, precio_coins, descripcion)
-                            VALUES (%s, %s, %s, %s) ON CONFLICT (servicio) DO NOTHING""", (srv, pesos, coins, desc))
+                            VALUES (%s, %s, %s, %s) ON CONFLICT (servicio) DO UPDATE SET 
+                            precio_pesos = EXCLUDED.precio_pesos, precio_coins = EXCLUDED.precio_coins""", (srv, pesos, coins, desc))
+            # Eliminar mi_dashboard de premium si existía
+            c.execute("DELETE FROM precios_servicios WHERE servicio = 'mi_dashboard'")
             conn.commit()
             logger.info("✅ Tablas v4.0 (Coins, Precios) inicializadas")
         else:
@@ -649,14 +651,14 @@ def init_db():
                 precio_coins INTEGER DEFAULT 0, descripcion TEXT, activo INTEGER DEFAULT 1
             )''')
             for srv, pesos, coins, desc in [
-                ('generar_cv', 5000, 50, 'Generador de CV profesional con IA'),
-                ('entrevista', 3000, 30, 'Simulador de entrevista laboral'),
+                ('generar_cv', 2500, 25, 'Generador de CV profesional con IA'),
+                ('entrevista', 5000, 50, 'Simulador de entrevista laboral'),
                 ('analisis_linkedin', 3000, 30, 'Análisis de perfil LinkedIn con IA'),
-                ('mi_dashboard', 2000, 20, 'Dashboard personal de networking'),
-                ('mentor', 5000, 50, 'Plan de mentoría IA personalizado'),
+                ('mentor', 4000, 40, 'Plan de mentoría IA personalizado'),
             ]:
-                c.execute("INSERT OR IGNORE INTO precios_servicios (servicio, precio_pesos, precio_coins, descripcion) VALUES (?,?,?,?)",
+                c.execute("INSERT OR REPLACE INTO precios_servicios (servicio, precio_pesos, precio_coins, descripcion) VALUES (?,?,?,?)",
                          (srv, pesos, coins, desc))
+            c.execute("DELETE FROM precios_servicios WHERE servicio = 'mi_dashboard'")
             conn.commit()
             logger.info("✅ Tablas v4.0 SQLite inicializadas")
         
@@ -2419,12 +2421,16 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 ASISTENTE FINANCIERO
 /finanzas [consulta] - Asesoría basada en libros (gratis)
 
+📊 TU DASHBOARD (GRATIS)
+⭐ /mi_dashboard - Tu dashboard personal ⭐
+  Métricas, Trust Score, ranking, coins,
+  recomendaciones y cómo mejorar tu networking!
+
 💎 SERVICIOS PREMIUM (Coins o pesos)
-/generar_cv [orientación] - CV profesional con IA
-/entrevista [cargo] - Simulador de entrevista
-/analisis_linkedin - Análisis de perfil profesional
-/mi_dashboard - Dashboard de networking
-/mentor - Plan de mentoría personalizado
+/generar_cv [orientación] - CV profesional ($2.500 / 25 coins)
+/entrevista [cargo] - Simulador entrevista ($5.000 / 50 coins)
+/analisis_linkedin - Análisis de perfil ($3.000 / 30 coins)
+/mentor - Plan de mentoría IA ($4.000 / 40 coins)
 
 🪙 COFRADÍA COINS
 /mis_coins - Balance y servicios canjeables
@@ -8723,50 +8729,125 @@ Responde en español, de forma concisa. No uses asteriscos ni formatos."""
 
 @requiere_suscripcion
 async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /cumpleanos_mes - Cumpleaños del mes actual"""
+    """Comando /cumpleanos_mes - Cumpleaños del mes desde Google Drive (columna X: DD-MMM)"""
+    msg = await update.message.reply_text("🎂 Buscando cumpleaños del mes...")
+    
     try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Error de conexión")
+        from oauth2client.service_account import ServiceAccountCredentials
+        
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            await msg.edit_text("❌ Credenciales de Google Drive no configuradas.")
             return
-        c = conn.cursor()
+        
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        # Buscar archivo BD Grupo Laboral
+        search_url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            'fields': 'files(id, name)',
+            'supportsAllDrives': 'true',
+            'includeItemsFromAllDrives': 'true'
+        }
+        response = requests.get(search_url, headers=headers, params=params, timeout=30)
+        archivos = response.json().get('files', [])
+        
+        if not archivos:
+            await msg.edit_text("❌ No se encontró el archivo BD Grupo Laboral.")
+            return
+        
+        file_id = archivos[0]['id']
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
+        response = requests.get(download_url, headers=headers, timeout=60)
+        
+        if response.status_code != 200:
+            await msg.edit_text("❌ Error descargando datos desde Drive.")
+            return
+        
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
+        
+        # Mapeo columnas: C=2 (Nombre), D=3 (Apellido), X=23 (Cumpleaños DD-MMM)
+        def get_col(row, idx):
+            try:
+                val = row.iloc[idx] if idx < len(row) else ''
+                val = str(val).strip()
+                if val.lower() in ['nan', 'none', '', 'null', 'n/a', '-', 'nat']:
+                    return ''
+                return val
+            except:
+                return ''
         
         mes_actual = datetime.now().month
+        meses_nombres = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                         'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
         
-        if DATABASE_URL:
-            c.execute("""SELECT "Nombre", "Apellido Paterno", "Fecha de Nacimiento" 
-                        FROM bd_grupo_laboral 
-                        WHERE EXTRACT(MONTH FROM "Fecha de Nacimiento"::date) = %s
-                        ORDER BY EXTRACT(DAY FROM "Fecha de Nacimiento"::date)""", (mes_actual,))
-        else:
-            await update.message.reply_text("❌ Esta función requiere Supabase (base de datos de Drive).")
+        # Abreviaciones de meses en español e inglés para parsear DD-MMM
+        mes_abrev = {
+            1: ['ene', 'jan'], 2: ['feb'], 3: ['mar'], 4: ['abr', 'apr'],
+            5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['ago', 'aug'],
+            9: ['sep', 'sept'], 10: ['oct'], 11: ['nov'], 12: ['dic', 'dec']
+        }
+        # Invertir: abreviatura → número
+        abrev_a_mes = {}
+        for num, abrevs in mes_abrev.items():
+            for a in abrevs:
+                abrev_a_mes[a] = num
+        
+        cumples = []
+        for idx, row in df.iterrows():
+            nombre = get_col(row, 2)    # Columna C
+            apellido = get_col(row, 3)  # Columna D
+            fecha_str = get_col(row, 23)  # Columna X (DD-MMM)
+            
+            if not fecha_str or not nombre:
+                continue
+            
+            # Parsear DD-MMM (ej: "15-Mar", "03-Jul", "7-Ene", "12-dic")
+            try:
+                # Limpiar y separar
+                fecha_clean = fecha_str.replace('/', '-').replace('.', '-').strip()
+                partes = fecha_clean.split('-')
+                if len(partes) >= 2:
+                    dia = int(partes[0].strip())
+                    mes_str = partes[1].strip().lower()[:3]
+                    mes_num = abrev_a_mes.get(mes_str, 0)
+                    
+                    if mes_num == mes_actual:
+                        cumples.append({
+                            'nombre': f"{nombre} {apellido}".strip(),
+                            'dia': dia
+                        })
+            except (ValueError, IndexError):
+                continue
+        
+        # Ordenar por día
+        cumples.sort(key=lambda x: x['dia'])
+        
+        if not cumples:
+            await msg.edit_text(
+                f"🎂 No se encontraron cumpleaños para {meses_nombres[mes_actual]}.\n\n"
+                f"💡 Los cumpleaños se leen de la columna X del archivo BD Grupo Laboral."
+            )
             return
         
-        cumples = c.fetchall()
-        conn.close()
-    except:
-        # Fallback: buscar en rag_chunks
-        cumples = []
-    
-    if not cumples:
-        meses = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-                 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
-        await update.message.reply_text(f"🎂 No se encontraron cumpleaños para {meses[datetime.now().month]}.\n\n"
-                                        "💡 Los cumpleaños se obtienen de la base de datos del grupo.")
-        return
-    
-    meses = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-             'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
-    msg = f"🎂 CUMPLEAÑOS DE {meses[mes_actual].upper()}\n{'━' * 28}\n\n"
-    for c in cumples:
-        nombre = c['Nombre'] if DATABASE_URL else c[0]
-        apellido = c['Apellido Paterno'] if DATABASE_URL else c[1]
-        fecha = str(c['Fecha de Nacimiento'] if DATABASE_URL else c[2])[:10]
-        dia = fecha.split('-')[2] if '-' in fecha else '?'
-        msg += f"🎂 {dia}/{mes_actual} — {nombre} {apellido}\n"
-    
-    msg += f"\n🎉 {len(cumples)} cumpleaños este mes"
-    await enviar_mensaje_largo(update, msg)
+        texto = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_actual].upper()}\n{'━' * 28}\n\n"
+        for c in cumples:
+            texto += f"🎂 {c['dia']:02d}/{mes_actual:02d} — {c['nombre']}\n"
+        
+        texto += f"\n🎉 {len(cumples)} cumpleaños este mes"
+        
+        await msg.edit_text(texto)
+        
+    except Exception as e:
+        logger.error(f"Error cumpleaños mes: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await msg.edit_text(f"❌ Error obteniendo cumpleaños: {str(e)[:100]}")
 
 
 # ==================== 6. ENCUESTAS ====================
@@ -9843,26 +9924,8 @@ Genera: 1) Fortalezas del perfil, 2) Headline sugerido (120 chars),
 
 @requiere_suscripcion
 async def mi_dashboard_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /mi_dashboard - Dashboard personal de networking"""
+    """Comando /mi_dashboard - Dashboard personal de networking (GRATIS)"""
     user_id = update.effective_user.id
-    if user_id != OWNER_ID:
-        precio = get_precio_servicio('mi_dashboard')
-        if precio:
-            coins = get_coins_balance(user_id)
-            if coins['balance'] >= precio['coins']:
-                if not gastar_coins(user_id, precio['coins'], 'Servicio: mi_dashboard'):
-                    await update.message.reply_text("❌ Error procesando coins.")
-                    return
-                await update.message.reply_text(f"✅ {precio['coins']} Coins descontados.")
-            else:
-                faltan = precio['coins'] - coins['balance']
-                await update.message.reply_text(
-                    f"💎 SERVICIO PREMIUM: Dashboard Personal\n\n"
-                    f"💰 Precio: ${precio['pesos']:,} CLP o {precio['coins']} Coins\n"
-                    f"🪙 Tu balance: {coins['balance']} Coins (faltan {faltan})\n\n"
-                    f"💡 /mis_coins para ver cómo ganar más."
-                )
-                return
     msg = await update.message.reply_text("📊 Generando tu dashboard...")
     try:
         conn = get_db_connection()
