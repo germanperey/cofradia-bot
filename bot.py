@@ -7689,6 +7689,69 @@ Máximo 100 palabras. Sin introducción. No uses asteriscos ni guiones bajos."""
 
 # ==================== 1. DIRECTORIO PROFESIONAL ====================
 
+COFRADIA_LOGO_URL = "https://image2url.com/r2/default/images/1771472537472-e500a03d-8d53-4737-af3e-97bc77a7656a.png"
+_logo_cache = {'img': None, 'loaded': False}
+
+
+def descargar_logo_cofradia():
+    """Descarga y cachea el logo de Cofradía (solo una vez)"""
+    if _logo_cache['loaded']:
+        return _logo_cache['img']
+    
+    try:
+        resp = requests.get(COFRADIA_LOGO_URL, timeout=10)
+        if resp.status_code == 200:
+            logo = Image.open(BytesIO(resp.content)).convert('RGBA')
+            _logo_cache['img'] = logo
+            _logo_cache['loaded'] = True
+            logger.info(f"✅ Logo Cofradía descargado: {logo.size}")
+            return logo
+        else:
+            logger.warning(f"No se pudo descargar logo: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Error descargando logo Cofradía: {e}")
+    
+    _logo_cache['loaded'] = True  # No reintentar infinitamente
+    return None
+
+
+def generar_qr_simple(url: str, size: int = 160, color_dark=(15, 47, 89)):
+    """Genera QR code de forma robusta, compatible con todas las versiones"""
+    if not qr_disponible:
+        return None
+    
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+            border=2
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+        
+        # Generar imagen QR en blanco y negro primero (máxima compatibilidad)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+        
+        # Recolorear: reemplazar negro por azul oscuro
+        from PIL import ImageOps
+        pixels = qr_img.load()
+        w, h = qr_img.size
+        for x in range(w):
+            for y in range(h):
+                r, g, b = pixels[x, y]
+                if r < 128:  # pixel oscuro
+                    pixels[x, y] = color_dark
+        
+        # Redimensionar al tamaño deseado
+        resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
+        qr_img = qr_img.resize((size, size), resample)
+        return qr_img
+    except Exception as e:
+        logger.warning(f"Error generando QR: {e}")
+        return None
+
+
 def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     """Genera una imagen PNG profesional de tarjeta de presentación con QR y logo"""
     if not pil_disponible:
@@ -7702,7 +7765,6 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     AZUL_MEDIO = (30, 80, 140)
     AZUL_CLARO = (52, 120, 195)
     BLANCO = (255, 255, 255)
-    GRIS_CLARO = (245, 247, 250)
     GRIS_TEXTO = (80, 80, 80)
     GRIS_SUTIL = (150, 155, 165)
     DORADO = (195, 165, 90)
@@ -7736,22 +7798,32 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     # Línea dorada decorativa
     draw.rectangle([0, 130, W, 134], fill=DORADO)
     
-    # --- Logo Cofradía (ancla estilizada) en la franja superior ---
-    # Dibujar ancla simplificada
-    cx_logo, cy_logo = 60, 65
-    # Aro superior del ancla
-    draw.ellipse([cx_logo-12, cy_logo-35, cx_logo+12, cy_logo-10], outline=DORADO, width=3)
-    # Barra vertical
-    draw.line([cx_logo, cy_logo-10, cx_logo, cy_logo+25], fill=DORADO, width=3)
-    # Barra horizontal
-    draw.line([cx_logo-20, cy_logo+10, cx_logo+20, cy_logo+10], fill=DORADO, width=3)
-    # Curvas inferiores del ancla
-    draw.arc([cx_logo-25, cy_logo+5, cx_logo, cy_logo+30], 0, 180, fill=DORADO, width=3)
-    draw.arc([cx_logo, cy_logo+5, cx_logo+25, cy_logo+30], 0, 180, fill=DORADO, width=3)
+    # --- Logo Cofradía (descargado desde URL, cacheado) ---
+    logo = descargar_logo_cofradia()
+    logo_end_x = 40  # Posición por defecto si no hay logo
+    if logo:
+        try:
+            # Ajustar logo a la franja (max 90px alto, proporcional)
+            logo_h = 90
+            ratio = logo_h / logo.height
+            logo_w = int(logo.width * ratio)
+            resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
+            logo_resized = logo.resize((logo_w, logo_h), resample)
+            
+            # Pegar logo con transparencia sobre la franja azul
+            logo_x, logo_y = 30, 20
+            if logo_resized.mode == 'RGBA':
+                img.paste(logo_resized, (logo_x, logo_y), logo_resized)
+            else:
+                img.paste(logo_resized, (logo_x, logo_y))
+            logo_end_x = logo_x + logo_w + 15
+        except Exception as e:
+            logger.debug(f"Error pegando logo: {e}")
+            logo_end_x = 40
     
     # Texto "COFRADÍA DE NETWORKING" al lado del logo
-    draw.text((95, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
-    draw.text((95, 58), "Red Profesional de Oficiales", fill=GRIS_SUTIL, font=font_campo)
+    draw.text((logo_end_x, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
+    draw.text((logo_end_x, 58), "Red Profesional de Oficiales", fill=GRIS_SUTIL, font=font_campo)
     
     # --- Nombre grande en azul (sobre fondo blanco) ---
     nombre = datos.get('nombre_completo', 'Sin nombre')
@@ -7770,56 +7842,72 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     # --- Campos de información ---
     y_info = y_sep + 15
     campos = [
-        ('empresa', '🏢', datos.get('empresa', '')),
-        ('servicios', '🛠️', datos.get('servicios', '')),
-        ('ciudad', '📍', datos.get('ciudad', '')),
-        ('telefono', '📱', datos.get('telefono', '')),
-        ('email', '📧', datos.get('email', '')),
-        ('linkedin', '🔗', datos.get('linkedin', '')),
+        ('empresa', datos.get('empresa', '')),
+        ('servicios', datos.get('servicios', '')),
+        ('ciudad', datos.get('ciudad', '')),
+        ('telefono', datos.get('telefono', '')),
+        ('email', datos.get('email', '')),
+        ('linkedin', datos.get('linkedin', '')),
     ]
     
-    for label, icono, valor in campos:
+    labels_display = {
+        'empresa': 'Empresa', 'servicios': 'Servicios', 'ciudad': 'Ciudad',
+        'telefono': 'Teléfono', 'email': 'Email', 'linkedin': 'LinkedIn'
+    }
+    
+    for label, valor in campos:
         if valor:
-            # Icono como texto (emoji) puede no renderizarse bien, usar label
-            label_display = {'empresa': 'Empresa', 'servicios': 'Servicios', 'ciudad': 'Ciudad',
-                           'telefono': 'Teléfono', 'email': 'Email', 'linkedin': 'LinkedIn'}.get(label, label)
-            draw.text((42, y_info), f"{label_display}:", fill=GRIS_SUTIL, font=font_label)
+            draw.text((42, y_info), f"{labels_display[label]}:", fill=GRIS_SUTIL, font=font_label)
             draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
             y_info += 24
     
     # --- QR Code (lado derecho) ---
-    qr_x, qr_y = 630, 155
-    qr_size = 160
+    qr_x, qr_y = 640, 155
+    qr_size = 150
     
     username = datos.get('username', '')
     if username:
         qr_url = f"https://t.me/{username}"
     else:
-        qr_url = f"https://t.me/Cofradia_Premium_Bot"
+        qr_url = "https://t.me/Cofradia_Premium_Bot"
     
-    if qr_disponible:
+    qr_img = generar_qr_simple(qr_url, size=qr_size, color_dark=AZUL_OSCURO)
+    if qr_img:
         try:
-            qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=1)
-            qr.add_data(qr_url)
-            qr.make(fit=True)
-            qr_img = qr.make_image(fill_color=AZUL_OSCURO, back_color=BLANCO).convert('RGB')
-            qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR)
             img.paste(qr_img, (qr_x, qr_y))
-            # Marco alrededor del QR
-            draw.rectangle([qr_x-3, qr_y-3, qr_x+qr_size+3, qr_y+qr_size+3], outline=AZUL_CLARO, width=2)
+            # Marco elegante alrededor del QR
+            draw.rectangle([qr_x - 4, qr_y - 4, qr_x + qr_size + 4, qr_y + qr_size + 4], outline=AZUL_CLARO, width=2)
         except Exception as e:
-            logger.debug(f"Error generando QR: {e}")
+            logger.debug(f"Error pegando QR: {e}")
     
-    # --- "Miembro Cofradía" debajo del QR ---
-    draw.text((qr_x + 18, qr_y + qr_size + 10), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
+    # --- Logo pequeño + "Miembro Cofradía" debajo del QR ---
+    badge_y = qr_y + qr_size + 12
+    if logo:
+        try:
+            mini_h = 28
+            ratio = mini_h / logo.height
+            mini_w = int(logo.width * ratio)
+            resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
+            mini_logo = logo.resize((mini_w, mini_h), resample)
+            mini_x = qr_x + (qr_size - mini_w - 100) // 2
+            if mini_logo.mode == 'RGBA':
+                img.paste(mini_logo, (qr_x + 10, badge_y), mini_logo)
+            else:
+                img.paste(mini_logo, (qr_x + 10, badge_y))
+            draw.text((qr_x + 10 + mini_w + 8, badge_y + 7), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
+        except Exception as e:
+            logger.debug(f"Error pegando mini logo: {e}")
+            draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
+    else:
+        draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
     
     # --- Franja inferior ---
-    draw.rectangle([0, H-35, W, H], fill=AZUL_OSCURO)
-    draw.text((40, H-27), "cofradía de networking", fill=GRIS_SUTIL, font=font_miembro)
-    draw.text((W-250, H-27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
+    draw.rectangle([0, H - 35, W, H], fill=AZUL_OSCURO)
+    draw.text((40, H - 27), "cofradía de networking", fill=GRIS_SUTIL, font=font_miembro)
+    draw.text((W - 250, H - 27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
     
     # --- Borde sutil alrededor de toda la tarjeta ---
-    draw.rectangle([0, 0, W-1, H-1], outline=(200, 205, 215), width=1)
+    draw.rectangle([0, 0, W - 1, H - 1], outline=(200, 205, 215), width=1)
     
     # Exportar a BytesIO
     buffer = BytesIO()
