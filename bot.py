@@ -2158,6 +2158,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     
+    # DEEP LINK: /start tarjeta_USERID → mostrar tarjeta profesional de alguien
+    if context.args and len(context.args) > 0 and context.args[0].startswith('tarjeta_'):
+        try:
+            target_user_id = int(context.args[0].replace('tarjeta_', ''))
+            await mostrar_tarjeta_publica(update, context, target_user_id)
+            return ConversationHandler.END
+        except (ValueError, Exception) as e:
+            logger.debug(f"Error procesando deep link tarjeta: {e}")
+    
+    
     # Owner siempre tiene acceso completo
     if user_id == OWNER_ID:
         await update.message.reply_text(
@@ -7715,37 +7725,28 @@ def descargar_logo_cofradia():
     return None
 
 
-def generar_qr_simple(url: str, size: int = 160, color_dark=(15, 47, 89)):
-    """Genera QR code de forma robusta, compatible con todas las versiones"""
+def generar_qr_simple(url: str, size: int = 150):
+    """Genera QR code limpio y escaneable — sin manipulación de píxeles"""
     if not qr_disponible:
         return None
     
     try:
         qr = qrcode.QRCode(
-            version=1,
+            version=2,
             error_correction=qrcode.constants.ERROR_CORRECT_H,
             box_size=10,
-            border=2
+            border=3
         )
         qr.add_data(url)
         qr.make(fit=True)
         
-        # Generar imagen QR en blanco y negro primero (máxima compatibilidad)
+        # Generar en blanco y negro puro (máxima compatibilidad con escáneres)
         qr_img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
         
-        # Recolorear: reemplazar negro por azul oscuro
-        from PIL import ImageOps
-        pixels = qr_img.load()
-        w, h = qr_img.size
-        for x in range(w):
-            for y in range(h):
-                r, g, b = pixels[x, y]
-                if r < 128:  # pixel oscuro
-                    pixels[x, y] = color_dark
-        
-        # Redimensionar al tamaño deseado
-        resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.BILINEAR
+        # Redimensionar con NEAREST para mantener bordes nítidos (crucial para QR)
+        resample = Image.NEAREST
         qr_img = qr_img.resize((size, size), resample)
+        
         return qr_img
     except Exception as e:
         logger.warning(f"Error generando QR: {e}")
@@ -7866,12 +7867,12 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     qr_size = 150
     
     username = datos.get('username', '')
-    if username:
-        qr_url = f"https://t.me/{username}"
-    else:
-        qr_url = "https://t.me/Cofradia_Premium_Bot"
+    user_id = datos.get('user_id', '')
     
-    qr_img = generar_qr_simple(qr_url, size=qr_size, color_dark=AZUL_OSCURO)
+    # Deep link: al escanear abre el bot y muestra la tarjeta de este usuario
+    qr_url = f"https://t.me/Cofradia_Premium_Bot?start=tarjeta_{user_id}" if user_id else "https://t.me/Cofradia_Premium_Bot"
+    
+    qr_img = generar_qr_simple(qr_url, size=qr_size)
     if qr_img:
         try:
             img.paste(qr_img, (qr_x, qr_y))
@@ -7916,6 +7917,95 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     return buffer
 
 
+async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """Muestra la tarjeta profesional de un usuario (activada por deep link QR)"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión. Intenta nuevamente.")
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (target_user_id,))
+        else:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (target_user_id,))
+        tarjeta = c.fetchone()
+        conn.close()
+        
+        if not tarjeta:
+            await update.message.reply_text(
+                "📇 Este cofrade aún no ha creado su tarjeta profesional.\n\n"
+                "¿Eres miembro de Cofradía? Crea tu tarjeta con /mi_tarjeta"
+            )
+            return
+        
+        nombre = tarjeta['nombre_completo'] if DATABASE_URL else tarjeta[1]
+        profesion = tarjeta['profesion'] if DATABASE_URL else tarjeta[2]
+        empresa = tarjeta['empresa'] if DATABASE_URL else tarjeta[3]
+        servicios = tarjeta['servicios'] if DATABASE_URL else tarjeta[4]
+        telefono = tarjeta['telefono'] if DATABASE_URL else tarjeta[5]
+        email = tarjeta['email'] if DATABASE_URL else tarjeta[6]
+        ciudad = tarjeta['ciudad'] if DATABASE_URL else tarjeta[7]
+        linkedin = tarjeta['linkedin'] if DATABASE_URL else tarjeta[8]
+        
+        # Obtener username del dueño de la tarjeta
+        username_target = ''
+        try:
+            conn2 = get_db_connection()
+            if conn2:
+                c2 = conn2.cursor()
+                if DATABASE_URL:
+                    c2.execute("SELECT username FROM suscripciones WHERE user_id = %s", (target_user_id,))
+                else:
+                    c2.execute("SELECT username FROM suscripciones WHERE user_id = ?", (target_user_id,))
+                row = c2.fetchone()
+                if row:
+                    username_target = row['username'] if DATABASE_URL else row[0]
+                conn2.close()
+        except:
+            pass
+        
+        datos_tarjeta = {
+            'nombre_completo': nombre, 'profesion': profesion,
+            'empresa': empresa, 'servicios': servicios,
+            'telefono': telefono, 'email': email,
+            'ciudad': ciudad, 'linkedin': linkedin,
+            'username': username_target or '',
+            'user_id': target_user_id
+        }
+        
+        img_buffer = None
+        try:
+            img_buffer = generar_tarjeta_imagen(datos_tarjeta)
+        except Exception as e:
+            logger.warning(f"Error generando tarjeta pública: {e}")
+        
+        if img_buffer:
+            caption = f"📇 Tarjeta profesional de {nombre}\n"
+            if profesion: caption += f"💼 {profesion}\n"
+            if empresa: caption += f"🏢 {empresa}\n"
+            caption += "\n🔗 Cofradía de Networking — Red Profesional de Oficiales"
+            
+            await update.message.reply_photo(photo=img_buffer, caption=caption)
+        else:
+            # Fallback texto
+            msg = f"📇 TARJETA PROFESIONAL\n{'━' * 28}\n\n"
+            msg += f"👤 {nombre}\n"
+            if profesion: msg += f"💼 {profesion}\n"
+            if empresa: msg += f"🏢 {empresa}\n"
+            if servicios: msg += f"🛠️ {servicios}\n"
+            if ciudad: msg += f"📍 {ciudad}\n"
+            if telefono: msg += f"📱 {telefono}\n"
+            if email: msg += f"📧 {email}\n"
+            if linkedin: msg += f"🔗 {linkedin}\n"
+            msg += f"\n🔗 Cofradía de Networking"
+            await update.message.reply_text(msg)
+    except Exception as e:
+        logger.error(f"Error mostrando tarjeta pública: {e}")
+        await update.message.reply_text("❌ Error al mostrar la tarjeta. Intenta nuevamente.")
+
+
 @requiere_suscripcion
 async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /mi_tarjeta - Crear/ver tarjeta profesional"""
@@ -7952,7 +8042,8 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         'profesion': profesion, 'empresa': empresa,
                         'servicios': servicios, 'telefono': telefono,
                         'email': email, 'ciudad': ciudad, 'linkedin': linkedin,
-                        'username': user.username or ''
+                        'username': user.username or '',
+                        'user_id': user_id
                     }
                     
                     img_buffer = None
