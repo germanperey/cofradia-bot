@@ -331,9 +331,14 @@ def init_db():
                 email TEXT,
                 ciudad TEXT,
                 linkedin TEXT,
+                nro_kdt TEXT DEFAULT '',
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
+            try:
+                c.execute("ALTER TABLE tarjetas_profesional ADD COLUMN IF NOT EXISTS nro_kdt TEXT DEFAULT ''")
+            except Exception:
+                pass
             
             c.execute('''CREATE TABLE IF NOT EXISTS alertas_usuario (
                 id SERIAL PRIMARY KEY,
@@ -567,9 +572,14 @@ def init_db():
                 email TEXT,
                 ciudad TEXT,
                 linkedin TEXT,
+                nro_kdt TEXT DEFAULT '',
                 fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
                 fecha_actualizacion DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
+            try:
+                c.execute("ALTER TABLE tarjetas_profesional ADD COLUMN nro_kdt TEXT DEFAULT ''")
+            except Exception:
+                pass
             
             c.execute('''CREATE TABLE IF NOT EXISTS alertas_usuario (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2860,8 +2870,8 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /graficos - Muestra gráficos de actividad del grupo"""
-    msg = await update.message.reply_text("📊 Generando gráficos...")
+    """Comando /graficos - Dashboard interactivo ECharts con análisis del grupo"""
+    msg = await update.message.reply_text("📊 Generando dashboard interactivo ECharts...")
     
     try:
         conn = get_db_connection()
@@ -2870,9 +2880,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         c = conn.cursor()
-        dias = 7  # Últimos 7 días
+        dias = 7
         
-        # Primero verificar si hay datos
+        # Verificar datos
         if DATABASE_URL:
             c.execute("SELECT COUNT(*) as total FROM mensajes")
             total_general = c.fetchone()['total']
@@ -2883,299 +2893,456 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if total_general == 0:
             conn.close()
             await msg.edit_text(
-                "📊 **No hay datos para mostrar**\n\n"
+                "📊 No hay datos para mostrar\n\n"
                 "La base de datos está vacía. Los gráficos estarán disponibles cuando el bot "
-                "comience a guardar mensajes del grupo.\n\n"
-                "💡 Los mensajes se guardan automáticamente mientras el bot está activo en @Cofradia_de_Networking",
-                parse_mode='Markdown'
+                "comience a guardar mensajes del grupo."
             )
             return
         
-        # Obtener estadísticas
+        # ===== RECOLECTAR TODOS LOS DATOS =====
+        fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+        
+        # 1. Mensajes por día
         if DATABASE_URL:
-            # PostgreSQL
             c.execute("""SELECT DATE(fecha) as date, COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
                         GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
-            por_dia = c.fetchall()
-            
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
+            por_dia = [(str(r['date']), r['count']) for r in c.fetchall()]
+        else:
+            c.execute("SELECT DATE(fecha), COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)", (fecha_inicio,))
+            por_dia = [(r[0], r[1]) for r in c.fetchall()]
+        
+        # 2. Actividad por hora
+        if DATABASE_URL:
+            c.execute("""SELECT EXTRACT(HOUR FROM fecha)::int as hora, COUNT(*) as count 
+                        FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY EXTRACT(HOUR FROM fecha)::int ORDER BY hora""")
+            por_hora = [(r['hora'], r['count']) for r in c.fetchall()]
+        else:
+            c.execute("SELECT CAST(strftime('%%H', fecha) AS INTEGER), COUNT(*) FROM mensajes WHERE fecha >= ? GROUP BY 1 ORDER BY 1", (fecha_inicio,))
+            por_hora = [(r[0], r[1]) for r in c.fetchall()]
+        
+        # 3. Top usuarios
+        if DATABASE_URL:
+            c.execute("""SELECT COALESCE(
+                            MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                            AND first_name IS NOT NULL THEN first_name ELSE NULL END) 
+                            || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), 
+                            MAX(first_name), 'Usuario') as nombre, 
                         COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
                         GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10""")
-            usuarios_activos = c.fetchall()
-            
+            usuarios = [((r['nombre'] or 'Usuario').strip(), r['count']) for r in c.fetchall()]
+        else:
+            c.execute("""SELECT COALESCE(
+                            MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                            AND first_name IS NOT NULL THEN first_name ELSE NULL END) 
+                            || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), 
+                            MAX(first_name), 'Usuario'), 
+                        COUNT(*) FROM mensajes WHERE fecha >= ? 
+                        GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10""", (fecha_inicio,))
+            usuarios = [((r[0] or 'Usuario').strip(), r[1]) for r in c.fetchall()]
+        
+        # 4. Categorías
+        if DATABASE_URL:
             c.execute("""SELECT categoria, COUNT(*) as count FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days' AND categoria IS NOT NULL
                         GROUP BY categoria ORDER BY COUNT(*) DESC""")
-            por_categoria = c.fetchall()
+            categorias = [(r['categoria'], r['count']) for r in c.fetchall()]
         else:
-            # SQLite
-            fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
-            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? GROUP BY DATE(fecha) ORDER BY DATE(fecha)""", (fecha_inicio,))
-            por_dia = c.fetchall()
-            
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
-                        COUNT(*) as count FROM mensajes 
-                        WHERE fecha >= ? GROUP BY user_id ORDER BY count DESC LIMIT 10""", (fecha_inicio,))
-            usuarios_activos = c.fetchall()
-            
-            c.execute("""SELECT categoria, COUNT(*) FROM mensajes 
-                        WHERE fecha >= ? AND categoria IS NOT NULL
-                        GROUP BY categoria ORDER BY COUNT(*) DESC""", (fecha_inicio,))
-            por_categoria = c.fetchall()
+            c.execute("SELECT categoria, COUNT(*) FROM mensajes WHERE fecha >= ? AND categoria IS NOT NULL GROUP BY categoria ORDER BY COUNT(*) DESC", (fecha_inicio,))
+            categorias = [(r[0], r[1]) for r in c.fetchall()]
         
-        conn.close()
-        
-        # Convertir resultados
+        # 5. Miembros totales y nuevos
         if DATABASE_URL:
-            por_dia = [(str(r['date']), r['count']) for r in por_dia] if por_dia else []
-            usuarios_activos = [((r['nombre_completo'] or 'Usuario').strip(), r['count']) for r in usuarios_activos] if usuarios_activos else []
-            por_categoria = [(r['categoria'], r['count']) for r in por_categoria] if por_categoria else []
+            c.execute("SELECT COUNT(*) as t FROM suscripciones WHERE estado = 'activo'")
+            total_miembros = c.fetchone()['t']
+            c.execute("""SELECT COUNT(*) as t FROM suscripciones 
+                        WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days' AND estado = 'activo'""")
+            nuevos_7d = c.fetchone()['t']
         else:
-            por_dia = [(r[0], r[1]) for r in por_dia] if por_dia else []
-            usuarios_activos = [(r[0].strip() if r[0] else f'ID:{r[1] if len(r) > 1 else "?"}', r[1]) for r in usuarios_activos] if usuarios_activos else []
-            por_categoria = [(r[0], r[1]) for r in por_categoria] if por_categoria else []
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+            total_miembros = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ? AND estado = 'activo'", (fecha_inicio,))
+            nuevos_7d = c.fetchone()[0]
         
-        if not por_dia and not usuarios_activos:
-            await msg.edit_text(
-                "📊 **No hay datos de los últimos 7 días**\n\n"
-                f"Total mensajes en BD: {total_general}\n"
-                "Los mensajes más recientes aparecerán pronto.\n\n"
-                "💡 Usa /estadisticas para ver datos históricos.",
-                parse_mode='Markdown'
-            )
-            return
-        
-        # ============ OBTENER DATOS DE GOOGLE DRIVE ============
+        # 6. Datos Drive si disponible
         drive_data = None
         try:
             drive_data = obtener_datos_excel_drive()
-        except Exception as e:
-            logger.warning(f"No se pudo obtener datos de Drive para graficos: {e}")
+        except:
+            pass
         
-        # Crear gráfico - layout dinámico: 3x2 con Drive, 2x2 sin Drive
+        drive_stats = {}
         if drive_data is not None and len(drive_data) > 0:
-            fig, axes = plt.subplots(3, 2, figsize=(16, 18))
-            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=20, fontweight='bold', y=0.99)
-        else:
-            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-            fig.suptitle('📊 ESTADISTICAS COFRADIA - Ultimos 7 dias', fontsize=16, fontweight='bold')
-        
-        # ===== Gráfico 1: Actividad por Hora del Día =====
-        ax1 = axes[0, 0]
-        if por_dia:
-            if DATABASE_URL:
-                conn2 = get_db_connection()
-                c2 = conn2.cursor()
-                c2.execute("""SELECT EXTRACT(HOUR FROM fecha)::int as hora, COUNT(*) as count 
-                            FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                            GROUP BY EXTRACT(HOUR FROM fecha)::int ORDER BY hora""")
-                por_hora = [(r['hora'], r['count']) for r in c2.fetchall()]
-                conn2.close()
-            else:
-                conn2 = get_db_connection()
-                c2 = conn2.cursor()
-                c2.execute("""SELECT CAST(strftime('%H', fecha) AS INTEGER) as hora, COUNT(*) as count 
-                            FROM mensajes WHERE fecha >= ? GROUP BY hora ORDER BY hora""", 
-                          ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
-                por_hora = [(r[0], r[1]) for r in c2.fetchall()]
-                conn2.close()
-            
-            if por_hora:
-                horas = [h[0] for h in por_hora]
-                conteos = [h[1] for h in por_hora]
-                colores_hora = []
-                for h in horas:
-                    if 6 <= h < 12:
-                        colores_hora.append('#FFD700')
-                    elif 12 <= h < 18:
-                        colores_hora.append('#FF6B35')
-                    elif 18 <= h < 22:
-                        colores_hora.append('#4169E1')
-                    else:
-                        colores_hora.append('#2C3E50')
-                ax1.bar(horas, conteos, color=colores_hora, alpha=0.85, edgecolor='white')
-                hora_pico = horas[conteos.index(max(conteos))]
-                ax1.axvline(x=hora_pico, color='red', linestyle='--', alpha=0.5, label=f'Pico: {hora_pico}:00')
-                ax1.legend(fontsize=10)
-                ax1.set_xlabel('Hora del dia', fontsize=12)
-                ax1.tick_params(axis='both', labelsize=10)
-                ax1.set_ylabel('Mensajes')
-            else:
-                ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax1.set_title('🕐 Actividad por Hora')
-        else:
-            ax1.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax1.set_title('🕐 Actividad por Hora')
-        
-        # ===== Gráfico 2: Usuarios más activos con etiquetas =====
-        ax2 = axes[0, 1]
-        if usuarios_activos:
-            # Limpiar nombres: filtrar Group, agregar apellido
-            nombres_limpios = []
-            for u in usuarios_activos[:8]:
-                n = str(u[0]).replace('_', ' ').strip() if u[0] else 'Usuario'
-                if n.lower() in ['group', 'grupo', 'channel', 'canal', 'cofradía', 'cofradía de networking']:
-                    n = 'Germán Perey'
-                elif n.lower() in ['usuario', 'sin nombre', 'no name', 'none', 'null']:
-                    n = 'Usuario'
-                nombres_limpios.append(n[:25])
-            nombres = nombres_limpios
-            mensajes_u = [u[1] for u in usuarios_activos[:8]]
-            colors_bar = plt.cm.viridis([i/max(len(nombres),1) for i in range(len(nombres))])
-            bars = ax2.barh(nombres, mensajes_u, color=colors_bar, edgecolor='white')
-            for bar, val in zip(bars, mensajes_u):
-                ax2.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
-                        str(val), va='center', fontsize=12, fontweight='bold')
-            ax2.set_title('👥 Usuarios Mas Activos')
-            ax2.set_xlabel('Mensajes', fontsize=12)
-            ax2.tick_params(axis='both', labelsize=10)
-        else:
-            ax2.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax2.set_title('👥 Usuarios Mas Activos')
-        
-        # ===== Gráfico 3: Categorías desglosadas =====
-        ax3 = axes[1, 0]
-        if por_categoria:
-            cats_desglosadas = []
-            for cat_name, cat_count in por_categoria:
-                if str(cat_name) == 'General':
-                    cats_desglosadas.append(('Conversacion', int(cat_count * 0.40)))
-                    cats_desglosadas.append(('Opinion', int(cat_count * 0.25)))
-                    cats_desglosadas.append(('Informacion', int(cat_count * 0.20)))
-                    resto = cat_count - int(cat_count * 0.40) - int(cat_count * 0.25) - int(cat_count * 0.20)
-                    cats_desglosadas.append(('Otro', max(resto, 1)))
-                else:
-                    cats_desglosadas.append((str(cat_name), cat_count))
-            categorias_g = [c[0] for c in cats_desglosadas[:8]]
-            cantidades_g = [c[1] for c in cats_desglosadas[:8]]
-            colores_pie = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
-            ax3.pie(cantidades_g, labels=categorias_g, autopct='%1.1f%%', startangle=90,
-                   colors=colores_pie[:len(categorias_g)])
-            ax3.set_title('🏷️ Categorias de Mensajes')
-        else:
-            ax3.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-            ax3.set_title('🏷️ Categorias de Mensajes')
-        
-        # ===== Gráfico 4: KPIs Resumen =====
-        ax4 = axes[1, 1]
-        ax4.axis('off')
-        total_mensajes = sum([d[1] for d in por_dia]) if por_dia else 0
-        total_usuarios = len(usuarios_activos)
-        promedio = total_mensajes / dias if dias > 0 else 0
-        
-        resumen_texto = f"  📊 RESUMEN\n\n"
-        resumen_texto += f"  📝 Total mensajes: {total_mensajes}\n"
-        resumen_texto += f"  👥 Usuarios activos: {total_usuarios}\n"
-        resumen_texto += f"  📈 Promedio diario: {promedio:.1f}\n"
-        resumen_texto += f"  📅 Periodo: {dias} dias\n"
-        
-        if drive_data is not None:
-            resumen_texto += f"\n  📁 BD Google Drive\n"
-            resumen_texto += f"  👤 Total registros: {len(drive_data)}\n"
             try:
-                col_i = drive_data.iloc[:, 8] if len(drive_data.columns) > 8 else None
-                if col_i is not None:
-                    en_busqueda = col_i.astype(str).str.lower().str.contains('busqueda|búsqueda', na=False).sum()
-                    resumen_texto += f"  🔍 En busqueda: {en_busqueda}\n"
+                ciudades = {}
+                generaciones = {}
+                for _, row in drive_data.iterrows():
+                    ciudad = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else ''
+                    gen = str(row.iloc[3]).strip() if pd.notna(row.iloc[3]) else ''
+                    if ciudad and ciudad != 'nan':
+                        ciudades[ciudad] = ciudades.get(ciudad, 0) + 1
+                    if gen and gen != 'nan' and len(gen) == 4:
+                        generaciones[gen] = generaciones.get(gen, 0) + 1
+                drive_stats['ciudades'] = sorted(ciudades.items(), key=lambda x: -x[1])[:12]
+                drive_stats['generaciones'] = sorted(generaciones.items(), key=lambda x: x[0])
             except:
                 pass
         
-        ax4.text(0.05, 0.5, resumen_texto, fontsize=12, verticalalignment='center',
-                fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        conn.close()
         
-        # ===== Gráficos 5-6: Solo si hay datos de Drive =====
-        if drive_data is not None and len(drive_data) > 0:
+        # ===== GENERAR HTML CON ECHARTS =====
+        total_msgs_7d = sum(d[1] for d in por_dia) if por_dia else 0
+        promedio_diario = round(total_msgs_7d / max(len(por_dia), 1), 1)
+        hora_pico = max(por_hora, key=lambda x: x[1])[0] if por_hora else 0
+        
+        # Limpiar nombres usuarios
+        usuarios_clean = []
+        for u in usuarios[:8]:
+            n = str(u[0]).replace('_', ' ').strip()
+            if n.lower() in ['group', 'grupo', 'channel', 'canal', 'none', 'null', '']:
+                n = 'Cofradía'
+            usuarios_clean.append((n[:20], u[1]))
+        
+        # JSON data
+        import json as _json
+        dias_labels = _json.dumps([d[0][-5:] for d in por_dia])
+        dias_values = _json.dumps([d[1] for d in por_dia])
+        horas_labels = _json.dumps([f"{h[0]:02d}:00" for h in por_hora])
+        horas_values = _json.dumps([h[1] for h in por_hora])
+        users_labels = _json.dumps([u[0] for u in usuarios_clean])
+        users_values = _json.dumps([u[1] for u in usuarios_clean])
+        cats_data = _json.dumps([{'name': c[0] or 'General', 'value': c[1]} for c in categorias[:8]])
+        
+        # Drive data JSON
+        ciudades_json = _json.dumps([{'name': c[0], 'value': c[1]} for c in drive_stats.get('ciudades', [])])
+        gen_labels = _json.dumps([g[0] for g in drive_stats.get('generaciones', [])])
+        gen_values = _json.dumps([g[1] for g in drive_stats.get('generaciones', [])])
+        
+        has_drive = 'true' if drive_stats else 'false'
+        
+        html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard Cofradía de Networking</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ 
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: linear-gradient(135deg, #0a1628 0%, #0f2f59 50%, #1a3a6a 100%);
+    color: #e0e6ed; min-height: 100vh; padding: 20px;
+}}
+.header {{
+    text-align: center; padding: 30px 0 20px;
+    border-bottom: 2px solid rgba(195,165,90,0.4);
+    margin-bottom: 25px;
+}}
+.header h1 {{
+    font-size: 2.2em; color: #c3a55a;
+    text-shadow: 0 2px 10px rgba(195,165,90,0.3);
+    letter-spacing: 2px;
+}}
+.header .subtitle {{ color: #8899aa; font-size: 1em; margin-top: 5px; }}
+.kpi-row {{
+    display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap; justify-content: center;
+}}
+.kpi {{
+    background: linear-gradient(135deg, rgba(15,47,89,0.8), rgba(30,80,140,0.4));
+    border: 1px solid rgba(195,165,90,0.3); border-radius: 12px;
+    padding: 20px 30px; text-align: center; flex: 1; min-width: 180px; max-width: 220px;
+    backdrop-filter: blur(10px);
+}}
+.kpi .value {{
+    font-size: 2.5em; font-weight: 800; color: #c3a55a;
+    text-shadow: 0 0 20px rgba(195,165,90,0.4);
+}}
+.kpi .label {{ font-size: 0.85em; color: #8899aa; margin-top: 5px; text-transform: uppercase; letter-spacing: 1px; }}
+.charts-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 20px; margin-bottom: 20px;
+}}
+.chart-card {{
+    background: linear-gradient(145deg, rgba(15,47,89,0.6), rgba(10,22,40,0.8));
+    border: 1px solid rgba(52,120,195,0.2); border-radius: 14px;
+    padding: 15px; min-height: 380px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}}
+.chart-card .title {{
+    font-size: 1.1em; color: #c3a55a; margin-bottom: 10px;
+    padding-bottom: 8px; border-bottom: 1px solid rgba(195,165,90,0.2);
+    font-weight: 600; letter-spacing: 0.5px;
+}}
+.chart {{ width: 100%; height: 320px; }}
+.footer {{
+    text-align: center; padding: 20px 0; color: #556677;
+    font-size: 0.85em; border-top: 1px solid rgba(195,165,90,0.2);
+    margin-top: 20px;
+}}
+.footer span {{ color: #c3a55a; }}
+</style>
+</head>
+<body>
+<div class="header">
+    <h1>⚓ COFRADÍA DE NETWORKING</h1>
+    <div class="subtitle">Dashboard de Actividad — Últimos 7 días</div>
+</div>
+
+<div class="kpi-row">
+    <div class="kpi"><div class="value">{total_msgs_7d}</div><div class="label">Mensajes</div></div>
+    <div class="kpi"><div class="value">{len(usuarios_clean)}</div><div class="label">Usuarios Activos</div></div>
+    <div class="kpi"><div class="value">{promedio_diario}</div><div class="label">Promedio/Día</div></div>
+    <div class="kpi"><div class="value">{hora_pico:02d}:00</div><div class="label">Hora Pico</div></div>
+    <div class="kpi"><div class="value">{total_miembros}</div><div class="label">Miembros</div></div>
+    <div class="kpi"><div class="value">+{nuevos_7d}</div><div class="label">Nuevos 7d</div></div>
+</div>
+
+<div class="charts-grid">
+    <div class="chart-card">
+        <div class="title">📈 Actividad Diaria</div>
+        <div id="chart-diario" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">🕐 Actividad por Hora</div>
+        <div id="chart-hora" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">👥 Top Usuarios Activos</div>
+        <div id="chart-usuarios" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">📂 Categorías de Mensajes</div>
+        <div id="chart-categorias" class="chart"></div>
+    </div>
+</div>
+
+<div id="drive-section" class="charts-grid" style="display:none;">
+    <div class="chart-card">
+        <div class="title">🌎 Distribución por Ciudad</div>
+        <div id="chart-ciudades" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">⚓ Distribución por Generación</div>
+        <div id="chart-generaciones" class="chart"></div>
+    </div>
+</div>
+
+<div class="footer">
+    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Bot Premium v4.3 ECharts
+</div>
+
+<script>
+const gold = '#c3a55a';
+const goldLight = '#d4b86a';
+const blue = '#3478c3';
+const blueLight = '#5a9fd4';
+const navy = '#0f2f59';
+const textColor = '#c0c8d4';
+
+// ===== CHART 1: Actividad Diaria =====
+var c1 = echarts.init(document.getElementById('chart-diario'));
+c1.setOption({{
+    tooltip: {{ trigger: 'axis', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }} }},
+    grid: {{ left: '8%', right: '5%', bottom: '12%', top: '10%' }},
+    xAxis: {{ type: 'category', data: {dias_labels}, axisLabel: {{ color: textColor, fontSize: 11 }}, axisLine: {{ lineStyle: {{ color: '#2a4a6a' }} }} }},
+    yAxis: {{ type: 'value', axisLabel: {{ color: textColor }}, splitLine: {{ lineStyle: {{ color: 'rgba(52,120,195,0.15)' }} }} }},
+    series: [{{
+        type: 'line', data: {dias_values}, smooth: true,
+        lineStyle: {{ color: gold, width: 3 }},
+        areaStyle: {{ color: {{ type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [{{ offset: 0, color: 'rgba(195,165,90,0.4)' }}, {{ offset: 1, color: 'rgba(195,165,90,0.02)' }}] }} }},
+        itemStyle: {{ color: gold, borderWidth: 2 }},
+        symbol: 'circle', symbolSize: 8,
+        emphasis: {{ itemStyle: {{ borderWidth: 3, borderColor: '#fff' }} }}
+    }}]
+}});
+
+// ===== CHART 2: Por Hora =====
+var c2 = echarts.init(document.getElementById('chart-hora'));
+c2.setOption({{
+    tooltip: {{ trigger: 'axis', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: blue, textStyle: {{ color: textColor }} }},
+    grid: {{ left: '8%', right: '5%', bottom: '12%', top: '10%' }},
+    xAxis: {{ type: 'category', data: {horas_labels}, axisLabel: {{ color: textColor, fontSize: 10, rotate: 45 }}, axisLine: {{ lineStyle: {{ color: '#2a4a6a' }} }} }},
+    yAxis: {{ type: 'value', axisLabel: {{ color: textColor }}, splitLine: {{ lineStyle: {{ color: 'rgba(52,120,195,0.15)' }} }} }},
+    series: [{{
+        type: 'bar', data: {horas_values},
+        itemStyle: {{
+            color: {{ type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [{{ offset: 0, color: blueLight }}, {{ offset: 1, color: 'rgba(52,120,195,0.3)' }}] }},
+            borderRadius: [4, 4, 0, 0]
+        }},
+        emphasis: {{ itemStyle: {{ color: gold }} }}
+    }}]
+}});
+
+// ===== CHART 3: Usuarios =====
+var c3 = echarts.init(document.getElementById('chart-usuarios'));
+c3.setOption({{
+    tooltip: {{ trigger: 'axis', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }} }},
+    grid: {{ left: '30%', right: '12%', bottom: '5%', top: '5%' }},
+    xAxis: {{ type: 'value', axisLabel: {{ color: textColor }}, splitLine: {{ lineStyle: {{ color: 'rgba(52,120,195,0.15)' }} }} }},
+    yAxis: {{ type: 'category', data: {users_labels}, inverse: true, axisLabel: {{ color: textColor, fontSize: 11 }}, axisLine: {{ lineStyle: {{ color: '#2a4a6a' }} }} }},
+    series: [{{
+        type: 'bar', data: {users_values},
+        itemStyle: {{
+            color: {{ type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
+                colorStops: [{{ offset: 0, color: 'rgba(195,165,90,0.3)' }}, {{ offset: 1, color: gold }}] }},
+            borderRadius: [0, 6, 6, 0]
+        }},
+        label: {{ show: true, position: 'right', color: gold, fontWeight: 'bold', fontSize: 13 }}
+    }}]
+}});
+
+// ===== CHART 4: Categorías =====
+var c4 = echarts.init(document.getElementById('chart-categorias'));
+c4.setOption({{
+    tooltip: {{ trigger: 'item', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }},
+        formatter: '{{b}}: {{c}} ({{d}}%)' }},
+    series: [{{
+        type: 'pie', radius: ['35%', '70%'], center: ['50%', '55%'],
+        data: {cats_data},
+        itemStyle: {{ borderColor: 'rgba(10,22,40,0.8)', borderWidth: 2, borderRadius: 6 }},
+        label: {{ color: textColor, fontSize: 11, formatter: '{{b}}\\n{{d}}%' }},
+        emphasis: {{ itemStyle: {{ shadowBlur: 20, shadowColor: 'rgba(195,165,90,0.5)' }},
+            label: {{ fontSize: 14, fontWeight: 'bold' }} }},
+        color: [gold, blue, blueLight, '#2ecc71', '#e74c3c', '#9b59b6', '#f39c12', '#1abc9c']
+    }}]
+}});
+
+// ===== DRIVE CHARTS =====
+if ({has_drive}) {{
+    document.getElementById('drive-section').style.display = 'grid';
+    
+    var c5 = echarts.init(document.getElementById('chart-ciudades'));
+    c5.setOption({{
+        tooltip: {{ trigger: 'item', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }} }},
+        series: [{{
+            type: 'pie', radius: ['25%', '65%'], center: ['50%', '55%'],
+            roseType: 'area', data: {ciudades_json},
+            itemStyle: {{ borderColor: 'rgba(10,22,40,0.8)', borderWidth: 2, borderRadius: 4 }},
+            label: {{ color: textColor, fontSize: 10, formatter: '{{b}}: {{c}}' }},
+            color: [gold, blue, blueLight, '#2ecc71', '#e74c3c', '#9b59b6', '#f39c12', '#1abc9c', '#3498db', '#e67e22', '#c0392b', '#16a085']
+        }}]
+    }});
+    
+    var c6 = echarts.init(document.getElementById('chart-generaciones'));
+    c6.setOption({{
+        tooltip: {{ trigger: 'axis', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }} }},
+        grid: {{ left: '10%', right: '5%', bottom: '15%', top: '10%' }},
+        xAxis: {{ type: 'category', data: {gen_labels}, axisLabel: {{ color: textColor, fontSize: 10, rotate: 45 }}, axisLine: {{ lineStyle: {{ color: '#2a4a6a' }} }} }},
+        yAxis: {{ type: 'value', axisLabel: {{ color: textColor }}, splitLine: {{ lineStyle: {{ color: 'rgba(52,120,195,0.15)' }} }} }},
+        series: [{{
+            type: 'bar', data: {gen_values},
+            itemStyle: {{
+                color: {{ type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    colorStops: [{{ offset: 0, color: gold }}, {{ offset: 1, color: 'rgba(195,165,90,0.2)' }}] }},
+                borderRadius: [4, 4, 0, 0]
+            }},
+            label: {{ show: true, position: 'top', color: gold, fontSize: 11 }}
+        }}]
+    }});
+}}
+
+// Responsive
+window.addEventListener('resize', function() {{
+    c1.resize(); c2.resize(); c3.resize(); c4.resize();
+    if ({has_drive}) {{ c5.resize(); c6.resize(); }}
+}});
+</script>
+</body>
+</html>"""
+        
+        # Guardar HTML
+        html_path = f"/tmp/cofradia_dashboard_{update.effective_user.id}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        # También generar imagen preview con matplotlib
+        try:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.patch.set_facecolor('#0a1628')
+            fig.suptitle('COFRADÍA DE NETWORKING — Dashboard 7 días', fontsize=16, fontweight='bold', color='#c3a55a')
             
-            # ===== Gráfico 5: Distribución por Situación Laboral (col I = idx 8) =====
-            ax5 = axes[2, 0]
-            try:
-                col_sit = drive_data.iloc[:, 8].dropna().astype(str)
-                # Filtrar valores basura y headers
-                col_sit = col_sit[~col_sit.str.lower().isin([
-                    'nan', 'none', '', 'n/a', '-', 'nat', 
-                    'situación laboral', 'situacion laboral'
-                ])]
-                
-                if len(col_sit) > 0:
-                    # NORMALIZAR: agrupar case-insensitive
-                    NORMALIZACION_SITUACION = {
-                        'con contrato': 'Con Contrato',
-                        'con  contrato': 'Con Contrato',
-                        'independiente': 'Independiente',
-                        'búsqueda laboral': 'Búsqueda Laboral',
-                        'busqueda laboral': 'Búsqueda Laboral',
-                        'transición': 'Transición',
-                        'transicion': 'Transición',
-                        'cesante': 'Transición',
-                    }
-                    col_sit_norm = col_sit.str.strip().apply(
-                        lambda x: NORMALIZACION_SITUACION.get(x.lower().strip(), x.strip())
-                    )
-                    sit_counts = col_sit_norm.value_counts()
-                    
-                    # Colores por categoría (igual que el Excel)
-                    COLORES_SIT = {
-                        'Con Contrato': '#00B050',      # Verde
-                        'Independiente': '#FFD700',      # Amarillo
-                        'Búsqueda Laboral': '#FF0000',   # Rojo
-                        'Transición': '#BFBFBF',         # Gris
-                    }
-                    colores_sit = [COLORES_SIT.get(cat, '#4472C4') for cat in sit_counts.index]
-                    
-                    bars5 = ax5.barh(sit_counts.index.tolist(), sit_counts.values.tolist(), 
-                                    color=colores_sit, edgecolor='white', alpha=0.9)
-                    for bar, val in zip(bars5, sit_counts.values):
-                        ax5.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=12, fontweight='bold')
-                    ax5.set_title('💼 Distribucion de Egresados por Situacion Laboral', fontsize=12, fontweight='bold')
-                    ax5.set_xlabel('Numero de Egresados')
-                else:
-                    ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-                    ax5.set_title('💼 Situacion Laboral')
-            except Exception as e:
-                logger.warning(f"Error graficando situacion laboral: {e}")
-                ax5.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-                ax5.set_title('💼 Situacion Laboral')
+            for ax in axes.flat:
+                ax.set_facecolor('#0f2244')
+                ax.tick_params(colors='#8899aa')
+                ax.spines['bottom'].set_color('#2a4a6a')
+                ax.spines['left'].set_color('#2a4a6a')
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
             
-            # ===== Gráfico 6: Top 10 Industrias Principales (col K = idx 10) =====
-            ax6 = axes[2, 1]
-            try:
-                col_ind = drive_data.iloc[:, 10].dropna().astype(str)
-                col_ind = col_ind[~col_ind.str.lower().isin(['nan', 'none', '', 'n/a', '-', 'nat', 'industria_1'])]
-                if len(col_ind) > 0:
-                    ind_counts = col_ind.value_counts().head(10)
-                    colores_ind = ['#4472C4'] * len(ind_counts)
-                    bars6 = ax6.barh(ind_counts.index.tolist(), ind_counts.values.tolist(), 
-                                    color=colores_ind, edgecolor='white', alpha=0.9)
-                    for bar, val in zip(bars6, ind_counts.values):
-                        ax6.text(bar.get_width() + 0.2, bar.get_y() + bar.get_height()/2, 
-                                str(val), va='center', fontsize=12, fontweight='bold')
-                    ax6.set_title('🏢 Top 10 Industrias Principales de los Egresados', fontsize=12, fontweight='bold')
-                    ax6.set_xlabel('Numero de Egresados')
-                else:
-                    ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-                    ax6.set_title('🏢 Top 10 Industrias')
-            except Exception as e:
-                logger.warning(f"Error graficando industrias: {e}")
-                ax6.text(0.5, 0.5, 'Sin datos', ha='center', va='center')
-                ax6.set_title('🏢 Top 10 Industrias')
+            # G1: Actividad diaria
+            if por_dia:
+                axes[0,0].fill_between(range(len(por_dia)), [d[1] for d in por_dia], alpha=0.3, color='#c3a55a')
+                axes[0,0].plot(range(len(por_dia)), [d[1] for d in por_dia], color='#c3a55a', linewidth=2, marker='o', markersize=6)
+                axes[0,0].set_xticks(range(len(por_dia)))
+                axes[0,0].set_xticklabels([d[0][-5:] for d in por_dia], fontsize=8, color='#8899aa')
+            axes[0,0].set_title('Actividad Diaria', color='#c3a55a', fontsize=12)
+            axes[0,0].set_ylabel('Mensajes', color='#8899aa')
+            
+            # G2: Por hora
+            if por_hora:
+                colors_h = ['#FFD700' if 6<=h[0]<12 else '#3478c3' if 12<=h[0]<18 else '#5a9fd4' if 18<=h[0]<22 else '#2C3E50' for h in por_hora]
+                axes[0,1].bar([h[0] for h in por_hora], [h[1] for h in por_hora], color=colors_h, alpha=0.85)
+            axes[0,1].set_title('Actividad por Hora', color='#c3a55a', fontsize=12)
+            axes[0,1].set_xlabel('Hora', color='#8899aa')
+            
+            # G3: Top usuarios
+            if usuarios_clean:
+                names = [u[0][:15] for u in usuarios_clean[:8]]
+                vals = [u[1] for u in usuarios_clean[:8]]
+                bars = axes[1,0].barh(names, vals, color='#c3a55a', alpha=0.8, edgecolor='#d4b86a')
+                for bar, val in zip(bars, vals):
+                    axes[1,0].text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, str(val), va='center', color='#c3a55a', fontsize=10, fontweight='bold')
+            axes[1,0].set_title('Top Usuarios', color='#c3a55a', fontsize=12)
+            axes[1,0].invert_yaxis()
+            
+            # G4: Categorías
+            if categorias:
+                cat_names = [c[0] or 'General' for c in categorias[:6]]
+                cat_vals = [c[1] for c in categorias[:6]]
+                wedge_colors = ['#c3a55a', '#3478c3', '#5a9fd4', '#2ecc71', '#e74c3c', '#9b59b6']
+                axes[1,1].pie(cat_vals, labels=cat_names, colors=wedge_colors[:len(cat_names)], 
+                            autopct='%1.0f%%', textprops={'color': '#e0e6ed', 'fontsize': 9},
+                            wedgeprops={'edgecolor': '#0a1628', 'linewidth': 2})
+            axes[1,1].set_title('Categorías', color='#c3a55a', fontsize=12)
+            
+            plt.tight_layout()
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#0a1628')
+            buf.seek(0)
+            plt.close()
+            
+            # Enviar imagen preview
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=buf,
+                caption=f"📊 Dashboard Cofradía — Últimos 7 días\n\n"
+                        f"📨 {total_msgs_7d} mensajes · 👥 {len(usuarios_clean)} usuarios activos\n"
+                        f"📈 Promedio: {promedio_diario}/día · 🕐 Pico: {hora_pico:02d}:00\n\n"
+                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo con ECharts."
+            )
+        except Exception as e:
+            logger.warning(f"Error matplotlib preview: {e}")
+            await msg.edit_text("📊 Dashboard generado. Descarga el archivo HTML adjunto.")
         
-        plt.tight_layout()
+        # Enviar HTML como documento
+        with open(html_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"cofradia_dashboard_{datetime.now().strftime('%Y%m%d')}.html",
+                caption="📊 Dashboard Interactivo ECharts\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
+            )
         
-        # Guardar y enviar
-        buf = BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-        buf.seek(0)
-        plt.close()
-        
-        await msg.delete()
-        await update.message.reply_photo(
-            photo=buf,
-            caption="📊 Estadisticas de los ultimos 7 dias\n\nUsa /estadisticas para ver mas detalles."
-        )
+        # Limpiar
+        try:
+            os.remove(html_path)
+        except:
+            pass
         
         registrar_servicio_usado(update.effective_user.id, 'graficos')
         
@@ -3184,7 +3351,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error generando gráficos.\n\nDetalle: {str(e)[:100]}")
 
 
-@requiere_suscripcion
 async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /buscar_ia - Búsqueda inteligente UNIFICADA (historial + RAG + IA)"""
     if not context.args:
@@ -4593,7 +4759,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales del grupo"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -4605,41 +4771,133 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         if DATABASE_URL:
             c.execute("SELECT COUNT(*) as total FROM mensajes")
             total_msgs = c.fetchone()['total']
-            
             c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes")
             total_usuarios = c.fetchone()['total']
-            
             c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
             suscriptores = c.fetchone()['total']
-            
             c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE")
             msgs_hoy = c.fetchone()['total']
+            c.execute("SELECT COUNT(*) as total FROM recomendaciones")
+            total_recs = c.fetchone()['total']
+            c.execute("SELECT COUNT(*) as total FROM tarjetas_profesional")
+            total_tarjetas = c.fetchone()['total']
+            c.execute("""SELECT COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+            msgs_7d = c.fetchone()['total']
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
-            
             c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes")
             total_usuarios = c.fetchone()[0]
-            
             c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
             suscriptores = c.fetchone()[0]
-            
             c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
             msgs_hoy = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM recomendaciones")
+            total_recs = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM tarjetas_profesional")
+            total_tarjetas = c.fetchone()[0]
+            fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
+            msgs_7d = c.fetchone()[0]
         
         conn.close()
         
-        mensaje = f"""
-📊 **ESTADÍSTICAS DEL GRUPO**
+        promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
+        pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
+        
+        # Generar mini-dashboard HTML con gauges ECharts
+        import json as _json
+        html = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Estadísticas Cofradía</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}}
+h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
+.sub{{text-align:center;color:#667788;margin-bottom:25px}}
+.gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
+.gauge{{width:100%;height:100%}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
+.stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
+.stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
+</style></head><body>
+<h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
+<div class="sub">Resumen General — {datetime.now().strftime('%d/%m/%Y')}</div>
 
-📝 **Mensajes totales:** {total_msgs:,}
-👥 **Usuarios únicos:** {total_usuarios:,}
-✅ **Suscriptores activos:** {suscriptores:,}
-📅 **Mensajes hoy:** {msgs_hoy:,}
+<div class="gauges">
+<div class="gauge-box"><div id="g1" class="gauge"></div></div>
+<div class="gauge-box"><div id="g2" class="gauge"></div></div>
+<div class="gauge-box"><div id="g3" class="gauge"></div></div>
+</div>
 
-💡 Usa /graficos para ver gráficos visuales.
-"""
-        await update.message.reply_text(mensaje, parse_mode='Markdown')
+<div class="stats-grid">
+<div class="stat"><div class="val">{total_msgs:,}</div><div class="lbl">Mensajes Totales</div></div>
+<div class="stat"><div class="val">{total_usuarios:,}</div><div class="lbl">Usuarios Únicos</div></div>
+<div class="stat"><div class="val">{suscriptores:,}</div><div class="lbl">Miembros Activos</div></div>
+<div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
+<div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
+<div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+</div>
+
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
+
+<script>
+var gold='#c3a55a',blue='#3478c3';
+function gauge(id,val,max,title,color){{
+  var c=echarts.init(document.getElementById(id));
+  c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
+    pointer:{{show:true,length:'60%',width:4,itemStyle:{{color:color}}}},
+    progress:{{show:true,width:12,itemStyle:{{color:color}}}},
+    axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
+    axisTick:{{show:false}},splitLine:{{show:false}},
+    axisLabel:{{show:false}},
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
+      offsetCenter:[0,'40%'],formatter:'{{value}}'}},
+    data:[{{value:{val},name:title}}]
+  }}]}});
+  window.addEventListener('resize',()=>c.resize());
+}}
+gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
+gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
+gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+</script></body></html>"""
+        
+        html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        mensaje = (
+            f"📊 ESTADÍSTICAS COFRADÍA\n"
+            f"{'━' * 28}\n\n"
+            f"📝 Mensajes totales: {total_msgs:,}\n"
+            f"👥 Usuarios únicos: {total_usuarios:,}\n"
+            f"✅ Miembros activos: {suscriptores:,}\n"
+            f"📅 Mensajes hoy: {msgs_hoy:,}\n"
+            f"⭐ Recomendaciones: {total_recs:,}\n"
+            f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
+            f"💡 Usa /graficos para dashboard completo."
+        )
+        await update.message.reply_text(mensaje)
+        
+        with open(html_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
+                caption="📊 Dashboard ECharts interactivo con gauges"
+            )
+        
+        try:
+            os.remove(html_path)
+        except:
+            pass
+        
         registrar_servicio_usado(update.effective_user.id, 'estadisticas')
         
     except Exception as e:
@@ -8154,6 +8412,7 @@ def generar_qr_verificacion(url: str, size: int = 65):
 
 def obtener_stats_tarjeta(user_id_param: int) -> dict:
     """Obtiene antigüedad, recomendaciones y referidos para la tarjeta"""
+    import unicodedata as _ud
     stats = {'antiguedad': '0,0', 'recomendaciones': 0, 'referidos': 0,
              'fecha_incorporacion': '', 'estado': 'activo', 'nombre_completo': '', 'generacion': ''}
     try:
@@ -8174,22 +8433,32 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
             ln = (row['last_name'] if DATABASE_URL else row[4]) or ''
             stats['estado'] = estado
             stats['nombre_completo'] = f"{fn} {ln}".strip()
+            # --- Parseo robusto de fecha ---
             fecha_base = fecha_inc or fecha_reg
             if fecha_base:
                 try:
-                    fecha_str = str(fecha_base)[:19]
-                    if 'T' in fecha_str:
-                        fecha_dt = datetime.fromisoformat(fecha_str)
+                    fecha_dt = None
+                    if hasattr(fecha_base, 'year'):
+                        fecha_dt = datetime(fecha_base.year, fecha_base.month, fecha_base.day)
                     else:
-                        fecha_dt = datetime.strptime(fecha_str[:10], '%Y-%m-%d')
-                    delta = datetime.now() - fecha_dt
-                    total_meses = delta.days // 30
-                    anios = total_meses // 12
-                    meses = total_meses % 12
-                    stats['antiguedad'] = f"{anios},{meses}"
-                    stats['fecha_incorporacion'] = fecha_dt.strftime('%d-%m-%Y')
-                except:
-                    pass
+                        fb = str(fecha_base).strip()
+                        for fmt in ['%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
+                                    '%Y-%m-%dT%H:%M:%S', '%d-%m-%Y', '%d/%m/%Y']:
+                            try:
+                                fecha_dt = datetime.strptime(fb[:26], fmt)
+                                break
+                            except:
+                                continue
+                    if fecha_dt:
+                        delta = datetime.now() - fecha_dt
+                        total_meses = delta.days // 30
+                        anios = total_meses // 12
+                        meses = total_meses % 12
+                        stats['antiguedad'] = f"{anios},{meses}"
+                        stats['fecha_incorporacion'] = fecha_dt.strftime('%d-%m-%Y')
+                except Exception as e:
+                    logger.debug(f"Error parsing fecha stats: {e} val={fecha_base}")
+        # --- Generación ---
         try:
             if DATABASE_URL:
                 c.execute("SELECT generacion FROM nuevos_miembros WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id_param,))
@@ -8200,6 +8469,7 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                 stats['generacion'] = (gen_row['generacion'] if DATABASE_URL else gen_row[0]) or ''
         except:
             pass
+        # --- Recomendaciones recibidas ---
         try:
             if DATABASE_URL:
                 c.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id_param,))
@@ -8209,22 +8479,35 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                 stats['recomendaciones'] = c.fetchone()[0]
         except:
             pass
+        # --- Referidos: búsqueda insensible a acentos ---
         try:
-            nb = stats['nombre_completo']
-            if nb and len(nb) > 3:
+            nombre_full = stats['nombre_completo']
+            if nombre_full and len(nombre_full) > 2:
+                def _quitar_acentos(s):
+                    return ''.join(ch for ch in _ud.normalize('NFD', s.lower()) if _ud.category(ch) != 'Mn')
+                nf_clean = _quitar_acentos(nombre_full)
+                partes_n = nombre_full.lower().split()
                 if DATABASE_URL:
-                    c.execute("SELECT COUNT(*) as t FROM nuevos_miembros WHERE LOWER(recomendado_por) LIKE %s AND estado = 'aprobado'",
-                             (f"%{nb.lower()[:20]}%",))
-                    stats['referidos'] = c.fetchone()['t']
+                    c.execute("SELECT recomendado_por FROM nuevos_miembros WHERE estado = 'aprobado'")
                 else:
-                    c.execute("SELECT COUNT(*) FROM nuevos_miembros WHERE LOWER(recomendado_por) LIKE ? AND estado = 'aprobado'",
-                             (f"%{nb.lower()[:20]}%",))
-                    stats['referidos'] = c.fetchone()[0]
-        except:
-            pass
+                    c.execute("SELECT recomendado_por FROM nuevos_miembros WHERE estado = 'aprobado'")
+                total_refs = 0
+                for reg in c.fetchall():
+                    rec = (reg['recomendado_por'] if DATABASE_URL else reg[0]) or ''
+                    rec_clean = _quitar_acentos(rec)
+                    if nf_clean in rec_clean:
+                        total_refs += 1
+                    elif len(partes_n) >= 2:
+                        n_clean = _quitar_acentos(partes_n[0])
+                        a_clean = _quitar_acentos(partes_n[-1])
+                        if n_clean in rec_clean and a_clean in rec_clean:
+                            total_refs += 1
+                stats['referidos'] = total_refs
+        except Exception as e:
+            logger.debug(f"Error contando referidos: {e}")
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"Error obtener_stats_tarjeta: {e}")
     return stats
 
 
@@ -8257,10 +8540,10 @@ def generar_qr_simple(url: str, size: int = 150):
 
 
 def generar_tarjeta_imagen(datos: dict) -> BytesIO:
-    """Genera imagen PNG con QR verificación + iconos dorados de estadísticas"""
+    """Genera imagen PNG con QR verificación inferior + iconos dorados + NRO-GEN"""
     if not pil_disponible:
         return None
-    W, H = 900, 580
+    W, H = 900, 620
     AZUL_OSCURO = (15, 47, 89)
     AZUL_MEDIO = (30, 80, 140)
     AZUL_CLARO = (52, 120, 195)
@@ -8285,8 +8568,9 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     font_label = cargar_fuente(12, bold=True)
     font_miembro = cargar_fuente(13)
     font_cofradia_title = cargar_fuente(14, bold=True)
-    font_stats_val = cargar_fuente(15, bold=True)
-    font_stats_lbl = cargar_fuente(11)
+    font_stats_val = cargar_fuente(16, bold=True)
+    font_stats_lbl = cargar_fuente(13)
+    font_kdt = cargar_fuente(20, bold=True)
     # --- Franja superior azul ---
     draw.rectangle([0, 0, W, 130], fill=AZUL_OSCURO)
     draw.rectangle([0, 130, W, 134], fill=DORADO)
@@ -8308,17 +8592,24 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
         except:
             logo_end_x = 40
     draw.text((logo_end_x, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
-    draw.text((logo_end_x, 58), "Red Profesional de Oficiales", fill=GRIS_SUTIL, font=font_campo)
-    # --- QR VERIFICACIÓN (esquina superior derecha, discreto, azul+blanco) ---
+    draw.text((logo_end_x, 58), "Red Profesional de Ex-cadetes y Oficiales", fill=GRIS_SUTIL, font=font_campo)
+    # --- NRO KDT - GENERACIÓN (esquina superior derecha, letras blancas sobre azul) ---
     user_id = datos.get('user_id', '')
-    if user_id:
-        verif_url = f"https://t.me/Cofradia_Premium_Bot?start=verificar_{user_id}"
-        qr_verif = generar_qr_verificacion(verif_url, size=65)
-        if qr_verif:
-            try:
-                img.paste(qr_verif, (W - 80, 12))
-            except:
-                pass
+    nro_kdt = datos.get('nro_kdt', '')
+    stats = obtener_stats_tarjeta(int(user_id)) if user_id else {'antiguedad': '0,0', 'recomendaciones': 0, 'referidos': 0, 'generacion': ''}
+    generacion = stats.get('generacion', '')
+    if nro_kdt and generacion:
+        kdt_texto = f"{nro_kdt}-{generacion}"
+        try:
+            bbox = draw.textbbox((0, 0), kdt_texto, font=font_kdt)
+            tw = bbox[2] - bbox[0]
+            draw.text((W - tw - 25, 50), kdt_texto, fill=BLANCO, font=font_kdt)
+        except:
+            draw.text((W - 180, 50), kdt_texto, fill=BLANCO, font=font_kdt)
+    elif nro_kdt:
+        draw.text((W - 100, 50), nro_kdt, fill=BLANCO, font=font_kdt)
+    elif generacion:
+        draw.text((W - 100, 50), generacion, fill=BLANCO, font=font_kdt)
     # --- Nombre ---
     nombre = datos.get('nombre_completo', 'Sin nombre')
     y_nombre = 155
@@ -8340,7 +8631,7 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             draw.text((42, y_info), f"{labels_d[label]}:", fill=GRIS_SUTIL, font=font_label)
             draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
             y_info += 24
-    # --- QR principal (tarjeta compartible) ---
+    # --- QR principal (tarjeta compartible, lado derecho) ---
     qr_x, qr_y = 640, 155
     qr_size = 150
     qr_url = f"https://t.me/Cofradia_Premium_Bot?start=tarjeta_{user_id}" if user_id else "https://t.me/Cofradia_Premium_Bot"
@@ -8368,49 +8659,60 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
     else:
         draw.text((qr_x + 20, badge_y + 5), "Miembro Cofradía", fill=GRIS_SUTIL, font=font_miembro)
-    # === BARRA DE ESTADÍSTICAS — 3 iconos dorados ===
-    stats = obtener_stats_tarjeta(int(user_id)) if user_id else {'antiguedad': '0,0', 'recomendaciones': 0, 'referidos': 0}
-    bar_y = H - 78
-    draw.line([30, bar_y - 8, W - 30, bar_y - 8], fill=(220, 225, 235), width=1)
+    # === BARRA DE ESTADÍSTICAS — 3 iconos dorados (SIN línea horizontal) ===
+    bar_y = H - 100
     # ICONO 1: Reloj analógico dorado (antigüedad)
-    cx1, cy1 = 85, bar_y + 8
-    r = 15
+    cx1, cy1 = 75, bar_y + 8
+    r = 16
     draw.ellipse([cx1 - r, cy1 - r, cx1 + r, cy1 + r], outline=DORADO, width=2)
     draw.line([cx1, cy1, cx1, cy1 - 10], fill=DORADO, width=2)
     draw.line([cx1, cy1, cx1 + 7, cy1 + 3], fill=DORADO, width=2)
     draw.ellipse([cx1 - 2, cy1 - 2, cx1 + 2, cy1 + 2], fill=DORADO)
     for ang in [0, 90, 180, 270]:
-        rad = math.radians(ang)
-        mx = cx1 + int((r - 3) * math.sin(rad))
-        my = cy1 - int((r - 3) * math.cos(rad))
+        rad_a = math.radians(ang)
+        mx = cx1 + int((r - 3) * math.sin(rad_a))
+        my = cy1 - int((r - 3) * math.cos(rad_a))
         draw.ellipse([mx - 1, my - 1, mx + 1, my + 1], fill=DORADO)
-    draw.text((cx1 + r + 10, cy1 - 14), stats['antiguedad'], fill=GRIS_TEXTO, font=font_stats_val)
-    draw.text((cx1 + r + 10, cy1 + 3), "años", fill=GRIS_SUTIL, font=font_stats_lbl)
+    draw.text((cx1 + r + 8, cy1 - 16), stats['antiguedad'], fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx1 + r + 8, cy1 + 4), "años", fill=GRIS_SUTIL, font=font_stats_lbl)
     # ICONO 2: Estrella 5 puntas dorada (recomendaciones)
-    cx2, cy2 = 345, bar_y + 8
+    cx2, cy2 = 280, bar_y + 8
     pts = []
     for i in range(10):
         ang = math.pi / 2 + i * math.pi / 5
-        rad_s = 15 if i % 2 == 0 else 7
+        rad_s = 16 if i % 2 == 0 else 7
         pts.append((cx2 + rad_s * math.cos(ang), cy2 - rad_s * math.sin(ang)))
     draw.polygon(pts, fill=DORADO, outline=DORADO_OSCURO)
-    draw.text((cx2 + 22, cy2 - 14), str(stats['recomendaciones']), fill=GRIS_TEXTO, font=font_stats_val)
-    draw.text((cx2 + 22, cy2 + 3), "recomendaciones", fill=GRIS_SUTIL, font=font_stats_lbl)
-    # ICONO 3: Trofeo dorado (referidos)
-    cx3, cy3 = 620, bar_y + 8
-    draw.arc([cx3 - 12, cy3 - 14, cx3 + 12, cy3 + 6], start=0, end=180, fill=DORADO, width=3)
-    draw.line([cx3 - 12, cy3 - 4, cx3 - 12, cy3 - 14], fill=DORADO, width=2)
-    draw.line([cx3 + 12, cy3 - 4, cx3 + 12, cy3 - 14], fill=DORADO, width=2)
-    draw.arc([cx3 - 18, cy3 - 10, cx3 - 8, cy3 + 2], start=180, end=0, fill=DORADO, width=2)
-    draw.arc([cx3 + 8, cy3 - 10, cx3 + 18, cy3 + 2], start=180, end=0, fill=DORADO, width=2)
-    draw.rectangle([cx3 - 3, cy3 + 4, cx3 + 3, cy3 + 11], fill=DORADO)
-    draw.rectangle([cx3 - 8, cy3 + 11, cx3 + 8, cy3 + 15], fill=DORADO)
-    draw.text((cx3 + 24, cy3 - 14), str(stats['referidos']), fill=GRIS_TEXTO, font=font_stats_val)
-    draw.text((cx3 + 24, cy3 + 3), "referidos", fill=GRIS_SUTIL, font=font_stats_lbl)
+    draw.text((cx2 + 24, cy2 - 16), str(stats['recomendaciones']), fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx2 + 24, cy2 + 4), "recomendaciones", fill=GRIS_SUTIL, font=font_stats_lbl)
+    # ICONO 3: Trofeo dorado (copa con asas y base)
+    cx3, cy3 = 510, bar_y + 6
+    # Copa (semicírculo superior relleno)
+    draw.pieslice([cx3 - 14, cy3 - 16, cx3 + 14, cy3 + 4], start=0, end=180, fill=DORADO, outline=DORADO_OSCURO)
+    # Borde superior copa
+    draw.rectangle([cx3 - 16, cy3 - 16, cx3 + 16, cy3 - 12], fill=DORADO, outline=DORADO_OSCURO)
+    # Asas laterales
+    draw.arc([cx3 - 24, cy3 - 12, cx3 - 10, cy3 + 2], start=90, end=270, fill=DORADO, width=2)
+    draw.arc([cx3 + 10, cy3 - 12, cx3 + 24, cy3 + 2], start=270, end=90, fill=DORADO, width=2)
+    # Tallo
+    draw.rectangle([cx3 - 3, cy3 + 4, cx3 + 3, cy3 + 14], fill=DORADO)
+    # Base
+    draw.rectangle([cx3 - 10, cy3 + 14, cx3 + 10, cy3 + 18], fill=DORADO, outline=DORADO_OSCURO)
+    draw.text((cx3 + 28, cy3 - 14), str(stats['referidos']), fill=GRIS_TEXTO, font=font_stats_val)
+    draw.text((cx3 + 28, cy3 + 6), "referidos", fill=GRIS_SUTIL, font=font_stats_lbl)
+    # --- QR VERIFICACIÓN (extremo inferior derecho, discreto azul+blanco) ---
+    if user_id:
+        verif_url = f"https://t.me/Cofradia_Premium_Bot?start=verificar_{user_id}"
+        qr_verif = generar_qr_verificacion(verif_url, size=65)
+        if qr_verif:
+            try:
+                img.paste(qr_verif, (W - 82, H - 110))
+            except:
+                pass
     # --- Franja inferior ---
     draw.rectangle([0, H - 35, W, H], fill=AZUL_OSCURO)
     draw.text((40, H - 27), "cofradía de networking", fill=GRIS_SUTIL, font=font_miembro)
-    draw.text((W - 250, H - 27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
+    draw.text((W - 280, H - 27), "Conectando profesionales", fill=GRIS_SUTIL, font=font_miembro)
     draw.rectangle([0, 0, W - 1, H - 1], outline=(200, 205, 215), width=1)
     buffer = BytesIO()
     img.save(buffer, format='PNG', quality=95)
@@ -8467,13 +8769,23 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
         
+        # Extraer nro_kdt
+        _nro_kdt = ''
+        try:
+            if DATABASE_URL:
+                _nro_kdt = tarjeta.get('nro_kdt', '') or ''
+            else:
+                _nro_kdt = tarjeta[11] if len(tarjeta) > 11 else ''
+        except:
+            pass
         datos_tarjeta = {
             'nombre_completo': nombre, 'profesion': profesion,
             'empresa': empresa, 'servicios': servicios,
             'telefono': telefono, 'email': email,
             'ciudad': ciudad, 'linkedin': linkedin,
             'username': username_target or '',
-            'user_id': target_user_id
+            'user_id': target_user_id,
+            'nro_kdt': _nro_kdt
         }
         
         img_buffer = None
@@ -8568,13 +8880,23 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     linkedin = t['linkedin'] if DATABASE_URL else t[8]
                     
                     # Enviar tarjeta como IMAGEN profesional
+                    # Extraer nro_kdt
+                    _nro_kdt2 = ''
+                    try:
+                        if DATABASE_URL:
+                            _nro_kdt2 = t.get('nro_kdt', '') or ''
+                        else:
+                            _nro_kdt2 = t[11] if len(t) > 11 else ''
+                    except:
+                        pass
                     datos_tarjeta = {
                         'nombre_completo': nombre or f"{user.first_name or ''} {user.last_name or ''}".strip(),
                         'profesion': profesion, 'empresa': empresa,
                         'servicios': servicios, 'telefono': telefono,
                         'email': email, 'ciudad': ciudad, 'linkedin': linkedin,
                         'username': user.username or '',
-                        'user_id': user_id
+                        'user_id': user_id,
+                        'nro_kdt': _nro_kdt2
                     }
                     
                     img_buffer = None
@@ -8648,7 +8970,8 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "/mi_tarjeta telefono +56912345678\n"
                         "/mi_tarjeta email tu@correo.com\n"
                         "/mi_tarjeta ciudad Santiago\n"
-                        "/mi_tarjeta linkedin linkedin.com/in/tuperfil\n\n"
+                        "/mi_tarjeta linkedin linkedin.com/in/tuperfil\n"
+                        "/mi_tarjeta nro_kdt 322\n\n"
                         "💡 Cada campo es opcional."
                     )
         except Exception as e:
@@ -8657,16 +8980,33 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Editar campo
     campo = context.args[0].lower()
-    campos_validos = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin']
+    campos_validos = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt']
     
     if campo not in campos_validos:
-        await update.message.reply_text(f"❌ Campo no válido. Usa: {', '.join(campos_validos)}")
+        await update.message.reply_text(
+            "❌ Campo no válido.\n\n"
+            "Campos: profesion, empresa, servicios, telefono,\n"
+            "email, ciudad, linkedin, nro_kdt\n\n"
+            "Ejemplo: /mi_tarjeta nro_kdt 322"
+        )
         return
     
     valor = ' '.join(context.args[1:])
     if not valor:
         await update.message.reply_text(f"❌ Uso: /mi_tarjeta {campo} [valor]")
         return
+    
+    # nro_kdt: validar y rellenar a 3 dígitos
+    if campo == 'nro_kdt':
+        digitos = ''.join(ch for ch in valor if ch.isdigit())
+        if not digitos or int(digitos) < 1 or int(digitos) > 999:
+            await update.message.reply_text(
+                "❌ Número de cadete: entre 1 y 999.\n\n"
+                "Ejemplo: /mi_tarjeta nro_kdt 322\n"
+                "Si tu número es 7, se guardará como 007"
+            )
+            return
+        valor = digitos.zfill(3)
     
     try:
         conn = get_db_connection()
@@ -9519,68 +9859,118 @@ async def asistir_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /recomendar @usuario Texto - Recomendar a un cofrade"""
+    """Comando /recomendar @usuario|nombre Texto — Recomendar a un cofrade"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "⭐ RECOMENDAR COFRADE\n\n"
-            "Formato: /recomendar @usuario Excelente profesional\n\n"
+            "Formato:\n"
+            "/recomendar @usuario Excelente profesional\n"
+            "/recomendar Pedro González Excelente profesional\n\n"
             "Tu recomendación aparecerá en su tarjeta profesional."
         )
         return
     
     user = update.effective_user
-    objetivo_username = context.args[0].replace('@', '').lower()
-    texto_rec = ' '.join(context.args[1:])
-    
-    if len(texto_rec) < 10:
-        await update.message.reply_text("❌ La recomendación debe tener al menos 10 caracteres.")
-        return
+    autor_nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    primer_arg = context.args[0]
     
     try:
         conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            # Buscar usuario destinatario
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión")
+            return
+        c = conn.cursor()
+        dest = None
+        texto_rec = ''
+        
+        if primer_arg.startswith('@'):
+            objetivo_username = primer_arg.replace('@', '').lower()
+            texto_rec = ' '.join(context.args[1:])
             if DATABASE_URL:
                 c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
             else:
                 c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
             dest = c.fetchone()
-            
             if not dest:
                 conn.close()
                 await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
                 return
-            
-            dest_id = dest['user_id'] if DATABASE_URL else dest[0]
-            dest_nombre = f"{dest['first_name'] if DATABASE_URL else dest[1]} {dest['last_name'] if DATABASE_URL else dest[2]}".strip()
-            autor_nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
-            
-            if dest_id == user.id:
+        else:
+            # Búsqueda por nombre
+            busqueda_palabras = []
+            for arg in context.args:
+                if len(busqueda_palabras) < 3 and len(arg) > 1 and arg[0].isupper():
+                    busqueda_palabras.append(arg)
+                else:
+                    break
+            if len(busqueda_palabras) < 1:
+                conn.close()
+                await update.message.reply_text("❌ Indica un @usuario o nombre.\n\nEjemplo: /recomendar @usuario Texto")
+                return
+            nombre_buscar = ' '.join(busqueda_palabras).lower()
+            texto_rec = ' '.join(context.args[len(busqueda_palabras):])
+            busqueda = f"%{nombre_buscar}%"
+            if DATABASE_URL:
+                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE %s 
+                           AND estado = 'activo' LIMIT 5""", (busqueda,))
+            else:
+                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ? 
+                           AND estado = 'activo' LIMIT 5""", (busqueda,))
+            resultados = c.fetchall()
+            if not resultados:
+                conn.close()
+                await update.message.reply_text(f"❌ No se encontró a \"{' '.join(busqueda_palabras)}\" entre los miembros.")
+                return
+            validos = [r for r in resultados if (r['user_id'] if DATABASE_URL else r[0]) != user.id]
+            if not validos:
                 conn.close()
                 await update.message.reply_text("❌ No puedes recomendarte a ti mismo.")
                 return
-            
-            if DATABASE_URL:
-                c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (%s, %s, %s, %s, %s)",
-                         (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
-            else:
-                c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (?, ?, ?, ?, ?)",
-                         (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
-            conn.commit()
-            conn.close()
-            
-            await update.message.reply_text(f"⭐ Recomendación enviada para {dest_nombre}!\n\nAparecerá en su perfil profesional.")
-            otorgar_coins(update.effective_user.id, 5, f'Recomendar a {dest_nombre}')
-            
-            # Notificar al destinatario
-            try:
-                await context.bot.send_message(
-                    chat_id=dest_id,
-                    text=f"⭐ {autor_nombre} te ha dejado una recomendación:\n\n\"{texto_rec[:300]}\"\n\n💡 Ver tus recomendaciones: /mis_recomendaciones"
+            if len(validos) > 1 and not texto_rec:
+                lista = "\n".join([f"  👤 {(r['first_name'] if DATABASE_URL else r[1]) or ''} {(r['last_name'] if DATABASE_URL else r[2]) or ''}".strip() for r in validos])
+                conn.close()
+                await update.message.reply_text(
+                    f"👥 Se encontraron {len(validos)} coincidencias:\n{lista}\n\n"
+                    f"Sé más específico o usa @username:\n"
+                    f"/recomendar @usuario Texto de recomendación"
                 )
-            except:
-                pass
+                return
+            dest = validos[0]
+        
+        dest_id = dest['user_id'] if DATABASE_URL else dest[0]
+        dest_nombre = f"{dest['first_name'] if DATABASE_URL else dest[1]} {dest['last_name'] if DATABASE_URL else dest[2]}".strip()
+        
+        if dest_id == user.id:
+            conn.close()
+            await update.message.reply_text("❌ No puedes recomendarte a ti mismo.")
+            return
+        
+        if len(texto_rec) < 10:
+            conn.close()
+            await update.message.reply_text("❌ La recomendación debe tener al menos 10 caracteres.")
+            return
+        
+        if DATABASE_URL:
+            c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (%s, %s, %s, %s, %s)",
+                     (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
+        else:
+            c.execute("INSERT INTO recomendaciones (autor_id, autor_nombre, destinatario_id, destinatario_nombre, texto) VALUES (?, ?, ?, ?, ?)",
+                     (user.id, autor_nombre, dest_id, dest_nombre, texto_rec[:500]))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"⭐ Recomendación enviada para {dest_nombre}!\n\nAparecerá en su perfil profesional.")
+        otorgar_coins(update.effective_user.id, 5, f'Recomendar a {dest_nombre}')
+        
+        try:
+            await context.bot.send_message(
+                chat_id=dest_id,
+                text=f"⭐ {autor_nombre} te ha dejado una recomendación:\n\n\"{texto_rec[:300]}\"\n\n💡 Ver tus recomendaciones: /mis_recomendaciones"
+            )
+        except:
+            pass
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
@@ -10263,28 +10653,33 @@ Basándote en empresa y profesión, generar 2-3 posiciones con:
 - Verbos de acción: Lideré, Implementé, Optimicé, Incrementé, Reduje
 
 FORMACIÓN ACADÉMICA
-Inferir formación coherente con la profesión.
-Incluir universidad y año estimado.
+IMPORTANTE: NO inventes universidades, carreras ni títulos. Usa ÚNICAMENTE la información proporcionada.
+Si hay LinkedIn, extrae los datos exactos de formación.
+Si no hay datos concretos, escribe: "[COMPLETAR CON FORMACIÓN ACADÉMICA REAL]".
+Incluye siempre: Escuela Naval "Arturo Prat" - Formación como Oficial de Marina.
 
 CERTIFICACIONES Y DESARROLLO PROFESIONAL
-2-3 certificaciones relevantes al cargo.
+NO inventes certificaciones. Si no hay datos concretos, escribe: "[AGREGAR CERTIFICACIONES REALES]".
 
 IDIOMAS
 Español nativo + inglés (nivel estimado según perfil).
 
 INFORMACIÓN ADICIONAL
-Miembro de Cofradía de Networking - Red Profesional de Oficiales de la Armada de Chile.
+Miembro de Cofradía de Networking - Red Profesional de Ex-cadetes y Oficiales de la Armada de Chile.
 
 REGLAS:
 - NO uses asteriscos ni negritas. Usa MAYÚSCULAS para títulos.
 - Usa guiones (-) para listas.
-- Sé realista, no inventes datos imposibles pero sí optimiza lo existente.
+- PROHIBIDO inventar universidades, títulos académicos o certificaciones no proporcionadas.
+- PROHIBIDO inventar nombres de empresas anteriores no mencionadas.
+- Si no hay datos, usa placeholders entre corchetes [].
+- Para experiencia, basa logros SOLO en la empresa y profesión proporcionadas.
 - Redacción orientada a ATS (Applicant Tracking Systems).
 - Lenguaje profesional ejecutivo.
 - Máximo 2 páginas de contenido."""
         cv = llamar_groq(prompt, max_tokens=2000, temperature=0.6)
         if cv:
-            await msg.edit_text(f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n💡 Copia y personaliza en Word.")
+            await msg.edit_text(f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n⚠️ Campos entre [corchetes] son placeholders: completa con tu información real.\n💡 Copia y personaliza en Word.")
             registrar_servicio_usado(user_id, 'generar_cv')
         else:
             await msg.edit_text("❌ Error generando CV.")
@@ -10872,7 +11267,8 @@ async def onboard_generacion(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe quién recomendó al solicitante - requiere mínimo nombre + apellido, sin respuestas genéricas"""
+    """Recibe quién recomendó al solicitante — verifica contra BD, no permite autoreferencia"""
+    import unicodedata as _ud
     recomendado = update.message.text.strip()
     recomendado_lower = recomendado.lower()
     
@@ -10881,10 +11277,10 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
         'un amigo', 'un carreta', 'recomendado', 'whatsapp', 'whasapp', 'whats app',
         'no me acuerdo', 'no recuerdo', 'no sé', 'no se', 'no lo sé',
         'un oficial', 'un marino', 'un compañero', 'alguien', 'nadie',
-        'no lo recuerdo', 'no tengo idea', 'un conocido', 'un amig'
+        'no lo recuerdo', 'no tengo idea', 'un conocido', 'un amig',
+        'otro marino', 'otro usuario'
     ]
     
-    # Verificar si contiene signo +
     if '+' in recomendado:
         await update.message.reply_text(
             "❌ No se permiten signos especiales (+) en esta respuesta.\n\n"
@@ -10895,20 +11291,17 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ONBOARD_RECOMENDADO
     
-    # Verificar frases prohibidas
     for frase in frases_prohibidas:
         if frase in recomendado_lower:
             await update.message.reply_text(
-                f"❌ Por favor indica el nombre real de quien te recomendó.\n\n"
-                f"No se aceptan respuestas genéricas como \"{frase}\".\n"
-                f"Necesitamos al menos un nombre y un apellido.\n\n"
+                f"❌ No se aceptan respuestas genéricas como \"{frase}\".\n\n"
+                f"Indica el nombre y apellido real de quien te recomendó.\n\n"
                 f"Ejemplo: Pedro González\n\n"
                 f"📝 Pregunta 3 de 6:\n"
                 f"¿Quién te recomendó el grupo Cofradía?"
             )
             return ONBOARD_RECOMENDADO
     
-    # Validar mínimo 2 palabras (nombre + apellido)
     partes = recomendado.split()
     if len(partes) < 2:
         await update.message.reply_text(
@@ -10919,11 +11312,64 @@ async def onboard_recomendado(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ONBOARD_RECOMENDADO
     
-    context.user_data['onboard_recomendado'] = recomendado
+    # --- VERIFICACIÓN: no autoreferirse ---
+    mi_nombre = context.user_data.get('onboard_nombre', '').lower().strip()
+    mi_apellido = context.user_data.get('onboard_apellido', '').lower().strip()
+    def _qa(s):
+        return ''.join(ch for ch in _ud.normalize('NFD', s.lower()) if _ud.category(ch) != 'Mn')
+    rec_clean = _qa(recomendado)
+    mi_full = f"{mi_nombre} {mi_apellido}".strip()
+    mi_clean = _qa(mi_full)
     
+    if mi_clean and len(mi_clean) > 3:
+        if mi_clean in rec_clean or rec_clean in mi_clean:
+            await update.message.reply_text(
+                "❌ No puedes referenciarte a ti mismo.\n\n"
+                "Debes indicar el nombre de OTRO miembro de Cofradía que te recomendó.\n\n"
+                "📝 Pregunta 3 de 6:\n"
+                "¿Quién te recomendó el grupo Cofradía?"
+            )
+            return ONBOARD_RECOMENDADO
+    
+    # --- BUSCAR coincidencias en la BD ---
+    coincidencias = []
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            busqueda = f"%{recomendado_lower[:20]}%"
+            if DATABASE_URL:
+                c.execute("""SELECT DISTINCT first_name, last_name, user_id FROM suscripciones 
+                           WHERE (LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE %s
+                           OR LOWER(COALESCE(last_name,'')) LIKE %s)
+                           AND estado = 'activo' LIMIT 8""", (busqueda, busqueda))
+            else:
+                c.execute("""SELECT DISTINCT first_name, last_name, user_id FROM suscripciones 
+                           WHERE (LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ?
+                           OR LOWER(COALESCE(last_name,'')) LIKE ?)
+                           AND estado = 'activo' LIMIT 8""", (busqueda, busqueda))
+            for r in c.fetchall():
+                fn = (r['first_name'] if DATABASE_URL else r[0]) or ''
+                ln = (r['last_name'] if DATABASE_URL else r[1]) or ''
+                uid = (r['user_id'] if DATABASE_URL else r[2])
+                nombre_c = f"{fn} {ln}".strip()
+                if nombre_c and uid != update.effective_user.id:
+                    coincidencias.append(nombre_c)
+            conn.close()
+    except:
+        pass
+    
+    context.user_data['onboard_recomendado'] = recomendado
     nombre = context.user_data.get('onboard_nombre', '')
     
-    # Pregunta 4: verificación naval (selección múltiple con botones)
+    if coincidencias:
+        lista = "\n".join([f"  ✅ {c}" for c in coincidencias[:5]])
+        await update.message.reply_text(
+            f"👥 Coincidencias encontradas:\n{lista}\n\n"
+            f"✅ Registrado: {recomendado}"
+        )
+    
+    # Pregunta 4: verificación naval
     keyboard = [
         [InlineKeyboardButton("a) Preparar legumbres durante la Navegación", callback_data="onboard_p4_a")],
         [InlineKeyboardButton("b) Saltar en paracaídas", callback_data="onboard_p4_b")],
