@@ -681,74 +681,88 @@ def init_db():
             conn.commit()
             logger.info("✅ Tablas v4.0 SQLite inicializadas")
         
-        # Fix: Transferir mensajes "Group" (admin anónimo) y corregir owner
+        # ═══ SETUP OWNER: INSERT + UPDATE (causa raíz: owner nunca pasaba por registrar_usuario) ═══
         try:
             if OWNER_ID and OWNER_ID != 0:
                 c2 = conn.cursor()
                 owner_int = int(OWNER_ID)
-                logger.info(f"🔧 Corrigiendo registros del owner ID={owner_int}")
+                logger.info(f"🔧 Setup owner ID={owner_int}")
                 
+                # PASO 0: INSERTAR owner en suscripciones SI NO EXISTE
                 if DATABASE_URL:
-                    # PASO 1: Transferir mensajes de admin anónimo (first_name='Group') al OWNER
+                    c2.execute("SELECT user_id FROM suscripciones WHERE user_id = %s", (owner_int,))
+                    if not c2.fetchone():
+                        c2.execute("""INSERT INTO suscripciones 
+                            (user_id, first_name, last_name, username, es_admin, fecha_registro,
+                             fecha_expiracion, estado, mensajes_engagement, servicios_usados,
+                             fecha_incorporacion)
+                            VALUES (%s, 'Germán', 'Perey', '', 1, '2020-09-22',
+                                    '2099-12-31 23:59:59', 'activo', 0, '[]', '2020-09-22')""",
+                            (owner_int,))
+                        logger.info("✅ Owner INSERTADO en suscripciones (fecha_inc=2020-09-22)")
+                else:
+                    c2.execute("SELECT user_id FROM suscripciones WHERE user_id = ?", (owner_int,))
+                    if not c2.fetchone():
+                        c2.execute("""INSERT INTO suscripciones 
+                            (user_id, first_name, last_name, username, es_admin, fecha_registro,
+                             fecha_expiracion, estado, mensajes_engagement, servicios_usados,
+                             fecha_incorporacion)
+                            VALUES (?, 'Germán', 'Perey', '', 1, '2020-09-22',
+                                    '2099-12-31 23:59:59', 'activo', 0, '[]', '2020-09-22')""",
+                            (owner_int,))
+                        logger.info("✅ Owner INSERTADO en suscripciones SQLite")
+                
+                # PASO 1: Transferir mensajes admin anónimo
+                if DATABASE_URL:
                     c2.execute("""UPDATE mensajes SET user_id = %s, first_name = 'Germán', last_name = 'Perey' 
                                 WHERE first_name IN ('Group', 'Grupo', 'Cofradía', 'Cofradía de Networking')""", 
                               (owner_int,))
-                    transferidos = c2.rowcount
-                    
-                    # PASO 2: Corregir nombre en todos los registros del owner
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
                                 WHERE user_id = %s""", (owner_int,))
-                    corregidos = c2.rowcount
-                    
-                    # PASO 3: Suscripciones - nombre + suscripción perpetua
-                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey',
-                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo'
-                                WHERE user_id = %s""", (owner_int,))
-                    
-                    logger.info(f"✅ Owner fix: {transferidos} transferidos, {corregidos} corregidos, suscripción ∞")
                 else:
                     c2.execute("""UPDATE mensajes SET user_id = ?, first_name = 'Germán', last_name = 'Perey' 
                                 WHERE first_name IN ('Group', 'Grupo', 'Cofradía')""", (owner_int,))
                     c2.execute("""UPDATE mensajes SET first_name = 'Germán', last_name = 'Perey' 
                                 WHERE user_id = ?""", (owner_int,))
+                
+                # PASO 2: FORZAR datos owner (la fila ya existe por PASO 0)
+                if DATABASE_URL:
                     c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey',
-                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo'
+                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo',
+                                fecha_incorporacion = '2020-09-22'
+                                WHERE user_id = %s""", (owner_int,))
+                else:
+                    c2.execute("""UPDATE suscripciones SET first_name = 'Germán', last_name = 'Perey',
+                                fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo',
+                                fecha_incorporacion = '2020-09-22'
                                 WHERE user_id = ?""", (owner_int,))
-                    logger.info("✅ Registros owner corregidos, suscripción ∞")
                 
-                # Fijar fecha_incorporacion del fundador: 22-09-2020 (SIEMPRE forzar)
-                try:
-                    if DATABASE_URL:
-                        c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
-                                    WHERE user_id = %s""", (owner_int,))
-                    else:
-                        c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
-                                    WHERE user_id = ?""", (owner_int,))
-                except:
-                    pass
-                
-                # Asegurar registro en nuevos_miembros con generacion 2000
+                # PASO 3: Asegurar nuevos_miembros con generacion 2000
                 try:
                     if DATABASE_URL:
                         c2.execute("SELECT id FROM nuevos_miembros WHERE user_id = %s LIMIT 1", (owner_int,))
                         if not c2.fetchone():
-                            c2.execute("""INSERT INTO nuevos_miembros (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
-                                        VALUES (%s, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
+                            c2.execute("""INSERT INTO nuevos_miembros 
+                                (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
+                                VALUES (%s, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
+                            logger.info("✅ Owner en nuevos_miembros gen=2000")
                         else:
-                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000' WHERE user_id = %s", (owner_int,))
+                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000', nombre = 'Germán', apellido = 'Perey' WHERE user_id = %s", (owner_int,))
                     else:
                         c2.execute("SELECT id FROM nuevos_miembros WHERE user_id = ? LIMIT 1", (owner_int,))
                         if not c2.fetchone():
-                            c2.execute("""INSERT INTO nuevos_miembros (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
-                                        VALUES (?, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
+                            c2.execute("""INSERT INTO nuevos_miembros 
+                                (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
+                                VALUES (?, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
                         else:
-                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000' WHERE user_id = ?", (owner_int,))
+                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000', nombre = 'Germán', apellido = 'Perey' WHERE user_id = ?", (owner_int,))
                 except Exception as e_nm:
-                    logger.warning(f"Error creando owner nuevos_miembros: {e_nm}")
+                    logger.warning(f"Error en owner nuevos_miembros: {e_nm}")
                 
                 conn.commit()
+                logger.info("✅ Owner setup COMPLETO: suscripción + fecha + gen")
         except Exception as e:
-            logger.warning(f"Nota al corregir registros owner: {e}")
+            logger.warning(f"Error configurando owner: {e}")
         
         conn.commit()
         conn.close()
@@ -2368,12 +2382,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 verif = "❌ USUARIO INEXISTENTE\n\nEste código no corresponde a ningún miembro de Cofradía."
             await update.message.reply_text(verif)
             return ConversationHandler.END
-        except:
-            pass
+        except Exception as e_verif:
+            logger.warning(f"Error verificación QR: {e_verif}")
+            await update.message.reply_text("❌ Error verificando usuario.")
+            return ConversationHandler.END
     
     
     # Owner siempre tiene acceso completo
     if user_id == OWNER_ID:
+        registrar_usuario_suscripcion(user_id, 'Germán', user.username or '', es_admin=True, dias_gratis=999999, last_name='Perey')
         await update.message.reply_text(
             f"👑 Bienvenido Germán!\n\n"
             f"Panel completo disponible.\n"
