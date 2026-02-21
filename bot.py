@@ -716,14 +716,33 @@ def init_db():
                                 WHERE user_id = ?""", (owner_int,))
                     logger.info("✅ Registros owner corregidos, suscripción ∞")
                 
-                # Fijar fecha_incorporacion del fundador: 22-09-2020
+                # Fijar fecha_incorporacion del fundador: 22-09-2020 (SIEMPRE forzar)
                 try:
                     if DATABASE_URL:
                         c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
-                                    WHERE user_id = %s AND fecha_incorporacion IS NULL""", (owner_int,))
+                                    WHERE user_id = %s""", (owner_int,))
                     else:
                         c2.execute("""UPDATE suscripciones SET fecha_incorporacion = '2020-09-22'
-                                    WHERE user_id = ? AND fecha_incorporacion IS NULL""", (owner_int,))
+                                    WHERE user_id = ?""", (owner_int,))
+                except:
+                    pass
+                
+                # Asegurar registro en nuevos_miembros con generacion 2000
+                try:
+                    if DATABASE_URL:
+                        c2.execute("SELECT id FROM nuevos_miembros WHERE user_id = %s LIMIT 1", (owner_int,))
+                        if not c2.fetchone():
+                            c2.execute("""INSERT INTO nuevos_miembros (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
+                                        VALUES (%s, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
+                        else:
+                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000' WHERE user_id = %s", (owner_int,))
+                    else:
+                        c2.execute("SELECT id FROM nuevos_miembros WHERE user_id = ? LIMIT 1", (owner_int,))
+                        if not c2.fetchone():
+                            c2.execute("""INSERT INTO nuevos_miembros (user_id, nombre, apellido, generacion, recomendado_por, estado, fecha_solicitud)
+                                        VALUES (?, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
+                        else:
+                            c2.execute("UPDATE nuevos_miembros SET generacion = '2000' WHERE user_id = ?", (owner_int,))
                 except:
                     pass
                 
@@ -2978,17 +2997,33 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ciudades = {}
                 generaciones = {}
+                profesiones = {}
+                estados_laborales = {}
+                total_drive = len(drive_data)
                 for _, row in drive_data.iterrows():
-                    ciudad = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else ''
-                    gen = str(row.iloc[3]).strip() if pd.notna(row.iloc[3]) else ''
-                    if ciudad and ciudad != 'nan':
+                    ciudad = str(row.iloc[7]).strip() if len(row) > 7 and pd.notna(row.iloc[7]) else ''
+                    # Columna B (iloc[1]) = Generación (Año de Guardiamarina)
+                    gen = str(row.iloc[1]).strip() if len(row) > 1 and pd.notna(row.iloc[1]) else ''
+                    profesion = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ''
+                    estado_lab = str(row.iloc[6]).strip() if len(row) > 6 and pd.notna(row.iloc[6]) else ''
+                    if ciudad and ciudad.lower() not in ['nan', 'none', '']:
                         ciudades[ciudad] = ciudades.get(ciudad, 0) + 1
-                    if gen and gen != 'nan' and len(gen) == 4:
-                        generaciones[gen] = generaciones.get(gen, 0) + 1
+                    # Extraer año de 4 dígitos del valor de generación
+                    if gen and gen.lower() not in ['nan', 'none', '']:
+                        gen_digits = ''.join(c for c in gen if c.isdigit())
+                        if len(gen_digits) == 4 and 1950 <= int(gen_digits) <= 2025:
+                            generaciones[gen_digits] = generaciones.get(gen_digits, 0) + 1
+                    if profesion and profesion.lower() not in ['nan', 'none', '']:
+                        profesiones[profesion[:30]] = profesiones.get(profesion[:30], 0) + 1
+                    if estado_lab and estado_lab.lower() not in ['nan', 'none', '']:
+                        estados_laborales[estado_lab[:25]] = estados_laborales.get(estado_lab[:25], 0) + 1
                 drive_stats['ciudades'] = sorted(ciudades.items(), key=lambda x: -x[1])[:12]
                 drive_stats['generaciones'] = sorted(generaciones.items(), key=lambda x: x[0])
-            except:
-                pass
+                drive_stats['profesiones'] = sorted(profesiones.items(), key=lambda x: -x[1])[:10]
+                drive_stats['estados_laborales'] = sorted(estados_laborales.items(), key=lambda x: -x[1])[:8]
+                drive_stats['total_registros'] = total_drive
+            except Exception as e:
+                logger.warning(f"Error extrayendo drive_stats: {e}")
         
         conn.close()
         
@@ -3019,6 +3054,9 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ciudades_json = _json.dumps([{'name': c[0], 'value': c[1]} for c in drive_stats.get('ciudades', [])])
         gen_labels = _json.dumps([g[0] for g in drive_stats.get('generaciones', [])])
         gen_values = _json.dumps([g[1] for g in drive_stats.get('generaciones', [])])
+        profesiones_json = _json.dumps([{'name': p[0], 'value': p[1]} for p in drive_stats.get('profesiones', [])])
+        estados_json = _json.dumps([{'name': e[0], 'value': e[1]} for e in drive_stats.get('estados_laborales', [])])
+        total_drive_reg = drive_stats.get('total_registros', 0)
         
         has_drive = 'true' if drive_stats else 'false'
         
@@ -3099,6 +3137,7 @@ body {{
     <div class="kpi"><div class="value">{hora_pico:02d}:00</div><div class="label">Hora Pico</div></div>
     <div class="kpi"><div class="value">{total_miembros}</div><div class="label">Miembros</div></div>
     <div class="kpi"><div class="value">+{nuevos_7d}</div><div class="label">Nuevos 7d</div></div>
+    <div class="kpi"><div class="value">{total_drive_reg}</div><div class="label">BD Excel Drive</div></div>
 </div>
 
 <div class="charts-grid">
@@ -3126,8 +3165,16 @@ body {{
         <div id="chart-ciudades" class="chart"></div>
     </div>
     <div class="chart-card">
-        <div class="title">⚓ Distribución por Generación</div>
+        <div class="title">⚓ Distribución por Generación (Col B Excel)</div>
         <div id="chart-generaciones" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">💼 Top Profesiones / Cargos</div>
+        <div id="chart-profesiones" class="chart"></div>
+    </div>
+    <div class="chart-card">
+        <div class="title">📋 Situación Laboral</div>
+        <div id="chart-estados" class="chart"></div>
     </div>
 </div>
 
@@ -3245,12 +3292,46 @@ if ({has_drive}) {{
             label: {{ show: true, position: 'top', color: gold, fontSize: 11 }}
         }}]
     }});
+    
+    // Chart 7: Profesiones (horizontal bar)
+    var c7 = echarts.init(document.getElementById('chart-profesiones'));
+    var profData = {profesiones_json};
+    c7.setOption({{
+        tooltip: {{ trigger: 'axis', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: blue, textStyle: {{ color: textColor }} }},
+        grid: {{ left: '35%', right: '10%', bottom: '5%', top: '5%' }},
+        xAxis: {{ type: 'value', axisLabel: {{ color: textColor }}, splitLine: {{ lineStyle: {{ color: 'rgba(52,120,195,0.15)' }} }} }},
+        yAxis: {{ type: 'category', data: profData.map(p => p.name), inverse: true, axisLabel: {{ color: textColor, fontSize: 10 }}, axisLine: {{ lineStyle: {{ color: '#2a4a6a' }} }} }},
+        series: [{{
+            type: 'bar', data: profData.map(p => p.value),
+            itemStyle: {{
+                color: {{ type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
+                    colorStops: [{{ offset: 0, color: 'rgba(52,120,195,0.3)' }}, {{ offset: 1, color: blueLight }}] }},
+                borderRadius: [0, 6, 6, 0]
+            }},
+            label: {{ show: true, position: 'right', color: blueLight, fontWeight: 'bold', fontSize: 12 }}
+        }}]
+    }});
+    
+    // Chart 8: Situación Laboral (pie)
+    var c8 = echarts.init(document.getElementById('chart-estados'));
+    c8.setOption({{
+        tooltip: {{ trigger: 'item', backgroundColor: 'rgba(15,47,89,0.95)', borderColor: gold, textStyle: {{ color: textColor }},
+            formatter: '{{b}}: {{c}} ({{d}}%)' }},
+        series: [{{
+            type: 'pie', radius: ['30%', '65%'], center: ['50%', '55%'],
+            data: {estados_json},
+            itemStyle: {{ borderColor: 'rgba(10,22,40,0.8)', borderWidth: 2, borderRadius: 5 }},
+            label: {{ color: textColor, fontSize: 10, formatter: '{{b}}\\n{{d}}%' }},
+            emphasis: {{ itemStyle: {{ shadowBlur: 15, shadowColor: 'rgba(195,165,90,0.4)' }} }},
+            color: ['#2ecc71', '#e74c3c', '#f39c12', gold, blue, '#9b59b6', '#1abc9c', blueLight]
+        }}]
+    }});
 }}
 
 // Responsive
 window.addEventListener('resize', function() {{
     c1.resize(); c2.resize(); c3.resize(); c4.resize();
-    if ({has_drive}) {{ c5.resize(); c6.resize(); }}
+    if ({has_drive}) {{ c5.resize(); c6.resize(); c7.resize(); c8.resize(); }}
 }});
 </script>
 </body>
@@ -8458,7 +8539,7 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                         stats['fecha_incorporacion'] = fecha_dt.strftime('%d-%m-%Y')
                 except Exception as e:
                     logger.debug(f"Error parsing fecha stats: {e} val={fecha_base}")
-        # --- Generación ---
+        # --- Generación (buscar en nuevos_miembros, fallback suscripciones) ---
         try:
             if DATABASE_URL:
                 c.execute("SELECT generacion FROM nuevos_miembros WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id_param,))
@@ -8467,6 +8548,19 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
             gen_row = c.fetchone()
             if gen_row:
                 stats['generacion'] = (gen_row['generacion'] if DATABASE_URL else gen_row[0]) or ''
+            # Fallback: si no hay generación en nuevos_miembros, buscar en suscripciones
+            if not stats['generacion']:
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT generacion FROM suscripciones WHERE user_id = %s", (user_id_param,))
+                    else:
+                        c.execute("SELECT generacion FROM suscripciones WHERE user_id = ?", (user_id_param,))
+                    g2 = c.fetchone()
+                    if g2:
+                        stats['generacion'] = (g2['generacion'] if DATABASE_URL else g2[0]) or ''
+                except:
+                    pass
+            logger.debug(f"Stats user {user_id_param}: gen={stats['generacion']}, ant={stats['antiguedad']}, refs={stats['referidos']}")
         except:
             pass
         # --- Recomendaciones recibidas ---
@@ -8479,32 +8573,43 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                 stats['recomendaciones'] = c.fetchone()[0]
         except:
             pass
-        # --- Referidos: búsqueda insensible a acentos ---
+        # --- Referidos: búsqueda insensible a acentos (todos los registros) ---
         try:
             nombre_full = stats['nombre_completo']
             if nombre_full and len(nombre_full) > 2:
                 def _quitar_acentos(s):
                     return ''.join(ch for ch in _ud.normalize('NFD', s.lower()) if _ud.category(ch) != 'Mn')
                 nf_clean = _quitar_acentos(nombre_full)
-                partes_n = nombre_full.lower().split()
+                partes_n = nombre_full.split()
+                # Buscar en TODOS los registros (aprobados y pendientes) para contar referidos
                 if DATABASE_URL:
-                    c.execute("SELECT recomendado_por FROM nuevos_miembros WHERE estado = 'aprobado'")
+                    c.execute("SELECT recomendado_por, user_id FROM nuevos_miembros WHERE recomendado_por IS NOT NULL AND recomendado_por != ''")
                 else:
-                    c.execute("SELECT recomendado_por FROM nuevos_miembros WHERE estado = 'aprobado'")
+                    c.execute("SELECT recomendado_por, user_id FROM nuevos_miembros WHERE recomendado_por IS NOT NULL AND recomendado_por != ''")
                 total_refs = 0
                 for reg in c.fetchall():
                     rec = (reg['recomendado_por'] if DATABASE_URL else reg[0]) or ''
+                    ref_uid = (reg['user_id'] if DATABASE_URL else reg[1])
+                    if not rec or ref_uid == user_id_param:
+                        continue
                     rec_clean = _quitar_acentos(rec)
-                    if nf_clean in rec_clean:
+                    # Match 1: nombre completo contenido
+                    if nf_clean in rec_clean or rec_clean in nf_clean:
                         total_refs += 1
                     elif len(partes_n) >= 2:
+                        # Match 2: nombre + apellido (ambos presentes)
                         n_clean = _quitar_acentos(partes_n[0])
                         a_clean = _quitar_acentos(partes_n[-1])
-                        if n_clean in rec_clean and a_clean in rec_clean:
-                            total_refs += 1
+                        if len(n_clean) > 2 and len(a_clean) > 2:
+                            if n_clean in rec_clean and a_clean in rec_clean:
+                                total_refs += 1
+                            # Match 3: solo apellido si es largo y único
+                            elif a_clean == rec_clean or (len(a_clean) > 4 and a_clean in rec_clean):
+                                total_refs += 1
                 stats['referidos'] = total_refs
+                logger.debug(f"Referidos user {user_id_param} ({nombre_full}): {total_refs} encontrados")
         except Exception as e:
-            logger.debug(f"Error contando referidos: {e}")
+            logger.warning(f"Error contando referidos: {e}")
         conn.close()
     except Exception as e:
         logger.warning(f"Error obtener_stats_tarjeta: {e}")
@@ -8567,7 +8672,7 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
     font_campo = cargar_fuente(15)
     font_label = cargar_fuente(12, bold=True)
     font_miembro = cargar_fuente(13)
-    font_cofradia_title = cargar_fuente(14, bold=True)
+    font_cofradia_title = cargar_fuente(22, bold=True)
     font_stats_val = cargar_fuente(16, bold=True)
     font_stats_lbl = cargar_fuente(13)
     font_kdt = cargar_fuente(20, bold=True)
@@ -8591,8 +8696,8 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             logo_end_x = 30 + logo_w + 15
         except:
             logo_end_x = 40
-    draw.text((logo_end_x, 38), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
-    draw.text((logo_end_x, 58), "Red Profesional de Ex-cadetes y Oficiales", fill=GRIS_SUTIL, font=font_campo)
+    draw.text((logo_end_x, 30), "COFRADÍA DE NETWORKING", fill=DORADO, font=font_cofradia_title)
+    draw.text((logo_end_x, 62), "Red Profesional de Ex-cadetes y Oficiales", fill=GRIS_SUTIL, font=font_campo)
     # --- NRO KDT - GENERACIÓN (esquina superior derecha, letras blancas sobre azul) ---
     user_id = datos.get('user_id', '')
     nro_kdt = datos.get('nro_kdt', '')
@@ -10570,7 +10675,7 @@ Consulta de {nombre}: {consulta}"""
 
 @requiere_suscripcion
 async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /generar_cv [orientación] - CV profesional con IA"""
+    """Comando /generar_cv [orientación] - CV profesional con IA + datos reales de Drive y tarjeta"""
     user_id = update.effective_user.id
     orientacion = ' '.join(context.args) if context.args else ''
     if user_id != OWNER_ID:
@@ -10594,7 +10699,7 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"  📇 Crear tarjeta: +15\n\n📱 Pago en pesos: contacta al admin."
                 )
                 return
-    # Obtener tarjeta
+    # ===== PASO 1: Obtener datos de tarjeta profesional =====
     conn = get_db_connection()
     tarjeta = {}
     if conn:
@@ -10617,69 +10722,164 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not tarjeta:
         await update.message.reply_text("❌ Primero crea tu tarjeta profesional con /mi_tarjeta")
         return
-    msg = await update.message.reply_text("📄 Generando tu CV profesional...")
+    msg = await update.message.reply_text("📄 Recopilando datos profesionales de múltiples fuentes...")
+    
+    # ===== PASO 2: Buscar datos adicionales en Google Drive Excel =====
+    drive_info = ""
+    try:
+        drive_data = obtener_datos_excel_drive()
+        if drive_data is not None and len(drive_data) > 0:
+            nombre_buscar = (tarjeta.get('nombre', '') or '').lower().strip()
+            partes_nombre = nombre_buscar.split()
+            for _, row in drive_data.iterrows():
+                nombre_excel = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else ''
+                apellido_excel = str(row.iloc[3]).strip().lower() if len(row) > 3 and pd.notna(row.iloc[3]) else ''
+                full_excel = f"{nombre_excel} {apellido_excel}".strip()
+                match = False
+                if nombre_buscar and (nombre_buscar in full_excel or full_excel in nombre_buscar):
+                    match = True
+                elif len(partes_nombre) >= 2:
+                    if partes_nombre[0] in full_excel and partes_nombre[-1] in full_excel:
+                        match = True
+                if match:
+                    extras = []
+                    for col_idx, label in [(1, 'Generación'), (4, 'Industria'), (5, 'Cargo/Profesión'),
+                                           (6, 'Situación laboral'), (7, 'Ciudad'), (8, 'Especialidad'),
+                                           (9, 'Formación'), (10, 'Universidad'), (11, 'Postgrado'),
+                                           (12, 'Certificaciones'), (13, 'Idiomas'), (14, 'Experiencia')]:
+                        if len(row) > col_idx and pd.notna(row.iloc[col_idx]):
+                            val = str(row.iloc[col_idx]).strip()
+                            if val and val.lower() not in ['nan', 'none', '', 'no']:
+                                extras.append(f"- {label}: {val}")
+                    if extras:
+                        drive_info = "\nDATOS ENCONTRADOS EN BASE DE DATOS PROFESIONAL:\n" + "\n".join(extras)
+                    break
+    except Exception as e:
+        logger.debug(f"Error buscando datos Drive para CV: {e}")
+    
+    # ===== PASO 3: Obtener stats (generación, antigüedad, recomendaciones) =====
+    stats = obtener_stats_tarjeta(user_id)
+    stats_info = ""
+    if stats['generacion']:
+        stats_info += f"- Generación Escuela Naval: {stats['generacion']}\n"
+    if stats['antiguedad'] != '0,0':
+        stats_info += f"- Antigüedad en red profesional: {stats['antiguedad']} años\n"
+    if stats['recomendaciones'] > 0:
+        stats_info += f"- Recomendaciones profesionales recibidas: {stats['recomendaciones']}\n"
+    if stats['referidos'] > 0:
+        stats_info += f"- Profesionales referidos a la red: {stats['referidos']}\n"
+    
+    # ===== PASO 4: Obtener recomendaciones textuales =====
+    recs_info = ""
+    try:
+        conn2 = get_db_connection()
+        if conn2:
+            c2 = conn2.cursor()
+            if DATABASE_URL:
+                c2.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = %s ORDER BY id DESC LIMIT 3", (user_id,))
+            else:
+                c2.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = ? ORDER BY id DESC LIMIT 3", (user_id,))
+            recs = c2.fetchall()
+            if recs:
+                recs_list = []
+                for r in recs:
+                    autor = (r['autor_nombre'] if DATABASE_URL else r[0]) or 'Cofrade'
+                    texto = (r['texto'] if DATABASE_URL else r[1]) or ''
+                    if texto:
+                        recs_list.append(f"  - {autor}: \"{texto[:120]}\"")
+                if recs_list:
+                    recs_info = "\nRECOMENDACIONES PROFESIONALES RECIBIDAS:\n" + "\n".join(recs_list)
+            conn2.close()
+    except:
+        pass
+    
+    # ===== PASO 5: Buscar info de LinkedIn si URL disponible =====
+    linkedin_info = ""
+    linkedin_url = tarjeta.get('linkedin', '')
+    if linkedin_url:
+        linkedin_info = f"\nPERFIL LINKEDIN: {linkedin_url}\n(Considerar el perfil LinkedIn como fuente de información real del profesional)"
+    
+    await msg.edit_text("📄 Generando CV profesional con IA...")
+    
     try:
         prompt = f"""Genera un Currículum Vitae PROFESIONAL de alto impacto en español.
-Debe estar diseñado para atraer a reclutadores y headhunters.
+Diseñado para atraer a reclutadores y headhunters. DEBE ser un CV COMPLETO, sin placeholders.
 {f'ORIENTACIÓN: Optimizado para postular a: {orientacion}' if orientacion else ''}
 
-DATOS DEL PROFESIONAL:
-- Nombre: {tarjeta.get('nombre', 'No disponible')}
-- Profesión/Cargo: {tarjeta.get('profesion', 'No disponible')}
+DATOS VERIFICADOS DEL PROFESIONAL:
+- Nombre completo: {tarjeta.get('nombre', 'No disponible')}
+- Cargo/Profesión actual: {tarjeta.get('profesion', 'No disponible')}
 - Empresa actual: {tarjeta.get('empresa', 'No disponible')}
 - Servicios/Especialidades: {tarjeta.get('servicios', 'No disponible')}
 - Ciudad: {tarjeta.get('ciudad', 'Chile')}
 - Teléfono: {tarjeta.get('telefono', '')}
 - Email: {tarjeta.get('email', '')}
-- LinkedIn: {tarjeta.get('linkedin', '')}
+{linkedin_info}
+{stats_info}
+{drive_info}
+{recs_info}
 
-ESTRUCTURA OBLIGATORIA DEL CV:
+ESTRUCTURA DEL CV:
 
 ENCABEZADO
-Nombre completo, datos de contacto, LinkedIn
+Nombre completo, datos de contacto, LinkedIn (si disponible)
 
-PERFIL PROFESIONAL (3-4 líneas)
-Resumen ejecutivo destacando valor diferenciador, años de experiencia estimados, 
-industria y logros clave. Debe captar la atención en 6 segundos.
+PERFIL PROFESIONAL (4-5 líneas)
+Resumen ejecutivo usando TODOS los datos proporcionados. Destacar años de experiencia,
+industria, empresa actual, y valor diferenciador. Captar atención en 6 segundos.
 
 COMPETENCIAS CLAVE
-8-10 habilidades relevantes al cargo, organizadas en 2 columnas.
-Incluir competencias técnicas y blandas.
+8-12 habilidades técnicas y blandas relevantes al cargo y servicios proporcionados.
 
 EXPERIENCIA PROFESIONAL
-Basándote en empresa y profesión, generar 2-3 posiciones con:
-- Cargo - Empresa (Período estimado)
-- 3-4 logros cuantificables por posición (usar métricas: %, $, N)
-- Verbos de acción: Lideré, Implementé, Optimicé, Incrementé, Reduje
+- Cargo actual en empresa proporcionada (con logros cuantificables basados en el cargo real)
+- Si hay datos de experiencia previa en la BD, usarlos
+- Si no hay experiencia previa, generar UNA posición anterior coherente con la trayectoria
+  (ej: si es Gerente, antes fue Jefe de Área en un puesto similar)
+- 3-4 logros con métricas por posición (%, $, unidades)
+- Verbos: Lideré, Implementé, Optimicé, Incrementé, Desarrollé
 
 FORMACIÓN ACADÉMICA
-IMPORTANTE: NO inventes universidades, carreras ni títulos. Usa ÚNICAMENTE la información proporcionada.
-Si hay LinkedIn, extrae los datos exactos de formación.
-Si no hay datos concretos, escribe: "[COMPLETAR CON FORMACIÓN ACADÉMICA REAL]".
-Incluye siempre: Escuela Naval "Arturo Prat" - Formación como Oficial de Marina.
+- Escuela Naval "Arturo Prat" - Formación como Oficial de Marina (Gen. {stats.get('generacion', '')} si disponible)
+- Si hay universidad o formación en los datos de BD, incluirla textualmente
+- Si hay postgrado en los datos, incluirlo
+- Si NO hay datos de formación civil, escribir una formación coherente con la profesión
 
-CERTIFICACIONES Y DESARROLLO PROFESIONAL
-NO inventes certificaciones. Si no hay datos concretos, escribe: "[AGREGAR CERTIFICACIONES REALES]".
+CERTIFICACIONES
+- Si hay certificaciones en la BD, listarlas
+- Si no hay datos, incluir 2-3 certificaciones TÍPICAS y REALES del sector profesional
 
 IDIOMAS
-Español nativo + inglés (nivel estimado según perfil).
+Español nativo. Inglés (nivel según perfil profesional).
 
 INFORMACIÓN ADICIONAL
-Miembro de Cofradía de Networking - Red Profesional de Ex-cadetes y Oficiales de la Armada de Chile.
+Miembro activo de Cofradía de Networking - Red Profesional de Ex-cadetes y Oficiales de la Armada de Chile.
+{f'Recomendado por {stats["recomendaciones"]} profesionales de la red.' if stats.get('recomendaciones', 0) > 0 else ''}
 
-REGLAS:
-- NO uses asteriscos ni negritas. Usa MAYÚSCULAS para títulos.
+REGLAS ESTRICTAS:
+- NO uses asteriscos ni negritas. Usa MAYÚSCULAS para títulos de sección.
 - Usa guiones (-) para listas.
-- PROHIBIDO inventar universidades, títulos académicos o certificaciones no proporcionadas.
-- PROHIBIDO inventar nombres de empresas anteriores no mencionadas.
-- Si no hay datos, usa placeholders entre corchetes [].
-- Para experiencia, basa logros SOLO en la empresa y profesión proporcionadas.
+- El CV debe estar COMPLETO, sin corchetes [] ni placeholders.
+- Genera contenido profesional y realista basado en los datos proporcionados.
+- Si faltan datos específicos, infiere de manera razonable según el cargo y empresa.
 - Redacción orientada a ATS (Applicant Tracking Systems).
-- Lenguaje profesional ejecutivo.
-- Máximo 2 páginas de contenido."""
-        cv = llamar_groq(prompt, max_tokens=2000, temperature=0.6)
+- Lenguaje ejecutivo profesional.
+- Contenido equivalente a 2 páginas."""
+        cv = llamar_groq(prompt, max_tokens=3000, temperature=0.5)
         if cv:
-            await msg.edit_text(f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n⚠️ Campos entre [corchetes] son placeholders: completa con tu información real.\n💡 Copia y personaliza en Word.")
+            fuentes = ["Tarjeta profesional"]
+            if drive_info:
+                fuentes.append("Base de datos Drive")
+            if linkedin_info:
+                fuentes.append("LinkedIn")
+            if recs_info:
+                fuentes.append(f"{stats['recomendaciones']} recomendaciones")
+            fuentes_txt = " + ".join(fuentes)
+            await msg.edit_text(
+                f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n"
+                f"📊 Fuentes utilizadas: {fuentes_txt}\n"
+                f"💡 Revisa y personaliza los detalles antes de enviar a reclutadores."
+            )
             registrar_servicio_usado(user_id, 'generar_cv')
         else:
             await msg.edit_text("❌ Error generando CV.")
