@@ -743,8 +743,8 @@ def init_db():
                                         VALUES (?, 'Germán', 'Perey', '2000', 'Fundador', 'aprobado', '2020-09-22')""", (owner_int,))
                         else:
                             c2.execute("UPDATE nuevos_miembros SET generacion = '2000' WHERE user_id = ?", (owner_int,))
-                except:
-                    pass
+                except Exception as e_nm:
+                    logger.warning(f"Error creando owner nuevos_miembros: {e_nm}")
                 
                 conn.commit()
         except Exception as e:
@@ -1620,6 +1620,17 @@ def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False,
                            fecha_registro.strftime("%Y-%m-%d %H:%M:%S"), 
                            fecha_expiracion.strftime("%Y-%m-%d %H:%M:%S")))
             logger.info(f"Nuevo usuario registrado: {first_name} (ID: {user_id}) - {dias_gratis} días gratis")
+        
+        # Si es el owner/fundador, forzar fecha_incorporacion al 22-09-2020
+        if user_id == OWNER_ID:
+            try:
+                if DATABASE_URL:
+                    c.execute("UPDATE suscripciones SET fecha_incorporacion = '2020-09-22', first_name = 'Germán', last_name = 'Perey', fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo' WHERE user_id = %s", (user_id,))
+                else:
+                    c.execute("UPDATE suscripciones SET fecha_incorporacion = '2020-09-22', first_name = 'Germán', last_name = 'Perey', fecha_expiracion = '2099-12-31 23:59:59', estado = 'activo' WHERE user_id = ?", (user_id,))
+                logger.info(f"✅ Owner fecha_incorporacion forzada a 2020-09-22")
+            except Exception as e:
+                logger.warning(f"Error forzando fecha owner: {e}")
         
         conn.commit()
         conn.close()
@@ -3004,8 +3015,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ciudad = str(row.iloc[7]).strip() if len(row) > 7 and pd.notna(row.iloc[7]) else ''
                     # Columna B (iloc[1]) = Generación (Año de Guardiamarina)
                     gen = str(row.iloc[1]).strip() if len(row) > 1 and pd.notna(row.iloc[1]) else ''
-                    profesion = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ''
-                    estado_lab = str(row.iloc[6]).strip() if len(row) > 6 and pd.notna(row.iloc[6]) else ''
+                    # Columna Y (iloc[24]) = Profesión/Actividad
+                    profesion = str(row.iloc[24]).strip() if len(row) > 24 and pd.notna(row.iloc[24]) else ''
+                    # Columna I (iloc[8]) = Situación Laboral
+                    estado_lab = str(row.iloc[8]).strip() if len(row) > 8 and pd.notna(row.iloc[8]) else ''
                     if ciudad and ciudad.lower() not in ['nan', 'none', '']:
                         ciudades[ciudad] = ciudades.get(ciudad, 0) + 1
                     # Extraer año de 4 dígitos del valor de generación
@@ -8538,8 +8551,10 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                         stats['antiguedad'] = f"{anios},{meses}"
                         stats['fecha_incorporacion'] = fecha_dt.strftime('%d-%m-%Y')
                 except Exception as e:
-                    logger.debug(f"Error parsing fecha stats: {e} val={fecha_base}")
-        # --- Generación (buscar en nuevos_miembros, fallback suscripciones) ---
+                    logger.warning(f"Error parsing fecha stats: {e} val={fecha_base} type={type(fecha_base)}")
+            else:
+                logger.info(f"Stats user {user_id_param}: fecha_base is empty/None (inc={fecha_inc}, reg={fecha_reg})")
+        # --- Generación (buscar en nuevos_miembros) ---
         try:
             if DATABASE_URL:
                 c.execute("SELECT generacion FROM nuevos_miembros WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id_param,))
@@ -8548,21 +8563,9 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
             gen_row = c.fetchone()
             if gen_row:
                 stats['generacion'] = (gen_row['generacion'] if DATABASE_URL else gen_row[0]) or ''
-            # Fallback: si no hay generación en nuevos_miembros, buscar en suscripciones
-            if not stats['generacion']:
-                try:
-                    if DATABASE_URL:
-                        c.execute("SELECT generacion FROM suscripciones WHERE user_id = %s", (user_id_param,))
-                    else:
-                        c.execute("SELECT generacion FROM suscripciones WHERE user_id = ?", (user_id_param,))
-                    g2 = c.fetchone()
-                    if g2:
-                        stats['generacion'] = (g2['generacion'] if DATABASE_URL else g2[0]) or ''
-                except:
-                    pass
-            logger.debug(f"Stats user {user_id_param}: gen={stats['generacion']}, ant={stats['antiguedad']}, refs={stats['referidos']}")
-        except:
-            pass
+            logger.info(f"Stats user {user_id_param}: gen={stats['generacion']}, ant={stats['antiguedad']}, fecha={stats['fecha_incorporacion']}")
+        except Exception as e:
+            logger.warning(f"Error obteniendo generacion user {user_id_param}: {e}")
         # --- Recomendaciones recibidas ---
         try:
             if DATABASE_URL:
@@ -10743,10 +10746,17 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         match = True
                 if match:
                     extras = []
-                    for col_idx, label in [(1, 'Generación'), (4, 'Industria'), (5, 'Cargo/Profesión'),
-                                           (6, 'Situación laboral'), (7, 'Ciudad'), (8, 'Especialidad'),
-                                           (9, 'Formación'), (10, 'Universidad'), (11, 'Postgrado'),
-                                           (12, 'Certificaciones'), (13, 'Idiomas'), (14, 'Experiencia')]:
+                    # Mapeo real del Excel BD Grupo Laboral:
+                    # B=1:Generación, F=5:Teléfono, G=6:Email, H=7:Ciudad, 
+                    # I=8:Situación Laboral, K=10:Industria1, L=11:Empresa1,
+                    # M=12:Industria2, N=13:Empresa2, O=14:Industria3, P=15:Empresa3,
+                    # Y=24:Profesión/Actividad
+                    for col_idx, label in [(1, 'Generación'), (24, 'Profesión/Actividad'),
+                                           (8, 'Situación Laboral'), (7, 'Ciudad'),
+                                           (10, 'Industria 1'), (11, 'Empresa 1'),
+                                           (12, 'Industria 2'), (13, 'Empresa 2'),
+                                           (14, 'Industria 3'), (15, 'Empresa 3'),
+                                           (5, 'Teléfono'), (6, 'Email')]:
                         if len(row) > col_idx and pd.notna(row.iloc[col_idx]):
                             val = str(row.iloc[col_idx]).strip()
                             if val and val.lower() not in ['nan', 'none', '', 'no']:
@@ -10803,81 +10813,87 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         prompt = f"""Genera un Currículum Vitae PROFESIONAL de alto impacto en español.
-Diseñado para atraer a reclutadores y headhunters. DEBE ser un CV COMPLETO, sin placeholders.
+Diseñado para atraer reclutadores y headhunters. ESTRICTAMENTE BASADO EN DATOS REALES.
 {f'ORIENTACIÓN: Optimizado para postular a: {orientacion}' if orientacion else ''}
 
-DATOS VERIFICADOS DEL PROFESIONAL:
-- Nombre completo: {tarjeta.get('nombre', 'No disponible')}
-- Cargo/Profesión actual: {tarjeta.get('profesion', 'No disponible')}
-- Empresa actual: {tarjeta.get('empresa', 'No disponible')}
-- Servicios/Especialidades: {tarjeta.get('servicios', 'No disponible')}
-- Ciudad: {tarjeta.get('ciudad', 'Chile')}
-- Teléfono: {tarjeta.get('telefono', '')}
-- Email: {tarjeta.get('email', '')}
-{linkedin_info}
+===== DATOS REALES PROPORCIONADOS =====
+Nombre completo: {tarjeta.get('nombre', 'No disponible')}
+Cargo/Profesión actual: {tarjeta.get('profesion', 'No disponible')}
+Empresa actual: {tarjeta.get('empresa', 'No disponible')}
+Servicios/Especialidades: {tarjeta.get('servicios', 'No disponible')}
+Ciudad: {tarjeta.get('ciudad', 'Chile')}
+Teléfono: {tarjeta.get('telefono', '')}
+Email: {tarjeta.get('email', '')}
+LinkedIn: {tarjeta.get('linkedin', '')}
 {stats_info}
 {drive_info}
 {recs_info}
 
-ESTRUCTURA DEL CV:
+===== ESTRUCTURA OBLIGATORIA =====
 
 ENCABEZADO
-Nombre completo, datos de contacto, LinkedIn (si disponible)
+Nombre, ciudad, teléfono, email, LinkedIn.
 
-PERFIL PROFESIONAL (4-5 líneas)
-Resumen ejecutivo usando TODOS los datos proporcionados. Destacar años de experiencia,
-industria, empresa actual, y valor diferenciador. Captar atención en 6 segundos.
+PERFIL PROFESIONAL (3-4 líneas)
+Resumen ejecutivo basado EXCLUSIVAMENTE en los datos proporcionados: cargo actual,
+empresa, servicios, industria, ciudad. Incluir formación naval si hay generación.
 
 COMPETENCIAS CLAVE
-8-12 habilidades técnicas y blandas relevantes al cargo y servicios proporcionados.
+8-10 competencias derivadas lógicamente de: cargo actual + servicios + industria.
+Solo habilidades coherentes con el perfil real.
 
 EXPERIENCIA PROFESIONAL
-- Cargo actual en empresa proporcionada (con logros cuantificables basados en el cargo real)
-- Si hay datos de experiencia previa en la BD, usarlos
-- Si no hay experiencia previa, generar UNA posición anterior coherente con la trayectoria
-  (ej: si es Gerente, antes fue Jefe de Área en un puesto similar)
-- 3-4 logros con métricas por posición (%, $, unidades)
-- Verbos: Lideré, Implementé, Optimicé, Incrementé, Desarrollé
+- Posición actual: cargo + empresa proporcionados. Generar 3-4 logros REALISTAS
+  basados en el tipo de cargo (no inventar nombres de proyectos ni cifras exactas).
+- Si los datos de BD incluyen Empresa 1/2/3 e Industrias, usar esos datos reales
+  para crear posiciones anteriores con logros coherentes.
+- Si NO hay datos de empresas anteriores, incluir SOLO la posición actual.
+  NO INVENTAR empresas, fechas ni posiciones que no estén en los datos.
 
 FORMACIÓN ACADÉMICA
-- Escuela Naval "Arturo Prat" - Formación como Oficial de Marina (Gen. {stats.get('generacion', '')} si disponible)
-- Si hay universidad o formación en los datos de BD, incluirla textualmente
-- Si hay postgrado en los datos, incluirlo
-- Si NO hay datos de formación civil, escribir una formación coherente con la profesión
+- Escuela Naval "Arturo Prat" - Oficial de Marina{f' (Generación {stats.get("generacion", "")})' if stats.get('generacion') else ''}
+- Si los datos de BD incluyen universidad/formación/postgrado, incluirlos textualmente.
+- Si NO hay datos de formación civil, escribir SOLAMENTE la Escuela Naval.
+  NO INVENTAR universidades, carreras ni títulos.
 
-CERTIFICACIONES
-- Si hay certificaciones en la BD, listarlas
-- Si no hay datos, incluir 2-3 certificaciones TÍPICAS y REALES del sector profesional
+CERTIFICACIONES Y DESARROLLO
+- Si los datos de BD incluyen certificaciones, listarlas.
+- Si NO hay datos, NO inventar. Omitir esta sección o escribir:
+  "Disponible para compartir certificaciones relevantes al cargo."
 
 IDIOMAS
-Español nativo. Inglés (nivel según perfil profesional).
+Español nativo. Si hay datos de idiomas en BD, incluirlos. Si no, omitir sección.
 
 INFORMACIÓN ADICIONAL
-Miembro activo de Cofradía de Networking - Red Profesional de Ex-cadetes y Oficiales de la Armada de Chile.
-{f'Recomendado por {stats["recomendaciones"]} profesionales de la red.' if stats.get('recomendaciones', 0) > 0 else ''}
+- Miembro de Cofradía de Networking - Red Profesional de Ex-cadetes y Oficiales de la Armada de Chile.
+{f'- Recomendado por {stats["recomendaciones"]} profesionales de la red.' if stats.get('recomendaciones', 0) > 0 else ''}
+{f'- Ha referido {stats["referidos"]} profesionales a la comunidad.' if stats.get('referidos', 0) > 0 else ''}
 
-REGLAS ESTRICTAS:
-- NO uses asteriscos ni negritas. Usa MAYÚSCULAS para títulos de sección.
+REGLAS ABSOLUTAS:
+- NO uses asteriscos, negritas ni markdown. Usa MAYÚSCULAS para títulos.
 - Usa guiones (-) para listas.
-- El CV debe estar COMPLETO, sin corchetes [] ni placeholders.
-- Genera contenido profesional y realista basado en los datos proporcionados.
-- Si faltan datos específicos, infiere de manera razonable según el cargo y empresa.
-- Redacción orientada a ATS (Applicant Tracking Systems).
-- Lenguaje ejecutivo profesional.
-- Contenido equivalente a 2 páginas."""
-        cv = llamar_groq(prompt, max_tokens=3000, temperature=0.5)
+- PROHIBIDO INVENTAR: universidades, títulos, empresas anteriores, certificaciones,
+  nombres de proyectos, cifras exactas de facturación, o cualquier dato no proporcionado.
+- Los logros deben ser genéricos pero profesionales (ej: "Optimicé procesos operativos
+  logrando mejoras significativas en eficiencia") NO cifras inventadas.
+- Si una sección no tiene datos reales, OMÍTELA o indica brevemente que está disponible.
+- Redacción orientada a ATS. Lenguaje ejecutivo. Máximo 2 páginas."""
+        cv = llamar_groq(prompt, max_tokens=3000, temperature=0.4)
         if cv:
             fuentes = ["Tarjeta profesional"]
             if drive_info:
                 fuentes.append("Base de datos Drive")
-            if linkedin_info:
-                fuentes.append("LinkedIn")
+            if stats.get('generacion') or stats.get('antiguedad', '0,0') != '0,0':
+                fuentes.append("Stats comunidad")
             if recs_info:
                 fuentes.append(f"{stats['recomendaciones']} recomendaciones")
             fuentes_txt = " + ".join(fuentes)
+            nota_linkedin = ""
+            if tarjeta.get('linkedin', ''):
+                nota_linkedin = f"\n🔗 LinkedIn: {tarjeta['linkedin']} (verifica que tu perfil esté actualizado)"
             await msg.edit_text(
                 f"📄 CV PROFESIONAL\n{'━' * 30}\n\n{cv}\n\n{'━' * 30}\n"
-                f"📊 Fuentes utilizadas: {fuentes_txt}\n"
+                f"📊 Fuentes utilizadas: {fuentes_txt}{nota_linkedin}\n"
                 f"💡 Revisa y personaliza los detalles antes de enviar a reclutadores."
             )
             registrar_servicio_usado(user_id, 'generar_cv')
