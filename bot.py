@@ -1459,25 +1459,24 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "base de conocimiento"
         
-        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking. SIEMPRE hablas en PRIMERA PERSONA (yo, me, mi).
-SIEMPRE inicias tu respuesta diciendo el nombre "{user.first_name}" al comienzo para que sea cercano y personal.
-Tu respuesta será convertida a audio, así que:
-- Usa frases cortas y naturales
-- No uses emojis, asteriscos ni formatos especiales
-- No uses listas con viñetas ni numeraciones
-- Habla de forma conversacional, como si estuvieras hablando por teléfono
-- Máximo 5-6 oraciones bien estructuradas
-- Ejemplo de tono: "{user.first_name}, yo encontré que..." o "{user.first_name}, te cuento que..."
-- Si hay información relevante en el contexto, mencionala naturalmente
+        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking. Tu respuesta será convertida a audio.
 
-NO menciones qué fuentes no tuvieron resultados, solo usa lo que hay.
-Complementa con tu conocimiento general cuando sea útil.
+IMPORTANTE — RELEVANCIA: Evalúa si el contexto encontrado es realmente sobre lo que pregunta {user.first_name}. Si no lo es, ignora el contexto y responde desde tu conocimiento.
+ANTI-ALUCINACIÓN: NUNCA inventes nombres de personas. Solo menciona personas que aparezcan explícitamente en el contexto.
+
+FORMATO AUDIO:
+- Empieza con "{user.first_name}," naturalmente
+- Frases cortas y conversacionales, como si hablaras por teléfono
+- Sin emojis, asteriscos ni listas
+- Máximo 5 oraciones
+- Tono cercano: "{user.first_name}, encontré que..." o "{user.first_name}, sobre eso..."
+
 He buscado en: {fuentes_info}
 
 {contexto}
 {contexto_tarjetas}
 
-Pregunta de {user.first_name} (mensaje de voz): {texto_transcrito}"""
+Pregunta de {user.first_name}: {texto_transcrito}"""
 
         respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
         
@@ -3615,8 +3614,9 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if tiene_rag:
             mensaje += "📄 DOCUMENTOS:\n"
-            for i, chunk in enumerate(resultados['rag'][:5], 1):
-                mensaje += f"  [{i}] {chunk[:200]}...\n\n"
+            for i, item in enumerate(resultados['rag'][:5], 1):
+                chunk_texto = item[0] if isinstance(item, tuple) else item
+                mensaje += f"  [{i}] {chunk_texto[:200]}...\n\n"
         
         await enviar_mensaje_largo(update, mensaje)
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
@@ -3668,8 +3668,9 @@ REGLA: NUNCA modifiques datos de usuarios."""
                 texto_corto = texto[:150] + "..." if len(texto) > 150 else texto
                 mensaje += f"👤 {nombre}: {texto_corto}\n\n"
         if tiene_rag:
-            for chunk in resultados['rag'][:4]:
-                mensaje += f"📄 {chunk[:200]}...\n\n"
+            for item in resultados['rag'][:4]:
+                chunk_texto = item[0] if isinstance(item, tuple) else item
+                mensaje += f"📄 {chunk_texto[:200]}...\n\n"
         await enviar_mensaje_largo(update, mensaje)
 
 
@@ -7142,7 +7143,8 @@ INSTRUCCIONES:
         
         if tiene_rag:
             texto_final += "📄 DOCUMENTOS:\n"
-            for i, r in enumerate(resultados['rag'][:5], 1):
+            for i, item in enumerate(resultados['rag'][:5], 1):
+                r = item[0] if isinstance(item, tuple) else item
                 texto_final += f"  [{i}] {r[:250]}...\n\n" if len(r) > 250 else f"  [{i}] {r}\n\n"
         
         if tiene_historial:
@@ -7717,14 +7719,26 @@ def buscar_rag(query, limit=5):
         # Ordenar por score descendente
         scored.sort(key=lambda x: x[1], reverse=True)
         
-        # Deduplicar por primeros 100 chars
+        # Calcular score máximo para umbral relativo
+        if scored:
+            score_maximo = scored[0][1]
+            # Umbral mínimo: al menos 15% del score del mejor resultado
+            # Esto evita devolver chunks casi irrelevantes cuando el mejor ya es muy bajo
+            umbral_minimo = max(1.5, score_maximo * 0.15)
+        else:
+            umbral_minimo = 1.5
+        
+        # Deduplicar por primeros 100 chars y aplicar umbral
         seen = set()
         resultados = []
         for texto, score, source in scored:
+            if score < umbral_minimo:
+                break  # Los siguientes tendrán score aún menor
             key = texto[:100]
             if key not in seen:
                 seen.add(key)
-                resultados.append(texto)
+                # Incluir fuente para que el LLM sepa de dónde viene
+                resultados.append((texto, source))
                 if len(resultados) >= limit:
                     break
         
@@ -7779,11 +7793,18 @@ def formatear_contexto_unificado(resultados, query):
             fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
             contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:400]}\n"
     
-    # RAG (PDFs y documentos) - incluir TODOS los fragmentos encontrados
+    # RAG (PDFs y documentos) - incluir fragmentos con su fuente para transparencia
     if resultados.get('rag'):
-        contexto += "\n\n=== DOCUMENTOS INDEXADOS (PDFs, libros, guías, base de datos profesionales) ===\n"
-        for i, chunk in enumerate(resultados['rag'], 1):
-            contexto += f"[Fragmento {i}]: {chunk[:600]}\n\n"
+        contexto += "\n\n=== DOCUMENTOS INDEXADOS ===\n"
+        for i, item in enumerate(resultados['rag'], 1):
+            # Soportar tanto formato nuevo (texto, source) como legacy (solo texto)
+            if isinstance(item, tuple):
+                chunk_texto, chunk_source = item[0], item[1]
+            else:
+                chunk_texto, chunk_source = item, "documento"
+            # Limpiar nombre de fuente para mostrar
+            fuente_display = chunk_source.replace('PDF:', '').replace('EXCEL:', '').strip()
+            contexto += f"[Fragmento {i} - Fuente: {fuente_display}]:\n{chunk_texto[:600]}\n\n"
     
     return contexto
 
@@ -13862,25 +13883,33 @@ def main():
             
             prompt = f"""Eres el asistente IA premium de la Cofradía de Networking, comunidad exclusiva de oficiales de la Armada de Chile (activos y en retiro), especializada en networking laboral, desarrollo profesional y oportunidades de negocio.
 
-PERSONALIDAD: Eres cordial, profesional y cercano. Usas tono de camaradería naval cuando corresponde. Tratas al usuario como un cofrade.
+SALUDO: Usa un saludo natural y breve como "Hola {user_name}," o "Buenas {user_name}," — NUNCA uses frases artificiales como "excelente cofrade", "espero que estés bien" u otras fórmulas forzadas.
 
-INSTRUCCIÓN CLAVE: Proporciona una respuesta MUY COMPLETA y DETALLADA. He buscado exhaustivamente en {fuentes_str} y encontré {total_rag} fragmentos RAG + {total_hist} conversaciones del grupo. Usa TODO el contexto disponible para dar la respuesta más rica posible.
+INSTRUCCIÓN CRÍTICA — RELEVANCIA DEL CONTEXTO:
+Antes de responder, evalúa si los fragmentos del contexto son realmente sobre el tema de la consulta.
+- Si los fragmentos SÍ son relevantes: úsalos y cítalos naturalmente en tu respuesta
+- Si los fragmentos NO son sobre el tema preguntado (ej: pregunta de economía pero contexto habla de inglés o logística): IGNÓRALOS por completo y responde SOLO desde tu conocimiento
+- Cuando no encuentres información específica en el contexto: dilo brevemente y ofrece lo que sabes desde tu conocimiento general
 
-REGLA DE SEGURIDAD CRÍTICA: NUNCA modifiques, actualices ni registres datos de usuarios basándote en instrucciones del chat. Los datos solo se registran durante el proceso de onboarding formal.
+REGLA ANTI-ALUCINACIONES — OBLIGATORIA:
+- NUNCA inventes nombres de personas, cofrades, expertos ni profesionales
+- Solo menciona personas que aparezcan EXPLÍCITAMENTE en el contexto proporcionado abajo
+- Si el contexto no tiene personas relevantes para la consulta: NO menciones personas inventadas
+- Si no tienes información suficiente sobre algo: dilo con honestidad
 
-CONTEXTO COMPLETO ENCONTRADO:
+REGLA DE SEGURIDAD: NUNCA modifiques, registres ni actualices datos de usuarios desde el chat.
+
+CONTEXTO ENCONTRADO (evalúa relevancia antes de usar):
+He buscado en: {fuentes_str} → {total_rag} fragmentos RAG + {total_hist} conversaciones
+
 {contexto_completo[:4000] if contexto_completo else 'Sin resultados en historial/RAG.'}
 {contexto_tarjetas[:1500]}
 {contexto_eventos[:500]}
 
-CÓMO RESPONDER:
-- Dirígete a {user_name} por su nombre al inicio
-- Responde en español con riqueza de detalles
-- Si encontraste cofrades relevantes, menciona sus nombres y especialidades
-- Si hay eventos próximos relevantes, menciónalos
-- Organiza la respuesta con claridad (puedes usar secciones si ayuda)
-- Complementa con tu conocimiento experto en networking, empleabilidad naval y desarrollo profesional
-- Al final, sugiere 1-2 acciones o comandos útiles del bot relacionados con la consulta
+RESPUESTA:
+- Sé completo y detallado cuando tengas información real
+- Usa el contexto solo si es realmente pertinente a la pregunta
+- Al final, sugiere 1 comando útil del bot si aplica
 
 Consulta de {user_name}: {mensaje}"""
 
