@@ -1457,26 +1457,27 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e_tc:
             logger.debug(f"No se pudo buscar tarjetas para audio: {e_tc}")
         
-        fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "base de conocimiento"
+        fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
+        rag_conf = resultados.get('rag_confianza', 'ninguna')
         
-        prompt = f"""Eres el asistente IA del grupo Cofradía de Networking. Tu respuesta será convertida a audio.
+        modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
+                      else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
+        
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
 
-IMPORTANTE — RELEVANCIA: Evalúa si el contexto encontrado es realmente sobre lo que pregunta {user.first_name}. Si no lo es, ignora el contexto y responde desde tu conocimiento.
-ANTI-ALUCINACIÓN: NUNCA inventes nombres de personas. Solo menciona personas que aparezcan explícitamente en el contexto.
+{user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
+Empieza directamente: "{user.first_name}, [respuesta]..."
 
-FORMATO AUDIO:
-- Empieza con "{user.first_name}," naturalmente
-- Frases cortas y conversacionales, como si hablaras por teléfono
-- Sin emojis, asteriscos ni listas
-- Máximo 5 oraciones
-- Tono cercano: "{user.first_name}, encontré que..." o "{user.first_name}, sobre eso..."
+MODO: {modo_audio}
+NUNCA digas "no tengo información" si sabes del tema como LLM.
+NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
 
-He buscado en: {fuentes_info}
+He buscado en: {fuentes_info} (confianza RAG: {rag_conf})
 
 {contexto}
 {contexto_tarjetas}
 
-Pregunta de {user.first_name}: {texto_transcrito}"""
+{user.first_name} pregunta: {texto_transcrito}"""
 
         respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
         
@@ -3587,8 +3588,24 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     tiene_historial = bool(resultados.get('historial'))
     tiene_rag = bool(resultados.get('rag'))
+    rag_conf = resultados.get('rag_confianza', 'ninguna')
     
     if not tiene_historial and not tiene_rag:
+        # Aunque no haya RAG, la IA puede responder con su propio conocimiento
+        if ia_disponible:
+            await msg.edit_text("🧠 Consultando conocimiento del asistente IA...")
+            prompt_fallback = f"""Eres el asistente IA de la Cofradía de Networking. No encontré información sobre "{consulta}" en los documentos indexados de la comunidad, pero respondo desde mi conocimiento general como LLM experto.
+
+Pregunta: {consulta}
+
+Responde de forma completa y útil en español. No menciones que "no hay documentos" — simplemente responde lo que sabes. Máximo 350 palabras."""
+            respuesta_fb = llamar_groq(prompt_fallback, max_tokens=800, temperature=0.5)
+            if respuesta_fb:
+                await msg.delete()
+                await enviar_mensaje_largo(update, f"🔍 {consulta}\n📊 Fuente: Conocimiento IA\n{'━'*25}\n\n{respuesta_fb}")
+                registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
+                return
+        
         await msg.edit_text(
             f"❌ No se encontraron resultados para: {consulta}\n\n"
             f"💡 Intenta con otras palabras clave.\n"
@@ -3626,25 +3643,20 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("🧠 Analizando resultados con IA...")
     
     contexto_completo = formatear_contexto_unificado(resultados, consulta)
+    modo_buscar = ("USA el contexto encontrado como base." if rag_conf in ('alta','media')
+                   else "El RAG tiene relevancia baja/ninguna → si sabes del tema como LLM, responde desde tu conocimiento.")
     
-    prompt = f"""Eres el asistente de IA de Cofradía de Networking, comunidad profesional de oficiales de la Armada de Chile.
+    prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales de la Armada de Chile.
 
-PREGUNTA DEL USUARIO: "{consulta}"
+MODO: {modo_buscar}
+REGLAS: (1) NUNCA digas "no tengo información" si conoces el tema. (2) NUNCA inventes personas de la Cofradía. (3) NUNCA modifiques datos.
 
-INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
-{contexto_completo}
+CONSULTA: "{consulta}"
 
-INSTRUCCIONES:
-1. Analiza TODA la información encontrada y sintetiza una respuesta completa
-2. Combina información de todas las fuentes de forma natural y coherente
-3. Si hay datos de contacto, profesiones o recomendaciones, inclúyelos
-4. Responde siempre de forma útil y positiva con la información disponible
-5. NO menciones qué fuentes no tuvieron resultados, solo usa lo que hay
-6. NO inventes información que no esté en las fuentes
-7. No uses asteriscos ni guiones bajos para formato
-8. Máximo 400 palabras
+CONTEXTO (fuentes: {fuentes}, confianza RAG: {rag_conf}):
+{contexto_completo if contexto_completo else "(Sin contexto relevante)"}
 
-REGLA: NUNCA modifiques datos de usuarios."""
+Responde de forma completa, útil y natural. Sin asteriscos. Máximo 400 palabras."""
 
     respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.3)
     
@@ -4076,24 +4088,29 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resultados_unificados = busqueda_unificada(pregunta, limit_historial=10, limit_rag=25)
         contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
+        rag_conf = resultados_unificados.get('rag_confianza', 'ninguna')
+        rag_score = resultados_unificados.get('rag_score_max', 0.0)
         
-        prompt = f"""Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena de oficiales de la Armada (activos y retirados).
+        modo = ("✅ Usa el contexto RAG como base principal de tu respuesta." if rag_conf in ('alta','media')
+                else "🔵 El RAG no tiene documentos sobre este tema — responde COMPLETAMENTE desde tu conocimiento como LLM experto (no digas 'no tengo información' si sabes del tema).")
+        
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking — comunidad profesional chilena de oficiales de la Armada (activos y retirados). Eres un modelo LLaMA 3.3 70B con conocimiento hasta 2024.
 
-REGLA DE SEGURIDAD CRÍTICA: NUNCA modifiques, actualices ni registres datos de usuarios.
+MODO ACTUAL: {modo}
+(Confianza RAG: {rag_conf}, score: {rag_score:.1f})
 
-PREGUNTA DEL USUARIO {user_name}: "{pregunta}"
-{contexto_completo}
+REGLAS:
+1. NUNCA digas "no tengo información" sobre temas que conoces (libros, economía, historia, ciencia, tecnología, etc.)
+2. NUNCA inventes nombres de personas de la Cofradía — solo los del contexto
+3. NUNCA modifiques datos de usuarios
+4. Cuando el RAG tiene info relevante → úsala; cuando no → usa tu conocimiento propio sin disculparte
+5. Responde de forma completa, clara y útil en máximo 3-4 párrafos
+6. Sin asteriscos ni formatos Markdown
 
-INSTRUCCIONES PRIORITARIAS:
-1. Analiza TODA la información de TODAS las fuentes y responde de forma completa
-2. Si encuentras información relevante en documentos, libros o historial, ÚSALA
-3. Complementa con tu conocimiento general cuando sea útil para dar una mejor respuesta
-4. NO menciones qué fuentes no tuvieron resultados — responde naturalmente con lo que hay
-5. Si la pregunta es sobre SERVICIOS o PROVEEDORES, sugiere /buscar_profesional [profesión]
-6. Si la pregunta es sobre EMPLEOS, sugiere /empleo [cargo]
-7. Responde de forma útil, completa y en máximo 3 párrafos
-8. No uses asteriscos ni guiones bajos para formato
-9. NO inventes información específica que no esté en las fuentes proporcionadas"""
+PREGUNTA DE {user_name}: "{pregunta}"
+
+CONTEXTO ENCONTRADO (fuentes: {fuentes}):
+{contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
         respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         
@@ -7742,11 +7759,11 @@ def buscar_rag(query, limit=5):
                 if len(resultados) >= limit:
                     break
         
-        return resultados
+        return resultados, score_maximo if scored else 0.0
         
     except Exception as e:
         logger.error(f"Error buscando RAG: {e}")
-        return []
+        return [], 0.0
 
 
 def busqueda_unificada(query, limit_historial=10, limit_rag=25):
@@ -7757,6 +7774,8 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         'historial': [],
         'rag': [],
         'fuentes_usadas': [],
+        'rag_score_max': 0.0,    # Score máximo del mejor chunk RAG
+        'rag_confianza': 'ninguna',  # 'alta', 'media', 'baja', 'ninguna'
     }
     
     # 1. Historial del grupo (mensajes de usuarios)
@@ -7770,10 +7789,27 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     
     # 2. RAG (PDFs indexados + Excel indexado en BD)
     try:
-        chunks_rag = buscar_rag(query, limit=limit_rag)
+        chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
+        resultados['rag_score_max'] = score_max
+        
+        # Clasificar confianza RAG según score máximo obtenido
+        # Score >= 8: múltiples términos importantes matchean → alta confianza
+        # Score 4-8: coincidencias parciales → media confianza
+        # Score 1.5-4: solo términos genéricos matchean → baja confianza (probablemente irrelevante)
+        # Score < 1.5: nada relevante encontrado
+        if score_max >= 8.0:
+            resultados['rag_confianza'] = 'alta'
+        elif score_max >= 4.0:
+            resultados['rag_confianza'] = 'media'
+        elif score_max >= 1.5:
+            resultados['rag_confianza'] = 'baja'
+        else:
+            resultados['rag_confianza'] = 'ninguna'
+        
         if chunks_rag:
             resultados['rag'] = chunks_rag
-            resultados['fuentes_usadas'].append(f"RAG/Documentos ({len(chunks_rag)} fragmentos)")
+            confianza_str = resultados['rag_confianza']
+            resultados['fuentes_usadas'].append(f"RAG/Documentos ({len(chunks_rag)} fragmentos, confianza: {confianza_str})")
     except Exception as e:
         logger.warning(f"Error buscando RAG unificado: {e}")
     
@@ -13876,42 +13912,58 @@ def main():
             except Exception as e_ev:
                 logger.debug(f"Error buscando eventos privado: {e_ev}")
 
-            # Construir prompt enriquecido
-            fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "base de conocimiento"
+            # Construir prompt enriquecido con indicador de confianza RAG
+            fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
             total_rag = len(resultados_busq.get('rag', []))
             total_hist = len(resultados_busq.get('historial', []))
+            rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
+            rag_score = resultados_busq.get('rag_score_max', 0.0)
             
-            prompt = f"""Eres el asistente IA premium de la Cofradía de Networking, comunidad exclusiva de oficiales de la Armada de Chile (activos y en retiro), especializada en networking laboral, desarrollo profesional y oportunidades de negocio.
+            # Decidir qué sección de contexto incluir según confianza
+            if rag_confianza in ('alta', 'media'):
+                instruccion_contexto = f"""✅ CONTEXTO RAG CON RELEVANCIA {rag_confianza.upper()} (score: {rag_score:.1f}):
+Encontré información probablemente relevante en los documentos indexados. ÚSALA como base principal de tu respuesta.
 
-SALUDO: Usa un saludo natural y breve como "Hola {user_name}," o "Buenas {user_name}," — NUNCA uses frases artificiales como "excelente cofrade", "espero que estés bien" u otras fórmulas forzadas.
+{contexto_completo[:4000]}
+{contexto_tarjetas[:1000]}
+{contexto_eventos[:400]}"""
+            elif rag_confianza == 'baja':
+                instruccion_contexto = f"""⚠️ CONTEXTO RAG DE BAJA RELEVANCIA (score: {rag_score:.1f}):
+Los fragmentos encontrados pueden no ser sobre el tema exacto. Evalúa si son útiles. 
+Si no son relevantes para la pregunta → IGNÓRALOS e responde con tu conocimiento propio.
 
-INSTRUCCIÓN CRÍTICA — RELEVANCIA DEL CONTEXTO:
-Antes de responder, evalúa si los fragmentos del contexto son realmente sobre el tema de la consulta.
-- Si los fragmentos SÍ son relevantes: úsalos y cítalos naturalmente en tu respuesta
-- Si los fragmentos NO son sobre el tema preguntado (ej: pregunta de economía pero contexto habla de inglés o logística): IGNÓRALOS por completo y responde SOLO desde tu conocimiento
-- Cuando no encuentres información específica en el contexto: dilo brevemente y ofrece lo que sabes desde tu conocimiento general
+{contexto_completo[:2000]}
+{contexto_tarjetas[:800]}"""
+            else:
+                instruccion_contexto = f"""📚 SIN DOCUMENTOS RELEVANTES EN RAG:
+No encontré este tema en los documentos indexados. RESPONDE COMPLETAMENTE DESDE TU CONOCIMIENTO PROPIO como LLM experto.
+{contexto_tarjetas[:800] if contexto_tarjetas else ''}
+{contexto_eventos[:300] if contexto_eventos else ''}"""
+            
+            prompt = f"""Eres el asistente IA de la Cofradía de Networking — comunidad de oficiales de la Armada de Chile enfocada en networking y desarrollo profesional. Tienes acceso tanto a documentos indexados de la comunidad como a tu amplio conocimiento como modelo de lenguaje avanzado (Groq LLaMA 3.3 70B).
 
-REGLA ANTI-ALUCINACIONES — OBLIGATORIA:
-- NUNCA inventes nombres de personas, cofrades, expertos ni profesionales
-- Solo menciona personas que aparezcan EXPLÍCITAMENTE en el contexto proporcionado abajo
-- Si el contexto no tiene personas relevantes para la consulta: NO menciones personas inventadas
-- Si no tienes información suficiente sobre algo: dilo con honestidad
+SALUDO: Responde directamente, empezando con "{user_name}," de forma natural. Sin "excelente cofrade", sin "espero que estés bien". Solo su nombre y directo al punto.
 
-REGLA DE SEGURIDAD: NUNCA modifiques, registres ni actualices datos de usuarios desde el chat.
+━━━ MODO DE RESPUESTA ━━━
+{"🟢 MODO DOCUMENTOS: Tienes contexto relevante indexado → úsalo como base y complementa con tu conocimiento." if rag_confianza in ('alta','media') else "🔵 MODO CONOCIMIENTO PROPIO: No hay documentos relevantes en el RAG → responde COMPLETAMENTE desde tu conocimiento como LLM experto. NUNCA digas 'no tengo información' si sabes del tema."}
 
-CONTEXTO ENCONTRADO (evalúa relevancia antes de usar):
-He buscado en: {fuentes_str} → {total_rag} fragmentos RAG + {total_hist} conversaciones
+━━━ REGLAS OBLIGATORIAS ━━━
+1. NUNCA digas "no tengo información" sobre un tema que conoces como LLM (libros publicados, economía, historia, ciencia, etc.) — tu conocimiento va hasta 2024
+2. NUNCA inventes nombres de personas de la Cofradía — solo menciona personas del contexto
+3. NUNCA modifiques datos de usuarios
+4. Si hay documentos relevantes, cítalos; si no los hay, usa tu conocimiento sin disculparte
+5. Sé completo y útil — la Cofradía merece respuestas de calidad
 
-{contexto_completo[:4000] if contexto_completo else 'Sin resultados en historial/RAG.'}
-{contexto_tarjetas[:1500]}
-{contexto_eventos[:500]}
+━━━ CONTEXTO ENCONTRADO ━━━
+Fuentes consultadas: {fuentes_str}
+Fragmentos RAG: {total_rag} | Historial grupo: {total_hist} | Confianza RAG: {rag_confianza}
 
-RESPUESTA:
-- Sé completo y detallado cuando tengas información real
-- Usa el contexto solo si es realmente pertinente a la pregunta
-- Al final, sugiere 1 comando útil del bot si aplica
+{instruccion_contexto}
 
-Consulta de {user_name}: {mensaje}"""
+━━━ CONSULTA ━━━
+{user_name} pregunta: {mensaje}
+
+Responde en español, de forma completa y útil. Si aplica, sugiere 1 comando del bot al final."""
 
             await msg.edit_text("🧠 Generando respuesta completa...")
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
