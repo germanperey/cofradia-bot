@@ -1003,63 +1003,61 @@ def transcribir_audio_groq(audio_bytes: bytes, filename: str = "audio.ogg") -> s
 
 
 async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio MP3 con voz natural usando edge-tts"""
+    """Genera audio con voz natural — usa Chatterbox (HF) con fallback a edge-TTS"""
+    import re
+
+    # Limitar largo del texto
+    if len(texto) > 2000:
+        texto = texto[:1997] + "..."
+
+    # Limpiar emojis y símbolos
+    texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═⚓]', '', texto)
+    texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
+    texto_voz = texto_voz.replace(' ej:', ', por ejemplo:')
+    texto_voz = texto_voz.replace(' Ej:', ', por ejemplo:')
+    texto_voz = texto_voz.replace(' etc.', ', etcétera.')
+    texto_voz = texto_voz.replace(' vs ', ' versus ')
+    texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
+
+    # ── INTENTO 1: Chatterbox vía Hugging Face Space (voz ultra-natural) ──
+    try:
+        from tts_chatterbox import texto_a_voz
+        audio_bytes = await texto_a_voz(texto_voz, estilo="normal")
+        if audio_bytes:
+            # Guardar bytes en archivo temporal
+            ext = ".ogg" if audio_bytes[:4] == b'OggS' or audio_bytes[:4] != b'RIFF' else ".wav"
+            fname = filename.replace(".mp3", ext)
+            with open(fname, "wb") as f:
+                f.write(audio_bytes)
+            if os.path.getsize(fname) > 0:
+                logger.info(f"🎙️ Audio Chatterbox generado: {os.path.getsize(fname)} bytes")
+                return fname
+    except Exception as e:
+        logger.warning(f"⚠️ Chatterbox falló, usando Catalina: {e}")
+
+    # ── INTENTO 2: edge-TTS mejorado (Catalina más natural) ──
     try:
         import edge_tts
-        
-        # Limitar texto
-        if len(texto) > 2000:
-            texto = texto[:1997] + "..."
-        
-        # Preprocesar texto para voz más natural:
-        # 1. Agregar pausas después de puntos (punto → punto + pausa)
-        # 2. Pausas en comas largas
-        # 3. Respiraciones naturales en listas
-        texto_voz = texto
-        
-        # Reemplazar emojis y símbolos que confunden al TTS
-        texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═]', '', texto_voz)
-        texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
-        
-        # Convertir abreviaciones comunes
-        texto_voz = texto_voz.replace(' ej:', ', por ejemplo:')
-        texto_voz = texto_voz.replace(' Ej:', ', por ejemplo:')
-        texto_voz = texto_voz.replace(' etc.', ', etcétera.')
-        texto_voz = texto_voz.replace(' vs ', ' versus ')
-        
-        # Pausas naturales: punto seguido → pausa más larga
+        # Pausas naturales
         texto_voz = texto_voz.replace('. ', '... ')
-        # Dos puntos → pausa media
         texto_voz = texto_voz.replace(': ', ':... ')
-        # Punto y coma → pausa
         texto_voz = texto_voz.replace('; ', ';... ')
-        
-        # Limpiar espacios múltiples
-        texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
-        
-        # Generar con voz más lenta y natural
-        # rate="-3%" → ligeramente más lento (natural)
-        # pitch="+1Hz" → tono ligeramente más cálido
+
         communicate = edge_tts.Communicate(
-            texto_voz, 
-            VOZ_TTS, 
-            rate="-3%",
-            pitch="+1Hz"
+            texto_voz,
+            VOZ_TTS,
+            rate  = "-12%",   # más pausada y natural
+            pitch = "-4Hz",   # tono más grave y humano
+            volume = "+8%"    # más presencia
         )
         await communicate.save(filename)
-        
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            logger.info(f"🔊 Audio TTS generado: {os.path.getsize(filename)} bytes")
+            logger.info(f"🔊 Audio edge-TTS generado: {os.path.getsize(filename)} bytes")
             return filename
-        else:
-            logger.warning("edge-tts no generó archivo válido")
-            return None
-    except ImportError:
-        logger.warning("⚠️ edge-tts no instalado. Instalar con: pip install edge-tts")
-        return None
     except Exception as e:
         logger.error(f"Error generando TTS: {e}")
-        return None
+
+    return None
 
 
 # Mapeo de comandos por voz → comandos reales del bot
