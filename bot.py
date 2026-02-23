@@ -6571,7 +6571,10 @@ def generar_keywords_chunk(chunk_text):
 
 
 def indexar_pdf_en_rag(filename, texto, file_id=None):
-    """Indexa un PDF en la tabla rag_chunks para búsqueda RAG"""
+    """Indexa un PDF en la tabla rag_chunks para búsqueda RAG.
+    IMPORTANTE: inyecta términos del nombre de archivo en keywords de CADA chunk,
+    así búsquedas por autor/título siempre encuentran el documento correcto.
+    """
     try:
         if not texto or len(texto) < 50:
             logger.warning(f"PDF '{filename}' sin texto suficiente para indexar")
@@ -6590,34 +6593,58 @@ def indexar_pdf_en_rag(filename, texto, file_id=None):
         else:
             c.execute("DELETE FROM rag_chunks WHERE source = ?", (source,))
         
+        # Extraer keywords del nombre de archivo para inyectarlos en CADA chunk
+        # Esto es crítico: permite encontrar chunks aunque el autor no aparezca en el texto
+        import unicodedata, re as _re
+        def normalizar_kw(t):
+            t = unicodedata.normalize('NFKD', t.lower())
+            t = ''.join(c for c in t if not unicodedata.combining(c))
+            return t
+        
+        # Limpiar nombre de archivo: quitar extensión, separar por guiones/puntos/espacios
+        nombre_sin_ext = _re.sub(r'\.(pdf|docx?|txt)$', '', filename, flags=_re.IGNORECASE)
+        partes_nombre = _re.split(r'[\s\-_.,]+', nombre_sin_ext)
+        stopwords_archivo = {'el','la','los','las','de','del','un','una','y','a','en','fin','the','of'}
+        # Keywords del nombre: palabras de 3+ letras que no sean stopwords
+        keywords_filename = ' '.join([
+            normalizar_kw(p) for p in partes_nombre
+            if len(p) >= 3 and normalizar_kw(p) not in stopwords_archivo
+        ])
+        
+        logger.info(f"📎 PDF '{filename}' → keywords_filename: '{keywords_filename}'")
+        
         # Crear chunks
         chunks = crear_chunks_texto(texto)
         chunks_creados = 0
         
         for i, chunk_text in enumerate(chunks):
-            keywords = generar_keywords_chunk(chunk_text)
+            # Keywords del contenido del chunk
+            keywords_contenido = generar_keywords_chunk(chunk_text)
+            # ENRIQUECER: añadir keywords del filename a CADA chunk
+            keywords_enriquecidas = f"{keywords_filename} {keywords_contenido}".strip()
             
             metadata = json.dumps({
                 'filename': filename,
                 'file_id': file_id or '',
                 'chunk_index': i,
                 'total_chunks': len(chunks),
-                'tipo': 'pdf'
+                'tipo': 'pdf',
+                'filename_keywords': keywords_filename,
             })
             
             if DATABASE_URL:
                 c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
                            VALUES (%s, %s, %s, %s)""",
-                         (source, chunk_text, metadata, keywords))
+                         (source, chunk_text, metadata, keywords_enriquecidas))
             else:
                 c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
                            VALUES (?, ?, ?, ?)""",
-                         (source, chunk_text, metadata, keywords))
+                         (source, chunk_text, metadata, keywords_enriquecidas))
             chunks_creados += 1
         
         conn.commit()
         conn.close()
-        logger.info(f"✅ PDF '{filename}' indexado: {chunks_creados} chunks")
+        logger.info(f"✅ PDF '{filename}' indexado: {chunks_creados} chunks (keywords enriquecidas con nombre)")
         return chunks_creados
     
     except Exception as e:
@@ -7491,6 +7518,103 @@ async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.edit_text(f"❌ Error: {str(e)[:200]}")
 
 
+async def rag_enriquecer_keywords_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /rag_enriquecer — Enriquece keywords de PDFs YA indexados con términos del nombre de archivo.
+    Resuelve el problema de PDFs cuyo contenido no menciona al autor (ej: "El_fin_de_la_inflacion.pdf"
+    cuyos chunks no repiten "Milei" en el cuerpo).
+    Solo owner.
+    """
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("🔒 Solo el administrador puede ejecutar esto.")
+        return
+    
+    msg = await update.message.reply_text("🔑 Enriqueciendo keywords de todos los PDFs indexados...")
+    
+    try:
+        import unicodedata, re as _re
+        
+        def normalizar_kw(t):
+            t = unicodedata.normalize('NFKD', t.lower())
+            return ''.join(ch for ch in t if not unicodedata.combining(ch))
+        
+        stopwords_arch = {'el','la','los','las','de','del','un','una','y','a','en','fin',
+                         'the','of','and','to','in','por','para','con','que','es'}
+        
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Sin conexión a BD")
+            return
+        
+        c = conn.cursor()
+        
+        # Obtener todos los PDFs únicos
+        if DATABASE_URL:
+            c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%%'")
+        else:
+            c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%'")
+        sources = [r['source'] if DATABASE_URL else r[0] for r in c.fetchall()]
+        
+        total_actualizados = 0
+        log_docs = []
+        
+        for source in sources:
+            filename = source.replace('PDF:', '')
+            nombre_sin_ext = _re.sub(r'\.(pdf|docx?|txt)$', '', filename, flags=_re.IGNORECASE)
+            partes = _re.split(r'[\s\-_.,]+', nombre_sin_ext)
+            kw_filename = ' '.join([
+                normalizar_kw(p) for p in partes
+                if len(p) >= 3 and normalizar_kw(p) not in stopwords_arch
+            ])
+            
+            if not kw_filename.strip():
+                continue
+            
+            # Actualizar keywords de cada chunk: anteponer keywords del filename
+            if DATABASE_URL:
+                c.execute("""UPDATE rag_chunks 
+                            SET keywords = %s || ' ' || COALESCE(keywords, '')
+                            WHERE source = %s 
+                            AND keywords NOT LIKE %s""",
+                         (kw_filename, source, f'%{kw_filename[:20]}%'))
+            else:
+                c.execute("""UPDATE rag_chunks 
+                            SET keywords = ? || ' ' || COALESCE(keywords, '')
+                            WHERE source = ? 
+                            AND keywords NOT LIKE ?""",
+                         (kw_filename, source, f'%{kw_filename[:20]}%'))
+            
+            n = c.rowcount
+            if n > 0:
+                total_actualizados += n
+                log_docs.append(f"  ✅ {filename[:50]} → '{kw_filename}' ({n} chunks)")
+        
+        conn.commit()
+        conn.close()
+        
+        texto = f"✅ KEYWORDS ENRIQUECIDAS\n{'━'*35}\n\n"
+        texto += f"📄 Documentos procesados: {len(sources)}\n"
+        texto += f"🔑 Chunks actualizados: {total_actualizados}\n\n"
+        if log_docs:
+            texto += "DOCUMENTOS ENRIQUECIDOS:\n" + "\n".join(log_docs[:20])
+        texto += "\n\n💡 Ahora las búsquedas por autor/título funcionarán correctamente."
+        texto += "\n💡 NO es necesario re-indexar los PDFs."
+        
+        if len(texto) > 4000:
+            partes = [texto[i:i+3900] for i in range(0, len(texto), 3900)]
+            await msg.edit_text(partes[0])
+            for p in partes[1:]:
+                await update.message.reply_text(p)
+        else:
+            await msg.edit_text(texto)
+            
+    except Exception as e:
+        import traceback
+        logger.error(f"Error enriqueciendo keywords: {e}\n{traceback.format_exc()}")
+        await msg.edit_text(f"❌ Error: {e}")
+
+
 async def rag_reindexar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /rag_reindexar - Re-indexa todos los PDFs y Excel (solo owner/admin)"""
     user_id = update.effective_user.id
@@ -8137,15 +8261,33 @@ def formatear_contexto_unificado(resultados, query):
                 docs_agrupados[fuente_key] = []
             docs_agrupados[fuente_key].append(chunk_texto)
         
-        contexto += "\n\n╔══════════════════════════════════════╗\n"
-        contexto += "║  DOCUMENTOS INDEXADOS ENCONTRADOS    ║\n"
-        contexto += "╚══════════════════════════════════════╝\n"
-        contexto += "(INSTRUCCIÓN AL LLM: estos fragmentos fueron identificados por el motor de búsqueda como ALTAMENTE RELEVANTES para la consulta. LÉELOS y SINTETIZA su contenido. NO digas que no encontraste información — la información está en los fragmentos de abajo.)\n\n"
+        contexto += "\n\n╔══════════════════════════════════════════════════╗\n"
+        contexto += "║  FRAGMENTOS DE DOCUMENTOS INDEXADOS (FUENTE RAG) ║\n"
+        contexto += "╚══════════════════════════════════════════════════╝\n\n"
+        
+        # INSTRUCCIÓN EXPLÍCITA: conectar nombre del documento con la consulta
+        nombres_docs = list(docs_agrupados.keys())
+        contexto += f"⚠️ INSTRUCCIÓN PARA EL ASISTENTE:\n"
+        contexto += f"Los siguientes fragmentos provienen de estos documentos indexados:\n"
+        for nd in nombres_docs:
+            contexto += f"  → \"{nd}\"\n"
+        contexto += f"\nESTOS FRAGMENTOS CONTIENEN LA INFORMACIÓN SOLICITADA.\n"
+        contexto += f"Tu tarea: LEER cada fragmento y SINTETIZAR una respuesta completa.\n"
+        contexto += f"El nombre del documento identifica de qué trata — úsalo para contextualizar el contenido.\n"
+        contexto += f"NO digas 'no encontré información' — la información ESTÁ en los fragmentos.\n\n"
         
         for doc_nombre, chunks in docs_agrupados.items():
-            contexto += f"━━━ DOCUMENTO: [{doc_nombre}] ━━━\n"
+            # Título del documento con nombre limpio y visible
+            titulo_limpio = doc_nombre.replace('_', ' ').replace('-', ' ')
+            # Quitar extensión para mejor legibilidad
+            import re as _re
+            titulo_limpio = _re.sub(r'\.(pdf|docx?|txt)$', '', titulo_limpio, flags=_re.IGNORECASE)
+            contexto += f"{'═'*50}\n"
+            contexto += f"📄 DOCUMENTO: \"{titulo_limpio}\"\n"
+            contexto += f"   (archivo: {doc_nombre})\n"
+            contexto += f"{'─'*50}\n"
             for i, chunk in enumerate(chunks, 1):
-                contexto += f"  [Párrafo {i}]: {chunk[:700]}\n\n"
+                contexto += f"[Fragmento {i}]:\n{chunk[:800]}\n\n"
             contexto += "\n"
     
     # Historial del grupo (al final, menos prioritario)
@@ -14193,6 +14335,7 @@ def main():
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
+    application.add_handler(CommandHandler("rag_enriquecer", rag_enriquecer_keywords_comando))
     application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
     
