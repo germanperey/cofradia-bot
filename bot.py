@@ -14548,8 +14548,62 @@ def main():
                     )
                 return
         
+        # ── FILTRO CONVERSACIONAL ─────────────────────────────────────────────
+        # Detectar mensajes cortos de cortesía/chat ANTES de activar el RAG completo
+        msg_lower = mensaje.lower().strip()
+        palabras = msg_lower.split()
+        
+        RESPUESTAS_CONVERSACIONALES = {
+            # Agradecimientos
+            frozenset(['gracias']): f"¡De nada, {user_name}! Siempre a tu disposición. 👍",
+            frozenset(['gracias', 'muchas']): f"¡Con mucho gusto, {user_name}! Para eso estoy. 🤝",
+            frozenset(['gracias', 'muy']): f"¡De nada, {user_name}! Cualquier cosa me avisas.",
+            frozenset(['gracias', 'igual']): f"¡Igualmente, {user_name}! 👋",
+            frozenset(['gracias', 'todo']): f"¡De nada por todo, {user_name}! Fue un placer ayudarte. 🙌",
+            # Saludos
+            frozenset(['hola']): f"¡Hola, {user_name}! ¿En qué puedo ayudarte?",
+            frozenset(['buenas']): f"¡Buenas, {user_name}! ¿Qué necesitas?",
+            frozenset(['buenos', 'días']): f"¡Buenos días, {user_name}! ¿En qué te puedo ayudar hoy?",
+            frozenset(['buenos', 'dias']): f"¡Buenos días, {user_name}! ¿En qué te puedo ayudar?",
+            frozenset(['buenas', 'tardes']): f"¡Buenas tardes, {user_name}! ¿Qué necesitas?",
+            frozenset(['buenas', 'noches']): f"¡Buenas noches, {user_name}! ¿En qué te puedo ayudar?",
+            frozenset(['hey']): f"¡Hey, {user_name}! ¿Qué necesitas?",
+            # Confirmaciones / cierre
+            frozenset(['ok']): f"¡Entendido, {user_name}! ✅",
+            frozenset(['listo']): f"¡Perfecto, {user_name}! ✅",
+            frozenset(['perfecto']): f"¡Excelente, {user_name}! ¿Algo más en que pueda ayudarte?",
+            frozenset(['excelente']): f"Me alegra que haya sido útil, {user_name}! 😊",
+            frozenset(['genial']): f"¡Me alegra, {user_name}! ¿Algo más?",
+            frozenset(['entendido']): f"¡Perfecto, {user_name}! Cualquier cosa aquí estoy.",
+            frozenset(['dale']): f"¡De acuerdo, {user_name}! Aquí estoy cuando necesites. 👍",
+            frozenset(['claro']): f"¡Claro que sí, {user_name}! ¿En qué más te ayudo?",
+            frozenset(['si']): f"¡Entendido, {user_name}! ¿Algo más?",
+            frozenset(['sí']): f"¡Entendido, {user_name}! ¿Algo más?",
+            # Despedidas
+            frozenset(['bye']): f"¡Hasta luego, {user_name}! 👋",
+            frozenset(['chao']): f"¡Chao, {user_name}! Cuando quieras volver, aquí estoy. 👋",
+            frozenset(['adios']): f"¡Adiós, {user_name}! Un gusto ayudarte. 👋",
+            frozenset(['adiós']): f"¡Adiós, {user_name}! Hasta pronto. 👋",
+            frozenset(['hasta', 'luego']): f"¡Hasta luego, {user_name}! 👋",
+        }
+        
+        # Buscar match exacto por set de palabras (máximo 3 palabras)
+        if len(palabras) <= 3:
+            palabras_set = frozenset(palabras)
+            respuesta_rapida = RESPUESTAS_CONVERSACIONALES.get(palabras_set)
+            if not respuesta_rapida:
+                # Intentar con subset (ej: "muchas gracias de verdad" → match "muchas gracias")
+                for clave, resp in RESPUESTAS_CONVERSACIONALES.items():
+                    if clave.issubset(palabras_set):
+                        respuesta_rapida = resp
+                        break
+            
+            if respuesta_rapida:
+                await update.message.reply_text(respuesta_rapida)
+                return
+        # ── FIN FILTRO CONVERSACIONAL ─────────────────────────────────────────
+        
         # PENDIENTE 5: Interpretar preguntas naturales sobre comandos
-        msg_lower = mensaje.lower()
         
         # Detectar consultas sobre búsqueda de profesionales
         if any(p in msg_lower for p in ['buscar persona', 'buscar profesional', 'buscar cofrade', 
