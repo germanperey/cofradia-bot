@@ -1418,8 +1418,25 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 # Si falla, continuar con procesamiento normal de IA
         
         # PASO 3: Procesar consulta con IA - búsqueda exhaustiva en todas las fuentes
-        resultados = busqueda_unificada(texto_transcrito, limit_historial=15, limit_rag=40)
-        contexto = formatear_contexto_unificado(resultados, texto_transcrito)
+        # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
+        intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
+        texto_para_busqueda = intencion_voz['query_mejorada']
+        
+        # Si detectó un comando claro, ejecutarlo directamente
+        if intencion_voz['ejecutar_comando'] and intencion_voz['comando']:
+            ejecutado = await ejecutar_comando_desde_intencion(
+                intencion_voz['comando'], intencion_voz['args'], update, context
+            )
+            if ejecutado:
+                try:
+                    await msg.delete()
+                except:
+                    pass
+                registrar_servicio_usado(user_id, 'voz_comando')
+                return
+        
+        resultados = busqueda_unificada(texto_para_busqueda, limit_historial=15, limit_rag=40)
+        contexto = formatear_contexto_unificado(resultados, texto_para_busqueda)
         
         # Generar también contexto de tarjetas profesionales si hay nombres relevantes
         contexto_tarjetas = ""
@@ -1427,7 +1444,8 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn_tc = get_db_connection()
             if conn_tc:
                 c_tc = conn_tc.cursor()
-                palabras_busq = [p for p in texto_transcrito.lower().split() if len(p) > 3][:4]
+                # Usar query mejorada para mejor búsqueda de tarjetas
+                palabras_busq = [p for p in texto_para_busqueda.lower().split() if len(p) > 3][:5]
                 if palabras_busq:
                     cond_tc = []
                     params_tc = []
@@ -1463,6 +1481,11 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
                       else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
         
+        # Contexto de intención para el prompt
+        intent_audio_hint = ""
+        if texto_para_busqueda != texto_transcrito:
+            intent_audio_hint = f"\n(La búsqueda usó la consulta enriquecida: \"{texto_para_busqueda[:100]}\")"
+        
         prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
 
 {user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
@@ -1472,12 +1495,12 @@ MODO: {modo_audio}
 NUNCA digas "no tengo información" si sabes del tema como LLM.
 NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
 
-He buscado en: {fuentes_info} (confianza RAG: {rag_conf})
+He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
 
 {contexto}
 {contexto_tarjetas}
 
-{user.first_name} pregunta: {texto_transcrito}"""
+{user.first_name} pregunta (audio): {texto_transcrito}"""
 
         respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
         
@@ -4084,9 +4107,23 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ IA no disponible. Intenta más tarde.")
             return
         
-        # BÚSQUEDA UNIFICADA en todas las fuentes (máximo contexto)
-        resultados_unificados = busqueda_unificada(pregunta, limit_historial=10, limit_rag=25)
-        contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta)
+        # MOTOR DE INTENCIÓN: Mejorar query del grupo silenciosamente
+        intencion_mencion = mejorar_intencion(pregunta, user_name, user_id, canal='grupo')
+        pregunta_mejorada = intencion_mencion['query_mejorada']
+        
+        # Si detectó un comando claro (tipo=='comando'), ejecutarlo directamente
+        if (intencion_mencion['ejecutar_comando'] and intencion_mencion['comando'] 
+                and intencion_mencion['tipo'] == 'comando'):
+            ejecutado = await ejecutar_comando_desde_intencion(
+                intencion_mencion['comando'], intencion_mencion['args'], update, context
+            )
+            if ejecutado:
+                await msg.delete()
+                return
+        
+        # BÚSQUEDA UNIFICADA usando query mejorada
+        resultados_unificados = busqueda_unificada(pregunta_mejorada, limit_historial=10, limit_rag=25)
+        contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta_mejorada)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
         rag_conf = resultados_unificados.get('rag_confianza', 'ninguna')
         rag_score = resultados_unificados.get('rag_score_max', 0.0)
@@ -12626,6 +12663,273 @@ async def eliminar_solicitud_comando(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE MEJORA DE INTENCIÓN (Intent Enhancement Engine) — v1.0
+# Actúa como middleware invisible: intercepta mensajes en lenguaje natural,
+# enriquece el query para RAG/LLM y detecta si corresponde un comando del bot.
+# El usuario NUNCA ve este proceso — todo ocurre en el backend antes de responder.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Catálogo de comandos disponibles para el motor de intención
+CATALOGO_COMANDOS_INTENCION = {
+    # Búsqueda y consultas
+    'buscar_profesional': 'Buscar cofrades por profesión, área o habilidad',
+    'buscar_apoyo': 'Buscar cofrades en búsqueda laboral activa',
+    'buscar_especialista_sec': 'Buscar especialistas registrados en la SEC',
+    'buscar_ia': 'Búsqueda IA en historial y documentos del grupo',
+    'rag_consulta': 'Consultar libros, PDFs y documentos indexados',
+    'empleo': 'Buscar oportunidades de empleo',
+    # Perfil y directorio
+    'mi_tarjeta': 'Ver o actualizar tarjeta profesional propia',
+    'directorio': 'Ver directorio completo de cofrades',
+    'conectar': 'Ver conexiones con otros cofrades',
+    'mi_perfil': 'Ver estadísticas y actividad propia',
+    'mi_cuenta': 'Ver estado de cuenta y suscripción',
+    # Comunidad
+    'eventos': 'Ver eventos próximos de la Cofradía',
+    'anuncios': 'Ver anuncios del grupo',
+    'consultas': 'Ver consultas abiertas de la comunidad',
+    'consultar': 'Publicar una consulta al grupo',
+    'recomendar': 'Recomendar a un cofrade',
+    'publicar': 'Publicar un mensaje en el grupo',
+    # Resúmenes y estadísticas
+    'resumen': 'Resumen de actividad reciente del día',
+    'resumen_semanal': 'Resumen semanal de actividad',
+    'resumen_mes': 'Resumen mensual de actividad',
+    'estadisticas': 'Estadísticas generales del grupo',
+    'graficos': 'Gráficos de actividad y KPIs',
+    'top_usuarios': 'Ranking de participación',
+    'dotacion': 'Lista de miembros del grupo',
+    'cumpleanos_mes': 'Cumpleaños del mes',
+    # Desarrollo profesional
+    'generar_cv': 'Generar currículum profesional',
+    'entrevista': 'Simular entrevista de trabajo',
+    'analisis_linkedin': 'Analizar perfil LinkedIn',
+    'finanzas': 'Consultor financiero IA',
+    'mentor': 'Mentoría personalizada con IA',
+    'mi_dashboard': 'Dashboard personal de actividad',
+    # Agente inteligente
+    'agente': 'Plan de networking personalizado por IA',
+    'match': 'Encontrar los mejores matches profesionales',
+    'briefing': 'Briefing diario personalizado',
+    'mi_agenda': 'Ver agenda personal de networking',
+    'mis_tareas': 'Ver tareas de networking pendientes',
+    'mis_coins': 'Ver saldo de Cofra-Coins',
+    'ayuda': 'Ver todos los comandos disponibles',
+}
+
+
+def mejorar_intencion(mensaje_raw: str, user_name: str, user_id: int,
+                       canal: str = 'texto') -> dict:
+    """
+    Motor de mejora de intención invisible.
+    
+    Recibe el mensaje crudo del usuario y retorna:
+    {
+      'query_mejorada': str,     — Query enriquecida para búsqueda RAG/LLM
+      'comando': str | None,     — Comando del bot a ejecutar (o None)
+      'args': str,               — Argumentos del comando
+      'tipo': str,               — 'consulta' | 'comando' | 'ambos' | 'saludo'
+      'ejecutar_comando': bool,  — Si ejecutar el comando automáticamente
+      'razon': str,              — Logging interno (no se muestra al usuario)
+    }
+    
+    Todo ocurre en el backend — el usuario solo ve la respuesta final enriquecida.
+    """
+    try:
+        if not mensaje_raw or not mensaje_raw.strip():
+            return _intencion_default(mensaje_raw)
+        
+        mensaje = mensaje_raw.strip()
+        
+        # Mensajes muy cortos o saludos simples — no procesar con IA
+        if len(mensaje) < 8:
+            return _intencion_default(mensaje)
+        
+        palabras = mensaje.lower().split()
+        saludos = {'hola', 'hi', 'hey', 'buenas', 'buenos', 'buen', 'gracias', 'ok', 'perfecto'}
+        if len(palabras) <= 3 and all(p in saludos for p in palabras):
+            return _intencion_default(mensaje, tipo='saludo')
+        
+        # Construir catálogo compacto para el prompt
+        catalogo_str = "\n".join([f"  /{cmd}: {desc}" for cmd, desc in CATALOGO_COMANDOS_INTENCION.items()])
+        
+        prompt_intencion = f"""Eres el motor de intención del bot de la Cofradía de Networking. Tu tarea es analizar el mensaje de un usuario y devolver SOLO un JSON (sin markdown, sin texto adicional).
+
+MENSAJE DEL USUARIO ({canal}): "{mensaje}"
+NOMBRE DEL USUARIO: {user_name}
+
+COMANDOS DISPONIBLES DEL BOT:
+{catalogo_str}
+
+INSTRUCCIONES:
+1. "query_mejorada": Reescribe el mensaje en una consulta más específica, técnica y útil para búsqueda semántica. Expande siglas, agrega sinónimos relevantes, clarifica la intención. Mínimo 15 palabras.
+2. "comando": Si el mensaje claramente pide algo que un comando puede resolver mejor, pon el nombre del comando (sin /). Si no aplica, pon null.
+3. "args": Argumentos para el comando (ej: para /buscar_profesional sería "finanzas" o "ingenieria"). Si no hay args útiles, pon "".
+4. "tipo": "consulta" (quiere información/respuesta), "comando" (claramente quiere ejecutar algo), "ambos" (consulta + usar comando), "saludo" (saludo/chat casual).
+5. "ejecutar_comando": true solo si el usuario CLARAMENTE pide una acción específica que el comando resuelve. Para consultas generales donde el comando complementa, pon false.
+6. "razon": Una frase corta explicando tu razonamiento (solo para logs internos).
+
+CRITERIO PARA ejecutar_comando=true: Solo si el usuario dice explícitamente "muéstrame X", "ver X", "buscar X", "quiero saber X" donde X es exactamente lo que hace el comando.
+CRITERIO PARA ejecutar_comando=false: Si el usuario hace una pregunta abierta, consulta general, o quiere una respuesta elaborada (aunque un comando aporte contexto).
+
+RESPONDE SOLO EL JSON, sin bloques de código:
+{{"query_mejorada": "...", "comando": "..." o null, "args": "...", "tipo": "...", "ejecutar_comando": true/false, "razon": "..."}}"""
+
+        respuesta_raw = llamar_groq(
+            prompt_intencion,
+            max_tokens=300,
+            temperature=0.2  # Baja temperatura = más determinista y preciso
+        )
+        
+        if not respuesta_raw:
+            return _intencion_default(mensaje)
+        
+        # Parsear JSON de respuesta
+        import json as _json
+        # Limpiar posibles backticks o texto extra
+        resp_limpia = respuesta_raw.strip()
+        resp_limpia = resp_limpia.replace('```json', '').replace('```', '').strip()
+        
+        # Encontrar el JSON dentro de la respuesta
+        inicio = resp_limpia.find('{')
+        fin = resp_limpia.rfind('}')
+        if inicio == -1 or fin == -1:
+            logger.debug(f"Intent engine: no JSON encontrado en respuesta: {resp_limpia[:100]}")
+            return _intencion_default(mensaje)
+        
+        json_str = resp_limpia[inicio:fin+1]
+        datos = _json.loads(json_str)
+        
+        # Validar y sanear campos
+        query_mejorada = datos.get('query_mejorada', mensaje)
+        if not query_mejorada or len(query_mejorada.strip()) < 5:
+            query_mejorada = mensaje
+        
+        comando = datos.get('comando')
+        if comando and comando not in CATALOGO_COMANDOS_INTENCION:
+            comando = None  # Ignorar comandos inventados
+        
+        args = str(datos.get('args', '') or '').strip()
+        tipo = datos.get('tipo', 'consulta')
+        ejecutar = bool(datos.get('ejecutar_comando', False))
+        razon = datos.get('razon', '')
+        
+        # Seguridad: solo ejecutar automáticamente si hay comando válido
+        if ejecutar and not comando:
+            ejecutar = False
+        
+        resultado = {
+            'query_mejorada': query_mejorada,
+            'comando': comando,
+            'args': args,
+            'tipo': tipo,
+            'ejecutar_comando': ejecutar,
+            'razon': razon,
+            'original': mensaje,
+        }
+        
+        logger.info(f"🧠 IntentEngine [{user_name}] '{mensaje[:50]}' → "
+                   f"tipo={tipo}, cmd={comando}, exec={ejecutar} | {razon}")
+        
+        return resultado
+        
+    except Exception as e:
+        logger.debug(f"IntentEngine error (usando fallback): {e}")
+        return _intencion_default(mensaje_raw)
+
+
+def _intencion_default(mensaje: str, tipo: str = 'consulta') -> dict:
+    """Retorna intención por defecto cuando el motor no puede procesar."""
+    return {
+        'query_mejorada': mensaje,
+        'comando': None,
+        'args': '',
+        'tipo': tipo,
+        'ejecutar_comando': False,
+        'razon': 'fallback',
+        'original': mensaje,
+    }
+
+
+async def ejecutar_comando_desde_intencion(
+    comando: str, args: str, update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """
+    Ejecuta un comando detectado por el motor de intención.
+    Retorna True si se ejecutó con éxito, False si no.
+    El usuario NO ve ningún mensaje previo — el comando simplemente "sucede".
+    """
+    try:
+        # Mapa de comandos a funciones
+        MAPA_FUNCIONES = {
+            'buscar_profesional': 'buscar_profesional_comando',
+            'buscar_apoyo': 'buscar_apoyo_comando',
+            'buscar_especialista_sec': 'buscar_especialista_sec_comando',
+            'buscar_ia': 'buscar_ia_comando',
+            'rag_consulta': 'rag_consulta_comando',
+            'empleo': 'empleo_comando',
+            'mi_tarjeta': 'mi_tarjeta_comando',
+            'directorio': 'directorio_comando',
+            'conectar': 'conectar_comando',
+            'mi_perfil': 'mi_perfil_comando',
+            'mi_cuenta': 'mi_cuenta_comando',
+            'eventos': 'eventos_comando',
+            'anuncios': 'anuncios_comando',
+            'consultas': 'consultas_comando',
+            'consultar': 'consultar_comando',
+            'recomendar': 'recomendar_comando',
+            'publicar': 'publicar_comando',
+            'resumen': 'resumen_comando',
+            'resumen_semanal': 'resumen_semanal_comando',
+            'resumen_mes': 'resumen_mes_comando',
+            'estadisticas': 'estadisticas_comando',
+            'graficos': 'graficos_comando',
+            'top_usuarios': 'top_usuarios_comando',
+            'dotacion': 'dotacion_comando',
+            'cumpleanos_mes': 'cumpleanos_mes_comando',
+            'generar_cv': 'generar_cv_comando',
+            'entrevista': 'entrevista_comando',
+            'analisis_linkedin': 'analisis_linkedin_comando',
+            'finanzas': 'finanzas_comando',
+            'mentor': 'mentor_comando',
+            'mi_dashboard': 'mi_dashboard_comando',
+            'agente': 'agente_networking_comando',
+            'match': 'match_networking_comando',
+            'briefing': 'briefing_networking_comando',
+            'mi_agenda': 'mi_agenda_comando',
+            'mis_tareas': 'mis_tareas_comando',
+            'mis_coins': 'mis_coins_comando',
+            'ayuda': 'ayuda',
+        }
+        
+        nombre_func = MAPA_FUNCIONES.get(comando)
+        if not nombre_func:
+            return False
+        
+        # Buscar la función en el scope global
+        func = globals().get(nombre_func)
+        if not func or not callable(func):
+            logger.debug(f"IntentEngine: función '{nombre_func}' no encontrada en globals")
+            return False
+        
+        # Inyectar argumentos y ejecutar
+        args_originales = context.args
+        context.args = args.split() if args.strip() else []
+        
+        try:
+            await func(update, context)
+            logger.info(f"🎯 IntentEngine ejecutó /{comando} {args} automáticamente")
+            return True
+        finally:
+            context.args = args_originales
+            
+    except Exception as e:
+        logger.warning(f"IntentEngine: error ejecutando /{comando}: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
 
 async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13971,10 +14275,25 @@ def main():
         msg = await update.message.reply_text("🧠 Buscando en toda la base de conocimientos...")
         
         try:
+            # ===== MOTOR DE INTENCIÓN: Mejora silenciosa del mensaje =====
+            intencion = mejorar_intencion(mensaje, user_name, user_id, canal='texto')
+            query_para_busqueda = intencion['query_mejorada']
+            
+            # Si el motor detectó un comando claro → ejecutarlo directamente
+            if intencion['ejecutar_comando'] and intencion['comando']:
+                await msg.delete()
+                ejecutado = await ejecutar_comando_desde_intencion(
+                    intencion['comando'], intencion['args'], update, context
+                )
+                if ejecutado:
+                    return  # El comando fue ejecutado, no necesitamos respuesta de IA
+                # Si falló la ejecución, continuar con flujo normal
+            
             # ===== BÚSQUEDA EXHAUSTIVA EN TODAS LAS FUENTES =====
+            # Usar query mejorada para búsqueda más precisa
             # 1. Búsqueda unificada: historial + RAG (30-60 chunks)
-            resultados_busq = busqueda_unificada(mensaje, limit_historial=20, limit_rag=40)
-            contexto_completo = formatear_contexto_unificado(resultados_busq, mensaje)
+            resultados_busq = busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
+            contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
             
             # 2. Buscar también en tarjetas profesionales (directorio de cofrades)
@@ -14033,7 +14352,7 @@ def main():
             except Exception as e_ev:
                 logger.debug(f"Error buscando eventos privado: {e_ev}")
 
-            # Construir prompt con sistema de confianza RAG
+            # Construir prompt con sistema de confianza RAG + intención mejorada
             fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
             total_rag = len(resultados_busq.get('rag', []))
             total_hist = len(resultados_busq.get('historial', []))
@@ -14041,6 +14360,11 @@ def main():
             rag_score = resultados_busq.get('rag_score_max', 0.0)
             
             tiene_docs = rag_confianza in ('alta', 'media')
+            
+            # Info de intención para enriquecer el prompt (solo si fue mejorada)
+            intent_hint = ""
+            if query_para_busqueda != mensaje:
+                intent_hint = f"\n(La búsqueda se realizó con la consulta enriquecida: \"{query_para_busqueda}\")"
             
             if tiene_docs:
                 intro_contexto = (f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
@@ -14054,11 +14378,18 @@ def main():
                 intro_contexto = "No hay documentos indexados sobre este tema. Responde desde tu conocimiento como LLM experto (no digas 'no tengo información')."
                 ctx_docs = ""
             
+            # Si el motor de intención sugiere un comando complementario (pero no lo ejecutó)
+            cmd_sugerido = intencion.get('comando')
+            sugerencia_cmd = ""
+            if cmd_sugerido and not intencion.get('ejecutar_comando'):
+                desc_cmd = CATALOGO_COMANDOS_INTENCION.get(cmd_sugerido, '')
+                sugerencia_cmd = f"\n\nPara información más específica, puedes usar: /{cmd_sugerido} — {desc_cmd}"
+            
             prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos. Modelo LLaMA 3.3 70B con conocimiento hasta 2024.
 
 Empieza la respuesta con "{user_name}," de forma natural y directa.
 
-INSTRUCCIÓN: {intro_contexto}
+INSTRUCCIÓN: {intro_contexto}{intent_hint}
 
 REGLAS:
 - Nunca digas "no tengo información" si hay fragmentos relevantes o si conoces el tema
@@ -14070,7 +14401,7 @@ REGLAS:
 {contexto_tarjetas[:800] if contexto_tarjetas else ''}
 {contexto_eventos[:300] if contexto_eventos else ''}
 
-PREGUNTA: {mensaje}"""
+PREGUNTA ORIGINAL: {mensaje}"""
 
             await msg.edit_text("🧠 Generando respuesta completa...")
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
