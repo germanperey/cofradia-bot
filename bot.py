@@ -6909,6 +6909,64 @@ async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 @requiere_suscripcion
+async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_debug [query] — Solo para OWNER. Muestra los chunks exactos que retorna el RAG."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("🔒 Solo disponible para el administrador.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Uso: /rag_debug [consulta]\nEjemplo: /rag_debug libro Milei inflacion")
+        return
+    
+    query = ' '.join(context.args)
+    msg = await update.message.reply_text(f"🔬 Ejecutando debug RAG para: '{query}'...")
+    
+    try:
+        chunks, score_max = buscar_rag(query, limit=10)
+        
+        if not chunks:
+            await msg.edit_text(f"❌ RAG devolvió 0 chunks para: '{query}'\nScore máximo: {score_max:.2f}")
+            return
+        
+        # Clasificar confianza
+        if score_max >= 8.0:
+            conf = "ALTA ✅"
+        elif score_max >= 4.0:
+            conf = "MEDIA 🟡"
+        elif score_max >= 1.5:
+            conf = "BAJA 🟠"
+        else:
+            conf = "NINGUNA ❌"
+        
+        texto = f"🔬 DEBUG RAG: '{query}'\n"
+        texto += f"📊 Score máximo: {score_max:.2f} → Confianza: {conf}\n"
+        texto += f"📦 Chunks retornados: {len(chunks)}\n"
+        texto += "━" * 35 + "\n\n"
+        
+        for i, item in enumerate(chunks, 1):
+            if isinstance(item, tuple):
+                chunk_texto, chunk_source = item[0], item[1]
+            else:
+                chunk_texto, chunk_source = item, "?"
+            fuente = chunk_source.replace('PDF:', '').replace('EXCEL:', '')
+            texto += f"[{i}] FUENTE: {fuente}\n"
+            texto += f"    CONTENIDO: {chunk_texto[:300]}...\n\n"
+        
+        # Enviar en partes si es largo
+        if len(texto) > 4000:
+            partes = [texto[i:i+3900] for i in range(0, len(texto), 3900)]
+            await msg.edit_text(partes[0])
+            for parte in partes[1:]:
+                await update.message.reply_text(parte)
+        else:
+            await msg.edit_text(texto)
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ Error en debug: {e}")
+
+
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /rag_status - Ver estado del sistema RAG (paginado para 100+ PDFs)"""
     msg = await update.message.reply_text("🔍 Consultando estado del sistema RAG...")
@@ -7117,27 +7175,35 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         # Generar respuesta con IA
         if ia_disponible:
             contexto_completo = formatear_contexto_unificado(resultados, query)
+            rag_conf = resultados.get('rag_confianza', 'ninguna')
+            total_rag = len(resultados.get('rag', []))
             
-            prompt = f"""Eres el asistente de Cofradía de Networking, comunidad de oficiales de la Armada de Chile.
-El usuario pregunta: "{query}"
+            prompt = f"""Eres el asistente IA de la Cofradía de Networking.
 
-REGLA DE SEGURIDAD: NUNCA modifiques datos de usuarios. Solo proporciona información.
+CONSULTA: "{query}"
 
-INFORMACIÓN ENCONTRADA EN TODAS LAS FUENTES:
+{"━"*50}
+⚠️ INSTRUCCIÓN CRÍTICA — DEBES SEGUIRLA AL PIE DE LA LETRA:
+
+El motor de búsqueda encontró {total_rag} fragmentos con confianza {rag_conf.upper()}.
+ESTOS FRAGMENTOS CONTIENEN LA INFORMACIÓN QUE EL USUARIO BUSCA.
+
+TU TAREA:
+1. LEE cada fragmento del contexto con atención
+2. SINTETIZA el contenido en una respuesta completa y útil
+3. NUNCA digas "no encontré información" — la información ESTÁ en los fragmentos
+4. Si los fragmentos hablan de economía/inflación → ÚSALOS aunque no repitan el nombre del autor en cada línea
+5. Identifica el tema central de cada documento por su NOMBRE DE ARCHIVO y su CONTENIDO
+6. Responde en español, claro, completo, máximo 600 palabras
+7. Sin asteriscos ni markdown
+{"━"*50}
+
+CONTEXTO COMPLETO:
 {contexto_completo}
 
-INSTRUCCIONES:
-1. Responde basándote en TODA la información proporcionada
-2. Si la pregunta es sobre un libro o documento específico, prioriza los fragmentos relevantes
-3. Sé completo, directo y útil — usa TODOS los fragmentos disponibles
-4. Si hay datos de contacto o profesiones, inclúyelos
-5. No uses asteriscos ni guiones bajos para formato
-6. NO menciones qué fuentes no tuvieron resultados, responde con lo que hay
-7. Si la pregunta se relaciona con servicios profesionales, sugiere /buscar_profesional
-8. Complementa con tu conocimiento general cuando sea útil
-9. Máximo 500 palabras"""
+REGLA FINAL: Si el sistema dice que estos fragmentos son del tema buscado → CONFÍA en el sistema y ÚSALOS."""
             
-            respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.3)
+            respuesta = llamar_groq(prompt, max_tokens=2000, temperature=0.3)
             
             if respuesta:
                 respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
@@ -7821,26 +7887,38 @@ def formatear_contexto_unificado(resultados, query):
     Incluye el máximo de información posible para respuestas completas."""
     contexto = ""
     
-    # Historial del grupo
-    if resultados.get('historial'):
-        contexto += "\n\n=== MENSAJES DEL GRUPO (conversaciones de usuarios) ===\n"
-        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:10], 1):
-            nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
-            fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
-            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:400]}\n"
-    
-    # RAG (PDFs y documentos) - incluir fragmentos con su fuente para transparencia
+    # RAG (PDFs y documentos) - PRIMERO y con fuente MUY VISIBLE, agrupado por documento
     if resultados.get('rag'):
-        contexto += "\n\n=== DOCUMENTOS INDEXADOS ===\n"
-        for i, item in enumerate(resultados['rag'], 1):
-            # Soportar tanto formato nuevo (texto, source) como legacy (solo texto)
+        # Agrupar chunks por documento fuente
+        docs_agrupados = {}
+        for item in resultados['rag']:
             if isinstance(item, tuple):
                 chunk_texto, chunk_source = item[0], item[1]
             else:
                 chunk_texto, chunk_source = item, "documento"
-            # Limpiar nombre de fuente para mostrar
-            fuente_display = chunk_source.replace('PDF:', '').replace('EXCEL:', '').strip()
-            contexto += f"[Fragmento {i} - Fuente: {fuente_display}]:\n{chunk_texto[:600]}\n\n"
+            fuente_key = chunk_source.replace('PDF:', '').replace('EXCEL:', '').strip()
+            if fuente_key not in docs_agrupados:
+                docs_agrupados[fuente_key] = []
+            docs_agrupados[fuente_key].append(chunk_texto)
+        
+        contexto += "\n\n╔══════════════════════════════════════╗\n"
+        contexto += "║  DOCUMENTOS INDEXADOS ENCONTRADOS    ║\n"
+        contexto += "╚══════════════════════════════════════╝\n"
+        contexto += "(INSTRUCCIÓN AL LLM: estos fragmentos fueron identificados por el motor de búsqueda como ALTAMENTE RELEVANTES para la consulta. LÉELOS y SINTETIZA su contenido. NO digas que no encontraste información — la información está en los fragmentos de abajo.)\n\n"
+        
+        for doc_nombre, chunks in docs_agrupados.items():
+            contexto += f"━━━ DOCUMENTO: [{doc_nombre}] ━━━\n"
+            for i, chunk in enumerate(chunks, 1):
+                contexto += f"  [Párrafo {i}]: {chunk[:700]}\n\n"
+            contexto += "\n"
+    
+    # Historial del grupo (al final, menos prioritario)
+    if resultados.get('historial'):
+        contexto += "\n\n── CONVERSACIONES DEL GRUPO (referencia) ──\n"
+        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:8], 1):
+            nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
+            fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
+            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:350]}\n"
     
     return contexto
 
@@ -13609,6 +13687,7 @@ def main():
     # Handlers RAG PDF
     application.add_handler(CommandHandler("subir_pdf", subir_pdf_comando))
     application.add_handler(CommandHandler("rag_status", rag_status_comando))
+    application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
@@ -13912,58 +13991,52 @@ def main():
             except Exception as e_ev:
                 logger.debug(f"Error buscando eventos privado: {e_ev}")
 
-            # Construir prompt enriquecido con indicador de confianza RAG
+            # Construir prompt con sistema de confianza RAG
             fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
             total_rag = len(resultados_busq.get('rag', []))
             total_hist = len(resultados_busq.get('historial', []))
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
             
-            # Decidir qué sección de contexto incluir según confianza
+            # Sección de contexto según confianza — sin truncar en alta/media
             if rag_confianza in ('alta', 'media'):
-                instruccion_contexto = f"""✅ CONTEXTO RAG CON RELEVANCIA {rag_confianza.upper()} (score: {rag_score:.1f}):
-Encontré información probablemente relevante en los documentos indexados. ÚSALA como base principal de tu respuesta.
+                seccion_docs = f"""
+⚠️⚠️ ATENCIÓN LLM: EL MOTOR DE BÚSQUEDA ENCONTRÓ {total_rag} FRAGMENTOS CON CONFIANZA {rag_confianza.upper()} (score {rag_score:.1f}).
+ESTOS FRAGMENTOS CONTIENEN LA RESPUESTA. TU TRABAJO ES LEERLOS Y SINTETIZARLOS.
+NO DIGAS "no tengo información" — los documentos están abajo. LEE el nombre de cada documento.
 
-{contexto_completo[:4000]}
+{contexto_completo[:6000]}
 {contexto_tarjetas[:1000]}
 {contexto_eventos[:400]}"""
             elif rag_confianza == 'baja':
-                instruccion_contexto = f"""⚠️ CONTEXTO RAG DE BAJA RELEVANCIA (score: {rag_score:.1f}):
-Los fragmentos encontrados pueden no ser sobre el tema exacto. Evalúa si son útiles. 
-Si no son relevantes para la pregunta → IGNÓRALOS e responde con tu conocimiento propio.
+                seccion_docs = f"""
+⚠️ RAG con baja relevancia (score {rag_score:.1f}). Evalúa si los fragmentos son útiles; si no lo son, usa tu conocimiento propio.
 
-{contexto_completo[:2000]}
+{contexto_completo[:3000]}
 {contexto_tarjetas[:800]}"""
             else:
-                instruccion_contexto = f"""📚 SIN DOCUMENTOS RELEVANTES EN RAG:
-No encontré este tema en los documentos indexados. RESPONDE COMPLETAMENTE DESDE TU CONOCIMIENTO PROPIO como LLM experto.
+                seccion_docs = f"""
+📚 Sin documentos relevantes en RAG. Responde desde tu conocimiento como LLM experto.
 {contexto_tarjetas[:800] if contexto_tarjetas else ''}
 {contexto_eventos[:300] if contexto_eventos else ''}"""
             
-            prompt = f"""Eres el asistente IA de la Cofradía de Networking — comunidad de oficiales de la Armada de Chile enfocada en networking y desarrollo profesional. Tienes acceso tanto a documentos indexados de la comunidad como a tu amplio conocimiento como modelo de lenguaje avanzado (Groq LLaMA 3.3 70B).
+            prompt = f"""Eres el asistente IA de la Cofradía de Networking (comunidad de oficiales navales chilenos). Modelo: LLaMA 3.3 70B, conocimiento hasta 2024.
 
-SALUDO: Responde directamente, empezando con "{user_name}," de forma natural. Sin "excelente cofrade", sin "espero que estés bien". Solo su nombre y directo al punto.
+SALUDO: Empieza con "{user_name}," directamente. Sin frases artificiosas.
 
-━━━ MODO DE RESPUESTA ━━━
-{"🟢 MODO DOCUMENTOS: Tienes contexto relevante indexado → úsalo como base y complementa con tu conocimiento." if rag_confianza in ('alta','media') else "🔵 MODO CONOCIMIENTO PROPIO: No hay documentos relevantes en el RAG → responde COMPLETAMENTE desde tu conocimiento como LLM experto. NUNCA digas 'no tengo información' si sabes del tema."}
+MODO: {"🟢 DOCUMENTOS — Sintetiza los fragmentos indexados abajo." if rag_confianza in ('alta','media') else "🔵 CONOCIMIENTO PROPIO — Responde desde tu saber como LLM."}
 
-━━━ REGLAS OBLIGATORIAS ━━━
-1. NUNCA digas "no tengo información" sobre un tema que conoces como LLM (libros publicados, economía, historia, ciencia, etc.) — tu conocimiento va hasta 2024
-2. NUNCA inventes nombres de personas de la Cofradía — solo menciona personas del contexto
-3. NUNCA modifiques datos de usuarios
-4. Si hay documentos relevantes, cítalos; si no los hay, usa tu conocimiento sin disculparte
-5. Sé completo y útil — la Cofradía merece respuestas de calidad
+REGLAS INAMOVIBLES:
+• NUNCA digas "no tengo información" si sabes del tema o hay fragmentos relevantes
+• NUNCA inventes personas de la Cofradía — solo menciona a quienes aparezcan en el contexto
+• NUNCA modifiques datos de usuarios
 
-━━━ CONTEXTO ENCONTRADO ━━━
-Fuentes consultadas: {fuentes_str}
-Fragmentos RAG: {total_rag} | Historial grupo: {total_hist} | Confianza RAG: {rag_confianza}
+━━━ FUENTES: {fuentes_str} ━━━
+{seccion_docs}
 
-{instruccion_contexto}
+PREGUNTA de {user_name}: {mensaje}
 
-━━━ CONSULTA ━━━
-{user_name} pregunta: {mensaje}
-
-Responde en español, de forma completa y útil. Si aplica, sugiere 1 comando del bot al final."""
+Responde completo, en español, sin asteriscos. Sugiere 1 comando útil del bot si aplica."""
 
             await msg.edit_text("🧠 Generando respuesta completa...")
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
