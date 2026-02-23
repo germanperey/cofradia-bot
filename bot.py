@@ -8195,14 +8195,16 @@ def buscar_rag(query, limit=5):
 
 def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
-    Retorna dict con resultados de: historial (mensajes grupo), RAG (PDFs indexados).
+    Incluye verificación de relevancia temática: si los docs no tratan el tema
+    consultado, marca rag_confianza='irrelevante' para que el LLM use su conocimiento.
     """
     resultados = {
         'historial': [],
         'rag': [],
         'fuentes_usadas': [],
-        'rag_score_max': 0.0,    # Score máximo del mejor chunk RAG
-        'rag_confianza': 'ninguna',  # 'alta', 'media', 'baja', 'ninguna'
+        'rag_score_max': 0.0,
+        'rag_confianza': 'ninguna',
+        'rag_tematica': 'desconocida',   # 'relevante' | 'irrelevante' | 'desconocida'
     }
     
     # 1. Historial del grupo (mensajes de usuarios)
@@ -8219,12 +8221,10 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
         resultados['rag_score_max'] = score_max
         
-        # Fase 1 retorna score=50+ → confianza alta garantizada
-        # Fase 2 retorna score según semántica
         if score_max >= 45.0:
-            resultados['rag_confianza'] = 'alta'   # Documento encontrado por nombre
+            resultados['rag_confianza'] = 'alta'
         elif score_max >= 8.0:
-            resultados['rag_confianza'] = 'alta'   # Múltiples términos clave matchean
+            resultados['rag_confianza'] = 'alta'
         elif score_max >= 4.0:
             resultados['rag_confianza'] = 'media'
         elif score_max >= 1.5:
@@ -8233,9 +8233,75 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
             resultados['rag_confianza'] = 'ninguna'
         
         if chunks_rag:
+            # ── VERIFICACIÓN DE RELEVANCIA TEMÁTICA ──────────────────────────────
+            # Comparar términos clave del query contra términos clave del contenido
+            # Si no hay overlap significativo → los docs no son sobre el tema consultado
+            import unicodedata as _ud, re as _re
+            def _norm(t):
+                t = _ud.normalize('NFKD', t.lower())
+                return ''.join(c for c in t if not _ud.combining(c))
+            
+            STOPWORDS_TEMA = {
+                'de','la','el','en','los','las','del','al','un','una','por','con','para',
+                'que','es','se','no','su','lo','como','mas','pero','sus','le','ya','este',
+                'si','ha','son','muy','hay','fue','ser','han','esta','tan','sin','sobre',
+                'trata','libro','libros','acerca','habla','dice','cual','que','como','esto',
+                'a','y','o','e','u','the','of','and','to','in','me','te','le','nos'
+            }
+            
+            # Términos clave del query (palabras significativas de 4+ letras)
+            query_norm = _norm(query)
+            terminos_query = set(
+                w for w in _re.findall(r'\b\w{4,}\b', query_norm)
+                if w not in STOPWORDS_TEMA
+            )
+            
+            # Términos del contenido de los chunks retornados
+            texto_chunks = ' '.join(
+                (item[0] if isinstance(item, tuple) else item)
+                for item in chunks_rag[:10]  # Analizar primeros 10 chunks
+            )
+            terminos_chunks = set(
+                w for w in _re.findall(r'\b\w{4,}\b', _norm(texto_chunks))
+                if w not in STOPWORDS_TEMA
+            )
+            
+            # Nombres de documentos retornados (también como señal de relevancia)
+            sources_retornados = set()
+            for item in chunks_rag:
+                src = (item[1] if isinstance(item, tuple) else '')
+                src_norm = _norm(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+                sources_retornados.update(w for w in src_norm.split() if len(w) >= 4)
+            
+            # Calcular overlap: cuántos términos del query aparecen en chunks O en nombres de docs
+            terminos_en_contenido = terminos_query & terminos_chunks
+            terminos_en_sources = terminos_query & sources_retornados
+            overlap_total = terminos_en_contenido | terminos_en_sources
+            
+            ratio_overlap = len(overlap_total) / max(len(terminos_query), 1)
+            
+            if ratio_overlap >= 0.4 or len(terminos_en_contenido) >= 2:
+                resultados['rag_tematica'] = 'relevante'
+            elif ratio_overlap >= 0.2 or len(terminos_en_sources) >= 1:
+                resultados['rag_tematica'] = 'posible'
+            else:
+                resultados['rag_tematica'] = 'irrelevante'
+                # Si los docs son irrelevantes, degradar confianza para que LLM use su conocimiento
+                resultados['rag_confianza'] = 'irrelevante'
+                logger.info(f"⚠️ RAG temática IRRELEVANTE para '{query[:50]}': "
+                           f"overlap={ratio_overlap:.0%}, términos_query={terminos_query}, "
+                           f"en_chunks={terminos_en_contenido}, en_sources={terminos_en_sources}")
+            
+            logger.info(f"📊 RAG temática: {resultados['rag_tematica']} "
+                       f"(overlap={ratio_overlap:.0%}, query_terms={terminos_query}, "
+                       f"en_contenido={terminos_en_contenido})")
+            # ── FIN VERIFICACIÓN ──────────────────────────────────────────────────
+            
             resultados['rag'] = chunks_rag
             confianza_str = resultados['rag_confianza']
-            resultados['fuentes_usadas'].append(f"RAG/Documentos ({len(chunks_rag)} fragmentos, confianza: {confianza_str})")
+            resultados['fuentes_usadas'].append(
+                f"RAG/Documentos ({len(chunks_rag)} fragmentos, confianza: {confianza_str})"
+            )
     except Exception as e:
         logger.warning(f"Error buscando RAG unificado: {e}")
     
@@ -14652,56 +14718,71 @@ def main():
             except Exception as e_ev:
                 logger.debug(f"Error buscando eventos privado: {e_ev}")
 
-            # Construir prompt con sistema de confianza RAG + intención mejorada
+            # Construir prompt con modo inteligente según relevancia temática
             fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
             total_rag = len(resultados_busq.get('rag', []))
-            total_hist = len(resultados_busq.get('historial', []))
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
+            rag_tematica = resultados_busq.get('rag_tematica', 'desconocida')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
             
-            tiene_docs = rag_confianza in ('alta', 'media')
-            
-            # Info de intención para enriquecer el prompt (solo si fue mejorada)
+            # Intent hint
             intent_hint = ""
             if query_para_busqueda != mensaje:
-                intent_hint = f"\n(La búsqueda se realizó con la consulta enriquecida: \"{query_para_busqueda}\")"
+                intent_hint = f"\n(búsqueda enriquecida: \"{query_para_busqueda}\")"
             
-            if tiene_docs:
-                intro_contexto = (f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
-                                 f"(confianza: {rag_confianza}, score: {rag_score:.0f}). "
-                                 f"Los documentos están agrupados por título abajo. LÉELOS y sintetiza la respuesta a partir de ellos.")
-                ctx_docs = contexto_completo[:7000]
-            elif rag_confianza == 'baja':
-                intro_contexto = "Se encontraron fragmentos de baja relevancia. Úsalos solo si aportan; de lo contrario responde desde tu conocimiento."
-                ctx_docs = contexto_completo[:3000]
-            else:
-                intro_contexto = "No hay documentos indexados sobre este tema. Responde desde tu conocimiento como LLM experto (no digas 'no tengo información')."
-                ctx_docs = ""
-            
-            # Si el motor de intención sugiere un comando complementario (pero no lo ejecutó)
+            # Sugerencia de comando complementario
             cmd_sugerido = intencion.get('comando')
             sugerencia_cmd = ""
             if cmd_sugerido and not intencion.get('ejecutar_comando'):
                 desc_cmd = CATALOGO_COMANDOS_INTENCION.get(cmd_sugerido, '')
-                sugerencia_cmd = f"\n\nPara información más específica, puedes usar: /{cmd_sugerido} — {desc_cmd}"
+                sugerencia_cmd = f"\nComando relacionado disponible: /{cmd_sugerido} — {desc_cmd}"
             
-            prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos. Modelo LLaMA 3.3 70B con conocimiento hasta 2024.
+            # ── DECISIÓN DE MODO ─────────────────────────────────────────────
+            docs_son_relevantes = (
+                rag_tematica in ('relevante', 'posible') and
+                rag_confianza in ('alta', 'media') and
+                bool(resultados_busq.get('rag'))
+            )
+            
+            if docs_son_relevantes:
+                # MODO A: documentos del RAG son sobre el tema → sintetizar
+                instruccion = (
+                    f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
+                    f"para esta consulta. LÉELOS y sintetiza una respuesta completa basándote en ellos."
+                )
+                ctx_rag = contexto_completo[:7000]
+                fuentes_str_final = fuentes_str
+                logger.info(f"💬 Modo RAG para '{mensaje[:40]}'")
+            else:
+                # MODO B: docs no son sobre el tema → responder desde conocimiento LLM
+                instruccion = (
+                    "La base de documentos indexados no contiene información sobre este tema específico. "
+                    "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
+                    "No menciones documentos, no pidas más contexto. Solo responde lo que sabes."
+                )
+                ctx_rag = ""  # No pasar docs irrelevantes al LLM
+                fuentes_str_final = "Conocimiento propio del modelo"
+                logger.info(f"💬 Modo LLM para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
+            # ── FIN DECISIÓN ─────────────────────────────────────────────────
+            
+            prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
 
-Empieza la respuesta con "{user_name}," de forma natural y directa.
+Responde a {user_name} empezando con "{user_name}," de forma directa y natural.{intent_hint}
 
-INSTRUCCIÓN: {intro_contexto}{intent_hint}
+INSTRUCCIÓN: {instruccion}
 
 REGLAS:
-- Nunca digas "no tengo información" si hay fragmentos relevantes o si conoces el tema
+- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
 - Nunca inventes personas de la Cofradía
-- Nunca modifiques datos de usuarios
-- Responde completo y útil, en español, sin asteriscos
+- Responde completo, útil, en español, sin asteriscos
 
-{ctx_docs}
-{contexto_tarjetas[:800] if contexto_tarjetas else ''}
-{contexto_eventos[:300] if contexto_eventos else ''}
+{ctx_rag}
+{contexto_tarjetas[:600] if contexto_tarjetas else ''}
+{contexto_eventos[:200] if contexto_eventos else ''}
 
-PREGUNTA ORIGINAL: {mensaje}"""
+PREGUNTA: {mensaje}{sugerencia_cmd}"""
+            
+            fuentes_str = fuentes_str_final
 
             await msg.edit_text("🧠 Generando respuesta completa...")
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
