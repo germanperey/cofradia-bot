@@ -6947,28 +6947,94 @@ async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TY
 
 @requiere_suscripcion
 async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /rag_debug [query] — Solo para OWNER. Muestra los chunks exactos que retorna el RAG."""
+    """Comando /rag_debug [query] — Solo para OWNER. Diagnóstico completo del RAG."""
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
         await update.message.reply_text("🔒 Solo disponible para el administrador.")
         return
     
     if not context.args:
-        await update.message.reply_text("Uso: /rag_debug [consulta]\nEjemplo: /rag_debug libro Milei inflacion")
+        await update.message.reply_text(
+            "Uso: /rag_debug [consulta]\n"
+            "Ejemplo: /rag_debug milei inflacion\n\n"
+            "También: /rag_debug --docs (lista todos los documentos indexados)"
+        )
         return
     
     query = ' '.join(context.args)
-    msg = await update.message.reply_text(f"🔬 Ejecutando debug RAG para: '{query}'...")
+    
+    # Modo especial: listar todos los documentos
+    if query.strip() == '--docs':
+        msg = await update.message.reply_text("📚 Listando todos los documentos indexados...")
+        try:
+            conn = get_db_connection()
+            if not conn:
+                await msg.edit_text("❌ Sin conexión a BD")
+                return
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("""SELECT source, COUNT(*) as chunks, 
+                            MAX(LENGTH(chunk_text)) as max_len
+                            FROM rag_chunks GROUP BY source ORDER BY chunks DESC""")
+            else:
+                c.execute("""SELECT source, COUNT(*) as chunks,
+                            MAX(LENGTH(chunk_text)) as max_len
+                            FROM rag_chunks GROUP BY source ORDER BY chunks DESC""")
+            docs = c.fetchall()
+            conn.close()
+            
+            texto = f"📚 DOCUMENTOS INDEXADOS EN RAG ({len(docs)} total)\n"
+            texto += "━" * 40 + "\n\n"
+            for d in docs:
+                if DATABASE_URL:
+                    src, n, ml = d['source'], d['chunks'], d['max_len']
+                else:
+                    src, n, ml = d[0], d[1], d[2]
+                src_clean = src.replace('PDF:', '📄 ').replace('EXCEL:', '📊 ')
+                texto += f"{src_clean}\n   → {n} chunks, max {ml} chars\n\n"
+            
+            if len(texto) > 4000:
+                partes = [texto[i:i+3900] for i in range(0, len(texto), 3900)]
+                await msg.edit_text(partes[0])
+                for p in partes[1:]:
+                    await update.message.reply_text(p)
+            else:
+                await msg.edit_text(texto)
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {e}")
+        return
+    
+    msg = await update.message.reply_text(f"🔬 Debug RAG completo para: '{query}'...")
     
     try:
-        chunks, score_max = buscar_rag(query, limit=10)
+        # 1. Buscar en nombres de documentos directamente
+        conn = get_db_connection()
+        docs_directos = []
+        if conn:
+            c = conn.cursor()
+            for term in query.lower().split():
+                if len(term) >= 3:
+                    if DATABASE_URL:
+                        c.execute("SELECT DISTINCT source, COUNT(*) as n FROM rag_chunks WHERE LOWER(source) LIKE %s GROUP BY source",
+                                 (f'%{term}%',))
+                    else:
+                        c.execute("SELECT DISTINCT source, COUNT(*) as n FROM rag_chunks WHERE LOWER(source) LIKE ? GROUP BY source",
+                                 (f'%{term}%',))
+                    rows = c.fetchall()
+                    for r in rows:
+                        src = r['source'] if DATABASE_URL else r[0]
+                        n = r['n'] if DATABASE_URL else r[1]
+                        if src not in [d[0] for d in docs_directos]:
+                            docs_directos.append((src, n, term))
+            conn.close()
         
-        if not chunks:
-            await msg.edit_text(f"❌ RAG devolvió 0 chunks para: '{query}'\nScore máximo: {score_max:.2f}")
-            return
+        # 2. Ejecutar buscar_rag normal
+        chunks, score_max = buscar_rag(query, limit=15)
         
         # Clasificar confianza
-        if score_max >= 8.0:
+        if score_max >= 45.0:
+            conf = "ALTA-FASE1 ✅ (documento encontrado por nombre)"
+        elif score_max >= 8.0:
             conf = "ALTA ✅"
         elif score_max >= 4.0:
             conf = "MEDIA 🟡"
@@ -6977,19 +7043,46 @@ async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             conf = "NINGUNA ❌"
         
-        texto = f"🔬 DEBUG RAG: '{query}'\n"
-        texto += f"📊 Score máximo: {score_max:.2f} → Confianza: {conf}\n"
-        texto += f"📦 Chunks retornados: {len(chunks)}\n"
-        texto += "━" * 35 + "\n\n"
+        texto = f"🔬 DEBUG RAG COMPLETO: '{query}'\n"
+        texto += "━" * 40 + "\n\n"
         
-        for i, item in enumerate(chunks, 1):
+        # Documentos encontrados por nombre
+        texto += f"🎯 FASE 1 — Búsqueda por nombre de documento:\n"
+        if docs_directos:
+            for src, n, term in docs_directos:
+                texto += f"  ✅ '{term}' → {src} ({n} chunks)\n"
+        else:
+            texto += f"  ❌ Ningún documento tiene los términos '{query}' en su nombre\n"
+            texto += f"  ⚠️ Esto significa que el PDF de Milei tiene otro nombre\n"
+        
+        texto += f"\n📊 FASE 2 — Búsqueda semántica:\n"
+        texto += f"  Score máximo: {score_max:.2f} → {conf}\n"
+        texto += f"  Chunks retornados: {len(chunks)}\n\n"
+        
+        # Distribución por documento
+        dist = {}
+        for item in chunks:
+            if isinstance(item, tuple):
+                src = item[1]
+            else:
+                src = "?"
+            dist[src] = dist.get(src, 0) + 1
+        
+        texto += "📋 DISTRIBUCIÓN POR DOCUMENTO:\n"
+        for src, n in sorted(dist.items(), key=lambda x: -x[1]):
+            src_clean = src.replace('PDF:', '').replace('EXCEL:', '')
+            texto += f"  {n}x → {src_clean}\n"
+        
+        texto += "\n━" * 20 + "\n"
+        texto += "🔍 PRIMEROS 5 CHUNKS:\n\n"
+        
+        for i, item in enumerate(chunks[:5], 1):
             if isinstance(item, tuple):
                 chunk_texto, chunk_source = item[0], item[1]
             else:
                 chunk_texto, chunk_source = item, "?"
             fuente = chunk_source.replace('PDF:', '').replace('EXCEL:', '')
-            texto += f"[{i}] FUENTE: {fuente}\n"
-            texto += f"    CONTENIDO: {chunk_texto[:300]}...\n\n"
+            texto += f"[{i}] {fuente}\n{chunk_texto[:250]}...\n\n"
         
         # Enviar en partes si es largo
         if len(texto) > 4000:
@@ -7001,7 +7094,8 @@ async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(texto)
         
     except Exception as e:
-        await msg.edit_text(f"❌ Error en debug: {e}")
+        import traceback
+        await msg.edit_text(f"❌ Error en debug: {e}\n{traceback.format_exc()[:500]}")
 
 
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7863,13 +7957,13 @@ def buscar_rag(query, limit=5):
         conn.close()
         
         # ═══════════════════════════════════════════════════
-        # COMBINAR RESULTADOS: Fase 1 primero, luego Fase 2 balanceada
+        # COMBINAR RESULTADOS
         # ═══════════════════════════════════════════════════
         resultados = []
         seen = set()
         score_maximo = 0.0
         
-        # Primero: todos los chunks de documentos fase 1 (en orden)
+        # Primero: todos los chunks de documentos fase 1 (en orden del documento)
         for texto, score, source in chunks_fase1:
             key = texto[:80]
             if key not in seen and texto.strip():
@@ -7879,29 +7973,92 @@ def buscar_rag(query, limit=5):
                 if len(resultados) >= limit:
                     break
         
-        # Segundo: chunks fase 2 balanceados (máximo 3 por documento)
-        if len(resultados) < limit:
+        # FASE 2 con promoción automática:
+        # Si un documento domina los mejores resultados semánticos → promoverlo como Fase 1
+        # (esto resuelve el caso de PDFs con nombre sin el término buscado, ej: "El_fin_de_la_inflacion.pdf" para query "milei")
+        if chunks_fase2:
             chunks_fase2.sort(key=lambda x: x[1], reverse=True)
-            conteo_por_doc = {}
-            MAX_POR_DOC = 3
             
-            for texto, score, source in chunks_fase2:
-                if len(resultados) >= limit:
-                    break
-                key = texto[:80]
-                if key in seen or not texto.strip():
-                    continue
-                doc_count = conteo_por_doc.get(source, 0)
-                if doc_count >= MAX_POR_DOC:
-                    continue
-                seen.add(key)
-                conteo_por_doc[source] = doc_count + 1
-                resultados.append((texto, source))
-                score_maximo = max(score_maximo, score)
+            # Analizar distribución en los TOP-20 chunks por score
+            top_chunks = chunks_fase2[:20]
+            score_por_doc = {}
+            count_por_doc = {}
+            for txt, sc, src in top_chunks:
+                score_por_doc[src] = score_por_doc.get(src, 0) + sc
+                count_por_doc[src] = count_por_doc.get(src, 0) + 1
+            
+            # Identificar documento dominante: > 40% de los top chunks O score acumulado > 2x el segundo
+            docs_ordenados = sorted(score_por_doc.items(), key=lambda x: -x[1])
+            doc_dominante = None
+            
+            if docs_ordenados:
+                top_doc, top_score = docs_ordenados[0]
+                top_count = count_por_doc.get(top_doc, 0)
+                
+                segundo_score = docs_ordenados[1][1] if len(docs_ordenados) > 1 else 0
+                
+                # Criterio de dominancia: muchos chunks del mismo doc en top resultados
+                if (top_count >= 5 or  # 5+ chunks en top-20
+                    (top_count >= 3 and top_score > segundo_score * 2) or  # 3+ chunks y doble score
+                    (top_count / max(len(top_chunks), 1)) >= 0.4):  # 40%+ del top son del mismo doc
+                    doc_dominante = top_doc
+                    logger.info(f"🚀 RAG Fase2→Fase1 promoción: '{top_doc}' "
+                               f"(count={top_count}, score={top_score:.1f}, ratio={top_count/max(len(top_chunks),1):.0%})")
+            
+            # Si hay documento dominante NO encontrado en fase 1, traer TODOS sus chunks
+            if doc_dominante and doc_dominante not in docs_fase1:
+                try:
+                    conn2 = get_db_connection()
+                    if conn2:
+                        c2 = conn2.cursor()
+                        if DATABASE_URL:
+                            c2.execute("SELECT chunk_text, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
+                                      (doc_dominante,))
+                        else:
+                            c2.execute("SELECT chunk_text, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
+                                      (doc_dominante,))
+                        filas_dom = c2.fetchall()
+                        conn2.close()
+                        
+                        for fila in filas_dom:
+                            if len(resultados) >= limit:
+                                break
+                            txt = fila['chunk_text'] if DATABASE_URL else fila[0]
+                            src = fila['source'] if DATABASE_URL else fila[1]
+                            key = txt[:80] if txt else ''
+                            if key and key not in seen and txt.strip():
+                                seen.add(key)
+                                resultados.append((txt, src))
+                                score_maximo = max(score_maximo, 50.0)  # Promovido = score alto
+                        
+                        docs_fase1.append(doc_dominante)  # Marcar como ya procesado
+                except Exception as e_dom:
+                    logger.debug(f"Error promoviendo doc dominante: {e_dom}")
+            
+            # Chunks restantes de fase 2: máximo 3 por documento (excluir ya procesados)
+            if len(resultados) < limit:
+                conteo_por_doc = {}
+                MAX_POR_DOC = 3
+                
+                for texto, score, source in chunks_fase2:
+                    if len(resultados) >= limit:
+                        break
+                    if source in docs_fase1:  # Ya procesado (fase 1 o promovido)
+                        continue
+                    key = texto[:80]
+                    if key in seen or not texto.strip():
+                        continue
+                    doc_count = conteo_por_doc.get(source, 0)
+                    if doc_count >= MAX_POR_DOC:
+                        continue
+                    seen.add(key)
+                    conteo_por_doc[source] = doc_count + 1
+                    resultados.append((texto, source))
+                    score_maximo = max(score_maximo, score)
         
-        logger.info(f"🔍 RAG resultado: {len(resultados)} chunks "
-                   f"(fase1: {len(docs_fase1)} docs × todos sus chunks | "
-                   f"fase2: {len(chunks_fase2)} candidatos), score_max={score_maximo:.1f}")
+        logger.info(f"🔍 RAG resultado final: {len(resultados)} chunks "
+                   f"(fase1_docs={len(docs_fase1)}, f2_candidates={len(chunks_fase2)}), "
+                   f"score_max={score_maximo:.1f}")
         
         return resultados, score_maximo
         
