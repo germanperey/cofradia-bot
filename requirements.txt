@@ -18,3 +18,4 @@ pydub>=0.25.1
 aiohttp>=3.9.0
 gspread>=6.0.0
 soundfile>=0.12.1
+gradio-client>=0.16.0
