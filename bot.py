@@ -7654,181 +7654,224 @@ def indexar_google_drive_rag():
 
 
 def buscar_rag(query, limit=5):
-    """Busca en chunks RAG con scoring por relevancia mejorado"""
+    """
+    Búsqueda RAG bifásica:
+    Fase 1 — Búsqueda por NOMBRE DE DOCUMENTO (nombres propios, títulos, autores)
+    Fase 2 — Búsqueda semántica general balanceada (máx. 3 chunks por documento)
+    
+    Retorna: (lista de (texto, source), score_maximo)
+    """
     try:
         conn = get_db_connection()
         if not conn:
-            return []
+            return [], 0.0
         
         c = conn.cursor()
         
         import unicodedata
         def normalizar(texto):
             texto = unicodedata.normalize('NFKD', texto.lower())
-            texto = ''.join(ch for ch in texto if not unicodedata.combining(ch))
-            return texto
-        
-        def stem_es(palabra):
-            """Stemming básico español - NO aplicar a palabras cortas o nombres propios"""
-            if len(palabra) <= 5:
-                return palabra
-            for sufijo in ['iones', 'cion', 'mente', 'ando', 'endo', 'idos', 'idas',
-                          'ador', 'ores', 'ista', 'ismo', 'able', 'ible',
-                          'iendo', 'ados', 'adas', 'eras', 'ales', 'ares', 'eros', 'ante', 'ente']:
-                if len(palabra) > len(sufijo) + 3 and palabra.endswith(sufijo):
-                    return palabra[:-len(sufijo)]
-            for sufijo in ['ar', 'er', 'ir', 'es', 'os', 'as']:
-                if len(palabra) > len(sufijo) + 4 and palabra.endswith(sufijo):
-                    return palabra[:-len(sufijo)]
-            return palabra
+            return ''.join(ch for ch in texto if not unicodedata.combining(ch))
         
         STOPWORDS = {'de', 'la', 'el', 'en', 'los', 'las', 'del', 'al', 'un', 'una',
                     'por', 'con', 'para', 'que', 'es', 'se', 'no', 'su', 'lo', 'como',
                     'mas', 'pero', 'sus', 'le', 'ya', 'este', 'si', 'ha', 'son',
                     'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre',
+                    'trata', 'libro', 'libros', 'sobre', 'acerca', 'habla', 'dice',
+                    'cuéntame', 'cuentame', 'cual', 'cuál', 'qué', 'que',
                     'a', 'y', 'o', 'e', 'u', 'the', 'of', 'and', 'to', 'in'}
         
         query_norm = normalizar(query)
-        palabras_originales = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
-        stems = [stem_es(p) for p in palabras_originales]
         
-        # Unificar: buscar con palabras originales + stems (sin duplicados)
-        terminos_busqueda = list(set(palabras_originales + stems))
+        # Extraer términos relevantes — priorizar palabras largas (nombres propios, títulos)
+        todas_palabras = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
+        # Palabras clave: las más largas y/o únicas (nombres propios suelen ser >= 4 letras)
+        palabras_clave = sorted(set(todas_palabras), key=len, reverse=True)
         
-        if not terminos_busqueda:
+        if not palabras_clave:
             conn.close()
-            return []
+            return [], 0.0
         
-        # Construir WHERE: buscar en keywords, chunk_text Y source
-        condiciones = []
-        params = []
-        for term in terminos_busqueda:
-            if DATABASE_URL:
-                condiciones.append("(LOWER(keywords) LIKE %s OR LOWER(chunk_text) LIKE %s OR LOWER(source) LIKE %s)")
-                params.extend([f'%{term}%', f'%{term}%', f'%{term}%'])
+        # ═══════════════════════════════════════════════════
+        # FASE 1: BÚSQUEDA POR NOMBRE DE DOCUMENTO
+        # Si alguna palabra clave aparece en el SOURCE (nombre del archivo),
+        # traer TODOS los chunks de ese documento — máxima prioridad
+        # ═══════════════════════════════════════════════════
+        docs_fase1 = []    # sources encontrados en fase 1
+        chunks_fase1 = []  # (texto, score, source) con score alto
+        
+        for palabra in palabras_clave:
+            if len(palabra) < 3:
+                continue
+            try:
+                if DATABASE_URL:
+                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE LOWER(source) LIKE %s LIMIT 5",
+                             (f'%{palabra}%',))
+                else:
+                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE LOWER(source) LIKE ? LIMIT 5",
+                             (f'%{palabra}%',))
+                sources_encontrados = c.fetchall()
+                for row in sources_encontrados:
+                    src = row['source'] if DATABASE_URL else row[0]
+                    if src and src not in docs_fase1:
+                        docs_fase1.append(src)
+                        logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src}'")
+            except Exception as e:
+                logger.debug(f"Error fase1 RAG: {e}")
+        
+        if docs_fase1:
+            # Traer TODOS los chunks de los documentos encontrados en fase 1
+            for src in docs_fase1[:3]:  # Máximo 3 documentos en fase 1
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
+                                 (src,))
+                    else:
+                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
+                                 (src,))
+                    filas_doc = c.fetchall()
+                    
+                    for fila in filas_doc:
+                        if DATABASE_URL:
+                            texto = fila['chunk_text'] or ''
+                            source = fila['source'] or ''
+                        else:
+                            texto, _, source = fila[0] or '', fila[1] or '', fila[2] or ''
+                        
+                        # Score altísimo para documentos de fase 1 — garantiza que sean top
+                        score = 50.0 + len(texto) / 100
+                        chunks_fase1.append((texto, score, source))
+                except Exception as e:
+                    logger.debug(f"Error trayendo chunks de '{src}': {e}")
+        
+        # ═══════════════════════════════════════════════════
+        # FASE 2: BÚSQUEDA SEMÁNTICA GENERAL BALANCEADA
+        # Busca por keywords/texto, pero limita chunks por documento
+        # ═══════════════════════════════════════════════════
+        # Solo términos que no sean stopwords contextuales
+        terminos_semanticos = [p for p in palabras_clave if len(p) >= 3][:8]
+        
+        chunks_fase2 = []
+        
+        if terminos_semanticos:
+            condiciones = []
+            params = []
+            for term in terminos_semanticos:
+                if DATABASE_URL:
+                    condiciones.append("(LOWER(keywords) LIKE %s OR LOWER(chunk_text) LIKE %s)")
+                    params.extend([f'%{term}%', f'%{term}%'])
+                else:
+                    condiciones.append("(LOWER(keywords) LIKE ? OR LOWER(chunk_text) LIKE ?)")
+                    params.extend([f'%{term}%', f'%{term}%'])
+            
+            where_clause = " OR ".join(condiciones)
+            max_candidates = limit * 20
+            
+            # Excluir documentos ya encontrados en fase 1
+            if docs_fase1:
+                exclusion = " AND source NOT IN ({})".format(
+                    ','.join(['%s'] * len(docs_fase1) if DATABASE_URL else ['?'] * len(docs_fase1))
+                )
+                where_clause_f2 = f"({where_clause}){exclusion}"
+                params_f2 = params + docs_fase1
             else:
-                condiciones.append("(LOWER(keywords) LIKE ? OR LOWER(chunk_text) LIKE ? OR LOWER(source) LIKE ?)")
-                params.extend([f'%{term}%', f'%{term}%', f'%{term}%'])
-        
-        where_clause = " OR ".join(condiciones)
-        max_candidates = limit * 15  # Traer MUCHOS más para rankear bien
-        
-        if DATABASE_URL:
-            c.execute(f"""SELECT chunk_text, keywords, metadata, source FROM rag_chunks 
-                        WHERE {where_clause} LIMIT %s""", params + [max_candidates])
-            filas = c.fetchall()
-        else:
-            c.execute(f"""SELECT chunk_text, keywords, metadata, source FROM rag_chunks 
-                        WHERE {where_clause} LIMIT ?""", params + [max_candidates])
-            filas = c.fetchall()
+                where_clause_f2 = where_clause
+                params_f2 = params
+            
+            try:
+                if DATABASE_URL:
+                    c.execute(f"""SELECT chunk_text, keywords, metadata, source FROM rag_chunks 
+                                WHERE {where_clause_f2} LIMIT %s""", params_f2 + [max_candidates])
+                else:
+                    c.execute(f"""SELECT chunk_text, keywords, metadata, source FROM rag_chunks 
+                                WHERE {where_clause_f2} LIMIT ?""", params_f2 + [max_candidates])
+                filas_f2 = c.fetchall()
+                
+                # Scoring semántico
+                for fila in filas_f2:
+                    if DATABASE_URL:
+                        texto = fila['chunk_text'] or ''
+                        keywords = fila['keywords'] or ''
+                        source = fila['source'] or ''
+                    else:
+                        texto = fila[0] or ''
+                        keywords = fila[1] or ''
+                        source = fila[3] if len(fila) > 3 else ''
+                    
+                    texto_n = normalizar(texto)
+                    kw_n = normalizar(keywords)
+                    
+                    score = 0.0
+                    for p in terminos_semanticos:
+                        if p in kw_n:
+                            score += 3.0
+                        if p in texto_n:
+                            score += 2.0 + min(texto_n.count(p) * 0.3, 2.0)
+                    
+                    if len(texto) < 100:
+                        score *= 0.4
+                    elif len(texto) < 200:
+                        score *= 0.7
+                    if len(texto) > 500:
+                        score *= 1.1
+                    if source.startswith('PDF:'):
+                        score *= 1.1
+                    
+                    if score > 0:
+                        chunks_fase2.append((texto, score, source))
+                        
+            except Exception as e:
+                logger.warning(f"Error fase2 RAG: {e}")
         
         conn.close()
         
-        if not filas:
-            return []
-        
-        # Scoring por relevancia
-        scored = []
-        for fila in filas:
-            if DATABASE_URL:
-                texto = fila['chunk_text'] or ''
-                keywords = fila['keywords'] or ''
-                source = fila['source'] or ''
-            else:
-                texto = fila[0] or ''
-                keywords = fila[1] or ''
-                source = fila[3] if len(fila) > 3 else ''
-            
-            texto_norm = normalizar(texto)
-            keywords_norm = normalizar(keywords)
-            source_norm = normalizar(source)
-            
-            score = 0.0
-            matches = 0
-            
-            for palabra in palabras_originales:
-                # Match en source/filename (máximo peso - indica relevancia del documento)
-                if palabra in source_norm:
-                    score += 5.0
-                    matches += 1
-                
-                # Match exacto en keywords
-                if palabra in keywords_norm:
-                    score += 3.0
-                    matches += 1
-                
-                # Match exacto en texto
-                if palabra in texto_norm:
-                    score += 2.0
-                    matches += 1
-                    # Bonus si aparece múltiples veces
-                    ocurrencias = texto_norm.count(palabra)
-                    if ocurrencias > 1:
-                        score += min(ocurrencias * 0.5, 3.0)
-            
-            # Buscar también por stems (menor peso)
-            for stem in stems:
-                if stem not in palabras_originales:  # No contar doble
-                    if stem in keywords_norm:
-                        score += 1.5
-                        matches += 1
-                    elif stem in texto_norm:
-                        score += 0.8
-                        matches += 1
-            
-            # Bonus por múltiples matches (relevancia compuesta)
-            if matches >= 3:
-                score *= 1.0 + (matches * 0.4)
-            elif matches >= 2:
-                score *= 1.0 + (matches * 0.3)
-            
-            # Bonus PDFs (documentos más estructurados)
-            if source.startswith('PDF:'):
-                score *= 1.15
-            
-            # Penalizar chunks muy cortos (poco información)
-            if len(texto) < 100:
-                score *= 0.4
-            elif len(texto) < 200:
-                score *= 0.7
-            
-            # Bonus chunks con más contenido (más contexto)
-            if len(texto) > 500:
-                score *= 1.1
-            
-            if score > 0:
-                scored.append((texto, score, source))
-        
-        # Ordenar por score descendente
-        scored.sort(key=lambda x: x[1], reverse=True)
-        
-        # Calcular score máximo para umbral relativo
-        if scored:
-            score_maximo = scored[0][1]
-            # Umbral mínimo: al menos 15% del score del mejor resultado
-            # Esto evita devolver chunks casi irrelevantes cuando el mejor ya es muy bajo
-            umbral_minimo = max(1.5, score_maximo * 0.15)
-        else:
-            umbral_minimo = 1.5
-        
-        # Deduplicar por primeros 100 chars y aplicar umbral
-        seen = set()
+        # ═══════════════════════════════════════════════════
+        # COMBINAR RESULTADOS: Fase 1 primero, luego Fase 2 balanceada
+        # ═══════════════════════════════════════════════════
         resultados = []
-        for texto, score, source in scored:
-            if score < umbral_minimo:
-                break  # Los siguientes tendrán score aún menor
-            key = texto[:100]
-            if key not in seen:
+        seen = set()
+        score_maximo = 0.0
+        
+        # Primero: todos los chunks de documentos fase 1 (en orden)
+        for texto, score, source in chunks_fase1:
+            key = texto[:80]
+            if key not in seen and texto.strip():
                 seen.add(key)
-                # Incluir fuente para que el LLM sepa de dónde viene
                 resultados.append((texto, source))
+                score_maximo = max(score_maximo, score)
                 if len(resultados) >= limit:
                     break
         
-        return resultados, score_maximo if scored else 0.0
+        # Segundo: chunks fase 2 balanceados (máximo 3 por documento)
+        if len(resultados) < limit:
+            chunks_fase2.sort(key=lambda x: x[1], reverse=True)
+            conteo_por_doc = {}
+            MAX_POR_DOC = 3
+            
+            for texto, score, source in chunks_fase2:
+                if len(resultados) >= limit:
+                    break
+                key = texto[:80]
+                if key in seen or not texto.strip():
+                    continue
+                doc_count = conteo_por_doc.get(source, 0)
+                if doc_count >= MAX_POR_DOC:
+                    continue
+                seen.add(key)
+                conteo_por_doc[source] = doc_count + 1
+                resultados.append((texto, source))
+                score_maximo = max(score_maximo, score)
+        
+        logger.info(f"🔍 RAG resultado: {len(resultados)} chunks "
+                   f"(fase1: {len(docs_fase1)} docs × todos sus chunks | "
+                   f"fase2: {len(chunks_fase2)} candidatos), score_max={score_maximo:.1f}")
+        
+        return resultados, score_maximo
         
     except Exception as e:
-        logger.error(f"Error buscando RAG: {e}")
+        logger.error(f"Error en buscar_rag: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return [], 0.0
 
 
@@ -7858,13 +7901,12 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
         resultados['rag_score_max'] = score_max
         
-        # Clasificar confianza RAG según score máximo obtenido
-        # Score >= 8: múltiples términos importantes matchean → alta confianza
-        # Score 4-8: coincidencias parciales → media confianza
-        # Score 1.5-4: solo términos genéricos matchean → baja confianza (probablemente irrelevante)
-        # Score < 1.5: nada relevante encontrado
-        if score_max >= 8.0:
-            resultados['rag_confianza'] = 'alta'
+        # Fase 1 retorna score=50+ → confianza alta garantizada
+        # Fase 2 retorna score según semántica
+        if score_max >= 45.0:
+            resultados['rag_confianza'] = 'alta'   # Documento encontrado por nombre
+        elif score_max >= 8.0:
+            resultados['rag_confianza'] = 'alta'   # Múltiples términos clave matchean
         elif score_max >= 4.0:
             resultados['rag_confianza'] = 'media'
         elif score_max >= 1.5:
@@ -13998,45 +14040,37 @@ def main():
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
             
-            # Sección de contexto según confianza — sin truncar en alta/media
-            if rag_confianza in ('alta', 'media'):
-                seccion_docs = f"""
-⚠️⚠️ ATENCIÓN LLM: EL MOTOR DE BÚSQUEDA ENCONTRÓ {total_rag} FRAGMENTOS CON CONFIANZA {rag_confianza.upper()} (score {rag_score:.1f}).
-ESTOS FRAGMENTOS CONTIENEN LA RESPUESTA. TU TRABAJO ES LEERLOS Y SINTETIZARLOS.
-NO DIGAS "no tengo información" — los documentos están abajo. LEE el nombre de cada documento.
-
-{contexto_completo[:6000]}
-{contexto_tarjetas[:1000]}
-{contexto_eventos[:400]}"""
-            elif rag_confianza == 'baja':
-                seccion_docs = f"""
-⚠️ RAG con baja relevancia (score {rag_score:.1f}). Evalúa si los fragmentos son útiles; si no lo son, usa tu conocimiento propio.
-
-{contexto_completo[:3000]}
-{contexto_tarjetas[:800]}"""
-            else:
-                seccion_docs = f"""
-📚 Sin documentos relevantes en RAG. Responde desde tu conocimiento como LLM experto.
-{contexto_tarjetas[:800] if contexto_tarjetas else ''}
-{contexto_eventos[:300] if contexto_eventos else ''}"""
+            tiene_docs = rag_confianza in ('alta', 'media')
             
-            prompt = f"""Eres el asistente IA de la Cofradía de Networking (comunidad de oficiales navales chilenos). Modelo: LLaMA 3.3 70B, conocimiento hasta 2024.
+            if tiene_docs:
+                intro_contexto = (f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
+                                 f"(confianza: {rag_confianza}, score: {rag_score:.0f}). "
+                                 f"Los documentos están agrupados por título abajo. LÉELOS y sintetiza la respuesta a partir de ellos.")
+                ctx_docs = contexto_completo[:7000]
+            elif rag_confianza == 'baja':
+                intro_contexto = "Se encontraron fragmentos de baja relevancia. Úsalos solo si aportan; de lo contrario responde desde tu conocimiento."
+                ctx_docs = contexto_completo[:3000]
+            else:
+                intro_contexto = "No hay documentos indexados sobre este tema. Responde desde tu conocimiento como LLM experto (no digas 'no tengo información')."
+                ctx_docs = ""
+            
+            prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos. Modelo LLaMA 3.3 70B con conocimiento hasta 2024.
 
-SALUDO: Empieza con "{user_name}," directamente. Sin frases artificiosas.
+Empieza la respuesta con "{user_name}," de forma natural y directa.
 
-MODO: {"🟢 DOCUMENTOS — Sintetiza los fragmentos indexados abajo." if rag_confianza in ('alta','media') else "🔵 CONOCIMIENTO PROPIO — Responde desde tu saber como LLM."}
+INSTRUCCIÓN: {intro_contexto}
 
-REGLAS INAMOVIBLES:
-• NUNCA digas "no tengo información" si sabes del tema o hay fragmentos relevantes
-• NUNCA inventes personas de la Cofradía — solo menciona a quienes aparezcan en el contexto
-• NUNCA modifiques datos de usuarios
+REGLAS:
+- Nunca digas "no tengo información" si hay fragmentos relevantes o si conoces el tema
+- Nunca inventes personas de la Cofradía
+- Nunca modifiques datos de usuarios
+- Responde completo y útil, en español, sin asteriscos
 
-━━━ FUENTES: {fuentes_str} ━━━
-{seccion_docs}
+{ctx_docs}
+{contexto_tarjetas[:800] if contexto_tarjetas else ''}
+{contexto_eventos[:300] if contexto_eventos else ''}
 
-PREGUNTA de {user_name}: {mensaje}
-
-Responde completo, en español, sin asteriscos. Sugiere 1 comando útil del bot si aplica."""
+PREGUNTA: {mensaje}"""
 
             await msg.edit_text("🧠 Generando respuesta completa...")
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
