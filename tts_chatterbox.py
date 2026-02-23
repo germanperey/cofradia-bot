@@ -1,9 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   TTS CHATTERBOX — vía Hugging Face API (100% gratuito)         ║
-║   El modelo corre en los servidores de HF, no en Render.        ║
-║   Tu bot solo hace una llamada HTTP y recibe el audio.          ║
-║   Sin ffmpeg · Sin sudo · Sin RAM extra · Sin GPU               ║
+║   TTS CHATTERBOX — vía Gradio Space de Hugging Face             ║
+║   Voz ultra-natural · 100% gratuito · Sin instalar nada         ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -12,57 +10,26 @@ import io
 import logging
 import asyncio
 import hashlib
-import aiohttp
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ─── CONFIGURACIÓN ──────────────────────────────────────────────────
-HF_TOKEN   = os.getenv("HF_TOKEN", "")
-HF_API_URL = "https://api-inference.huggingface.co/models/ResembleAI/chatterbox"
+HF_TOKEN  = os.getenv("HF_TOKEN", "")
+HF_SPACE  = "ResembleAI/Chatterbox"
 
 CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-USE_CACHE  = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
+USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 
-EXAGGERATION = float(os.getenv("TTS_EXAGGERATION", "0.35"))
-CFG_WEIGHT   = float(os.getenv("TTS_CFG_WEIGHT",   "0.30"))
-
-
-def _cache_key(texto: str) -> str:
-    return hashlib.md5(texto.encode()).hexdigest()
+# Cliente Gradio global (se crea una sola vez)
+_gradio_client = None
+_client_lock   = asyncio.Lock()
 
 
-async def _llamar_hf_api(texto: str, exaggeration: float, cfg_weight: float) -> bytes:
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {
-        "inputs": texto,
-        "parameters": {"exaggeration": exaggeration, "cfg_weight": cfg_weight}
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            HF_API_URL, headers=headers, json=payload,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as resp:
-            if resp.status == 503:
-                data  = await resp.json()
-                espera = min(data.get("estimated_time", 20), 25)
-                logger.info(f"⏳ HF cargando modelo, esperando {espera:.0f}s...")
-                await asyncio.sleep(espera)
-                async with session.post(
-                    HF_API_URL, headers=headers, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=45)
-                ) as retry:
-                    if retry.status == 200:
-                        return await retry.read()
-                    raise Exception(f"HF reintento: {retry.status}")
-            if resp.status != 200:
-                raise Exception(f"HF API {resp.status}: {await resp.text()}")
-            return await resp.read()
+def _cache_key(texto: str, estilo: str) -> str:
+    return hashlib.md5(f"{texto}_{estilo}".encode()).hexdigest()
 
 
 def _limpiar_texto(texto: str) -> str:
@@ -73,31 +40,84 @@ def _limpiar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", texto).strip()
 
 
-def _wav_a_ogg_sin_ffmpeg(wav_bytes: bytes) -> bytes:
+async def _get_cliente():
+    """Crea el cliente Gradio una sola vez y lo reutiliza."""
+    global _gradio_client
+    if _gradio_client is not None:
+        return _gradio_client
+
+    async with _client_lock:
+        if _gradio_client is not None:
+            return _gradio_client
+
+        logger.info("🔌 Conectando a Chatterbox en Hugging Face...")
+        loop = asyncio.get_event_loop()
+
+        def _crear():
+            from gradio_client import Client
+            kwargs = {"src": HF_SPACE}
+            if HF_TOKEN:
+                kwargs["hf_token"] = HF_TOKEN
+            return Client(**kwargs)
+
+        _gradio_client = await loop.run_in_executor(None, _crear)
+        logger.info("✅ Conectado a Chatterbox.")
+
+    return _gradio_client
+
+
+async def _generar_con_gradio(texto: str, exaggeration: float, cfg_weight: float) -> bytes:
+    """Llama al Space de Chatterbox y devuelve bytes de audio WAV."""
+    cliente = await _get_cliente()
+    loop    = asyncio.get_event_loop()
+
+    def _llamar():
+        resultado = cliente.predict(
+            text         = texto,
+            audio_prompt = None,
+            exaggeration = exaggeration,
+            cfg_weight   = cfg_weight,
+            api_name     = "/generate"
+        )
+        # El Space devuelve la ruta al archivo WAV temporal
+        ruta = Path(resultado) if isinstance(resultado, str) else Path(resultado[0])
+        return ruta.read_bytes()
+
+    return await loop.run_in_executor(None, _llamar)
+
+
+def _wav_a_ogg(wav_bytes: bytes) -> bytes:
+    """Convierte WAV a OGG sin ffmpeg usando soundfile."""
     try:
         import soundfile as sf
-        import numpy as np
-        buf_in = io.BytesIO(wav_bytes)
+        buf_in  = io.BytesIO(wav_bytes)
         data, sr = sf.read(buf_in)
         buf_out  = io.BytesIO()
         sf.write(buf_out, data, sr, format="OGG", subtype="VORBIS")
         return buf_out.getvalue()
     except Exception:
-        return wav_bytes   # WAV directo — Telegram también lo acepta
+        return wav_bytes  # Telegram también acepta WAV directo
 
 
 async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
+    """Fallback a Catalina mejorada si Chatterbox no responde."""
     try:
         import edge_tts
-        communicate = edge_tts.Communicate(texto, "es-CL-CatalinaNeural",
-                                           rate="-8%", pitch="-2Hz")
+        communicate = edge_tts.Communicate(
+            texto,
+            "es-CL-CatalinaNeural",
+            rate   = "-12%",
+            pitch  = "-4Hz",
+            volume = "+8%"
+        )
         buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
+        logger.info("🔈 Audio generado con edge-TTS (fallback).")
         return buf.getvalue()
     except Exception as e:
-        logger.error(f"edge-TTS falló: {e}")
+        logger.error(f"edge-TTS también falló: {e}")
         return None
 
 
@@ -107,8 +127,8 @@ async def texto_a_voz(
     usar_chatterbox: bool = True
 ) -> Optional[bytes]:
     """
-    Función principal — reemplaza edge-TTS, misma firma.
-    Llama a Chatterbox en Hugging Face (gratis), sin usar RAM de Render.
+    Función principal de TTS.
+    Intenta Chatterbox primero. Si falla, usa Catalina mejorada.
     """
     if not texto or not texto.strip():
         return None
@@ -119,39 +139,49 @@ async def texto_a_voz(
 
     estilos = {
         "normal":       {"exaggeration": 0.35, "cfg_weight": 0.30},
-        "bienvenida":   {"exaggeration": 0.45, "cfg_weight": 0.35},
-        "alerta":       {"exaggeration": 0.55, "cfg_weight": 0.40},
-        "celebracion":  {"exaggeration": 0.60, "cfg_weight": 0.38},
+        "bienvenida":   {"exaggeration": 0.50, "cfg_weight": 0.35},
+        "alerta":       {"exaggeration": 0.60, "cfg_weight": 0.40},
+        "celebracion":  {"exaggeration": 0.65, "cfg_weight": 0.38},
     }
     cfg = estilos.get(estilo, estilos["normal"])
 
+    # Revisar caché primero
     if USE_CACHE:
-        clave = _cache_key(f"{texto_limpio}_{estilo}")
+        clave   = _cache_key(texto_limpio, estilo)
         f_cache = CACHE_DIR / f"{clave}.ogg"
         if f_cache.exists():
+            logger.debug("🎵 Audio desde caché.")
             return f_cache.read_bytes()
 
+    # Intentar Chatterbox
     if usar_chatterbox and HF_TOKEN:
         try:
-            wav  = await _llamar_hf_api(texto_limpio, cfg["exaggeration"], cfg["cfg_weight"])
-            ogg  = _wav_a_ogg_sin_ffmpeg(wav)
+            wav = await _generar_con_gradio(
+                texto_limpio,
+                cfg["exaggeration"],
+                cfg["cfg_weight"]
+            )
+            ogg = _wav_a_ogg(wav)
             if USE_CACHE:
                 f_cache.write_bytes(ogg)
+            logger.info("🎙️ Audio Chatterbox generado con éxito. ✅")
             return ogg
         except Exception as e:
-            logger.warning(f"Chatterbox HF falló ({e}) — usando edge-TTS")
+            logger.warning(f"⚠️ Chatterbox falló ({e}) → usando Catalina mejorada")
             return await _edge_tts_fallback(texto_limpio)
     else:
         if not HF_TOKEN:
-            logger.warning("HF_TOKEN no configurado — usando edge-TTS")
+            logger.warning("⚠️ HF_TOKEN no configurado → usando Catalina mejorada")
         return await _edge_tts_fallback(texto_limpio)
 
 
 async def limpiar_cache_tts(dias: int = 7):
+    """Limpia audios del caché más antiguos que N días."""
     import time
-    ahora = time.time()
-    borrados = sum(
-        1 for f in CACHE_DIR.glob("*.ogg")
-        if ahora - f.stat().st_mtime > dias * 86400 and f.unlink() is None
-    )
+    ahora    = time.time()
+    borrados = 0
+    for f in CACHE_DIR.glob("*.ogg"):
+        if ahora - f.stat().st_mtime > dias * 86400:
+            f.unlink()
+            borrados += 1
     logger.info(f"🗑️ Caché TTS: {borrados} archivos eliminados.")
