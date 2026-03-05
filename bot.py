@@ -1136,7 +1136,7 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
 # ==================== FUNCIONES DE VOZ (STT + TTS) ====================
 
 # Configuración de voz
-VOZ_TTS = os.environ.get('VOZ_TTS', 'es-CL-CatalinaNeural')  # Voz chilena femenina
+VOZ_TTS = os.environ.get('VOZ_TTS', 'es-MX-DaliaNeural')  # Voz femenina cálida y natural
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
 
@@ -1214,17 +1214,19 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     # ── INTENTO 2: edge-TTS mejorado (Catalina más natural) ──
     try:
         import edge_tts
-        # Pausas naturales
+        # Pausas naturales y expresivas (mejoran la calidez percibida)
         texto_voz = texto_voz.replace('. ', '... ')
-        texto_voz = texto_voz.replace(': ', ':... ')
-        texto_voz = texto_voz.replace('; ', ';... ')
+        texto_voz = texto_voz.replace('! ', '!... ')
+        texto_voz = texto_voz.replace('? ', '?... ')
+        texto_voz = texto_voz.replace(': ', ', ')
+        texto_voz = texto_voz.replace('; ', '... ')
 
         communicate = edge_tts.Communicate(
             texto_voz,
             VOZ_TTS,
-            rate  = "-12%",   # más pausada y natural
-            pitch = "-4Hz",   # tono más grave y humano
-            volume = "+8%"    # más presencia
+            rate   = "-8%",    # ritmo levemente pausado — natural, no lento
+            pitch  = "+2Hz",   # tono ligeramente más agudo — cálido y femenino
+            volume = "+10%"    # presencia y calidez
         )
         await communicate.save(filename)
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
