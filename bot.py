@@ -1033,7 +1033,7 @@ Tu personalidad:
     
     for intento in range(reintentos):
         try:
-            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
@@ -1608,8 +1608,12 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         # (sin mejorar_intencion que consume cuota extra — directo a la respuesta)
         await msg.edit_text(f'🧠 Procesando: "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
 
-        # 3a. Búsqueda unificada: historial + RAG + todos los documentos
-        resultados = busqueda_unificada(texto_transcrito, limit_historial=20, limit_rag=40)
+        # 3a. Búsqueda unificada en thread separado para no bloquear el event loop
+        import asyncio as _asyncio
+        await msg.edit_text(f'🔍 Buscando en documentos y base de conocimiento...')
+        resultados = await _asyncio.get_event_loop().run_in_executor(
+            None, lambda: busqueda_unificada(texto_transcrito, limit_historial=20, limit_rag=40)
+        )
         contexto_completo = formatear_contexto_unificado(resultados, texto_transcrito)
         fuentes_usadas = resultados.get("fuentes_usadas", [])
 
@@ -1676,33 +1680,39 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             ctx_rag = ""
             logger.info(f"🎤 Voz Modo LLM para '{texto_transcrito[:40]}' (rag={rag_tematica})")
 
-        prompt = f"""Eres el asistente IA de la Cofradía de Networking (LLaMA 3.3 70B, conocimiento hasta 2024).
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
 
-Responde a {user.first_name} de forma conversacional y directa. Empieza con "{user.first_name},".
-Esta respuesta se leerá como audio — sé fluido, sin listas, sin markdown, sin asteriscos.
+Responde a {user.first_name} de forma conversacional. Empieza siempre con "{user.first_name},".
+Esta respuesta se convertirá a audio — usa prosa fluida, sin listas, sin markdown, sin asteriscos, sin guiones.
 
 INSTRUCCIÓN: {instruccion}
 
-REGLAS:
-- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
-- Nunca inventes personas de la Cofradía
-- Responde completo y útil en español natural
-- Máximo 5 oraciones claras
+REGLAS OBLIGATORIAS:
+- NUNCA digas "no tengo información" si conoces el tema — responde con tu conocimiento hasta 2024
+- NUNCA inventes nombres de personas de la Cofradía
+- SIEMPRE desarrolla la respuesta completamente — mínimo 5 oraciones, máximo 10
+- Cubre TODOS los aspectos relevantes del tema consultado
+- Usa lenguaje profesional pero cercano, en español chileno
+- Si hay documentos relevantes abajo, incorpóralos en la respuesta
 
 {ctx_rag}
 {contexto_tarjetas[:600] if contexto_tarjetas else ""}
 
 {user.first_name} pregunta (audio): {texto_transcrito}"""
 
-        # 3d. Llamar IA con prompt completo (RAG + historial)
-        respuesta_texto = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
-        if not respuesta_texto:
-            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
+        # 3d. Llamar IA en thread separado (requests es sync, no bloquear event loop)
+        await msg.edit_text("🧠 Generando respuesta...")
+        import asyncio as _asyncio2
 
-        # 3e. Fallback emergencia: prompt mínimo sin RAG — mucho más liviano
-        if not respuesta_texto:
-            logger.warning(f"🚨 Prompt completo falló — emergencia para '{texto_transcrito[:40]}'")
-            respuesta_texto = llamar_ia_emergencia(texto_transcrito, user.first_name)
+        def _llamar_ia_completa():
+            r = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
+            if not r:
+                r = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
+            if not r:
+                r = llamar_ia_emergencia(texto_transcrito, user.first_name)
+            return r
+
+        respuesta_texto = await _asyncio2.get_event_loop().run_in_executor(None, _llamar_ia_completa)
 
         if not respuesta_texto:
             respuesta_texto = (
@@ -3976,19 +3986,21 @@ async def callback_velocidad_voz(update: Update, context: ContextTypes.DEFAULT_T
     set_preferencia_voz(uid, velocidad)
     nombres = {"lento": "🐢 Lento", "normal": "▶️ Normal", "rapido": "🐇 Rápido"}
     nombre_vel = nombres.get(velocidad, velocidad)
-    # Mostrar alerta inmediata al usuario (siempre funciona)
-    await query.answer(f"✅ Velocidad cambiada a {nombre_vel}", show_alert=False)
-    # Intentar actualizar los botones del mensaje
+    # Feedback inmediato al toque del botón
+    await query.answer(f"✅ {nombre_vel}", show_alert=False)
+    # Actualizar los botones para mostrar checkmark en el seleccionado
+    new_markup = botones_velocidad_voz(uid)
     try:
-        await query.edit_message_reply_markup(reply_markup=botones_velocidad_voz(uid))
-    except Exception:
-        try:
-            await query.edit_message_caption(
-                caption=f"🔊 Respuesta de voz — {nombre_vel}",
-                reply_markup=botones_velocidad_voz(uid)
-            )
-        except Exception:
-            pass  # El feedback ya se dio via query.answer
+        await query.edit_message_reply_markup(reply_markup=new_markup)
+    except Exception as e1:
+        if "not modified" not in str(e1).lower():
+            try:
+                await query.edit_message_caption(
+                    caption=f"🔊 Velocidad: {nombre_vel}",
+                    reply_markup=new_markup
+                )
+            except Exception:
+                pass
     logger.info(f"Usuario {uid} cambio velocidad voz a: {velocidad}")
 
 # ==================== CALLBACKS ====================
@@ -9200,14 +9212,14 @@ def botones_velocidad_voz(user_id: int) -> 'InlineKeyboardMarkup':
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     pref = get_preferencia_voz(user_id)
     actual = pref.get("velocidad", "normal")
-    marca = {"lento": "🐢✓", "normal": "▶️✓", "rapido": "🐇✓"}
+    # Mostrar checkmark SOLO en el botón activo
+    lbl_lento  = "🐢✓ Lento"  if actual == "lento"  else "🐢 Lento"
+    lbl_normal = "▶️✓ Normal" if actual == "normal" else "▶️ Normal"
+    lbl_rapido = "🐇✓ Rápido" if actual == "rapido" else "🐇 Rápido"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(marca.get("lento","🐢") if actual=="lento" else "🐢 Lento",
-                             callback_data=f"voz_vel:lento:{user_id}"),
-        InlineKeyboardButton(marca.get("normal","▶️") if actual=="normal" else "▶️ Normal",
-                             callback_data=f"voz_vel:normal:{user_id}"),
-        InlineKeyboardButton(marca.get("rapido","🐇") if actual=="rapido" else "🐇 Rápido",
-                             callback_data=f"voz_vel:rapido:{user_id}"),
+        InlineKeyboardButton(lbl_lento,  callback_data=f"voz_vel:lento:{user_id}"),
+        InlineKeyboardButton(lbl_normal, callback_data=f"voz_vel:normal:{user_id}"),
+        InlineKeyboardButton(lbl_rapido, callback_data=f"voz_vel:rapido:{user_id}"),
     ]])
 
 # ==================== MODO MANTENIMIENTO ====================
@@ -15812,8 +15824,11 @@ def main():
             
             # ===== BÚSQUEDA EXHAUSTIVA EN TODAS LAS FUENTES =====
             # Usar query mejorada para búsqueda más precisa
-            # 1. Búsqueda unificada: historial + RAG (30-60 chunks)
-            resultados_busq = busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
+            # 1. Búsqueda unificada en thread para no bloquear el event loop
+            import asyncio as _asyncio
+            resultados_busq = await _asyncio.get_event_loop().run_in_executor(
+                None, lambda: busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
+            )
             contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
             
@@ -15922,28 +15937,38 @@ def main():
             
             prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
 
-Responde a {user_name} empezando con "{user_name}," de forma directa y natural.{intent_hint}
+Responde a {user_name} empezando con "{user_name},". Sé directo, completo y útil.{intent_hint}
 
 INSTRUCCIÓN: {instruccion}
 
-REGLAS:
-- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
-- Nunca inventes personas de la Cofradía
-- Responde completo, útil, en español, sin asteriscos
+REGLAS OBLIGATORIAS:
+- NUNCA digas "no tengo información" si conoces el tema — responde con tu conocimiento hasta 2024
+- NUNCA inventes nombres de personas de la Cofradía
+- DESARROLLA la respuesta completamente: explica el tema en detalle, cubre pasos, requisitos, consideraciones
+- Usa formato claro: párrafos bien estructurados, puedes usar listas cuando ayude la claridad
+- Responde en español chileno profesional
+- Si hay documentos abajo, extrae y sintetiza la información relevante de ellos
 
 {ctx_rag}
-{contexto_tarjetas[:600] if contexto_tarjetas else ''}
-{contexto_eventos[:200] if contexto_eventos else ''}
+{contexto_tarjetas[:800] if contexto_tarjetas else ''}
+{contexto_eventos[:300] if contexto_eventos else ''}
 
-PREGUNTA: {mensaje}{sugerencia_cmd}"""
+PREGUNTA: {mensaje}{sugerencia_cmd}
+
+IMPORTANTE: Responde de forma COMPLETA y DETALLADA. No hagas respuestas de 3-4 líneas cuando el tema lo merece."""
             
             fuentes_str = fuentes_str_final
 
             await msg.edit_text("🧠 Generando respuesta completa...")
-            respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
-            
-            if not respuesta:
-                respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
+            import asyncio as _asyncio3
+
+            def _llamar_ia_texto():
+                r = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
+                if not r:
+                    r = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
+                return r
+
+            respuesta = await _asyncio3.get_event_loop().run_in_executor(None, _llamar_ia_texto)
             
             # Fallback emergencia si el prompt completo falló
             if not respuesta:
