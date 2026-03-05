@@ -874,18 +874,19 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-                return None
+                logger.warning(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                # No hacer return None — continuar al siguiente intento o al fallback
+                break
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
-            logger.error(f"Error inesperado Groq: {str(e)[:100]}")
-            return None
+            logger.warning(f"Error inesperado Groq: {str(e)[:100]}")
+            break
     
-    # FALLBACK: Groq agotó reintentos → Gemini 2.0 Flash
-    logger.warning("⚠️ Groq agotó reintentos → Gemini 2.0 Flash")
+    # FALLBACK siempre activo: Groq falló → Gemini 2.0 Flash
+    logger.warning("⚠️ Groq falló → Gemini 2.0 Flash como fallback")
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 

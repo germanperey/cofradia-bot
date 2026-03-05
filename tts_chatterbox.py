@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")
+# es-US-Wavenet-A: voz femenina más cálida y natural que Neural2
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Wavenet-A")
 VOICE_LANGUAGE = "es-US"
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.90"))
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-2.0"))
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.85"))  # más pausada = más natural
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-4.0"))  # más grave = más cálida
 
 CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_gtts"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
