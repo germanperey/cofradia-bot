@@ -14167,6 +14167,10 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Función principal"""
+    import time
+    # Esperar 5 segundos al inicio para que instancias anteriores terminen
+    logger.info("⏳ Esperando 5s para asegurar instancia única...")
+    time.sleep(5)
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
     logger.info(f"📊 Groq IA: {'✅' if GROQ_API_KEY else '❌'} | DeepSeek: {'✅' if deepseek_disponible else '❌'} | IA Global: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
@@ -14997,9 +15001,12 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     
     logger.info("✅ Bot iniciado!")
     
+    # stop_signals=[] evita conflictos en Render donde las señales causan reinicios en loop
     application.run_polling(
-        allowed_updates=Update.ALL_TYPES, 
-        drop_pending_updates=True
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False,
+        stop_signals=[],
     )
 
 
