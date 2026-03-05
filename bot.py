@@ -84,8 +84,7 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
-GROQ_MODEL_HEAVY = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # modelo probado que funciona en Groq
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -126,7 +125,7 @@ if GROQ_API_KEY:
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
-# Gemini 2.0 Flash como fallback (reemplaza DeepSeek, gratis)
+# Gemini 2.0 Flash como fallback de texto (reemplaza DeepSeek, gratis)
 deepseek_disponible = False
 gemini_texto_disponible = False
 if GEMINI_API_KEY:
@@ -874,29 +873,28 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.warning(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-                # No hacer return None — continuar al siguiente intento o al fallback
-                break
+                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                return None
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
-            logger.warning(f"Error inesperado Groq: {str(e)[:100]}")
-            break
+            logger.error(f"Error inesperado Groq: {str(e)[:100]}")
+            return None
     
-    # FALLBACK siempre activo: Groq falló → Gemini 2.0 Flash
-    logger.warning("⚠️ Groq falló → Gemini 2.0 Flash como fallback")
+    # FALLBACK: Groq agotó reintentos → Gemini 2.0 Flash
+    logger.warning("⚠️ Groq falló → Gemini 2.0 Flash")
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
 def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Redirige a Gemini 2.0 Flash (reemplaza DeepSeek)."""
+    """Redirige a Gemini 2.0 Flash."""
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Gemini 2.0 Flash — fallback gratuito de Groq (1500 req/día)."""
+    """Gemini 2.0 Flash — fallback de Groq (1500 req/día, gratis)."""
     if not GEMINI_API_KEY:
         logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
@@ -918,15 +916,14 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
                 "temperature": temperature,
             }
         }
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            texto = data["candidates"][0]["content"]["parts"][0]["text"]
+        r = requests.post(url, json=payload, timeout=30)
+        if r.status_code == 200:
+            texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
             if texto and texto.strip():
                 logger.info("✅ Respuesta Gemini 2.0 Flash")
                 return texto.strip()
         else:
-            logger.warning(f"Gemini error: {response.status_code} — {response.text[:200]}")
+            logger.warning(f"Gemini error: {r.status_code} — {r.text[:200]}")
     except Exception as e:
         logger.warning(f"Error Gemini: {e}")
     return None
@@ -14167,10 +14164,6 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Función principal"""
-    import time
-    # Esperar 5 segundos al inicio para que instancias anteriores terminen
-    logger.info("⏳ Esperando 5s para asegurar instancia única...")
-    time.sleep(5)
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
     logger.info(f"📊 Groq IA: {'✅' if GROQ_API_KEY else '❌'} | DeepSeek: {'✅' if deepseek_disponible else '❌'} | IA Global: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
@@ -15001,7 +14994,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     
     logger.info("✅ Bot iniciado!")
     
-    # stop_signals=[] evita conflictos en Render donde las señales causan reinicios en loop
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
