@@ -84,7 +84,7 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"  # modelo probado que funciona en Groq
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -125,7 +125,7 @@ if GROQ_API_KEY:
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
-# Gemini 2.0 Flash como fallback de texto (reemplaza DeepSeek, gratis)
+# Gemini 2.0 Flash — fallback gratuito (reemplaza DeepSeek)
 deepseek_disponible = False
 gemini_texto_disponible = False
 if GEMINI_API_KEY:
@@ -133,7 +133,7 @@ if GEMINI_API_KEY:
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR, fallback de Groq)")
+    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR)")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
@@ -883,7 +883,7 @@ Tu personalidad:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
             return None
     
-    # FALLBACK: Groq agotó reintentos → Gemini 2.0 Flash
+    # FALLBACK: Groq falló → Gemini 2.0 Flash
     logger.warning("⚠️ Groq falló → Gemini 2.0 Flash")
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
@@ -923,7 +923,7 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
                 logger.info("✅ Respuesta Gemini 2.0 Flash")
                 return texto.strip()
         else:
-            logger.warning(f"Gemini error: {r.status_code} — {r.text[:200]}")
+            logger.warning(f"Gemini error: {r.status_code} — {r.text[:300]}")
     except Exception as e:
         logger.warning(f"Error Gemini: {e}")
     return None
@@ -14994,12 +14994,28 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     
     logger.info("✅ Bot iniciado!")
     
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        close_loop=False,
-        stop_signals=[],
-    )
+    # WEBHOOK vs POLLING — webhook elimina el Conflict en Render definitivamente
+    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
+    if render_url:
+        # En Render: usar webhook (sin Conflict, sin instancias duplicadas)
+        webhook_url = f"{render_url}/webhook"
+        logger.info(f"🌐 Modo WEBHOOK: {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 10000)),
+            webhook_url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False,
+        )
+    else:
+        # Local: usar polling normal
+        logger.info("🔄 Modo POLLING (local)")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False,
+        )
 
 
 if __name__ == '__main__':
