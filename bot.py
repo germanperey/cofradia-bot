@@ -15002,7 +15002,8 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         logger.info(f"🌐 Modo WEBHOOK: {webhook_url}")
         application.run_webhook(
             listen="0.0.0.0",
-            port=int(os.environ.get("PORT", 10000)),
+            port=8443,           # Puerto 8443 — distinto al keep-alive (10000)
+            url_path="webhook",  # Ruta interna del servidor
             webhook_url=webhook_url,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
