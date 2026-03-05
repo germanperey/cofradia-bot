@@ -119,9 +119,9 @@ if GROQ_API_KEY:
             ia_disponible = True
             logger.info(f"✅ Groq AI inicializado correctamente (modelo: {GROQ_MODEL})")
         else:
-            logger.error(f"❌ Error conectando con Groq: {response.status_code}")
+            logger.error(f"❌ Groq HTTP {response.status_code}: {response.text[:300]}")
     except Exception as e:
-        logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
+        logger.error(f"❌ Error inicializando Groq: {str(e)[:200]}")
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
@@ -133,7 +133,21 @@ if GEMINI_API_KEY:
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR)")
+    # Test real de Gemini al arranque
+    try:
+        _test_url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
+        _test_r = requests.post(_test_url, json={
+            "contents": [{"parts": [{"text": "Hola"}]}],
+            "generationConfig": {"maxOutputTokens": 5}
+        }, timeout=10)
+        if _test_r.status_code == 200:
+            logger.info("✅ Gemini 2.0 Flash activo y respondiendo (texto + OCR)")
+        else:
+            logger.error(f"❌ Gemini falla en test: HTTP {_test_r.status_code} — {_test_r.text[:300]}")
+            gemini_disponible = False
+            gemini_texto_disponible = False
+    except Exception as _e:
+        logger.error(f"❌ Gemini excepción en test: {_e}")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
@@ -1045,8 +1059,8 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-                break  # Ir al fallback Gemini, nunca cortar aquí
+                logger.error(f"❌ Groq API error {response.status_code}: {response.text[:400]}")
+                break  # Ir al fallback Gemini
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
