@@ -84,12 +84,13 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
+GROQ_MODEL = "llama-3.1-8b-instant"        # Rápido, menos rate limit
+GROQ_MODEL_HEAVY = "llama-3.3-70b-versatile"  # Para tareas complejas
 
-# ==================== CONFIGURACIÓN DE GEMINI (OCR) ====================
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+# ==================== CONFIGURACIÓN DE GEMINI (texto + OCR) ====================
+# Gemini 2.0 Flash: 100% gratuito, 1500 req/día, reemplaza DeepSeek
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
@@ -126,38 +127,17 @@ if GROQ_API_KEY:
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
-# Probar conexión con DeepSeek (LLM alternativo/fallback)
-deepseek_disponible = False
-if DEEPSEEK_API_KEY:
-    try:
-        headers_ds = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        test_ds = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [{"role": "user", "content": "Hola"}],
-            "max_tokens": 10
-        }
-        response_ds = requests.post(DEEPSEEK_API_URL, headers=headers_ds, json=test_ds, timeout=10)
-        if response_ds.status_code == 200:
-            deepseek_disponible = True
-            if not ia_disponible:
-                ia_disponible = True  # DeepSeek como LLM principal si Groq no está
-            logger.info(f"✅ DeepSeek AI inicializado (modelo: {DEEPSEEK_MODEL})")
-        else:
-            logger.warning(f"⚠️ DeepSeek no disponible: {response_ds.status_code}")
-    except Exception as e:
-        logger.warning(f"⚠️ Error inicializando DeepSeek: {str(e)[:50]}")
-else:
-    logger.info("ℹ️ DEEPSEEK_API_KEY no configurada (opcional)")
-
-# Verificar Gemini
+# Gemini 2.0 Flash como fallback de texto (reemplaza DeepSeek, 100% gratuito)
+gemini_texto_disponible = False
+deepseek_disponible = False  # Ya no se usa, mantenido por compatibilidad
 if GEMINI_API_KEY:
     gemini_disponible = True
-    logger.info("✅ Gemini API Key configurada (OCR disponible)")
+    gemini_texto_disponible = True
+    if not ia_disponible:
+        ia_disponible = True
+    logger.info("✅ Gemini 2.0 Flash disponible (OCR + texto, fallback de Groq)")
 else:
-    logger.warning("⚠️ GEMINI_API_KEY no configurada - OCR no disponible")
+    logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
 # Verificar JSearch (RapidAPI)
 if RAPIDAPI_KEY:
@@ -914,46 +894,46 @@ Tu personalidad:
 
 
 def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Llama a la API de DeepSeek como LLM alternativo/fallback"""
-    if not DEEPSEEK_API_KEY:
+    """Ahora usa Gemini 2.0 Flash (gratuito). Mantiene nombre para compatibilidad."""
+    return llamar_gemini_texto(prompt, max_tokens, temperature)
+
+
+def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Gemini 2.0 Flash como fallback de texto (100% gratuito, 1500 req/día)."""
+    if not GEMINI_API_KEY:
+        logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
-    
     try:
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
+        url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
         payload = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Eres el asistente de IA de Cofradía de Networking, una comunidad profesional chilena. Responde siempre en español, de forma profesional y útil."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature
+            "contents": [{
+                "parts": [{
+                    "text": (
+                        "Eres el asistente de IA de Cofradía de Networking, "
+                        "una comunidad profesional chilena de alto nivel. "
+                        "Eres profesional, amigable y cercano. "
+                        "Experto en networking, negocios, emprendimiento y mercado laboral chileno. "
+                        "Responde siempre en español chileno, de forma clara y útil.\n\n"
+                        + prompt
+                    )
+                }]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            }
         }
-        
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
-        
+        response = requests.post(url, json=payload, timeout=30)
         if response.status_code == 200:
             data = response.json()
-            respuesta = data['choices'][0]['message']['content']
-            if respuesta and len(respuesta.strip()) > 0:
-                logger.info("✅ Respuesta obtenida de DeepSeek (fallback)")
-                return respuesta.strip()
+            texto = data["candidates"][0]["content"]["parts"][0]["text"]
+            if texto and len(texto.strip()) > 0:
+                logger.info("✅ Respuesta Gemini 2.0 Flash (fallback)")
+                return texto.strip()
         else:
-            logger.warning(f"DeepSeek API error: {response.status_code}")
-    
+            logger.warning(f"Gemini texto error: {response.status_code} - {response.text[:200]}")
     except Exception as e:
-        logger.warning(f"Error DeepSeek: {str(e)[:100]}")
-    
+        logger.warning(f"Error Gemini texto: {str(e)[:100]}")
     return None
 
 
