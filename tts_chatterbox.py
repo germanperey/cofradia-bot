@@ -190,11 +190,14 @@ async def texto_a_voz(
     print(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
     logger.info(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
 
+    # cfg_weight alto (0.7-0.9) = sigue más fielmente la voz de referencia
+    # → preserva el acento chileno del archivo voz_referencia.wav
+    # exaggeration bajo-medio (0.3-0.5) = voz natural sin sobreactuar
     estilos = {
-        "normal":       {"exaggeration": 0.50, "cfg_weight": 0.25},
-        "bienvenida":   {"exaggeration": 0.58, "cfg_weight": 0.28},
-        "alerta":       {"exaggeration": 0.62, "cfg_weight": 0.32},
-        "celebracion":  {"exaggeration": 0.68, "cfg_weight": 0.30},
+        "normal":       {"exaggeration": 0.35, "cfg_weight": 0.75},
+        "bienvenida":   {"exaggeration": 0.42, "cfg_weight": 0.78},
+        "alerta":       {"exaggeration": 0.50, "cfg_weight": 0.80},
+        "celebracion":  {"exaggeration": 0.55, "cfg_weight": 0.78},
     }
     cfg = estilos.get(estilo, estilos["normal"])
 
