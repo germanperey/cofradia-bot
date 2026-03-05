@@ -1,7 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   TTS CHATTERBOX — vía Gradio Space de Hugging Face             ║
-║   Corrección: archivo WAV enviado con handle_file()             ║
+║   TTS — Google Cloud Text-to-Speech                             ║
+║   Voz: es-US-Neural2-A (femenina, latinoamericana, natural)     ║
+║   Gratuito: 1,000,000 caracteres/mes para siempre               ║
+║   Fallback: edge-TTS Catalina mejorada                          ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -10,28 +12,35 @@ import io
 import logging
 import asyncio
 import hashlib
+import base64
+import requests
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ─── CONFIGURACIÓN ──────────────────────────────────────────────────
-HF_TOKEN      = os.getenv("HF_TOKEN", "")
-HF_SPACE      = "ResembleAI/Chatterbox"
-TTS_VOICE_URL = os.getenv("TTS_VOICE_URL", "")
+GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
+GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 
-CACHE_DIR      = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_v3"))
+# Voz seleccionada: femenina, español latinoamericano, ultra-natural
+# Opciones disponibles (todas gratuitas 1M chars/mes):
+#   es-US-Neural2-A  → mujer, neutro latinoamericano ← RECOMENDADA
+#   es-US-Neural2-C  → mujer, tono más cálido
+#   es-US-Wavenet-A  → mujer, muy natural
+#   es-US-Wavenet-F  → mujer, tono suave
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")
+VOICE_LANGUAGE = "es-US"
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE", "0.92"))  # 0.92 = levemente más pausada
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-1.5")) # -1.5 = tono ligeramente más cálido
+
+CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_gtts"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-USE_CACHE      = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
-VOICE_REF_PATH = Path("/tmp/cofradia_voz_ref_v3.wav")
-
-_gradio_client  = None
-_client_lock    = asyncio.Lock()
-_voice_ref_lock = asyncio.Lock()
+USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 
 
-def _cache_key(texto: str, estilo: str) -> str:
-    return hashlib.md5(f"{texto}_{estilo}".encode()).hexdigest()
+def _cache_key(texto: str) -> str:
+    return hashlib.md5(f"{texto}_{VOICE_NAME}_{SPEAKING_RATE}_{PITCH}".encode()).hexdigest()
 
 
 def _limpiar_texto(texto: str) -> str:
@@ -42,133 +51,61 @@ def _limpiar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", texto).strip()
 
 
-def _descargar_voz_referencia() -> Optional[str]:
+def _llamar_google_tts(texto: str) -> Optional[bytes]:
     """
-    Descarga el WAV de referencia desde TTS_VOICE_URL.
-    Retorna la ruta local o None si falla.
+    Llama a Google Cloud TTS y retorna bytes de audio MP3.
+    Gratuito hasta 1,000,000 caracteres/mes (WaveNet/Neural2).
     """
-    if VOICE_REF_PATH.exists() and VOICE_REF_PATH.stat().st_size > 5000:
-        print(f"✅ [TTS] Voz de referencia ya en disco ({VOICE_REF_PATH.stat().st_size} bytes)")
-        return str(VOICE_REF_PATH)
-
-    if not TTS_VOICE_URL:
-        print("⚠️ [TTS] TTS_VOICE_URL no configurada")
-        return None
-
+    url = f"{GOOGLE_TTS_URL}?key={GOOGLE_TTS_KEY}"
+    payload = {
+        "input": {"text": texto},
+        "voice": {
+            "languageCode": VOICE_LANGUAGE,
+            "name": VOICE_NAME,
+        },
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "speakingRate": SPEAKING_RATE,
+            "pitch": PITCH,
+            "effectsProfileId": ["headphone-class-device"],
+        }
+    }
     try:
-        import requests
-        print(f"⬇️  [TTS] Descargando voz desde: {TTS_VOICE_URL}")
-        r = requests.get(TTS_VOICE_URL, timeout=20)
-        if r.status_code == 200 and len(r.content) > 5000:
-            VOICE_REF_PATH.write_bytes(r.content)
-            print(f"✅ [TTS] Voz descargada: {len(r.content)} bytes → {VOICE_REF_PATH}")
-            return str(VOICE_REF_PATH)
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            audio_b64 = data.get("audioContent", "")
+            if audio_b64:
+                audio_bytes = base64.b64decode(audio_b64)
+                print(f"✅ [TTS] Google Neural2 generó {len(audio_bytes):,} bytes")
+                logger.info(f"✅ [TTS] Google Neural2 OK ({len(audio_bytes):,} bytes)")
+                return audio_bytes
         else:
-            print(f"❌ [TTS] Descarga falló: status={r.status_code} size={len(r.content)}")
-            return None
+            print(f"❌ [TTS] Google TTS error {response.status_code}: {response.text[:200]}")
+            logger.warning(f"Google TTS error {response.status_code}: {response.text[:200]}")
     except Exception as e:
-        print(f"❌ [TTS] Error descargando voz: {e}")
-        return None
-
-
-async def _get_cliente():
-    global _gradio_client
-    if _gradio_client is not None:
-        return _gradio_client
-
-    async with _client_lock:
-        if _gradio_client is not None:
-            return _gradio_client
-
-        print("🔌 [TTS] Conectando a Chatterbox en Hugging Face...")
-        loop = asyncio.get_event_loop()
-
-        def _crear():
-            from gradio_client import Client
-            if HF_TOKEN:
-                os.environ["GRADIO_HF_HUB_TOKEN"] = HF_TOKEN
-            return Client(HF_SPACE)
-
-        _gradio_client = await loop.run_in_executor(None, _crear)
-        print("✅ [TTS] Conectado a Chatterbox.")
-        logger.info("✅ [TTS] Conectado a Chatterbox.")
-
-    return _gradio_client
-
-
-async def _generar_con_gradio(texto: str, exaggeration: float, cfg_weight: float) -> bytes:
-    # Descargar la voz de referencia
-    voz_path = _descargar_voz_referencia()
-    cliente  = await _get_cliente()
-    loop     = asyncio.get_event_loop()
-
-    def _llamar():
-        from gradio_client import handle_file
-
-        # Preparar el audio prompt correctamente
-        # handle_file() es la forma correcta de enviar archivos a Gradio
-        if voz_path and Path(voz_path).exists():
-            audio_prompt = handle_file(voz_path)
-            print(f"🎙️ [TTS] Enviando voz de referencia con handle_file()")
-        else:
-            audio_prompt = None
-            print(f"⚠️ [TTS] Sin voz de referencia — Chatterbox usará voz aleatoria")
-
-        print(f"🚀 [TTS] Generando audio | exag={exaggeration} | cfg={cfg_weight}")
-
-        try:
-            resultado = cliente.predict(
-                texto,
-                audio_prompt,   # ← handle_file() en vez de string
-                exaggeration,
-                cfg_weight,
-                0,              # seed
-                api_name="/generate"
-            )
-            print(f"✅ [TTS] Respuesta recibida: {type(resultado)}")
-        except Exception as e1:
-            print(f"⚠️ [TTS] Reintentando sin api_name... ({e1})")
-            resultado = cliente.predict(
-                texto,
-                audio_prompt,
-                exaggeration,
-                cfg_weight,
-                0,
-            )
-
-        ruta = Path(resultado[0]) if isinstance(resultado, (list, tuple)) else Path(resultado)
-        print(f"✅ [TTS] Audio generado: {ruta}")
-        return ruta.read_bytes()
-
-    return await loop.run_in_executor(None, _llamar)
-
-
-def _wav_a_ogg(wav_bytes: bytes) -> bytes:
-    try:
-        import soundfile as sf
-        buf_in   = io.BytesIO(wav_bytes)
-        data, sr = sf.read(buf_in)
-        buf_out  = io.BytesIO()
-        sf.write(buf_out, data, sr, format="OGG", subtype="VORBIS")
-        return buf_out.getvalue()
-    except Exception as e:
-        print(f"⚠️ [TTS] Conversión OGG falló ({e}), usando WAV directo")
-        return wav_bytes
+        print(f"❌ [TTS] Google TTS excepción: {e}")
+        logger.warning(f"Google TTS excepción: {e}")
+    return None
 
 
 async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
+    """Fallback a Catalina mejorada si Google TTS no está disponible."""
     try:
         import edge_tts
         communicate = edge_tts.Communicate(
-            texto, "es-CL-CatalinaNeural",
-            rate="-12%", pitch="-4Hz", volume="+8%"
+            texto,
+            "es-CL-CatalinaNeural",
+            rate   = "-10%",
+            pitch  = "-3Hz",
+            volume = "+8%"
         )
         buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
-        print("🔈 [TTS] Fallback: Catalina mejorada.")
-        logger.info("🔈 [TTS] Fallback: Catalina mejorada.")
+        print("🔈 [TTS] Fallback: Catalina mejorada")
+        logger.info("🔈 [TTS] Fallback: Catalina mejorada")
         return buf.getvalue()
     except Exception as e:
         logger.error(f"edge-TTS falló: {e}")
@@ -178,8 +115,13 @@ async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
 async def texto_a_voz(
     texto: str,
     estilo: str = "normal",
-    usar_chatterbox: bool = True
+    usar_chatterbox: bool = True   # parámetro mantenido por compatibilidad
 ) -> Optional[bytes]:
+    """
+    Función principal de TTS.
+    Usa Google Cloud Neural2 (voz latinoamericana natural).
+    Fallback a Catalina si GOOGLE_TTS_KEY no está configurada.
+    """
     if not texto or not texto.strip():
         return None
 
@@ -187,58 +129,45 @@ async def texto_a_voz(
     if not texto_limpio:
         return None
 
-    print(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
-    logger.info(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
+    # Limitar largo (Google TTS acepta hasta 5,000 chars)
+    if len(texto_limpio) > 4500:
+        texto_limpio = texto_limpio[:4497] + "..."
 
-    # cfg_weight mínimo permitido = 0.05
-    # Con 0.05 Chatterbox sigue casi exclusivamente la voz de referencia
-    # preservando el acento chileno/latinoamericano del WAV subido
-    estilos = {
-        "normal":       {"exaggeration": 0.30, "cfg_weight": 0.05},
-        "bienvenida":   {"exaggeration": 0.38, "cfg_weight": 0.05},
-        "alerta":       {"exaggeration": 0.45, "cfg_weight": 0.05},
-        "celebracion":  {"exaggeration": 0.50, "cfg_weight": 0.05},
-    }
-    cfg = estilos.get(estilo, estilos["normal"])
+    print(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'} | voz={VOICE_NAME}")
+    logger.info(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'}")
 
+    # Revisar caché
     if USE_CACHE:
-        clave   = _cache_key(texto_limpio, estilo)
-        f_cache = CACHE_DIR / f"{clave}.ogg"
+        clave   = _cache_key(texto_limpio)
+        f_cache = CACHE_DIR / f"{clave}.mp3"
         if f_cache.exists():
-            print("🎵 [TTS] Audio desde caché.")
+            print("🎵 [TTS] Audio desde caché")
             return f_cache.read_bytes()
 
-    if usar_chatterbox and HF_TOKEN:
-        try:
-            wav = await _generar_con_gradio(
-                texto_limpio, cfg["exaggeration"], cfg["cfg_weight"]
-            )
-            ogg = _wav_a_ogg(wav)
+    if GOOGLE_TTS_KEY:
+        # Ejecutar en thread para no bloquear asyncio
+        loop = asyncio.get_event_loop()
+        audio = await loop.run_in_executor(None, _llamar_google_tts, texto_limpio)
+        if audio:
             if USE_CACHE:
-                f_cache.write_bytes(ogg)
-            print("🎙️ [TTS] ¡CHATTERBOX EXITOSO! ✅")
-            logger.info("🎙️ [TTS] ¡CHATTERBOX EXITOSO! ✅")
-            return ogg
-        except Exception as e:
-            print(f"❌ [TTS] Chatterbox falló: {e}")
-            logger.warning(f"❌ [TTS] Chatterbox falló: {e}")
-            # Borrar voz de referencia para que se re-descargue la próxima vez
-            if VOICE_REF_PATH.exists():
-                VOICE_REF_PATH.unlink()
+                f_cache.write_bytes(audio)
+            return audio
+        else:
+            print("⚠️ [TTS] Google TTS falló → Catalina mejorada")
             return await _edge_tts_fallback(texto_limpio)
     else:
-        print("⏭️ [TTS] Sin Chatterbox → Catalina mejorada")
+        print("⏭️ [TTS] Sin GOOGLE_TTS_KEY → Catalina mejorada")
+        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada — usando edge-TTS")
         return await _edge_tts_fallback(texto_limpio)
 
 
 async def limpiar_cache_tts(dias: int = 7):
+    """Limpia audios del caché más antiguos que N días."""
     import time
     ahora    = time.time()
     borrados = 0
-    for f in CACHE_DIR.glob("*.ogg"):
+    for f in CACHE_DIR.glob("*.mp3"):
         if ahora - f.stat().st_mtime > dias * 86400:
             f.unlink()
             borrados += 1
-    if VOICE_REF_PATH.exists():
-        VOICE_REF_PATH.unlink()
     logger.info(f"🗑️ Caché TTS: {borrados} archivos eliminados.")
