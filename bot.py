@@ -85,14 +85,10 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_MODEL_FAST = "llama3-8b-8192"       # Fallback Groq rápido — límite separado
-GROQ_MODEL_MIX  = "mixtral-8x7b-32768"   # Fallback Groq alternativo
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_TEXT_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_FLASH15_URL    = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-GEMINI_FLASH15_8B_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent"
+GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
@@ -123,9 +119,9 @@ if GROQ_API_KEY:
             ia_disponible = True
             logger.info(f"✅ Groq AI inicializado correctamente (modelo: {GROQ_MODEL})")
         else:
-            logger.error(f"❌ Groq HTTP {response.status_code}: {response.text[:300]}")
+            logger.error(f"❌ Error conectando con Groq: {response.status_code}")
     except Exception as e:
-        logger.error(f"❌ Error inicializando Groq: {str(e)[:200]}")
+        logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
@@ -137,21 +133,7 @@ if GEMINI_API_KEY:
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    # Test real de Gemini al arranque
-    try:
-        _test_url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
-        _test_r = requests.post(_test_url, json={
-            "contents": [{"parts": [{"text": "Hola"}]}],
-            "generationConfig": {"maxOutputTokens": 5}
-        }, timeout=10)
-        if _test_r.status_code == 200:
-            logger.info("✅ Gemini 2.0 Flash activo y respondiendo (texto + OCR)")
-        else:
-            logger.error(f"❌ Gemini falla en test: HTTP {_test_r.status_code} — {_test_r.text[:300]}")
-            gemini_disponible = False
-            gemini_texto_disponible = False
-    except Exception as _e:
-        logger.error(f"❌ Gemini excepción en test: {_e}")
+    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR)")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
@@ -387,92 +369,6 @@ def init_db():
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                voz_idioma TEXT DEFAULT 'es-US-Wavenet-A',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS confirmaciones_lectura (
-                id SERIAL PRIMARY KEY,
-                anuncio_id BIGINT,
-                user_id BIGINT,
-                first_name TEXT,
-                fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(anuncio_id, user_id)
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'El bot está en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            c.execute('''INSERT INTO modo_mantenimiento (id, activo) VALUES (1, 0)
-                ON CONFLICT (id) DO NOTHING''')
-
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'Bot en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            try:
-                if DATABASE_URL:
-                    c.execute('''INSERT INTO modo_mantenimiento (id,activo) VALUES (1,0) ON CONFLICT (id) DO NOTHING''')
-                else:
-                    c.execute('''INSERT OR IGNORE INTO modo_mantenimiento (id,activo) VALUES (1,0)''')
-            except Exception:
-                pass
-
             c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
@@ -749,92 +645,6 @@ def init_db():
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                voz_idioma TEXT DEFAULT 'es-US-Wavenet-A',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS confirmaciones_lectura (
-                id SERIAL PRIMARY KEY,
-                anuncio_id BIGINT,
-                user_id BIGINT,
-                first_name TEXT,
-                fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(anuncio_id, user_id)
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'El bot está en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            c.execute('''INSERT INTO modo_mantenimiento (id, activo) VALUES (1, 0)
-                ON CONFLICT (id) DO NOTHING''')
-
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'Bot en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            try:
-                if DATABASE_URL:
-                    c.execute('''INSERT INTO modo_mantenimiento (id,activo) VALUES (1,0) ON CONFLICT (id) DO NOTHING''')
-                else:
-                    c.execute('''INSERT OR IGNORE INTO modo_mantenimiento (id,activo) VALUES (1,0)''')
-            except Exception:
-                pass
-
             c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -1055,14 +865,7 @@ Tu personalidad:
             elif response.status_code == 429:
                 logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
                 import time
-                time.sleep(3 * (intento + 1))
-                # Cambiar a modelo más liviano en reintentos
-                if intento == 1:
-                    payload["model"] = GROQ_MODEL_FAST
-                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_FAST}")
-                elif intento == 2:
-                    payload["model"] = GROQ_MODEL_MIX
-                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_MIX}")
+                time.sleep(2 * (intento + 1))
                 
             elif response.status_code >= 500:
                 logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
@@ -1070,15 +873,15 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.error(f"❌ Groq API error {response.status_code}: {response.text[:400]}")
-                break  # Ir al fallback Gemini
+                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                return None
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
-            break  # Ir al fallback Gemini
+            return None
     
     # FALLBACK: Groq falló → Gemini 2.0 Flash
     logger.warning("⚠️ Groq falló → Gemini 2.0 Flash")
@@ -1090,58 +893,39 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
-def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature: float, nombre: str) -> str:
-    """Llama a un endpoint específico de Gemini."""
-    try:
-        url = f"{url_base}?key={GEMINI_API_KEY}"
-        sistema = (
-            "Eres el asistente de IA de Cofradía de Networking, "
-            "comunidad profesional chilena de alto nivel. "
-            "Responde siempre en español chileno, profesional y cercano.\n\n"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": sistema + prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
-        }
-        r = requests.post(url, json=payload, timeout=30)
-        if r.status_code == 200:
-            candidatos = r.json().get("candidates", [])
-            if candidatos:
-                texto = candidatos[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                if texto and texto.strip():
-                    logger.info(f"✅ Respuesta {nombre} OK")
-                    return texto.strip()
-        elif r.status_code == 429:
-            logger.warning(f"⚠️ {nombre} cuota agotada (429)")
-        else:
-            logger.error(f"❌ {nombre} HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        logger.error(f"❌ {nombre} excepción: {e}")
-    return None
-
-
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Cadena Gemini con 3 modelos de cuota independiente:
-    gemini-2.0-flash → gemini-1.5-flash → gemini-1.5-flash-8b
-    Cada modelo tiene su propio límite de 1500 req/día gratis."""
+    """Gemini 2.0 Flash — fallback de Groq (1500 req/día, gratis)."""
     if not GEMINI_API_KEY:
         logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
-    # Intento 1: Gemini 2.0 Flash
-    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt, max_tokens, temperature, "Gemini 2.0 Flash")
-    if r:
-        return r
-    # Intento 2: Gemini 1.5 Flash (cuota separada)
-    logger.info("🔄 Gemini 2.0 agotado → Gemini 1.5 Flash")
-    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash")
-    if r:
-        return r
-    # Intento 3: Gemini 1.5 Flash-8B (cuota separada, ultra ligero)
-    logger.info("🔄 Gemini 1.5 agotado → Gemini 1.5 Flash-8B")
-    r = _llamar_gemini_url(GEMINI_FLASH15_8B_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash-8B")
-    if r:
-        return r
-    logger.error("❌ Todos los modelos Gemini agotaron su cuota diaria")
+    try:
+        url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": (
+                        "Eres el asistente de IA de Cofradía de Networking, "
+                        "comunidad profesional chilena de alto nivel. "
+                        "Responde siempre en español chileno, profesional y cercano.\n\n"
+                        + prompt
+                    )
+                }]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            }
+        }
+        r = requests.post(url, json=payload, timeout=30)
+        if r.status_code == 200:
+            texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            if texto and texto.strip():
+                logger.info("✅ Respuesta Gemini 2.0 Flash")
+                return texto.strip()
+        else:
+            logger.warning(f"Gemini error: {r.status_code} — {r.text[:300]}")
+    except Exception as e:
+        logger.warning(f"Error Gemini: {e}")
     return None
 
 
@@ -1705,14 +1489,14 @@ He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
         
         # PASO 5: Generar y enviar audio de respuesta
         try:
-            audio_file = await generar_audio_con_velocidad(respuesta_texto, user_id)
+            audio_file = await generar_audio_tts(respuesta_texto)
             if audio_file:
                 with open(audio_file, 'rb') as f:
                     await update.message.reply_voice(
                         voice=f,
-                        caption="🔊 Respuesta de voz",
-                        reply_markup=botones_velocidad_voz(user_id)
+                        caption="🔊 Respuesta de voz"
                     )
+                # Limpiar archivo temporal
                 try:
                     os.remove(audio_file)
                 except:
@@ -3930,36 +3714,7 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
-# ==================== CALLBACK VELOCIDAD VOZ ====================
-
-async def callback_velocidad_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones de velocidad de voz."""
-    query = update.callback_query
-    await query.answer()
-    partes = query.data.split(":")  # voz_vel:lento:user_id
-    if len(partes) < 3:
-        return
-    _, velocidad, uid_str = partes[0], partes[1], partes[2]
-    try:
-        uid = int(uid_str)
-    except ValueError:
-        uid = query.from_user.id
-    # Solo el propio usuario puede cambiar su velocidad
-    if query.from_user.id != uid:
-        await query.answer("Solo puedes cambiar tu propia preferencia.", show_alert=True)
-        return
-    set_preferencia_voz(uid, velocidad)
-    nombres = {"lento": "🐢 Lento", "normal": "▶️ Normal", "rapido": "🐇 Rápido"}
-    await query.edit_message_text(
-        f"Velocidad de voz guardada: *{nombres.get(velocidad, velocidad)}*\n\n"
-        "Tu proxima respuesta de voz usara esta velocidad.",
-        parse_mode='Markdown',
-        reply_markup=botones_velocidad_voz(uid)
-    )
-    logger.info(f"Usuario {uid} cambio velocidad voz a: {velocidad}")
-
 # ==================== CALLBACKS ====================
-
 
 async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback cuando seleccionan un plan"""
@@ -9037,162 +8792,7 @@ def buscar_apoyo_profesional(query):
         return f"❌ Error: {str(e)[:150]}"
 
 
-# ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
-
-def get_preferencia_voz(user_id: int) -> dict:
-    """Obtiene preferencias de voz del usuario."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=%s", (user_id,))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"velocidad": row[0], "resumen_diario": row[1], "hora_resumen": row[2]}
-    except Exception:
-        pass
-    return {"velocidad": "normal", "resumen_diario": 0, "hora_resumen": 9}
-
-def set_preferencia_voz(user_id: int, velocidad: str):
-    """Guarda preferencia de velocidad de voz."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET voz_velocidad=EXCLUDED.voz_velocidad,
-                    fecha_actualizado=CURRENT_TIMESTAMP""", (user_id, velocidad))
-            else:
-                c.execute("""INSERT OR REPLACE INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (?, ?)""", (user_id, velocidad))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error guardando preferencia voz: {e}")
-
-def velocidad_a_rate(velocidad: str) -> str:
-    """Convierte preferencia a parámetro de rate para TTS."""
-    return {"lento": "-25%", "normal": "-12%", "rapido": "+20%"}.get(velocidad, "-12%")
-
-def velocidad_a_pitch(velocidad: str) -> float:
-    """Convierte preferencia a pitch para Google TTS."""
-    return {"lento": -6.0, "normal": -4.0, "rapido": -2.0}.get(velocidad, -4.0)
-
-def velocidad_a_rate_google(velocidad: str) -> float:
-    """Convierte preferencia a speakingRate para Google TTS."""
-    return {"lento": 0.75, "normal": 0.85, "rapido": 1.15}.get(velocidad, 0.85)
-
-async def generar_audio_con_velocidad(texto: str, user_id: int, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio respetando la preferencia de velocidad del usuario."""
-    pref = get_preferencia_voz(user_id)
-    velocidad = pref.get("velocidad", "normal")
-    import re, os
-
-    if len(texto) > 2000:
-        texto = texto[:1997] + "..."
-    texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═⚓]', '', texto)
-    texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
-    texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
-
-    # Intentar Google TTS con velocidad personalizada
-    google_key = os.getenv("GOOGLE_TTS_KEY", "")
-    if google_key:
-        try:
-            import requests as _req, base64
-            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={google_key}"
-            payload = {
-                "input": {"text": texto_voz},
-                "voice": {"languageCode": "es-US", "name": "es-US-Wavenet-A"},
-                "audioConfig": {
-                    "audioEncoding": "MP3",
-                    "speakingRate": velocidad_a_rate_google(velocidad),
-                    "pitch": velocidad_a_pitch(velocidad),
-                    "volumeGainDb": 1.0,
-                }
-            }
-            r = _req.post(url, json=payload, timeout=15)
-            if r.status_code == 200:
-                audio = base64.b64decode(r.json().get("audioContent", ""))
-                if audio:
-                    with open(filename, "wb") as f:
-                        f.write(audio)
-                    logger.info(f"🎤 Audio Wavenet ({velocidad}) generado: {len(audio):,} bytes")
-                    return filename
-        except Exception as e:
-            logger.warning(f"Google TTS velocidad falló: {e}")
-
-    # Fallback: edge-TTS con velocidad
-    try:
-        import edge_tts
-        texto_voz2 = texto_voz.replace('. ', '... ').replace(': ', ':... ')
-        communicate = edge_tts.Communicate(
-            texto_voz2, VOZ_TTS,
-            rate=velocidad_a_rate(velocidad),
-            pitch="-4Hz", volume="+8%"
-        )
-        await communicate.save(filename)
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            return filename
-    except Exception as e:
-        logger.error(f"Error TTS con velocidad: {e}")
-    return None
-
-def botones_velocidad_voz(user_id: int) -> 'InlineKeyboardMarkup':
-    """Genera botones inline para ajustar velocidad de voz."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    pref = get_preferencia_voz(user_id)
-    actual = pref.get("velocidad", "normal")
-    marca = {"lento": "🐢✓", "normal": "▶️✓", "rapido": "🐇✓"}
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(marca.get("lento","🐢") if actual=="lento" else "🐢 Lento",
-                             callback_data=f"voz_vel:lento:{user_id}"),
-        InlineKeyboardButton(marca.get("normal","▶️") if actual=="normal" else "▶️ Normal",
-                             callback_data=f"voz_vel:normal:{user_id}"),
-        InlineKeyboardButton(marca.get("rapido","🐇") if actual=="rapido" else "🐇 Rápido",
-                             callback_data=f"voz_vel:rapido:{user_id}"),
-    ]])
-
-# ==================== MODO MANTENIMIENTO ====================
-
-def get_modo_mantenimiento() -> dict:
-    """Retorna estado del modo mantenimiento."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT activo, mensaje FROM modo_mantenimiento WHERE id=1")
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"activo": bool(row[0]), "mensaje": row[1]}
-    except Exception:
-        pass
-    return {"activo": False, "mensaje": ""}
-
-def set_modo_mantenimiento(activo: bool, mensaje: str, admin_id: int):
-    """Activa o desactiva el modo mantenimiento."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""UPDATE modo_mantenimiento SET activo=%s, mensaje=%s,
-                    activado_por=%s, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            else:
-                c.execute("""UPDATE modo_mantenimiento SET activo=?, mensaje=?,
-                    activado_por=?, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error modo mantenimiento: {e}")
-
 # ==================== SISTEMA DE CUMPLEAÑOS ====================
-
 
 def obtener_cumpleanos_hoy():
     """
@@ -13665,519 +13265,6 @@ async def ejecutar_comando_desde_intencion(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
-
-def get_preferencia_voz(user_id: int) -> dict:
-    """Obtiene preferencias de voz del usuario."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=%s" if DATABASE_URL else
-                      "SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=?", (user_id,))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"velocidad": row[0], "resumen_diario": row[1], "hora_resumen": row[2]}
-    except Exception:
-        pass
-    return {"velocidad": "normal", "resumen_diario": 0, "hora_resumen": 9}
-
-
-def set_preferencia_voz(user_id: int, velocidad: str):
-    """Guarda preferencia de velocidad de voz."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET voz_velocidad=EXCLUDED.voz_velocidad,
-                    fecha_actualizado=CURRENT_TIMESTAMP""", (user_id, velocidad))
-            else:
-                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, voz_velocidad) VALUES (?, ?)", (user_id, velocidad))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error guardando preferencia voz: {e}")
-
-
-def velocidad_a_rate_google(velocidad: str) -> float:
-    return {"lento": 0.75, "normal": 0.85, "rapido": 1.15}.get(velocidad, 0.85)
-
-
-def velocidad_a_pitch(velocidad: str) -> float:
-    return {"lento": -6.0, "normal": -4.0, "rapido": -2.0}.get(velocidad, -4.0)
-
-
-def velocidad_a_rate_edge(velocidad: str) -> str:
-    return {"lento": "-25%", "normal": "-12%", "rapido": "+20%"}.get(velocidad, "-12%")
-
-
-async def generar_audio_con_velocidad(texto: str, user_id: int, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio respetando la preferencia de velocidad del usuario."""
-    import re, os, base64, requests as _req
-    pref = get_preferencia_voz(user_id)
-    velocidad = pref.get("velocidad", "normal")
-
-    if len(texto) > 2000:
-        texto = texto[:1997] + "..."
-    texto_voz = re.sub(r'[^\w\s,.!?;:()\-áéíóúüñÁÉÍÓÚÜÑ]', ' ', texto)
-    texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
-
-    google_key = os.getenv("GOOGLE_TTS_KEY", "")
-    if google_key:
-        try:
-            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={google_key}"
-            payload = {
-                "input": {"text": texto_voz},
-                "voice": {"languageCode": "es-US", "name": "es-US-Wavenet-A"},
-                "audioConfig": {
-                    "audioEncoding": "MP3",
-                    "speakingRate": velocidad_a_rate_google(velocidad),
-                    "pitch": velocidad_a_pitch(velocidad),
-                    "volumeGainDb": 1.0,
-                }
-            }
-            r = _req.post(url, json=payload, timeout=15)
-            if r.status_code == 200:
-                audio = base64.b64decode(r.json().get("audioContent", ""))
-                if audio:
-                    with open(filename, "wb") as f:
-                        f.write(audio)
-                    logger.info(f"Audio Wavenet ({velocidad}): {len(audio):,} bytes")
-                    return filename
-        except Exception as e:
-            logger.warning(f"Google TTS velocidad fallo: {e}")
-
-    try:
-        import edge_tts
-        texto_voz2 = texto_voz.replace('. ', '... ').replace(': ', ':... ')
-        communicate = edge_tts.Communicate(
-            texto_voz2, VOZ_TTS,
-            rate=velocidad_a_rate_edge(velocidad),
-            pitch="-4Hz", volume="+8%"
-        )
-        await communicate.save(filename)
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            return filename
-    except Exception as e:
-        logger.error(f"Error TTS velocidad: {e}")
-    return None
-
-
-def botones_velocidad_voz(user_id: int):
-    """Genera botones inline para ajustar velocidad de voz."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    pref = get_preferencia_voz(user_id)
-    actual = pref.get("velocidad", "normal")
-    lbl_l = "🐢✓ Lento" if actual == "lento" else "🐢 Lento"
-    lbl_n = "▶️✓ Normal" if actual == "normal" else "▶️ Normal"
-    lbl_r = "🐇✓ Rápido" if actual == "rapido" else "🐇 Rápido"
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(lbl_l, callback_data=f"voz_vel:lento:{user_id}"),
-        InlineKeyboardButton(lbl_n, callback_data=f"voz_vel:normal:{user_id}"),
-        InlineKeyboardButton(lbl_r, callback_data=f"voz_vel:rapido:{user_id}"),
-    ]])
-
-
-# ==================== MODO MANTENIMIENTO ====================
-
-def get_modo_mantenimiento() -> dict:
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT activo, mensaje FROM modo_mantenimiento WHERE id=1")
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"activo": bool(row[0]), "mensaje": row[1]}
-    except Exception:
-        pass
-    return {"activo": False, "mensaje": ""}
-
-
-def set_modo_mantenimiento(activo: bool, mensaje: str, admin_id: int):
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""UPDATE modo_mantenimiento SET activo=%s, mensaje=%s,
-                    activado_por=%s, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            else:
-                c.execute("""UPDATE modo_mantenimiento SET activo=?, mensaje=?,
-                    activado_por=?, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error modo mantenimiento: {e}")
-
-
-# ==================== COMANDOS v6.0 ====================
-
-async def match_cofrades_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sugiere 3 cofrades compatibles basado en perfil profesional."""
-    user = update.effective_user
-    await update.message.reply_text("🔍 Analizando perfiles para encontrar tus mejores conexiones...")
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("No se pudo conectar a la base de datos.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        c.execute(f"SELECT nombre, cargo, empresa FROM tarjetas_profesional WHERE user_id={ph}", (user.id,))
-        mi_perfil = c.fetchone()
-        c.execute(f"""SELECT t.user_id, t.nombre, t.cargo, t.empresa, s.username
-            FROM tarjetas_profesional t
-            JOIN suscripciones s ON t.user_id=s.user_id
-            WHERE t.user_id != {ph} AND s.estado='activo'
-            LIMIT 20""", (user.id,))
-        candidatos = c.fetchall()
-        conn.close()
-
-        if not candidatos:
-            await update.message.reply_text(
-                "No hay suficientes perfiles aun.\n"
-                "Completa tu tarjeta profesional con /mi_perfil primero."
-            )
-            return
-
-        perfil_str = f"{mi_perfil[1]} en {mi_perfil[2]}" if mi_perfil else "Sin perfil definido"
-        candidatos_str = "\n".join([f"- {r[1]}, {r[2]} en {r[3]}" for r in candidatos[:10]])
-
-        prompt = (
-            f"Eres experto en networking profesional naval chileno.\n"
-            f"Mi perfil: {perfil_str}\n"
-            f"Candidatos:\n{candidatos_str}\n\n"
-            f"Selecciona los 3 mas compatibles. Explica en 1 linea por que cada uno es buena conexion.\n"
-            f"Formato:\n1. [nombre] - [razon breve]\n2. [nombre] - [razon breve]\n3. [nombre] - [razon breve]"
-        )
-
-        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.7)
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=300, temperature=0.7)
-
-        texto = f"*Tus 3 mejores conexiones en la Cofradia:*\n\n{respuesta}\n\n"
-        texto += "Usa /buscar\\_profesional para ver el perfil completo."
-        await update.message.reply_text(texto, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error match_cofrades: {e}")
-        await update.message.reply_text("Error al buscar matches. Intenta de nuevo.")
-
-
-async def ofrezco_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Registra un servicio ofrecido."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Publicar tu servicio:*\n\n"
-            "`/ofrezco [descripcion]`\n\n"
-            "Ejemplo:\n`/ofrezco Asesoria en derecho maritimo`",
-            parse_mode='Markdown'
-        )
-        return
-    descripcion = " ".join(context.args)[:300]
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"UPDATE servicios_cofrades SET activo=0 WHERE user_id={ph} AND tipo='ofrezco'", (user.id,))
-            c.execute(f"INSERT INTO servicios_cofrades (user_id, tipo, descripcion) VALUES ({ph},'ofrezco',{ph})", (user.id, descripcion))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Servicio publicado:\n_{descripcion}_\n\nLos cofrades te encontraran con `/busco`.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error ofrezco: {e}")
-        await update.message.reply_text("Error al registrar el servicio.")
-
-
-async def busco_servicio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Busca cofrades que ofrecen un servicio."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Buscar servicio:*\n\n`/busco [lo que necesitas]`\n\nEjemplo:\n`/busco asesoria legal`",
-            parse_mode='Markdown'
-        )
-        return
-    busqueda = " ".join(context.args).lower()
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        if DATABASE_URL:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE %s
-                LIMIT 5""", (f"%{busqueda}%",))
-        else:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE ?
-                LIMIT 5""", (f"%{busqueda}%",))
-        resultados = c.fetchall()
-        conn.close()
-
-        if not resultados:
-            await update.message.reply_text(
-                f"Nadie ofrece *{busqueda}* por ahora.\n\n"
-                "Si tu lo ofreces, publicate con `/ofrezco [descripcion]`",
-                parse_mode='Markdown'
-            )
-            return
-
-        texto = f"*Cofrades que ofrecen '{busqueda}':*\n\n"
-        for desc, fname, uname in resultados:
-            contacto = f"@{uname}" if uname else fname
-            texto += f"*{fname}* ({contacto})\n_{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error busco_servicio: {e}")
-        await update.message.reply_text("Error al buscar.")
-
-
-async def mis_servicios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra servicios publicados por el usuario."""
-    user = update.effective_user
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        c.execute(f"SELECT tipo, descripcion FROM servicios_cofrades WHERE user_id={ph} AND activo=1", (user.id,))
-        servicios = c.fetchall()
-        conn.close()
-
-        if not servicios:
-            await update.message.reply_text(
-                "No tienes servicios publicados.\n\n"
-                "• `/ofrezco [descripcion]` — publica lo que ofreces\n"
-                "• `/busco [servicio]` — busca lo que necesitas"
-            )
-            return
-
-        texto = "*Tus servicios publicados:*\n\n"
-        for tipo, desc in servicios:
-            icono = "🟢" if tipo == "ofrezco" else "🔵"
-            texto += f"{icono} _{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error mis_servicios: {e}")
-        await update.message.reply_text("Error al obtener servicios.")
-
-
-async def recordar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Crea recordatorio. Uso: /recordar 2h Llamar a Juan"""
-    user = update.effective_user
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "*Crear recordatorio:*\n\n"
-            "`/recordar [tiempo] [mensaje]`\n\n"
-            "*Ejemplos:*\n"
-            "`/recordar 30m Revisar propuesta`\n"
-            "`/recordar 2h Llamar al cliente`\n"
-            "`/recordar 1d Seguimiento reunion`",
-            parse_mode='Markdown'
-        )
-        return
-
-    tiempo_str = context.args[0].lower()
-    mensaje = " ".join(context.args[1:])
-    from datetime import datetime, timedelta
-    ahora = datetime.utcnow()
-    try:
-        if tiempo_str.endswith('m'):
-            delta = timedelta(minutes=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('h'):
-            delta = timedelta(hours=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('d'):
-            delta = timedelta(days=int(tiempo_str[:-1]))
-        else:
-            raise ValueError()
-        fecha_recordar = ahora + delta
-    except Exception:
-        await update.message.reply_text("Formato invalido. Usa: 30m, 2h, 1d")
-        return
-
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"INSERT INTO recordatorios (user_id, mensaje, fecha_recordar) VALUES ({ph},{ph},{ph})",
-                     (user.id, mensaje, fecha_recordar if DATABASE_URL else fecha_recordar.isoformat()))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Recordatorio creado:\n_{mensaje}_\n\nTe avisare en {tiempo_str}.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error recordar: {e}")
-        await update.message.reply_text("Error al crear recordatorio.")
-
-
-async def verificar_recordatorios(context):
-    """Job: envía recordatorios pendientes cada minuto."""
-    from datetime import datetime
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        ahora = datetime.utcnow()
-        if DATABASE_URL:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= %s", (ahora,))
-        else:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= ?", (ahora.isoformat(),))
-        pendientes = c.fetchall()
-        for rec_id, uid, msg in pendientes:
-            try:
-                await context.bot.send_message(chat_id=uid, text=f"Recordatorio:\n\n{msg}")
-                ph = "%s" if DATABASE_URL else "?"
-                c.execute(f"UPDATE recordatorios SET enviado=1 WHERE id={ph}", (rec_id,))
-            except Exception as e:
-                logger.warning(f"Error recordatorio {rec_id}: {e}")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Error verificando recordatorios: {e}")
-
-
-async def mantenimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: activa/desactiva modo mantenimiento."""
-    user = update.effective_user
-    if user.id != OWNER_ID:
-        await update.message.reply_text("Solo el administrador puede usar este comando.")
-        return
-    if not context.args:
-        estado = get_modo_mantenimiento()
-        txt = "ACTIVO" if estado["activo"] else "INACTIVO"
-        await update.message.reply_text(
-            f"Modo Mantenimiento: *{txt}*\n\n"
-            "`/mantenimiento on [mensaje]`\n`/mantenimiento off`",
-            parse_mode='Markdown'
-        )
-        return
-    accion = context.args[0].lower()
-    if accion == "on":
-        msg_c = " ".join(context.args[1:]) if len(context.args) > 1 else "El bot esta en mantenimiento. Volvemos pronto."
-        set_modo_mantenimiento(True, msg_c, user.id)
-        await update.message.reply_text(f"Modo mantenimiento ACTIVADO\n\n_{msg_c}_", parse_mode='Markdown')
-    elif accion == "off":
-        set_modo_mantenimiento(False, "", user.id)
-        await update.message.reply_text("Modo mantenimiento DESACTIVADO — Bot operativo.")
-    else:
-        await update.message.reply_text("Usa: `/mantenimiento on` o `/mantenimiento off`", parse_mode='Markdown')
-
-
-async def velocidad_voz_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ajusta velocidad de la voz del bot."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    actual = pref.get("velocidad", "normal")
-    emojis = {"lento": "🐢", "normal": "▶️", "rapido": "🐇"}
-    await update.message.reply_text(
-        f"Velocidad de voz actual: {emojis.get(actual,'')} *{actual.upper()}*\n\nSelecciona tu preferencia:",
-        parse_mode='Markdown',
-        reply_markup=botones_velocidad_voz(user.id)
-    )
-
-
-async def resumen_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activa/desactiva resumen diario personalizado por audio."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    activo = pref.get("resumen_diario", 0)
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            nuevo = 0 if activo else 1
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, resumen_diario)
-                    VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET resumen_diario=EXCLUDED.resumen_diario""",
-                    (user.id, nuevo))
-            else:
-                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, resumen_diario) VALUES (?, ?)", (user.id, nuevo))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error resumen_diario: {e}")
-
-    if activo:
-        await update.message.reply_text("Resumen diario *desactivado*.", parse_mode='Markdown')
-    else:
-        await update.message.reply_text(
-            "Resumen diario *activado*\n\n"
-            "Recibiras un audio cada manana a las 9:00 AM Chile\n"
-            "con novedades relevantes para ti.\n\n"
-            "Para desactivar, usa `/resumen_diario` de nuevo.",
-            parse_mode='Markdown'
-        )
-
-
-async def enviar_resumenes_diarios(context):
-    """Job matutino: envia resumen personalizado por audio."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        c.execute("""SELECT p.user_id, s.first_name FROM preferencias_usuario p
-            JOIN suscripciones s ON p.user_id=s.user_id
-            WHERE p.resumen_diario=1 AND s.estado='activo'""")
-        usuarios = c.fetchall()
-        conn.close()
-        for uid, nombre in usuarios:
-            try:
-                prompt = (
-                    f"Crea un resumen ejecutivo breve (4 oraciones maximas) para {nombre}, "
-                    "miembro de Cofradia de Networking. Incluye: novedades networking profesional, "
-                    "mercado laboral chileno, y algo motivador. Sin listas ni emojis."
-                )
-                resumen = llamar_groq(prompt, max_tokens=200, temperature=0.7)
-                if not resumen:
-                    resumen = llamar_gemini_texto(prompt, max_tokens=200, temperature=0.7)
-                if resumen:
-                    audio_file = await generar_audio_con_velocidad(resumen, uid, f"/tmp/resumen_{uid}.mp3")
-                    if audio_file:
-                        import os
-                        with open(audio_file, 'rb') as f:
-                            await context.bot.send_voice(
-                                chat_id=uid, voice=f,
-                                caption=f"Buenos dias, {nombre}! Tu resumen diario de la Cofradia."
-                            )
-                        try:
-                            os.remove(audio_file)
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"Error resumen a {uid}: {e}")
-    except Exception as e:
-        logger.warning(f"Error resumenes diarios: {e}")
-
-
 # ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
 
 async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15102,18 +14189,16 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook + evitar Conflict con instancias anteriores"""
-        # PASO 1: Esperar que instancias anteriores terminen
-        import time
-        time.sleep(3)
-        # PASO 2: Limpiar webhook y updates pendientes
+        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
+        # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Webhook eliminado — sin conflictos")
+            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
-        # PASO 3: Pausa para que Telegram procese la eliminación
-        await asyncio.sleep(3)
+        
+        # PASO 2: Esperar un momento para que Telegram procese la eliminación
+        await asyncio.sleep(2)
         
         # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
@@ -15234,15 +14319,6 @@ def main():
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
-    # ── Comandos v6.0 ──
-    application.add_handler(CommandHandler("match", match_cofrades_comando))
-    application.add_handler(CommandHandler("ofrezco", ofrezco_comando))
-    application.add_handler(CommandHandler("busco_servicio", busco_servicio_comando))
-    application.add_handler(CommandHandler("mis_servicios", mis_servicios_comando))
-    application.add_handler(CommandHandler("recordar", recordar_comando))
-    application.add_handler(CommandHandler("mantenimiento", mantenimiento_comando))
-    application.add_handler(CommandHandler("velocidad_voz", velocidad_voz_comando))
-    application.add_handler(CommandHandler("resumen_diario", resumen_diario_comando))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
     application.add_handler(CommandHandler("renovar", renovar_comando))
@@ -15388,8 +14464,6 @@ def main():
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     
     # Handler de mensajes de voz (privado y grupo)
-    # Callback velocidad voz
-    application.add_handler(CallbackQueryHandler(callback_velocidad_voz, pattern=r'^voz_vel:'))
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
@@ -15410,12 +14484,6 @@ def main():
         if not es_owner and not verificar_suscripcion_activa(user_id):
             return  # El catch-all redirigirá a /start
         
-        # Verificar modo mantenimiento
-        mant = get_modo_mantenimiento()
-        if mant["activo"] and update.effective_user.id != OWNER_ID:
-            await update.message.reply_text(mant["mensaje"])
-            return
-
         mensaje = update.message.text.strip()
         user_name = update.effective_user.first_name
         
@@ -15922,25 +14990,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("📧 Newsletter email programado: lunes 10:15 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter email: {e}")
-
-        # Job: Verificar recordatorios cada minuto
-        try:
-            job_queue.run_repeating(verificar_recordatorios, interval=60, first=10, name='recordatorios')
-            logger.info("⏰ Verificador de recordatorios activo (cada 1 min)")
-        except Exception as e:
-            logger.warning(f"No se pudo programar recordatorios: {e}")
-
-        # Job: Resumen diario personalizado — 12:00 UTC = 9:00 AM Chile
-        try:
-            from datetime import time as dt_time2
-            job_queue.run_daily(
-                enviar_resumenes_diarios,
-                time=dt_time2(hour=12, minute=0),
-                name='resumen_diario'
-            )
-            logger.info("☀️ Resumen diario programado: 9:00 AM Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar resumen diario: {e}")
     
     logger.info("✅ Bot iniciado!")
     
