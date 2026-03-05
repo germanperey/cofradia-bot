@@ -126,21 +126,8 @@ if GEMINI_API_KEY:
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    # Test real de Gemini al arranque
-    try:
-        _test_url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
-        _test_r = requests.post(_test_url, json={
-            "contents": [{"parts": [{"text": "Hola"}]}],
-            "generationConfig": {"maxOutputTokens": 5}
-        }, timeout=10)
-        if _test_r.status_code == 200:
-            logger.info("✅ Gemini 2.0 Flash activo y respondiendo (texto + OCR)")
-        else:
-            logger.error(f"❌ Gemini falla en test: HTTP {_test_r.status_code} — {_test_r.text[:300]}")
-            gemini_disponible = False
-            gemini_texto_disponible = False
-    except Exception as _e:
-        logger.error(f"❌ Gemini excepción en test: {_e}")
+    # Sin test al arranque — evita consumir cuota innecesariamente
+    logger.info("✅ Gemini configurado (5 modelos como fallback de Groq)")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
