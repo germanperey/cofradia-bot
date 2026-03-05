@@ -2331,16 +2331,23 @@ def run_keepalive_server():
     server.serve_forever()
 
 def auto_ping():
-    """Auto-ping para mantener el servicio activo"""
+    """
+    Keep-alive: ping cada 4 minutos para que Render nunca duerma el servicio.
+    El webhook server en PORT(10000) atiende el ping — sin servidor extra necesario.
+    """
     import time as t
-    url = os.environ.get('RENDER_EXTERNAL_URL')
+    url = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
+    if not url:
+        return
+    ping_url = f"{url}/health"
+    logger.info(f"🏓 Keep-alive activo → ping cada 4min a {ping_url}")
     while True:
-        t.sleep(300)
-        if url:
-            try:
-                requests.get(url, timeout=10)
-            except:
-                pass
+        t.sleep(240)  # 4 minutos — Render duerme tras 15min sin actividad
+        try:
+            r = requests.get(ping_url, timeout=10)
+            logger.debug(f"🏓 Keep-alive ping OK ({r.status_code})")
+        except Exception as e:
+            logger.debug(f"🏓 Keep-alive ping falló: {e}")
 
 
 # ==================== DECORADORES ====================
@@ -14175,14 +14182,17 @@ def main():
         logger.error("❌ No se pudo inicializar la base de datos")
         return
     
-    # Keep-alive para Render
-    keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
-    keepalive_thread.start()
-    
-    if os.environ.get('RENDER_EXTERNAL_URL'):
+    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
+    if render_url:
+        # En Render: el webhook server ocupa PORT(10000) — solo necesitamos auto_ping
+        # El /health endpoint del webhook responde al ping → bot NUNCA duerme
         ping_thread = threading.Thread(target=auto_ping, daemon=True)
         ping_thread.start()
-        logger.info("🏓 Auto-ping activado")
+        logger.info("🏓 Keep-alive activado (ping /health cada 4min — bot siempre despierto)")
+    else:
+        # En local: servidor HTTP independiente para keep-alive
+        keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
+        keepalive_thread.start()
     
     if not TOKEN_BOT:
         logger.error("❌ TOKEN_BOT no configurado")
@@ -15002,8 +15012,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         logger.info(f"🌐 Modo WEBHOOK: {webhook_url}")
         application.run_webhook(
             listen="0.0.0.0",
-            port=8443,           # Puerto 8443 — distinto al keep-alive (10000)
-            url_path="webhook",  # Ruta interna del servidor
+            port=int(os.environ.get("PORT", 10000)),
             webhook_url=webhook_url,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
