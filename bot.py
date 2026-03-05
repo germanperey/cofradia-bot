@@ -1604,39 +1604,111 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning(f"Error ejecutando comando por voz: {e}")
                 # Si falla, continuar con procesamiento normal de IA
         
-        # PASO 3: Llamar IA directamente (sin RAG para evitar cuelgues de DB en threads)
-        # El handler de audio es rápido y conversacional — el LLM tiene todo el conocimiento necesario
+        # PASO 3: Llamar IA con timeout duro de 25s (GARANTIZA respuesta siempre)
         await msg.edit_text(f'🧠 Procesando: "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
 
         _nombre = user.first_name
+
+        # RAG rápido: máx 5 chunks, consulta directa en el hilo principal (sin threads)
+        _ctx_rag = ""
+        try:
+            _conn_r = get_db_connection()
+            if _conn_r:
+                _c_r = _conn_r.cursor()
+                _palabras = [p for p in texto_transcrito.lower().split()
+                             if len(p) > 4 and p not in {"como","para","este","esta","cuál","cual"}][:4]
+                if _palabras:
+                    if DATABASE_URL:
+                        _conds = " OR ".join([f"LOWER(chunk_text) LIKE %s" for _ in _palabras])
+                        _params = [f"%{p}%" for p in _palabras]
+                    else:
+                        _conds = " OR ".join([f"LOWER(chunk_text) LIKE ?" for _ in _palabras])
+                        _params = [f"%{p}%" for p in _palabras]
+                    _c_r.execute(f"SELECT chunk_text, source FROM rag_chunks WHERE {_conds} LIMIT 5", _params)
+                    _rows = _c_r.fetchall()
+                    if _rows:
+                        _chunks = []
+                        for _row in _rows:
+                            _txt = (_row["chunk_text"] if DATABASE_URL else _row[0]) or ""
+                            _src = (_row["source"] if DATABASE_URL else _row[1]) or ""
+                            if _txt.strip():
+                                _chunks.append(f"[{_src[:30]}] {_txt[:300]}")
+                        if _chunks:
+                            _ctx_rag = "\nINFO RELEVANTE:\n" + "\n---\n".join(_chunks)
+                _conn_r.close()
+        except Exception as _e_rag:
+            logger.debug(f"RAG voz: {_e_rag}")
+
+        _ctx_hint = "\n\nSi deseas más detalles sobre esta consulta, escríbeme tu pregunta y te daré una respuesta más completa."
+
         prompt = (
-            f"Eres el asistente IA de la Cofradía de Networking, comunidad profesional chilena de oficiales navales.\n"
-            f"Responde a {_nombre} en formato de audio — prosa fluida, sin listas, sin asteriscos, sin guiones.\n"
-            f"Empieza SIEMPRE con \"{_nombre},\".\n\n"
-            f"REGLAS:\n"
-            f"- Responde desde tu conocimiento (LLaMA 3.3 70B, hasta 2024)\n"
-            f"- NUNCA digas no tengo informacion si conoces el tema\n"
-            f"- Desarrolla la respuesta completa: minimo 5 oraciones, cubre pasos y detalles relevantes\n"
-            f"- Lenguaje profesional cercano, en espanol chileno\n\n"
-            f"{_nombre} pregunta: {texto_transcrito}"
+            f"Eres el asistente IA de la Cofradía de Networking, comunidad profesional chilena.\n"
+            f"Responde a {_nombre} en formato de audio: prosa fluida, sin listas, sin asteriscos.\n"
+            f"Empieza SIEMPRE con \"{_nombre},\".\n"
+            f"Desarrolla la respuesta en 4-6 oraciones cubriendo los puntos principales.\n"
+            f"NUNCA digas que no tienes información si conoces el tema hasta 2024.{_ctx_rag}\n\n"
+            f"Pregunta de {_nombre}: {texto_transcrito}{_ctx_hint}"
         )
 
-        # Llamar IA en thread (requests es sincrono — no bloquear event loop)
+        # Función de IA con 1 sola llamada rápida (sin reintentos para evitar cuelgues)
         import asyncio as _asyncio2
-        def _llamar_ia_voz():
-            r = llamar_groq(prompt, max_tokens=1000, temperature=0.7)
-            if not r:
-                r = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.7)
-            if not r:
-                r = llamar_ia_emergencia(texto_transcrito, _nombre)
-            return r
+        import requests as _req
 
-        respuesta_texto = await _asyncio2.get_event_loop().run_in_executor(None, _llamar_ia_voz)
+        def _ia_rapida_voz():
+            """Llamada IA sin reintentos — timeout estricto 15s."""
+            if not GROQ_API_KEY:
+                return None
+            try:
+                _headers = {
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                _payload = {
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 600,
+                    "temperature": 0.7
+                }
+                _r = _req.post(GROQ_API_URL, headers=_headers, json=_payload, timeout=15)
+                if _r.status_code == 200:
+                    _data = _r.json()
+                    return _data["choices"][0]["message"]["content"].strip()
+            except Exception:
+                pass
+            # Fallback: Gemini directo sin reintentos
+            try:
+                if GEMINI_API_KEY:
+                    _url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
+                    _rg = _req.post(_url, json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7}
+                    }, timeout=15)
+                    if _rg.status_code == 200:
+                        _cands = _rg.json().get("candidates", [])
+                        if _cands:
+                            return _cands[0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                pass
+            return None
+
+        # TIMEOUT DURO: si la IA tarda más de 25s, cancela y responde igual
+        try:
+            respuesta_texto = await _asyncio2.wait_for(
+                _asyncio2.get_event_loop().run_in_executor(None, _ia_rapida_voz),
+                timeout=25.0
+            )
+        except _asyncio2.TimeoutError:
+            logger.warning(f"⏰ Timeout 25s en audio — respondiendo con emergencia")
+            respuesta_texto = None
+        except Exception as _e_ia:
+            logger.warning(f"Error IA voz: {_e_ia}")
+            respuesta_texto = None
 
         if not respuesta_texto:
             respuesta_texto = (
-                f"{_nombre}, los modelos de IA están temporalmente ocupados. "
-                "Intenta de nuevo en 30 segundos."
+                f"{_nombre}, recibí tu pregunta sobre {texto_transcrito[:60]}. "
+                "Los modelos de IA están con alta demanda en este momento. "
+                "Por favor escríbeme la misma pregunta como texto y te responderé de inmediato con información completa."
             )
 
         # PASO 4: Enviar respuesta en TEXTO
@@ -1647,7 +1719,7 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             if "not modified" not in str(e_edit).lower():
                 logger.debug(f"edit_text voz: {e_edit}")
 
-        # PASO 5: Generar y enviar AUDIO de respuesta
+        # PASO 5: Generar y enviar AUDIO
         try:
             audio_file = await generar_audio_tts(respuesta_texto)
             if audio_file:
@@ -1658,7 +1730,7 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except:
                     pass
         except Exception as e_tts:
-            logger.warning(f"TTS falló: {e_tts}")
+            logger.warning(f"TTS: {e_tts}")
         
         # Registrar uso del servicio
         registrar_servicio_usado(user_id, 'voz')
