@@ -1604,149 +1604,61 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning(f"Error ejecutando comando por voz: {e}")
                 # Si falla, continuar con procesamiento normal de IA
         
-        # PASO 3: Procesar con la MISMA lógica robusta del handler de texto
-        # (sin mejorar_intencion que consume cuota extra — directo a la respuesta)
+        # PASO 3: Llamar IA directamente (sin RAG para evitar cuelgues de DB en threads)
+        # El handler de audio es rápido y conversacional — el LLM tiene todo el conocimiento necesario
         await msg.edit_text(f'🧠 Procesando: "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
 
-        # 3a. Búsqueda unificada en thread separado para no bloquear el event loop
-        import asyncio as _asyncio
-        await msg.edit_text(f'🔍 Buscando en documentos y base de conocimiento...')
-        resultados = await _asyncio.get_event_loop().run_in_executor(
-            None, lambda: busqueda_unificada(texto_transcrito, limit_historial=20, limit_rag=40)
-        )
-        contexto_completo = formatear_contexto_unificado(resultados, texto_transcrito)
-        fuentes_usadas = resultados.get("fuentes_usadas", [])
-
-        # 3b. Tarjetas profesionales
-        contexto_tarjetas = ""
-        try:
-            conn_tc = get_db_connection()
-            if conn_tc:
-                c_tc = conn_tc.cursor()
-                palabras_busq = [p for p in texto_transcrito.lower().split() if len(p) > 3][:5]
-                if palabras_busq:
-                    cond_tc, params_tc = [], []
-                    for p in palabras_busq:
-                        if DATABASE_URL:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
-                            params_tc.extend([f"%{p}%"]*5)
-                        else:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
-                            params_tc.extend([f"%{p}%"]*5)
-                    wh = " OR ".join(cond_tc)
-                    if DATABASE_URL:
-                        c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", params_tc)
-                    else:
-                        c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", params_tc)
-                    tarjetas = c_tc.fetchall()
-                    if tarjetas:
-                        lineas_tar = []
-                        for t in tarjetas:
-                            if DATABASE_URL:
-                                lineas_tar.append(f"• {t['nombre_completo']} | {t['profesion']} | {t['empresa']} | {t['ciudad']}")
-                            else:
-                                lineas_tar.append(f"• {t[0]} | {t[1]} | {t[2]} | {t[3]}")
-                        contexto_tarjetas = "\n\n=== DIRECTORIO PROFESIONAL COFRADES ===\n" + "\n".join(lineas_tar)
-                        fuentes_usadas.append(f"Directorio ({len(tarjetas)} cofrades)")
-                conn_tc.close()
-        except Exception as e_tc:
-            logger.debug(f"Error tarjetas en voz: {e_tc}")
-
-        # 3c. Construir prompt con misma lógica inteligente del handler de texto
-        fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
-        rag_confianza = resultados.get("rag_confianza", "ninguna")
-        rag_tematica = resultados.get("rag_tematica", "desconocida")
-        total_rag = len(resultados.get("rag", []))
-
-        docs_son_relevantes = (
-            rag_tematica in ("relevante", "posible") and
-            rag_confianza in ("alta", "media") and
-            bool(resultados.get("rag"))
+        _nombre = user.first_name
+        prompt = (
+            f"Eres el asistente IA de la Cofradía de Networking, comunidad profesional chilena de oficiales navales.\n"
+            f"Responde a {_nombre} en formato de audio — prosa fluida, sin listas, sin asteriscos, sin guiones.\n"
+            f"Empieza SIEMPRE con \"{_nombre},\".\n\n"
+            f"REGLAS:\n"
+            f"- Responde desde tu conocimiento (LLaMA 3.3 70B, hasta 2024)\n"
+            f"- NUNCA digas no tengo informacion si conoces el tema\n"
+            f"- Desarrolla la respuesta completa: minimo 5 oraciones, cubre pasos y detalles relevantes\n"
+            f"- Lenguaje profesional cercano, en espanol chileno\n\n"
+            f"{_nombre} pregunta: {texto_transcrito}"
         )
 
-        if docs_son_relevantes:
-            instruccion = (
-                f"El sistema encontró {total_rag} fragmentos de documentos relevantes. "
-                "LÉELOS y sintetiza una respuesta completa basándote en ellos."
-            )
-            ctx_rag = contexto_completo[:7000]
-            logger.info(f"🎤 Voz Modo RAG para '{texto_transcrito[:40]}'")
-        else:
-            instruccion = (
-                "La base de documentos no contiene info sobre este tema. "
-                "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
-                "No menciones documentos. Solo responde lo que sabes."
-            )
-            ctx_rag = ""
-            logger.info(f"🎤 Voz Modo LLM para '{texto_transcrito[:40]}' (rag={rag_tematica})")
-
-        prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
-
-Responde a {user.first_name} de forma conversacional. Empieza siempre con "{user.first_name},".
-Esta respuesta se convertirá a audio — usa prosa fluida, sin listas, sin markdown, sin asteriscos, sin guiones.
-
-INSTRUCCIÓN: {instruccion}
-
-REGLAS OBLIGATORIAS:
-- NUNCA digas "no tengo información" si conoces el tema — responde con tu conocimiento hasta 2024
-- NUNCA inventes nombres de personas de la Cofradía
-- SIEMPRE desarrolla la respuesta completamente — mínimo 5 oraciones, máximo 10
-- Cubre TODOS los aspectos relevantes del tema consultado
-- Usa lenguaje profesional pero cercano, en español chileno
-- Si hay documentos relevantes abajo, incorpóralos en la respuesta
-
-{ctx_rag}
-{contexto_tarjetas[:600] if contexto_tarjetas else ""}
-
-{user.first_name} pregunta (audio): {texto_transcrito}"""
-
-        # 3d. Llamar IA en thread separado (requests es sync, no bloquear event loop)
-        await msg.edit_text("🧠 Generando respuesta...")
+        # Llamar IA en thread (requests es sincrono — no bloquear event loop)
         import asyncio as _asyncio2
-
-        def _llamar_ia_completa():
-            r = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
+        def _llamar_ia_voz():
+            r = llamar_groq(prompt, max_tokens=1000, temperature=0.7)
             if not r:
-                r = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
+                r = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.7)
             if not r:
-                r = llamar_ia_emergencia(texto_transcrito, user.first_name)
+                r = llamar_ia_emergencia(texto_transcrito, _nombre)
             return r
 
-        respuesta_texto = await _asyncio2.get_event_loop().run_in_executor(None, _llamar_ia_completa)
+        respuesta_texto = await _asyncio2.get_event_loop().run_in_executor(None, _llamar_ia_voz)
 
         if not respuesta_texto:
             respuesta_texto = (
-                f"{user.first_name}, todos los modelos de IA están temporalmente ocupados. "
-                "Intenta en 30 segundos."
+                f"{_nombre}, los modelos de IA están temporalmente ocupados. "
+                "Intenta de nuevo en 30 segundos."
             )
 
-        # PASO 4: Enviar respuesta en TEXTO (sin Markdown para evitar errores con caracteres especiales)
-        fuentes_footer = f"\n──────────────────\n🔍 Fuentes: {fuentes_str}"
-        texto_display = f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}{fuentes_footer}"
+        # PASO 4: Enviar respuesta en TEXTO
+        texto_display = f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}"
         try:
             await msg.edit_text(texto_display)
         except Exception as e_edit:
-            # "Message is not modified" o similar — ignorar, ya está el texto correcto
             if "not modified" not in str(e_edit).lower():
                 logger.debug(f"edit_text voz: {e_edit}")
 
         # PASO 5: Generar y enviar AUDIO de respuesta
         try:
-            audio_file = await generar_audio_con_velocidad(respuesta_texto, user_id)
+            audio_file = await generar_audio_tts(respuesta_texto)
             if audio_file:
                 with open(audio_file, "rb") as af:
-                    await update.message.reply_voice(
-                        voice=af,
-                        caption="🔊 Respuesta de voz",
-                        reply_markup=botones_velocidad_voz(user_id)
-                    )
+                    await update.message.reply_voice(voice=af, caption="🔊 Respuesta de voz")
                 try:
                     os.remove(audio_file)
                 except:
                     pass
-        except Exception as e:
-            logger.warning(f"No se pudo enviar audio TTS: {e}")
-            # No es crítico - ya se envió la respuesta en texto
+        except Exception as e_tts:
+            logger.warning(f"TTS falló: {e_tts}")
         
         # Registrar uso del servicio
         registrar_servicio_usado(user_id, 'voz')
@@ -14194,8 +14106,7 @@ async def velocidad_voz_comando(update: Update, context: ContextTypes.DEFAULT_TY
     emojis = {"lento": "🐢", "normal": "▶️", "rapido": "🐇"}
     await update.message.reply_text(
         f"Velocidad de voz actual: {emojis.get(actual,'')} *{actual.upper()}*\n\nSelecciona tu preferencia:",
-        parse_mode='Markdown',
-        reply_markup=botones_velocidad_voz(user.id)
+        parse_mode='Markdown'
     )
 
 
@@ -14376,8 +14287,7 @@ async def analizar_usuario_comando(update: Update, context: ContextTypes.DEFAULT
                 with open(audio_file, "rb") as af:
                     await update.message.reply_voice(
                         voice=af,
-                        caption=f"Analisis de {nombre_c}",
-                        reply_markup=botones_velocidad_voz(user.id)
+                        caption=f"Analisis de {nombre_c}"
                     )
                 try: _os.remove(audio_file)
                 except: pass
@@ -15601,7 +15511,7 @@ def main():
     
     # Handler de mensajes de voz (privado y grupo)
     # Callback velocidad voz
-    application.add_handler(CallbackQueryHandler(callback_velocidad_voz, pattern=r'^voz_vel:'))
+    # Botones velocidad eliminados
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
@@ -15989,14 +15899,10 @@ IMPORTANTE: Responde de forma COMPLETA y DETALLADA. No hagas respuestas de 3-4 l
                             logger.debug(f"edit_text texto: {e_edit2}")
                 # Generar audio de la respuesta
                 try:
-                    audio_txt = await generar_audio_con_velocidad(respuesta, user_id)
+                    audio_txt = await generar_audio_tts(respuesta)
                     if audio_txt:
                         with open(audio_txt, "rb") as af:
-                            await update.message.reply_voice(
-                                voice=af,
-                                caption="🔊 Escuchar respuesta",
-                                reply_markup=botones_velocidad_voz(user_id)
-                            )
+                            await update.message.reply_voice(voice=af, caption="🔊 Escuchar respuesta")
                         try:
                             import os as _ost
                             _ost.remove(audio_txt)
