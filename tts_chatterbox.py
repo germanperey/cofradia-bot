@@ -54,13 +54,14 @@ async def _get_cliente():
 
         def _crear():
             from gradio_client import Client
-            kwargs = {"src": HF_SPACE}
+            # Pasar el token via variable de entorno (compatible con todas las versiones)
             if HF_TOKEN:
-                kwargs["hf_token"] = HF_TOKEN
-            c = Client(**kwargs)
+                os.environ["GRADIO_HF_HUB_TOKEN"] = HF_TOKEN
+            c = Client(HF_SPACE)
             # Mostrar endpoints disponibles para diagnóstico
             try:
-                print(f"📋 [TTS] Endpoints disponibles: {[e for e in c.endpoints]}")
+                endpoints = [str(e) for e in c.endpoints]
+                print(f"📋 [TTS] Endpoints disponibles: {endpoints}")
             except Exception:
                 pass
             return c
