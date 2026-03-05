@@ -85,10 +85,14 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL_FAST = "llama3-8b-8192"       # Fallback Groq rápido — límite separado
+GROQ_MODEL_MIX  = "mixtral-8x7b-32768"   # Fallback Groq alternativo
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_TEXT_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_FLASH15_URL    = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_FLASH15_8B_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent"
 
 # ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
@@ -1051,7 +1055,14 @@ Tu personalidad:
             elif response.status_code == 429:
                 logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
                 import time
-                time.sleep(2 * (intento + 1))
+                time.sleep(3 * (intento + 1))
+                # Cambiar a modelo más liviano en reintentos
+                if intento == 1:
+                    payload["model"] = GROQ_MODEL_FAST
+                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_FAST}")
+                elif intento == 2:
+                    payload["model"] = GROQ_MODEL_MIX
+                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_MIX}")
                 
             elif response.status_code >= 500:
                 logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
@@ -1079,46 +1090,58 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
-def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Gemini 2.0 Flash — fallback de Groq (1500 req/día, gratis)."""
-    if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY no configurada")
-        return None
+def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature: float, nombre: str) -> str:
+    """Llama a un endpoint específico de Gemini."""
     try:
-        url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
+        url = f"{url_base}?key={GEMINI_API_KEY}"
+        sistema = (
+            "Eres el asistente de IA de Cofradía de Networking, "
+            "comunidad profesional chilena de alto nivel. "
+            "Responde siempre en español chileno, profesional y cercano.\n\n"
+        )
         payload = {
-            "contents": [{
-                "parts": [{
-                    "text": (
-                        "Eres el asistente de IA de Cofradía de Networking, "
-                        "comunidad profesional chilena de alto nivel. "
-                        "Responde siempre en español chileno, profesional y cercano.\n\n"
-                        + prompt
-                    )
-                }]
-            }],
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": temperature,
-            }
+            "contents": [{"parts": [{"text": sistema + prompt}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
         }
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code == 200:
-            data = r.json()
-            candidatos = data.get("candidates", [])
+            candidatos = r.json().get("candidates", [])
             if candidatos:
                 texto = candidatos[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 if texto and texto.strip():
-                    logger.info("✅ Respuesta Gemini 2.0 Flash OK")
+                    logger.info(f"✅ Respuesta {nombre} OK")
                     return texto.strip()
-                else:
-                    logger.error(f"Gemini respuesta vacía: {data}")
-            else:
-                logger.error(f"Gemini sin candidatos: {data}")
+        elif r.status_code == 429:
+            logger.warning(f"⚠️ {nombre} cuota agotada (429)")
         else:
-            logger.error(f"Gemini error HTTP {r.status_code}: {r.text[:400]}")
+            logger.error(f"❌ {nombre} HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        logger.error(f"Error Gemini excepcion: {e}")
+        logger.error(f"❌ {nombre} excepción: {e}")
+    return None
+
+
+def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Cadena Gemini con 3 modelos de cuota independiente:
+    gemini-2.0-flash → gemini-1.5-flash → gemini-1.5-flash-8b
+    Cada modelo tiene su propio límite de 1500 req/día gratis."""
+    if not GEMINI_API_KEY:
+        logger.warning("⚠️ GEMINI_API_KEY no configurada")
+        return None
+    # Intento 1: Gemini 2.0 Flash
+    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt, max_tokens, temperature, "Gemini 2.0 Flash")
+    if r:
+        return r
+    # Intento 2: Gemini 1.5 Flash (cuota separada)
+    logger.info("🔄 Gemini 2.0 agotado → Gemini 1.5 Flash")
+    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash")
+    if r:
+        return r
+    # Intento 3: Gemini 1.5 Flash-8B (cuota separada, ultra ligero)
+    logger.info("🔄 Gemini 1.5 agotado → Gemini 1.5 Flash-8B")
+    r = _llamar_gemini_url(GEMINI_FLASH15_8B_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash-8B")
+    if r:
+        return r
+    logger.error("❌ Todos los modelos Gemini agotaron su cuota diaria")
     return None
 
 
