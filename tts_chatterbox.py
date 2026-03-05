@@ -20,10 +20,10 @@ HF_TOKEN      = os.getenv("HF_TOKEN", "")
 HF_SPACE      = "ResembleAI/Chatterbox"
 TTS_VOICE_URL = os.getenv("TTS_VOICE_URL", "")
 
-CACHE_DIR      = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache"))
+CACHE_DIR      = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_v3"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 USE_CACHE      = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
-VOICE_REF_PATH = Path("/tmp/cofradia_voz_ref.wav")
+VOICE_REF_PATH = Path("/tmp/cofradia_voz_ref_v3.wav")
 
 _gradio_client  = None
 _client_lock    = asyncio.Lock()
@@ -190,14 +190,15 @@ async def texto_a_voz(
     print(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
     logger.info(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
 
-    # cfg_weight alto (0.7-0.9) = sigue más fielmente la voz de referencia
-    # → preserva el acento chileno del archivo voz_referencia.wav
-    # exaggeration bajo-medio (0.3-0.5) = voz natural sin sobreactuar
+    # cfg_weight=0 → Chatterbox sigue ÚNICAMENTE la voz de referencia
+    # Esto es lo que recomienda la documentación oficial de Chatterbox
+    # para preservar el acento y estilo de la voz de referencia al 100%
+    # exaggeration=0.3 → natural, sin dramatismo excesivo
     estilos = {
-        "normal":       {"exaggeration": 0.35, "cfg_weight": 0.75},
-        "bienvenida":   {"exaggeration": 0.42, "cfg_weight": 0.78},
-        "alerta":       {"exaggeration": 0.50, "cfg_weight": 0.80},
-        "celebracion":  {"exaggeration": 0.55, "cfg_weight": 0.78},
+        "normal":       {"exaggeration": 0.30, "cfg_weight": 0.0},
+        "bienvenida":   {"exaggeration": 0.38, "cfg_weight": 0.0},
+        "alerta":       {"exaggeration": 0.45, "cfg_weight": 0.0},
+        "celebracion":  {"exaggeration": 0.50, "cfg_weight": 0.0},
     }
     cfg = estilos.get(estilo, estilos["normal"])
 
