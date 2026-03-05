@@ -1694,25 +1694,31 @@ REGLAS:
 
 {user.first_name} pregunta (audio): {texto_transcrito}"""
 
-        # 3d. Llamar IA con máximos tokens — misma potencia que el handler de texto
+        # 3d. Llamar IA con prompt completo (RAG + historial)
         respuesta_texto = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
         if not respuesta_texto:
             respuesta_texto = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
 
+        # 3e. Fallback emergencia: prompt mínimo sin RAG — mucho más liviano
         if not respuesta_texto:
-            # Si la IA falló completamente, responder con conocimiento básico
+            logger.warning(f"🚨 Prompt completo falló — emergencia para '{texto_transcrito[:40]}'")
+            respuesta_texto = llamar_ia_emergencia(texto_transcrito, user.first_name)
+
+        if not respuesta_texto:
             respuesta_texto = (
-                f"{user.first_name}, en este momento los modelos de IA están ocupados. "
-                "Intenta de nuevo en 30 segundos o usa /buscar_ia para consultas específicas."
+                f"{user.first_name}, todos los modelos de IA están temporalmente ocupados. "
+                "Intenta en 30 segundos."
             )
 
-        # PASO 4: Enviar respuesta en TEXTO
-        fuentes_footer = f"\n\n─────────────────\n🔍 *Fuentes:* {fuentes_str}"
-        texto_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}{fuentes_footer}"
+        # PASO 4: Enviar respuesta en TEXTO (sin Markdown para evitar errores con caracteres especiales)
+        fuentes_footer = f"\n──────────────────\n🔍 Fuentes: {fuentes_str}"
+        texto_display = f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}{fuentes_footer}"
         try:
-            await msg.edit_text(texto_display, parse_mode="Markdown")
-        except Exception:
-            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}\n\n🔍 Fuentes: {fuentes_str}")
+            await msg.edit_text(texto_display)
+        except Exception as e_edit:
+            # "Message is not modified" o similar — ignorar, ya está el texto correcto
+            if "not modified" not in str(e_edit).lower():
+                logger.debug(f"edit_text voz: {e_edit}")
 
         # PASO 5: Generar y enviar AUDIO de respuesta
         try:
@@ -1747,11 +1753,19 @@ REGLAS:
             )
         
     except Exception as e:
+        err_str = str(e).lower()
+        # Ignorar errores de Telegram que no son críticos
+        if "not modified" in err_str or "message to edit not found" in err_str:
+            logger.debug(f"Telegram no-crítico en voz: {e}")
+            return
         logger.error(f"Error procesando voz: {e}")
         import traceback
         logger.error(traceback.format_exc())
         try:
-            await msg.edit_text(f"❌ Error procesando audio: {str(e)[:100]}")
+            await msg.edit_text(
+                f"Ocurrió un error procesando tu audio.\n"
+                "Intenta de nuevo en unos segundos."
+            )
         except:
             pass
 
@@ -9056,7 +9070,29 @@ def buscar_apoyo_profesional(query):
         return f"❌ Error: {str(e)[:150]}"
 
 
+# ==================== FALLBACK DE EMERGENCIA ====================
+
+def llamar_ia_emergencia(pregunta: str, nombre: str) -> str:
+    """Prompt mínimo sin contexto RAG — último recurso cuando la IA falla con prompt largo."""
+    prompt_min = (
+        f"Eres un asistente profesional chileno. "
+        f"Responde directamente la siguiente pregunta de {nombre} en máximo 4 oraciones claras.\n\n"
+        f"Pregunta: {pregunta}"
+    )
+    # Intentar con cada modelo disponible con prompt mínimo
+    r = llamar_groq(prompt_min, max_tokens=600, temperature=0.7)
+    if r: return r
+    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini emergencia")
+    if r: return r
+    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt_min, 600, 0.7, "Gemini 1.5 emergencia")
+    if r: return r
+    if GEMINI_API_KEY_2:
+        r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini key2 emergencia", api_key=GEMINI_API_KEY_2)
+        if r: return r
+    return None
+
 # ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
+
 
 def get_preferencia_voz(user_id: int) -> dict:
     """Obtiene preferencias de voz del usuario."""
@@ -13691,7 +13727,29 @@ async def ejecutar_comando_desde_intencion(
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ==================== FALLBACK DE EMERGENCIA ====================
+
+def llamar_ia_emergencia(pregunta: str, nombre: str) -> str:
+    """Prompt mínimo sin contexto RAG — último recurso cuando la IA falla con prompt largo."""
+    prompt_min = (
+        f"Eres un asistente profesional chileno. "
+        f"Responde directamente la siguiente pregunta de {nombre} en máximo 4 oraciones claras.\n\n"
+        f"Pregunta: {pregunta}"
+    )
+    # Intentar con cada modelo disponible con prompt mínimo
+    r = llamar_groq(prompt_min, max_tokens=600, temperature=0.7)
+    if r: return r
+    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini emergencia")
+    if r: return r
+    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt_min, 600, 0.7, "Gemini 1.5 emergencia")
+    if r: return r
+    if GEMINI_API_KEY_2:
+        r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini key2 emergencia", api_key=GEMINI_API_KEY_2)
+        if r: return r
+    return None
+
 # ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
+
 
 def get_preferencia_voz(user_id: int) -> dict:
     """Obtiene preferencias de voz del usuario."""
@@ -15887,15 +15945,24 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             if not respuesta:
                 respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
             
+            # Fallback emergencia si el prompt completo falló
+            if not respuesta:
+                logger.warning(f"🚨 Texto prompt completo falló — emergencia para '{mensaje[:40]}'")
+                respuesta = llamar_ia_emergencia(mensaje, user_name)
+
             if respuesta:
-                # Agregar footer con fuentes consultadas
-                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}"
-                respuesta_final = respuesta + footer
+                # Enviar respuesta en texto (sin Markdown para evitar errores)
+                fuentes_footer = f"\n──────────────────\n🔍 Fuentes: {fuentes_str}"
+                respuesta_final = respuesta + fuentes_footer
                 try:
                     await msg.edit_text(respuesta_final, parse_mode='Markdown')
                 except Exception:
-                    await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
-                # Generar audio de la respuesta (igual que handler de voz)
+                    try:
+                        await msg.edit_text(respuesta_final)
+                    except Exception as e_edit2:
+                        if "not modified" not in str(e_edit2).lower():
+                            logger.debug(f"edit_text texto: {e_edit2}")
+                # Generar audio de la respuesta
                 try:
                     audio_txt = await generar_audio_con_velocidad(respuesta, user_id)
                     if audio_txt:
@@ -15911,9 +15978,12 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         except:
                             pass
                 except Exception as e_aud:
-                    logger.debug(f"Audio texto opcional falló: {e_aud}")
+                    logger.debug(f"Audio texto: {e_aud}")
             else:
-                await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
+                await msg.edit_text(
+                    "Los modelos de IA están temporalmente ocupados.\n"
+                    "Intenta en 30 segundos o usa /buscar_ia para buscar en el historial."
+                )
                 
         except Exception as e:
             logger.error(f"Error en chat privado: {e}")
