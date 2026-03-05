@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║   TTS CHATTERBOX — vía Gradio Space de Hugging Face             ║
-║   Voz de referencia personalizada vía TTS_VOICE_URL             ║
+║   Corrección: archivo WAV enviado con handle_file()             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -16,14 +16,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ─── CONFIGURACIÓN ──────────────────────────────────────────────────
-HF_TOKEN       = os.getenv("HF_TOKEN", "")
-HF_SPACE       = "ResembleAI/Chatterbox"
-TTS_VOICE_URL  = os.getenv("TTS_VOICE_URL", "")   # URL del WAV de referencia
+HF_TOKEN      = os.getenv("HF_TOKEN", "")
+HF_SPACE      = "ResembleAI/Chatterbox"
+TTS_VOICE_URL = os.getenv("TTS_VOICE_URL", "")
 
 CACHE_DIR      = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 USE_CACHE      = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
-
 VOICE_REF_PATH = Path("/tmp/cofradia_voz_ref.wav")
 
 _gradio_client  = None
@@ -43,69 +42,32 @@ def _limpiar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", texto).strip()
 
 
-async def _preparar_voz_referencia() -> Optional[str]:
+def _descargar_voz_referencia() -> Optional[str]:
     """
-    Obtiene la voz de referencia en este orden de prioridad:
-    1. Desde TTS_VOICE_URL (tu archivo WAV personalizado) ← MEJOR OPCIÓN
-    2. Generada con edge-TTS (Catalina) como fallback
-    Retorna la ruta local al archivo WAV o None si todo falla.
+    Descarga el WAV de referencia desde TTS_VOICE_URL.
+    Retorna la ruta local o None si falla.
     """
-    async with _voice_ref_lock:
-        # Si ya está descargada y pesa más de 5KB, reutilizarla
-        if VOICE_REF_PATH.exists() and VOICE_REF_PATH.stat().st_size > 5000:
-            print(f"✅ [TTS] Usando voz de referencia en disco ({VOICE_REF_PATH.stat().st_size} bytes)")
+    if VOICE_REF_PATH.exists() and VOICE_REF_PATH.stat().st_size > 5000:
+        print(f"✅ [TTS] Voz de referencia ya en disco ({VOICE_REF_PATH.stat().st_size} bytes)")
+        return str(VOICE_REF_PATH)
+
+    if not TTS_VOICE_URL:
+        print("⚠️ [TTS] TTS_VOICE_URL no configurada")
+        return None
+
+    try:
+        import requests
+        print(f"⬇️  [TTS] Descargando voz desde: {TTS_VOICE_URL}")
+        r = requests.get(TTS_VOICE_URL, timeout=20)
+        if r.status_code == 200 and len(r.content) > 5000:
+            VOICE_REF_PATH.write_bytes(r.content)
+            print(f"✅ [TTS] Voz descargada: {len(r.content)} bytes → {VOICE_REF_PATH}")
             return str(VOICE_REF_PATH)
-
-        # ── OPCIÓN 1: Descargar desde TTS_VOICE_URL ───────────────────
-        if TTS_VOICE_URL:
-            print(f"⬇️  [TTS] Descargando voz de referencia desde: {TTS_VOICE_URL}")
-            try:
-                import requests
-                r = requests.get(TTS_VOICE_URL, timeout=20)
-                if r.status_code == 200 and len(r.content) > 5000:
-                    VOICE_REF_PATH.write_bytes(r.content)
-                    print(f"✅ [TTS] Voz personalizada descargada: {len(r.content)} bytes")
-                    return str(VOICE_REF_PATH)
-                else:
-                    print(f"⚠️  [TTS] Descarga falló (status={r.status_code}, size={len(r.content)})")
-            except Exception as e:
-                print(f"⚠️  [TTS] Error descargando voz: {e}")
-
-        # ── OPCIÓN 2: Generar con edge-TTS como fallback ──────────────
-        print("🎙️ [TTS] Generando voz de referencia con edge-TTS (Catalina)...")
-        try:
-            import edge_tts
-            import soundfile as sf
-
-            texto_ref = (
-                "Hola, bienvenido a la Cofradía de Networking. "
-                "Es un placer acompañarte en este espacio profesional "
-                "donde conectamos a grandes personas."
-            )
-            communicate = edge_tts.Communicate(
-                texto_ref, "es-CL-CatalinaNeural",
-                rate="-5%", pitch="-2Hz"
-            )
-            buf = io.BytesIO()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    buf.write(chunk["data"])
-
-            audio_bytes = buf.getvalue()
-            if len(audio_bytes) > 1000:
-                # Intentar convertir MP3→WAV con soundfile
-                try:
-                    buf_in = io.BytesIO(audio_bytes)
-                    data, sr = sf.read(buf_in)
-                    data = data[:sr * 8]   # máximo 8 segundos
-                    sf.write(str(VOICE_REF_PATH), data, sr)
-                except Exception:
-                    VOICE_REF_PATH.write_bytes(audio_bytes)
-                print(f"✅ [TTS] Voz referencia generada con edge-TTS: {VOICE_REF_PATH.stat().st_size} bytes")
-                return str(VOICE_REF_PATH)
-        except Exception as e:
-            print(f"❌ [TTS] edge-TTS también falló: {e}")
-
+        else:
+            print(f"❌ [TTS] Descarga falló: status={r.status_code} size={len(r.content)}")
+            return None
+    except Exception as e:
+        print(f"❌ [TTS] Error descargando voz: {e}")
         return None
 
 
@@ -135,25 +97,47 @@ async def _get_cliente():
 
 
 async def _generar_con_gradio(texto: str, exaggeration: float, cfg_weight: float) -> bytes:
-    voz_ref = await _preparar_voz_referencia()
-    cliente = await _get_cliente()
-    loop    = asyncio.get_event_loop()
+    # Descargar la voz de referencia
+    voz_path = _descargar_voz_referencia()
+    cliente  = await _get_cliente()
+    loop     = asyncio.get_event_loop()
 
     def _llamar():
-        print(f"🚀 [TTS] Enviando a Chatterbox | ref={'SÍ' if voz_ref else 'NO'} | exag={exaggeration} | cfg={cfg_weight}")
+        from gradio_client import handle_file
+
+        # Preparar el audio prompt correctamente
+        # handle_file() es la forma correcta de enviar archivos a Gradio
+        if voz_path and Path(voz_path).exists():
+            audio_prompt = handle_file(voz_path)
+            print(f"🎙️ [TTS] Enviando voz de referencia con handle_file()")
+        else:
+            audio_prompt = None
+            print(f"⚠️ [TTS] Sin voz de referencia — Chatterbox usará voz aleatoria")
+
+        print(f"🚀 [TTS] Generando audio | exag={exaggeration} | cfg={cfg_weight}")
+
         try:
             resultado = cliente.predict(
-                texto, voz_ref, exaggeration, cfg_weight, 0,
+                texto,
+                audio_prompt,   # ← handle_file() en vez de string
+                exaggeration,
+                cfg_weight,
+                0,              # seed
                 api_name="/generate"
             )
+            print(f"✅ [TTS] Respuesta recibida: {type(resultado)}")
         except Exception as e1:
             print(f"⚠️ [TTS] Reintentando sin api_name... ({e1})")
             resultado = cliente.predict(
-                texto, voz_ref, exaggeration, cfg_weight, 0
+                texto,
+                audio_prompt,
+                exaggeration,
+                cfg_weight,
+                0,
             )
 
         ruta = Path(resultado[0]) if isinstance(resultado, (list, tuple)) else Path(resultado)
-        print(f"✅ [TTS] WAV recibido: {ruta} ({ruta.stat().st_size if ruta.exists() else '?'} bytes)")
+        print(f"✅ [TTS] Audio generado: {ruta}")
         return ruta.read_bytes()
 
     return await loop.run_in_executor(None, _llamar)
@@ -196,11 +180,6 @@ async def texto_a_voz(
     estilo: str = "normal",
     usar_chatterbox: bool = True
 ) -> Optional[bytes]:
-    """
-    Función principal de TTS.
-    Usa Chatterbox clonando la voz del archivo TTS_VOICE_URL.
-    Fallback automático a Catalina si falla.
-    """
     if not texto or not texto.strip():
         return None
 
@@ -240,6 +219,9 @@ async def texto_a_voz(
         except Exception as e:
             print(f"❌ [TTS] Chatterbox falló: {e}")
             logger.warning(f"❌ [TTS] Chatterbox falló: {e}")
+            # Borrar voz de referencia para que se re-descargue la próxima vez
+            if VOICE_REF_PATH.exists():
+                VOICE_REF_PATH.unlink()
             return await _edge_tts_fallback(texto_limpio)
     else:
         print("⏭️ [TTS] Sin Chatterbox → Catalina mejorada")
@@ -254,8 +236,6 @@ async def limpiar_cache_tts(dias: int = 7):
         if ahora - f.stat().st_mtime > dias * 86400:
             f.unlink()
             borrados += 1
-    # Forzar regeneración de la voz de referencia
     if VOICE_REF_PATH.exists():
         VOICE_REF_PATH.unlink()
-        print("🗑️ [TTS] Voz de referencia eliminada para regenerar.")
     logger.info(f"🗑️ Caché TTS: {borrados} archivos eliminados.")
