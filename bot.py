@@ -84,11 +84,10 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"           # Rápido, 14,400 req/día gratis
-GROQ_MODEL_HEAVY = "llama-3.3-70b-versatile"  # Para tareas complejas
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL_HEAVY = "llama-3.3-70b-versatile"
 
-# ==================== CONFIGURACIÓN DE GEMINI (OCR + texto) ====================
-# Gemini 2.0 Flash: 1,500 req/día GRATIS, reemplaza DeepSeek completamente
+# ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
@@ -127,17 +126,17 @@ if GROQ_API_KEY:
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
-# Gemini 2.0 Flash — fallback de texto + OCR (100% gratuito)
-deepseek_disponible = False  # Ya no se usa
+# Gemini 2.0 Flash como fallback (reemplaza DeepSeek, gratis)
+deepseek_disponible = False
 gemini_texto_disponible = False
 if GEMINI_API_KEY:
     gemini_disponible = True
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR, 1500 req/día gratis)")
+    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR, fallback de Groq)")
 else:
-    logger.warning("⚠️ GEMINI_API_KEY no configurada — sin fallback de IA")
+    logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
 # Verificar JSearch (RapidAPI)
 if RAPIDAPI_KEY:
@@ -885,23 +884,20 @@ Tu personalidad:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
             return None
     
-    # FALLBACK: Si Groq falla → Gemini 2.0 Flash (gratis)
-    logger.warning("⚠️ Groq agotó reintentos → usando Gemini 2.0 Flash")
+    # FALLBACK: Groq agotó reintentos → Gemini 2.0 Flash
+    logger.warning("⚠️ Groq agotó reintentos → Gemini 2.0 Flash")
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
 def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Redirige a Gemini 2.0 Flash (reemplaza DeepSeek, mantiene compatibilidad)."""
+    """Redirige a Gemini 2.0 Flash (reemplaza DeepSeek)."""
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """
-    Gemini 2.0 Flash como LLM de texto.
-    100% gratuito · 1,500 req/día · Sin tarjeta de crédito adicional.
-    """
+    """Gemini 2.0 Flash — fallback gratuito de Groq (1500 req/día)."""
     if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY no configurada — sin fallback disponible")
+        logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
     try:
         url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
@@ -910,10 +906,8 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
                 "parts": [{
                     "text": (
                         "Eres el asistente de IA de Cofradía de Networking, "
-                        "una comunidad profesional chilena de alto nivel. "
-                        "Eres profesional, amigable y cercano al estilo chileno. "
-                        "Experto en networking, negocios, emprendimiento y mercado laboral chileno. "
-                        "Responde siempre en español chileno, de forma clara y útil.\n\n"
+                        "comunidad profesional chilena de alto nivel. "
+                        "Responde siempre en español chileno, profesional y cercano.\n\n"
                         + prompt
                     )
                 }]
@@ -927,13 +921,13 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
         if response.status_code == 200:
             data = response.json()
             texto = data["candidates"][0]["content"]["parts"][0]["text"]
-            if texto and len(texto.strip()) > 0:
+            if texto and texto.strip():
                 logger.info("✅ Respuesta Gemini 2.0 Flash")
                 return texto.strip()
         else:
-            logger.warning(f"Gemini texto error: {response.status_code} - {response.text[:300]}")
+            logger.warning(f"Gemini error: {response.status_code} — {response.text[:200]}")
     except Exception as e:
-        logger.warning(f"Error Gemini texto: {str(e)[:150]}")
+        logger.warning(f"Error Gemini: {e}")
     return None
 
 
