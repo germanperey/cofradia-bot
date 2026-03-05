@@ -190,15 +190,14 @@ async def texto_a_voz(
     print(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
     logger.info(f"🎤 [TTS] HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | VOICE_URL={'SÍ' if TTS_VOICE_URL else 'NO'}")
 
-    # cfg_weight=0 → Chatterbox sigue ÚNICAMENTE la voz de referencia
-    # Esto es lo que recomienda la documentación oficial de Chatterbox
-    # para preservar el acento y estilo de la voz de referencia al 100%
-    # exaggeration=0.3 → natural, sin dramatismo excesivo
+    # cfg_weight mínimo permitido = 0.05
+    # Con 0.05 Chatterbox sigue casi exclusivamente la voz de referencia
+    # preservando el acento chileno/latinoamericano del WAV subido
     estilos = {
-        "normal":       {"exaggeration": 0.30, "cfg_weight": 0.0},
-        "bienvenida":   {"exaggeration": 0.38, "cfg_weight": 0.0},
-        "alerta":       {"exaggeration": 0.45, "cfg_weight": 0.0},
-        "celebracion":  {"exaggeration": 0.50, "cfg_weight": 0.0},
+        "normal":       {"exaggeration": 0.30, "cfg_weight": 0.05},
+        "bienvenida":   {"exaggeration": 0.38, "cfg_weight": 0.05},
+        "alerta":       {"exaggeration": 0.45, "cfg_weight": 0.05},
+        "celebracion":  {"exaggeration": 0.50, "cfg_weight": 0.05},
     }
     cfg = estilos.get(estilo, estilos["normal"])
 
