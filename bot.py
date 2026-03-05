@@ -2331,23 +2331,16 @@ def run_keepalive_server():
     server.serve_forever()
 
 def auto_ping():
-    """
-    Keep-alive: ping cada 4 minutos para que Render nunca duerma el servicio.
-    El webhook server en PORT(10000) atiende el ping — sin servidor extra necesario.
-    """
+    """Auto-ping para mantener el servicio activo"""
     import time as t
-    url = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
-    if not url:
-        return
-    ping_url = f"{url}/health"
-    logger.info(f"🏓 Keep-alive activo → ping cada 4min a {ping_url}")
+    url = os.environ.get('RENDER_EXTERNAL_URL')
     while True:
-        t.sleep(240)  # 4 minutos — Render duerme tras 15min sin actividad
-        try:
-            r = requests.get(ping_url, timeout=10)
-            logger.debug(f"🏓 Keep-alive ping OK ({r.status_code})")
-        except Exception as e:
-            logger.debug(f"🏓 Keep-alive ping falló: {e}")
+        t.sleep(300)
+        if url:
+            try:
+                requests.get(url, timeout=10)
+            except:
+                pass
 
 
 # ==================== DECORADORES ====================
@@ -14182,17 +14175,13 @@ def main():
         logger.error("❌ No se pudo inicializar la base de datos")
         return
     
-    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
-    if render_url:
-        # En Render: el webhook server ocupa PORT(10000) — solo necesitamos auto_ping
-        # El /health endpoint del webhook responde al ping → bot NUNCA duerme
-        ping_thread = threading.Thread(target=auto_ping, daemon=True)
-        ping_thread.start()
-        logger.info("🏓 Keep-alive activado (ping /health cada 4min — bot siempre despierto)")
-    else:
-        # En local: servidor HTTP independiente para keep-alive
-        keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
-        keepalive_thread.start()
+    # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
+    keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
+    keepalive_thread.start()
+    # Auto-ping cada 4min — Render NUNCA duerme el bot
+    ping_thread = threading.Thread(target=auto_ping, daemon=True)
+    ping_thread.start()
+    logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
     
     if not TOKEN_BOT:
         logger.error("❌ TOKEN_BOT no configurado")
@@ -15004,28 +14993,13 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     
     logger.info("✅ Bot iniciado!")
     
-    # WEBHOOK vs POLLING — webhook elimina el Conflict en Render definitivamente
-    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
-    if render_url:
-        # En Render: usar webhook (sin Conflict, sin instancias duplicadas)
-        webhook_url = f"{render_url}/webhook"
-        logger.info(f"🌐 Modo WEBHOOK: {webhook_url}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", 10000)),
-            webhook_url=webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False,
-        )
-    else:
-        # Local: usar polling normal
-        logger.info("🔄 Modo POLLING (local)")
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False,
-        )
+    # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
+    logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False,
+    )
 
 
 if __name__ == '__main__':
