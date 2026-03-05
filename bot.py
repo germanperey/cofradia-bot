@@ -1604,113 +1604,123 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning(f"Error ejecutando comando por voz: {e}")
                 # Si falla, continuar con procesamiento normal de IA
         
-        # PASO 3: Procesar consulta con IA - búsqueda exhaustiva en todas las fuentes
-        # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
-        intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
-        texto_para_busqueda = intencion_voz['query_mejorada']
-        
-        # Si detectó un comando claro, ejecutarlo directamente
-        if intencion_voz['ejecutar_comando'] and intencion_voz['comando']:
-            ejecutado = await ejecutar_comando_desde_intencion(
-                intencion_voz['comando'], intencion_voz['args'], update, context
-            )
-            if ejecutado:
-                try:
-                    await msg.delete()
-                except:
-                    pass
-                registrar_servicio_usado(user_id, 'voz_comando')
-                return
-        
-        resultados = busqueda_unificada(texto_para_busqueda, limit_historial=15, limit_rag=40)
-        contexto = formatear_contexto_unificado(resultados, texto_para_busqueda)
-        
-        # Generar también contexto de tarjetas profesionales si hay nombres relevantes
+        # PASO 3: Procesar con la MISMA lógica robusta del handler de texto
+        # (sin mejorar_intencion que consume cuota extra — directo a la respuesta)
+        await msg.edit_text(f'🧠 Procesando: "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
+
+        # 3a. Búsqueda unificada: historial + RAG + todos los documentos
+        resultados = busqueda_unificada(texto_transcrito, limit_historial=20, limit_rag=40)
+        contexto_completo = formatear_contexto_unificado(resultados, texto_transcrito)
+        fuentes_usadas = resultados.get("fuentes_usadas", [])
+
+        # 3b. Tarjetas profesionales
         contexto_tarjetas = ""
         try:
             conn_tc = get_db_connection()
             if conn_tc:
                 c_tc = conn_tc.cursor()
-                # Usar query mejorada para mejor búsqueda de tarjetas
-                palabras_busq = [p for p in texto_para_busqueda.lower().split() if len(p) > 3][:5]
+                palabras_busq = [p for p in texto_transcrito.lower().split() if len(p) > 3][:5]
                 if palabras_busq:
-                    cond_tc = []
-                    params_tc = []
+                    cond_tc, params_tc = [], []
                     for p in palabras_busq:
                         if DATABASE_URL:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
+                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
+                            params_tc.extend([f"%{p}%"]*5)
                         else:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
-                    if cond_tc:
-                        wh = " OR ".join(cond_tc)
-                        if DATABASE_URL:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        else:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        tarjetas = c_tc.fetchall()
-                        if tarjetas:
-                            ctx_list = []
-                            for t in tarjetas:
-                                if DATABASE_URL:
-                                    ctx_list.append(f"{t['nombre_completo']} - {t['profesion']} en {t['empresa']} ({t['ciudad']}): {t['servicios']}")
-                                else:
-                                    ctx_list.append(f"{t[0]} - {t[1]} en {t[2]} ({t[3]}): {t[4]}")
-                            contexto_tarjetas = "\n=== PROFESIONALES COFRADÍA (Tarjetas) ===\n" + "\n".join(ctx_list)
+                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
+                            params_tc.extend([f"%{p}%"]*5)
+                    wh = " OR ".join(cond_tc)
+                    if DATABASE_URL:
+                        c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", params_tc)
+                    else:
+                        c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", params_tc)
+                    tarjetas = c_tc.fetchall()
+                    if tarjetas:
+                        lineas_tar = []
+                        for t in tarjetas:
+                            if DATABASE_URL:
+                                lineas_tar.append(f"• {t['nombre_completo']} | {t['profesion']} | {t['empresa']} | {t['ciudad']}")
+                            else:
+                                lineas_tar.append(f"• {t[0]} | {t[1]} | {t[2]} | {t[3]}")
+                        contexto_tarjetas = "\n\n=== DIRECTORIO PROFESIONAL COFRADES ===\n" + "\n".join(lineas_tar)
+                        fuentes_usadas.append(f"Directorio ({len(tarjetas)} cofrades)")
                 conn_tc.close()
         except Exception as e_tc:
-            logger.debug(f"No se pudo buscar tarjetas para audio: {e_tc}")
-        
-        fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
-        rag_conf = resultados.get('rag_confianza', 'ninguna')
-        
-        modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
-                      else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
-        
-        # Contexto de intención para el prompt
-        intent_audio_hint = ""
-        if texto_para_busqueda != texto_transcrito:
-            intent_audio_hint = f"\n(La búsqueda usó la consulta enriquecida: \"{texto_para_busqueda[:100]}\")"
-        
-        prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
+            logger.debug(f"Error tarjetas en voz: {e_tc}")
 
-{user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
-Empieza directamente: "{user.first_name}, [respuesta]..."
+        # 3c. Construir prompt con misma lógica inteligente del handler de texto
+        fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
+        rag_confianza = resultados.get("rag_confianza", "ninguna")
+        rag_tematica = resultados.get("rag_tematica", "desconocida")
+        total_rag = len(resultados.get("rag", []))
 
-MODO: {modo_audio}
-NUNCA digas "no tengo información" si sabes del tema como LLM.
-NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
+        docs_son_relevantes = (
+            rag_tematica in ("relevante", "posible") and
+            rag_confianza in ("alta", "media") and
+            bool(resultados.get("rag"))
+        )
 
-He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
+        if docs_son_relevantes:
+            instruccion = (
+                f"El sistema encontró {total_rag} fragmentos de documentos relevantes. "
+                "LÉELOS y sintetiza una respuesta completa basándote en ellos."
+            )
+            ctx_rag = contexto_completo[:7000]
+            logger.info(f"🎤 Voz Modo RAG para '{texto_transcrito[:40]}'")
+        else:
+            instruccion = (
+                "La base de documentos no contiene info sobre este tema. "
+                "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
+                "No menciones documentos. Solo responde lo que sabes."
+            )
+            ctx_rag = ""
+            logger.info(f"🎤 Voz Modo LLM para '{texto_transcrito[:40]}' (rag={rag_tematica})")
 
-{contexto}
-{contexto_tarjetas}
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking (LLaMA 3.3 70B, conocimiento hasta 2024).
+
+Responde a {user.first_name} de forma conversacional y directa. Empieza con "{user.first_name},".
+Esta respuesta se leerá como audio — sé fluido, sin listas, sin markdown, sin asteriscos.
+
+INSTRUCCIÓN: {instruccion}
+
+REGLAS:
+- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
+- Nunca inventes personas de la Cofradía
+- Responde completo y útil en español natural
+- Máximo 5 oraciones claras
+
+{ctx_rag}
+{contexto_tarjetas[:600] if contexto_tarjetas else ""}
 
 {user.first_name} pregunta (audio): {texto_transcrito}"""
 
-        respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
-        
+        # 3d. Llamar IA con máximos tokens — misma potencia que el handler de texto
+        respuesta_texto = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
         if not respuesta_texto:
-            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
-        
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
+
         if not respuesta_texto:
-            respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
-        
-        # PASO 4: Enviar respuesta en texto
-        texto_respuesta_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}"
+            # Si la IA falló completamente, responder con conocimiento básico
+            respuesta_texto = (
+                f"{user.first_name}, en este momento los modelos de IA están ocupados. "
+                "Intenta de nuevo en 30 segundos o usa /buscar_ia para consultas específicas."
+            )
+
+        # PASO 4: Enviar respuesta en TEXTO
+        fuentes_footer = f"\n\n─────────────────\n🔍 *Fuentes:* {fuentes_str}"
+        texto_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}{fuentes_footer}"
         try:
-            await msg.edit_text(texto_respuesta_display, parse_mode='Markdown')
+            await msg.edit_text(texto_display, parse_mode="Markdown")
         except Exception:
-            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}")
-        
-        # PASO 5: Generar y enviar audio de respuesta
+            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}\n\n🔍 Fuentes: {fuentes_str}")
+
+        # PASO 5: Generar y enviar AUDIO de respuesta
         try:
             audio_file = await generar_audio_con_velocidad(respuesta_texto, user_id)
             if audio_file:
-                with open(audio_file, 'rb') as f:
+                with open(audio_file, "rb") as af:
                     await update.message.reply_voice(
-                        voice=f,
+                        voice=af,
                         caption="🔊 Respuesta de voz",
                         reply_markup=botones_velocidad_voz(user_id)
                     )
@@ -3951,23 +3961,20 @@ async def callback_velocidad_voz(update: Update, context: ContextTypes.DEFAULT_T
         return
     set_preferencia_voz(uid, velocidad)
     nombres = {"lento": "🐢 Lento", "normal": "▶️ Normal", "rapido": "🐇 Rápido"}
-    # Intentar editar caption (funciona en mensajes de voz con caption)
+    nombre_vel = nombres.get(velocidad, velocidad)
+    # Mostrar alerta inmediata al usuario (siempre funciona)
+    await query.answer(f"✅ Velocidad cambiada a {nombre_vel}", show_alert=False)
+    # Intentar actualizar los botones del mensaje
     try:
-        await query.edit_message_caption(
-            caption=f"🔊 Respuesta de voz — velocidad: *{nombres.get(velocidad, velocidad)}*",
-            parse_mode='Markdown',
-            reply_markup=botones_velocidad_voz(uid)
-        )
+        await query.edit_message_reply_markup(reply_markup=botones_velocidad_voz(uid))
     except Exception:
-        # Si no se puede editar, responder con mensaje nuevo
         try:
-            await query.message.reply_text(
-                f"✅ Velocidad de voz cambiada a *{nombres.get(velocidad, velocidad)}*\n"
-                "Tu próxima respuesta usará esta velocidad.",
-                parse_mode='Markdown'
+            await query.edit_message_caption(
+                caption=f"🔊 Respuesta de voz — {nombre_vel}",
+                reply_markup=botones_velocidad_voz(uid)
             )
-        except Exception as e:
-            logger.warning(f"Error actualizando botón velocidad: {e}")
+        except Exception:
+            pass  # El feedback ya se dio via query.answer
     logger.info(f"Usuario {uid} cambio velocidad voz a: {velocidad}")
 
 # ==================== CALLBACKS ====================
@@ -15888,6 +15895,23 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                     await msg.edit_text(respuesta_final, parse_mode='Markdown')
                 except Exception:
                     await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
+                # Generar audio de la respuesta (igual que handler de voz)
+                try:
+                    audio_txt = await generar_audio_con_velocidad(respuesta, user_id)
+                    if audio_txt:
+                        with open(audio_txt, "rb") as af:
+                            await update.message.reply_voice(
+                                voice=af,
+                                caption="🔊 Escuchar respuesta",
+                                reply_markup=botones_velocidad_voz(user_id)
+                            )
+                        try:
+                            import os as _ost
+                            _ost.remove(audio_txt)
+                        except:
+                            pass
+                except Exception as e_aud:
+                    logger.debug(f"Audio texto opcional falló: {e_aud}")
             else:
                 await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
                 
