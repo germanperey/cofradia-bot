@@ -73,45 +73,89 @@ async def _get_cliente():
     return _gradio_client
 
 
+# ─── VOZ DE REFERENCIA FEMENINA ─────────────────────────────────────
+# URL de una muestra de voz femenina cálida en español (Creative Commons)
+# Puedes reemplazar esta URL por tu propia grabación de 5-10 segundos
+VOICE_REF_URL  = os.getenv(
+    "TTS_VOICE_URL",
+    "https://huggingface.co/datasets/mozilla-foundation/common_voice_13_0/resolve/main/audio/es/validated/common_voice_es_19822797.mp3"
+)
+VOICE_REF_PATH = Path("/tmp/tts_voice_ref.wav")
+
+
+def _obtener_voz_referencia() -> str | None:
+    """
+    Descarga la voz de referencia femenina si no está en disco.
+    Retorna la ruta al archivo WAV o None si falla.
+    """
+    if VOICE_REF_PATH.exists() and VOICE_REF_PATH.stat().st_size > 1000:
+        return str(VOICE_REF_PATH)
+    try:
+        import requests
+        import soundfile as sf
+        import numpy as np
+
+        print("⬇️  [TTS] Descargando voz de referencia femenina...")
+        r = requests.get(VOICE_REF_URL, timeout=15)
+        if r.status_code != 200:
+            print(f"⚠️  [TTS] No se pudo descargar la voz de referencia: {r.status_code}")
+            return None
+
+        # Guardar como WAV (soundfile puede leer MP3 si tiene libsndfile)
+        try:
+            buf = io.BytesIO(r.content)
+            data, sr = sf.read(buf)
+            # Tomar solo los primeros 8 segundos para la referencia
+            max_samples = sr * 8
+            if len(data) > max_samples:
+                data = data[:max_samples]
+            sf.write(str(VOICE_REF_PATH), data, sr)
+            print(f"✅ [TTS] Voz de referencia guardada: {VOICE_REF_PATH}")
+            return str(VOICE_REF_PATH)
+        except Exception as e:
+            # Si soundfile no puede leer MP3, guardar el archivo crudo
+            VOICE_REF_PATH.write_bytes(r.content)
+            print(f"✅ [TTS] Voz de referencia guardada (raw): {VOICE_REF_PATH}")
+            return str(VOICE_REF_PATH)
+
+    except Exception as e:
+        print(f"⚠️  [TTS] Error descargando voz de referencia: {e}")
+        return None
+
+
 async def _generar_con_gradio(texto: str, exaggeration: float, cfg_weight: float) -> bytes:
     cliente = await _get_cliente()
     loop    = asyncio.get_event_loop()
 
     def _llamar():
-        # Intentar con el endpoint correcto del Space de Chatterbox
-        # El Space ResembleAI/Chatterbox usa estos parámetros posicionales:
-        # 1: text (str)
-        # 2: audio_prompt (file | None)  
-        # 3: exaggeration (float)
-        # 4: cfg_weight (float)
-        # 5: seed (int) — opcional
+        # Obtener voz de referencia femenina
+        voz_ref = _obtener_voz_referencia()
+        if voz_ref:
+            print(f"🎙️  [TTS] Usando voz de referencia femenina: {voz_ref}")
+        else:
+            print("⚠️  [TTS] Sin voz de referencia — Chatterbox elegirá una voz aleatoria")
+
         try:
-            # Intento 1: endpoint /generate con parámetros nombrados
             resultado = cliente.predict(
-                texto,      # text
-                None,       # audio_prompt (sin clonar voz)
+                texto,
+                voz_ref,      # audio_prompt → voz femenina de referencia
                 exaggeration,
                 cfg_weight,
-                0,          # seed = 0 (aleatorio)
+                0,            # seed
                 api_name="/generate"
             )
             print(f"✅ [TTS] Chatterbox respondió: {type(resultado)}")
         except Exception as e1:
-            print(f"⚠️ [TTS] Intento 1 falló ({e1}), probando endpoint alternativo...")
-            try:
-                # Intento 2: sin nombre de endpoint (usa el primero disponible)
-                resultado = cliente.predict(
-                    texto,
-                    None,
-                    exaggeration,
-                    cfg_weight,
-                    0,
-                )
-                print(f"✅ [TTS] Chatterbox respondió (intento 2): {type(resultado)}")
-            except Exception as e2:
-                raise Exception(f"Ambos intentos fallaron. E1: {e1} | E2: {e2}")
+            print(f"⚠️ [TTS] Intento 1 falló ({e1}), probando sin nombre de endpoint...")
+            resultado = cliente.predict(
+                texto,
+                voz_ref,
+                exaggeration,
+                cfg_weight,
+                0,
+            )
+            print(f"✅ [TTS] Chatterbox respondió (intento 2): {type(resultado)}")
 
-        # El Space devuelve la ruta al archivo WAV temporal
         if isinstance(resultado, (list, tuple)):
             ruta = Path(resultado[0])
         else:
@@ -174,11 +218,14 @@ async def texto_a_voz(
     print(f"🎤 [TTS] Solicitando audio. HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'} | Chatterbox={'SÍ' if usar_chatterbox else 'NO'}")
     logger.info(f"🎤 [TTS] Solicitando audio. HF_TOKEN={'SÍ' if HF_TOKEN else 'NO'}")
 
+    # exaggeration: calidez y expresividad (0.0=plana, 1.0=muy dramática)
+    # cfg_weight: velocidad/pace (0.0=muy lento, 1.0=rápido)
+    # Para voz femenina cálida: exaggeration ~0.45-0.55, cfg_weight ~0.25-0.35
     estilos = {
-        "normal":       {"exaggeration": 0.35, "cfg_weight": 0.30},
-        "bienvenida":   {"exaggeration": 0.50, "cfg_weight": 0.35},
-        "alerta":       {"exaggeration": 0.60, "cfg_weight": 0.40},
-        "celebracion":  {"exaggeration": 0.65, "cfg_weight": 0.38},
+        "normal":       {"exaggeration": 0.50, "cfg_weight": 0.25},
+        "bienvenida":   {"exaggeration": 0.58, "cfg_weight": 0.28},
+        "alerta":       {"exaggeration": 0.62, "cfg_weight": 0.32},
+        "celebracion":  {"exaggeration": 0.68, "cfg_weight": 0.30},
     }
     cfg = estilos.get(estilo, estilos["normal"])
 
