@@ -90,9 +90,13 @@ GROQ_MODEL_MIX  = "mixtral-8x7b-32768"   # Fallback Groq alternativo
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_TEXT_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_FLASH15_URL    = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-GEMINI_FLASH15_8B_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent"
+GEMINI_TEXT_URL        = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_FLASH15_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_FLASH15_8B_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-latest:generateContent"
+GEMINI_FLASH20_8B_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+GEMINI_FLASH_EXP_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
+# API Key 2 (cuota completamente separada — 1500 req/día adicionales)
+GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "")
 
 # ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
@@ -1075,10 +1079,13 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
-def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature: float, nombre: str) -> str:
+def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature: float, nombre: str, api_key: str = None) -> str:
     """Llama a un endpoint específico de Gemini."""
+    key = api_key or GEMINI_API_KEY
+    if not key:
+        return None
     try:
-        url = f"{url_base}?key={GEMINI_API_KEY}"
+        url = f"{url_base}?key={key}"
         sistema = (
             "Eres el asistente de IA de Cofradía de Networking, "
             "comunidad profesional chilena de alto nivel. "
@@ -1106,26 +1113,35 @@ def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature:
 
 
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Cadena Gemini con 3 modelos de cuota independiente:
-    gemini-2.0-flash → gemini-1.5-flash → gemini-1.5-flash-8b
-    Cada modelo tiene su propio límite de 1500 req/día gratis."""
+    """Cadena Gemini: 5 modelos x 2 API keys = hasta 10 intentos antes de rendirse.
+    Cuota gratuita: cada modelo tiene ~1500 req/día independientes."""
     if not GEMINI_API_KEY:
         logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
-    # Intento 1: Gemini 2.0 Flash
-    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt, max_tokens, temperature, "Gemini 2.0 Flash")
-    if r:
-        return r
-    # Intento 2: Gemini 1.5 Flash (cuota separada)
-    logger.info("🔄 Gemini 2.0 agotado → Gemini 1.5 Flash")
-    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash")
-    if r:
-        return r
-    # Intento 3: Gemini 1.5 Flash-8B (cuota separada, ultra ligero)
-    logger.info("🔄 Gemini 1.5 agotado → Gemini 1.5 Flash-8B")
-    r = _llamar_gemini_url(GEMINI_FLASH15_8B_URL, prompt, max_tokens, temperature, "Gemini 1.5 Flash-8B")
-    if r:
-        return r
+
+    # Lista de (url, nombre) — cuotas completamente separadas entre modelos
+    modelos = [
+        (GEMINI_TEXT_URL,       "Gemini 2.0 Flash"),
+        (GEMINI_FLASH20_8B_URL, "Gemini 2.0 Flash-Lite"),
+        (GEMINI_FLASH15_URL,    "Gemini 1.5 Flash"),
+        (GEMINI_FLASH_EXP_URL,  "Gemini 2.0 Flash-Exp"),
+        (GEMINI_FLASH15_8B_URL, "Gemini 1.5 Flash-8B"),
+    ]
+
+    # Primer intento: con API Key principal
+    for url, nombre in modelos:
+        r = _llamar_gemini_url(url, prompt, max_tokens, temperature, nombre)
+        if r:
+            return r
+
+    # Segundo intento: con API Key 2 si está configurada (cuota completamente independiente)
+    if GEMINI_API_KEY_2:
+        logger.info("🔄 Cambiando a GEMINI_API_KEY_2")
+        for url, nombre in modelos[:3]:  # Solo los 3 principales con key2
+            r = _llamar_gemini_url(url, prompt, max_tokens, temperature, f"{nombre} (key2)", api_key=GEMINI_API_KEY_2)
+            if r:
+                return r
+
     logger.error("❌ Todos los modelos Gemini agotaron su cuota diaria")
     return None
 
@@ -3935,12 +3951,23 @@ async def callback_velocidad_voz(update: Update, context: ContextTypes.DEFAULT_T
         return
     set_preferencia_voz(uid, velocidad)
     nombres = {"lento": "🐢 Lento", "normal": "▶️ Normal", "rapido": "🐇 Rápido"}
-    await query.edit_message_text(
-        f"Velocidad de voz guardada: *{nombres.get(velocidad, velocidad)}*\n\n"
-        "Tu proxima respuesta de voz usara esta velocidad.",
-        parse_mode='Markdown',
-        reply_markup=botones_velocidad_voz(uid)
-    )
+    # Intentar editar caption (funciona en mensajes de voz con caption)
+    try:
+        await query.edit_message_caption(
+            caption=f"🔊 Respuesta de voz — velocidad: *{nombres.get(velocidad, velocidad)}*",
+            parse_mode='Markdown',
+            reply_markup=botones_velocidad_voz(uid)
+        )
+    except Exception:
+        # Si no se puede editar, responder con mensaje nuevo
+        try:
+            await query.message.reply_text(
+                f"✅ Velocidad de voz cambiada a *{nombres.get(velocidad, velocidad)}*\n"
+                "Tu próxima respuesta usará esta velocidad.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.warning(f"Error actualizando botón velocidad: {e}")
     logger.info(f"Usuario {uid} cambio velocidad voz a: {velocidad}")
 
 # ==================== CALLBACKS ====================
@@ -14169,6 +14196,122 @@ async def enviar_resumenes_diarios(context):
         logger.warning(f"Error resumenes diarios: {e}")
 
 
+# ==================== ANÁLISIS DE USUARIOS ====================
+
+async def analizar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analiza mensajes recientes de un cofrade. Uso: /analizar @username"""
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text(
+            "*Analizar a un cofrade:*\n\n"
+            "`/analizar @username` o `/analizar Nombre`\n\n"
+            "Busca sus mensajes recientes y genera un análisis de su expertise, "
+            "temas de interes y aportes destacados.",
+            parse_mode="Markdown"
+        )
+        return
+
+    busqueda = " ".join(context.args).replace("@", "").strip()
+    msg = await update.message.reply_text(f"Analizando mensajes recientes de *{busqueda}*...", parse_mode="Markdown")
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("Error de conexion.")
+            return
+        c = conn.cursor()
+
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, username FROM suscripciones
+                WHERE LOWER(username) = %s OR LOWER(first_name) LIKE %s LIMIT 1""",
+                (busqueda.lower(), f"%{busqueda.lower()}%"))
+        else:
+            c.execute("""SELECT user_id, first_name, username FROM suscripciones
+                WHERE LOWER(username) = ? OR LOWER(first_name) LIKE ? LIMIT 1""",
+                (busqueda.lower(), f"%{busqueda.lower()}%"))
+        cofrade = c.fetchone()
+
+        if not cofrade:
+            await msg.edit_text(f"No encontre a *{busqueda}* en la Cofradia.", parse_mode="Markdown")
+            conn.close()
+            return
+
+        if DATABASE_URL:
+            uid_c = cofrade["user_id"]
+            nombre_c = cofrade["first_name"]
+            uname_c = cofrade.get("username", "") or ""
+        else:
+            uid_c, nombre_c, uname_c = cofrade[0], cofrade[1], (cofrade[2] or "")
+
+        if DATABASE_URL:
+            c.execute("""SELECT contenido FROM mensajes
+                WHERE user_id = %s AND contenido IS NOT NULL
+                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
+        else:
+            c.execute("""SELECT contenido FROM mensajes
+                WHERE user_id = ? AND contenido IS NOT NULL
+                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await msg.edit_text(
+                f"*{nombre_c}* no tiene mensajes recientes en el sistema.",
+                parse_mode="Markdown"
+            )
+            return
+
+        textos = [r["contenido"] if DATABASE_URL else r[0] for r in rows if (r["contenido"] if DATABASE_URL else r[0])]
+        mensajes_str = "\n---\n".join(textos[:20])
+
+        prompt = (
+            f"Eres un analista experto en networking profesional chileno.\n"
+            f"Analiza los mensajes recientes de {nombre_c} en la Cofradia de Networking:\n\n"
+            f"MENSAJES:\n{mensajes_str}\n\n"
+            f"Genera un analisis con:\n"
+            f"1. Temas de interes y expertise demostrado\n"
+            f"2. Recomendaciones o insights destacados que ha compartido\n"
+            f"3. Perfil profesional inferido\n"
+            f"4. Tu evaluacion y que agregas al respecto\n\n"
+            f"Se especifico y menciona ejemplos concretos. Maximo 200 palabras."
+        )
+
+        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.7)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
+        if not respuesta:
+            await msg.edit_text("No pude generar el analisis ahora. Intenta en un momento.")
+            return
+
+        contacto = f"@{uname_c}" if uname_c else nombre_c
+        texto_final = (
+            f"Analisis de *{nombre_c}* ({contacto})\n"
+            f"Basado en {len(textos)} mensajes recientes\n\n"
+            f"{respuesta}"
+        )
+        await msg.edit_text(texto_final, parse_mode="Markdown")
+
+        # Audio del analisis
+        try:
+            audio_file = await generar_audio_con_velocidad(respuesta, user.id, f"/tmp/analisis_{uid_c}.mp3")
+            if audio_file:
+                import os as _os
+                with open(audio_file, "rb") as af:
+                    await update.message.reply_voice(
+                        voice=af,
+                        caption=f"Analisis de {nombre_c}",
+                        reply_markup=botones_velocidad_voz(user.id)
+                    )
+                try: _os.remove(audio_file)
+                except: pass
+        except Exception as e:
+            logger.warning(f"Error audio analisis: {e}")
+
+    except Exception as e:
+        logger.error(f"Error analizar_usuario: {e}")
+        await msg.edit_text("Error al analizar. Intenta de nuevo.")
+
+
 # ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
 
 async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15227,6 +15370,7 @@ def main():
     application.add_handler(CommandHandler("ayuda", ayuda))
     # ── Comandos v6.0 ──
     application.add_handler(CommandHandler("match", match_cofrades_comando))
+    application.add_handler(CommandHandler("analizar", analizar_usuario_comando))
     application.add_handler(CommandHandler("ofrezco", ofrezco_comando))
     application.add_handler(CommandHandler("busco_servicio", busco_servicio_comando))
     application.add_handler(CommandHandler("mis_servicios", mis_servicios_comando))
