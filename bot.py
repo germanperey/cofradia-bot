@@ -1046,14 +1046,14 @@ Tu personalidad:
                 
             else:
                 logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-                return None
+                break  # Ir al fallback Gemini, nunca cortar aquí
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
-            return None
+            break  # Ir al fallback Gemini
     
     # FALLBACK: Groq falló → Gemini 2.0 Flash
     logger.warning("⚠️ Groq falló → Gemini 2.0 Flash")
@@ -1090,14 +1090,21 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
         }
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code == 200:
-            texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            if texto and texto.strip():
-                logger.info("✅ Respuesta Gemini 2.0 Flash")
-                return texto.strip()
+            data = r.json()
+            candidatos = data.get("candidates", [])
+            if candidatos:
+                texto = candidatos[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if texto and texto.strip():
+                    logger.info("✅ Respuesta Gemini 2.0 Flash OK")
+                    return texto.strip()
+                else:
+                    logger.error(f"Gemini respuesta vacía: {data}")
+            else:
+                logger.error(f"Gemini sin candidatos: {data}")
         else:
-            logger.warning(f"Gemini error: {r.status_code} — {r.text[:300]}")
+            logger.error(f"Gemini error HTTP {r.status_code}: {r.text[:400]}")
     except Exception as e:
-        logger.warning(f"Error Gemini: {e}")
+        logger.error(f"Error Gemini excepcion: {e}")
     return None
 
 
@@ -15058,16 +15065,18 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
-        # PASO 1: Limpiar webhook para evitar Conflict en Render
+        """Eliminar webhook + evitar Conflict con instancias anteriores"""
+        # PASO 1: Esperar que instancias anteriores terminen
+        import time
+        time.sleep(3)
+        # PASO 2: Limpiar webhook y updates pendientes
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
+            logger.info("🧹 Webhook eliminado — sin conflictos")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
-        
-        # PASO 2: Esperar un momento para que Telegram procese la eliminación
-        await asyncio.sleep(2)
+        # PASO 3: Pausa para que Telegram procese la eliminación
+        await asyncio.sleep(3)
         
         # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
