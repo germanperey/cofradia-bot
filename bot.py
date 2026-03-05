@@ -15343,7 +15343,6 @@ def main():
     
     # Handler de mensajes de voz (privado y grupo)
     # Callback velocidad voz
-    from telegram.ext import CallbackQueryHandler
     application.add_handler(CallbackQueryHandler(callback_velocidad_voz, pattern=r'^voz_vel:'))
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
