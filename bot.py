@@ -874,19 +874,18 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.warning(f"Error Groq API: {response.status_code} - {response.text[:200]}")
-                # No hacer return None — continuar al siguiente intento o al fallback
-                break
+                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                return None
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
-            logger.warning(f"Error inesperado Groq: {str(e)[:100]}")
-            break
+            logger.error(f"Error inesperado Groq: {str(e)[:100]}")
+            return None
     
-    # FALLBACK siempre activo: Groq falló → Gemini 2.0 Flash
-    logger.warning("⚠️ Groq falló → Gemini 2.0 Flash como fallback")
+    # FALLBACK: Groq agotó reintentos → Gemini 2.0 Flash
+    logger.warning("⚠️ Groq agotó reintentos → Gemini 2.0 Flash")
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
@@ -1478,7 +1477,7 @@ He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
         respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
         
         if not respuesta_texto:
-            respuesta_texto = llamar_deepseek(prompt, max_tokens=600, temperature=0.7) if 'llamar_deepseek' in dir() else None
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
         
         if not respuesta_texto:
             respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
@@ -13391,8 +13390,8 @@ Sé específico, motivador y con lenguaje profesional pero cercano. Tutéalo com
         await msg.edit_text("🤖 Generando plan estratégico personalizado...")
         respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.6)
         
-        if not respuesta and deepseek_disponible:
-            respuesta = llamar_deepseek(prompt, max_tokens=1800, temperature=0.6)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.6)
         
         if respuesta:
             header = f"🤖 *AGENTE DE NETWORKING - Plan para {user.first_name}*\n{'━'*35}\n\n"
@@ -13877,8 +13876,8 @@ Sé específico y estratégico. Piensa en sinergias de negocio, intercambio de e
         await msg.edit_text("🤝 Calculando compatibilidades y sinergias...")
         respuesta = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
         
-        if not respuesta and deepseek_disponible:
-            respuesta = llamar_deepseek(prompt, max_tokens=1600, temperature=0.6)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
         
         if respuesta:
             header = f"🤝 *MATCH DE NETWORKING para {user.first_name}*\n{'━'*35}\n\n"
@@ -14012,8 +14011,8 @@ Sé conciso pero impactante. Tono energético, profesional y de camaradería."""
         
         respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
         
-        if not respuesta and deepseek_disponible:
-            respuesta = llamar_deepseek(prompt, max_tokens=1200, temperature=0.7)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
         
         if respuesta:
             try:
@@ -14815,7 +14814,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
             
             if not respuesta:
-                respuesta = llamar_deepseek(prompt, max_tokens=1800, temperature=0.7) if deepseek_disponible else None
+                respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
             
             if respuesta:
                 # Agregar footer con fuentes consultadas
