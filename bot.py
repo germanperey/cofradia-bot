@@ -10171,24 +10171,65 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         return
     
-    # Editar campo
-    campo = context.args[0].lower()
+    # Editar campo — normalizar tildes y variantes para tolerancia de errores
+    import unicodedata as _ud
+    def _norm(t):
+        t = _ud.normalize('NFKD', t.lower())
+        return ''.join(c for c in t if not _ud.combining(c))
+
+    campo_raw = context.args[0]
+    campo = _norm(campo_raw)
+
+    # Aliases tolerantes: acepta variantes con/sin tilde y sinónimos comunes
+    _aliases = {
+        'profesion': 'profesion', 'profesión': 'profesion',
+        'cargo': 'profesion', 'ocupacion': 'profesion', 'ocupación': 'profesion',
+        'empresa': 'empresa', 'compania': 'empresa', 'compañia': 'empresa',
+        'trabajo': 'empresa', 'empleador': 'empresa',
+        'servicios': 'servicios', 'servicio': 'servicios',
+        'telefono': 'telefono', 'teléfono': 'telefono', 'fono': 'telefono',
+        'celular': 'telefono', 'movil': 'telefono', 'móvil': 'telefono',
+        'email': 'email', 'correo': 'email', 'mail': 'email',
+        'ciudad': 'ciudad', 'ubicacion': 'ciudad', 'ubicación': 'ciudad',
+        'linkedin': 'linkedin', 'linked': 'linkedin',
+        'nro_kdt': 'nro_kdt', 'numero': 'nro_kdt', 'número': 'nro_kdt',
+        'nro': 'nro_kdt', 'kdt': 'nro_kdt', 'cadete': 'nro_kdt',
+    }
+    campo = _aliases.get(campo, campo)
     campos_validos = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt']
-    
+
     if campo not in campos_validos:
         await update.message.reply_text(
-            "❌ Campo no válido.\n\n"
-            "Campos: profesion, empresa, servicios, telefono,\n"
-            "email, ciudad, linkedin, nro_kdt\n\n"
-            "Ejemplo: /mi_tarjeta nro_kdt 322"
+            f"❌ Campo '{campo_raw}' no reconocido.\n\n"
+            "Campos disponibles:\n"
+            "• profesion — tu cargo o profesión\n"
+            "• empresa — donde trabajas\n"
+            "• servicios — qué ofreces\n"
+            "• telefono — celular o fijo\n"
+            "• email — correo de contacto\n"
+            "• ciudad — donde estás ubicado\n"
+            "• linkedin — tu perfil LinkedIn\n"
+            "• nro_kdt — número de cadete\n\n"
+            "Ejemplo: /mi_tarjeta profesion Ingeniero Civil"
         )
         return
     
-    valor = ' '.join(context.args[1:])
+    valor = ' '.join(context.args[1:]).strip()
     if not valor:
         await update.message.reply_text(f"❌ Uso: /mi_tarjeta {campo} [valor]")
         return
-    
+
+    # Ajustar valor largo: si la última palabra supera 10 caracteres y el total > 30,
+    # truncarla a 7 letras + punto (ej: "Internacional" → "Interna.")
+    palabras_valor = valor.split()
+    if len(palabras_valor) >= 2 and len(valor) > 30:
+        ultima = palabras_valor[-1]
+        if len(ultima) > 10:
+            palabras_valor[-1] = ultima[:7] + "."
+            valor = ' '.join(palabras_valor)
+
+    logger.info(f"🪪 /mi_tarjeta: user={user_id} campo='{campo}' valor='{valor}'")
+
     # nro_kdt: validar y rellenar a 3 dígitos
     if campo == 'nro_kdt':
         digitos = ''.join(ch for ch in valor if ch.isdigit())
