@@ -2376,173 +2376,145 @@ def buscar_empleos_jsearch(query: str, ubicacion: str = "Chile", num_pages: int 
         return None
 
 
-async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
-    """Busca empleos - primero intenta JSearch (reales), luego fallback a IA"""
-    
+async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
+    """Busca empleos reales (JSearch) con fallback a web scraping. offset para variar resultados."""
+    import random
+
     busqueda_texto = cargo or "empleo"
     ubicacion_busqueda = ubicacion or "Chile"
-    
-    # Intentar buscar empleos REALES con JSearch
+
+    # Intentar empleos REALES con JSearch
     if jsearch_disponible:
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
-        
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales
+            # Rotar resultados si hay offset (búsqueda repetida)
+            if offset > 0 and len(empleos) > 5:
+                empleos = empleos[offset:] + empleos[:offset]
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
-            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
-            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
-            resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado  = "*🔎 EMPLEOS REALES ENCONTRADOS*\n"
+            resultado += "📋 *Búsqueda:* " + busqueda_texto + "\n"
+            resultado += "📍 *Ubicación:* " + ubicacion_busqueda + "\n"
+            resultado += "📅 *Fecha:* " + fecha_actual + "\n"
             resultado += "━" * 30 + "\n\n"
-            
-            for i, empleo in enumerate(empleos[:8], 1):
-                titulo = empleo.get('job_title', 'Sin título')
-                empresa = empleo.get('employer_name', 'Empresa no especificada')
-                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
-                
-                # Sueldo
-                min_salary = empleo.get('job_min_salary')
-                max_salary = empleo.get('job_max_salary')
+            for i, empleo in enumerate(empleos[:10], 1):
+                titulo        = empleo.get('job_title', 'Sin título')
+                empresa       = empleo.get('employer_name', 'Empresa no especificada')
+                ciudad        = empleo.get('job_city') or empleo.get('job_state') or empleo.get('job_country', 'No especificada')
+                pais          = empleo.get('job_country', '')
+                ubicacion_job = (ciudad + ", " + pais).strip(", ") if ciudad and pais and ciudad != pais else ciudad or pais or 'No especificada'
+                min_salary    = empleo.get('job_min_salary')
+                max_salary    = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                
+                salary_curr   = empleo.get('job_salary_currency', 'USD')
                 if min_salary and max_salary:
-                    sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    if salary_period:
-                        sueldo += f" ({salary_period})"
+                    sueldo = salary_curr + " " + "{:,.0f}".format(min_salary) + " - " + "{:,.0f}".format(max_salary)
+                    if salary_period: sueldo += " /" + salary_period.lower()
                 elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                    sueldo = "Desde " + salary_curr + " " + "{:,.0f}".format(min_salary)
+                    if salary_period: sueldo += " /" + salary_period.lower()
                 else:
                     sueldo = "No especificado"
-                
-                # Tipo de empleo
-                tipo = empleo.get('job_employment_type', 'No especificado')
-                if tipo == 'FULLTIME':
-                    tipo = 'Tiempo completo'
-                elif tipo == 'PARTTIME':
-                    tipo = 'Medio tiempo'
-                elif tipo == 'CONTRACTOR':
-                    tipo = 'Contrato'
-                
-                # Link de postulación
+                tipo = empleo.get('job_employment_type', '')
+                tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo', 'CONTRACTOR': 'Contrato', 'INTERN': 'Práctica'}
+                tipo = tipo_map.get(tipo, tipo) or 'No especificado'
                 link = empleo.get('job_apply_link', '')
-                
-                # Fecha de publicación
                 posted = empleo.get('job_posted_at_datetime_utc', '')
                 if posted:
                     try:
-                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
-                        if dias_atras == 0:
-                            fecha_str = "Hoy"
-                        elif dias_atras == 1:
-                            fecha_str = "Ayer"
-                        else:
-                            fecha_str = f"Hace {dias_atras} días"
+                        fp = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias = (datetime.now(fp.tzinfo) - fp).days
+                        fecha_str = "Hoy" if dias == 0 else ("Ayer" if dias == 1 else "Hace " + str(dias) + " días")
                     except:
                         fecha_str = ""
                 else:
                     fecha_str = ""
-                
-                resultado += f"**{i}. {titulo}**\n"
-                resultado += f"🏢 {empresa}\n"
-                resultado += f"📍 {ubicacion_job}\n"
-                resultado += f"💰 {sueldo}\n"
-                resultado += f"📋 {tipo}"
+                resultado += "*" + str(i) + ". " + titulo + "*\n"
+                resultado += "🏢 *Empresa:* " + empresa + "\n"
+                resultado += "📍 *Ubicación:* " + ubicacion_job + "\n"
+                resultado += "💰 *Salario:* " + sueldo + "\n"
+                resultado += "📋 *Modalidad:* " + tipo
                 if fecha_str:
-                    resultado += f" • {fecha_str}"
+                    resultado += "  •  " + fecha_str
                 resultado += "\n"
-                
                 if link:
-                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
-                
+                    resultado += "🔗 [POSTULAR AQUÍ](" + link + ")\n"
                 resultado += "\n"
-            
             resultado += "━" * 30 + "\n"
-            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
-            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
-            
+            resultado += "_✅ Empleos reales de LinkedIn, Indeed, Glassdoor y otros._\n"
+            resultado += "_👆 Repite /empleo " + (cargo or '') + " para ver más resultados._"
             return resultado
-    
-    # FALLBACK: JSearch no disponible — usar Web Scraping gratuito
+
+    # FALLBACK: web scraping gratuito
     busqueda_encoded = urllib.parse.quote(busqueda_texto)
     busqueda_laborum = busqueda_texto.replace(" ", "-").lower()
-
-    links_portales = f"""
-🔗 **BUSCA EN ESTOS PORTALES:**
-
-• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={busqueda_encoded}&location=Chile)
-• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q={busqueda_encoded})
-• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-{busqueda_laborum}.html)
-• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q={busqueda_encoded}&l=Chile)
-• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q={busqueda_encoded})
-"""
-
-    # Intentar scraping web de empleos reales con motores gratuitos
+    links_portales = (
+        "\n*🔗 BUSCA EN ESTOS PORTALES:*\n\n"
+        "• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords=" + busqueda_encoded + "&location=Chile)\n"
+        "• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q=" + busqueda_encoded + ")\n"
+        "• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-" + busqueda_laborum + ".html)\n"
+        "• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q=" + busqueda_encoded + "&l=Chile)\n"
+        "• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q=" + busqueda_encoded + ")\n"
+    )
     web_empleos_ctx = ''
     try:
-        query_web = f"oferta empleo {busqueda_texto} Chile"
+        query_web = "oferta empleo " + busqueda_texto + " Chile salario empresa"
         if ubicacion and ubicacion.lower() != 'chile':
-            query_web = f"oferta empleo {busqueda_texto} {ubicacion} Chile"
+            query_web = "oferta empleo " + busqueda_texto + " " + ubicacion + " Chile"
+        # Variar query si es búsqueda repetida
+        if offset > 0:
+            variantes = ["sueldo renta", "contrato", "requisitos experiencia", "empresa cargo"]
+            query_web += " " + variantes[offset % len(variantes)]
         web_res = buscar_en_web(query_web, extraer_contenido=False)
         if web_res.get('resultados'):
             web_empleos_ctx = formatear_contexto_web(web_res)
-            logger.info(f"💼 Empleos web scraping: {len(web_res['resultados'])} resultados")
     except Exception as e:
-        logger.debug(f"Web scraping empleos: {e}")
+        logger.debug("Web scraping empleos: " + str(e))
 
     if not ia_disponible:
-        return f"🔍 **BÚSQUEDA DE EMPLEO**\n📋 Criterios: _{busqueda_texto}_\n{links_portales}\n\n💡 Haz clic en los links para ver ofertas reales."
-    
+        return "*🔍 BÚSQUEDA DE EMPLEO*\n📋 Criterios: " + busqueda_texto + "\n" + links_portales
     try:
-        consulta = f"cargo: {cargo}" if cargo else "empleos generales"
-        if ubicacion:
-            consulta += f", ubicacion: {ubicacion}"
-
-        contexto_web_empleos = web_empleos_ctx if 'web_empleos_ctx' in dir() else ''
-
-        if contexto_web_empleos:
-            prompt = f"""Eres experto en mercado laboral chileno.
-El usuario busca empleo: {consulta}
-
-{contexto_web_empleos}
-
-INSTRUCCION: Analiza los resultados web encontrados y presenta las mejores oportunidades laborales.
-Para cada oferta muestra: cargo, empresa, ubicacion, sueldo estimado si lo hay, link de postulacion.
-Complementa con sugerencias de portales. Responde en espanol profesional. Maximo 400 palabras."""
+        consulta = "cargo: " + cargo if cargo else "empleos generales"
+        if ubicacion: consulta += ", ubicacion: " + ubicacion
+        if renta:     consulta += ", renta esperada: " + renta
+        if web_empleos_ctx:
+            prompt = (
+                "Eres experto en mercado laboral chileno.\n"
+                "El usuario busca: " + consulta + "\n\n"
+                + web_empleos_ctx + "\n\n"
+                "INSTRUCCION: Analiza los resultados y presenta las MEJORES oportunidades.\n"
+                "Para CADA oferta indica OBLIGATORIAMENTE: cargo, empresa, ubicacion, salario mensual liquido estimado en CLP, modalidad.\n"
+                "Presenta minimo 5 ofertas. Responde en espanol profesional."
+            )
         else:
-            prompt = f"""Genera 5 ejemplos de ofertas laborales REALISTAS para Chile.
-
-BUSQUEDA: {consulta}
-
-REGLAS:
-1. Sueldos MENSUALES LIQUIDOS en pesos chilenos
-2. Empresas REALES chilenas
-3. Si el cargo no existe exactamente, muestra CARGOS SIMILARES
-
-FORMATO:
-Cargo, Empresa, Ubicacion, Sueldo estimado, Modalidad
-
-Solo las 5 ofertas, sin introducciones."""
-
-        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
-        
+            # Usar semilla aleatoria para variar respuestas en búsquedas repetidas
+            seed_var = ["junior", "senior", "full-time", "remoto", "hibrido"][offset % 5] if offset > 0 else ""
+            prompt = (
+                "Genera 8 ofertas laborales REALISTAS para Chile.\n\n"
+                "BUSQUEDA: " + consulta + ("  [Variante: " + seed_var + "]" if seed_var else "") + "\n\n"
+                "REGLAS:\n"
+                "1. Sueldos MENSUALES LIQUIDOS en pesos chilenos (rango realista)\n"
+                "2. Empresas REALES chilenas o multinacionales presentes en Chile\n"
+                "3. Indica ciudad (Santiago, Valparaíso, Concepción, etc.)\n"
+                "4. Indica modalidad (presencial/remoto/híbrido)\n\n"
+                "FORMATO por oferta:\n"
+                "CARGO | EMPRESA | CIUDAD | SALARIO | MODALIDAD\n\n"
+                "Solo las 8 ofertas sin introducciones."
+            )
+        respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.75)
         if respuesta:
-            resultado = f"🔎 **SUGERENCIAS DE EMPLEO (IA)**\n"
-            resultado += f"📋 Búsqueda: _{consulta}_\n"
+            resultado  = "*🔎 SUGERENCIAS DE EMPLEO*\n"
+            resultado += "📋 *Búsqueda:* " + consulta + "\n"
             resultado += "━" * 30 + "\n\n"
             resultado += respuesta
             resultado += "\n\n" + "━" * 30
-            resultado += "\n⚠️ _Estas son sugerencias de IA. Para ofertas reales:_\n"
+            resultado += "\n_⚠️ Sugerencias de IA. Para ofertas reales:_\n"
             resultado += links_portales
             return resultado
         else:
-            return f"🔍 **BÚSQUEDA DE EMPLEO**\n{links_portales}\n💡 Usa los links para buscar directamente."
-            
+            return "*🔍 BÚSQUEDA DE EMPLEO*\n" + links_portales
     except Exception as e:
-        logger.error(f"Error en buscar_empleos_web: {e}")
-        return f"❌ Error al buscar.\n{links_portales}"
-
+        logger.error("buscar_empleos_web: " + str(e))
+        return "*🔍 BÚSQUEDA DE EMPLEO*\n" + links_portales
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
 
@@ -2849,6 +2821,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
 /empleo [cargo] - Buscar empleos
+/buscar_web [consulta] - Búsqueda web en tiempo real con IA
+/feriados [año] - Feriados legales de Chile
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
@@ -3944,11 +3918,17 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cargo = texto
     
     msg = await update.message.reply_text("🔍 Buscando ofertas de empleo...")
-    
-    resultado = await buscar_empleos_web(cargo, ubicacion, renta)
-    
+
+    # Calcular offset para variar resultados en búsquedas repetidas
+    _emp_key = "empleo_count_" + str(update.effective_user.id)
+    _emp_count = context.bot_data.get(_emp_key, 0)
+    context.bot_data[_emp_key] = _emp_count + 1
+    _offset = (_emp_count * 3) % 15  # rota cada 3 búsquedas, ciclo de 15
+
+    resultado = await buscar_empleos_web(cargo, ubicacion, renta, offset=_offset)
+
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado)
+    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -5279,15 +5259,13 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
+    """Comando /estadisticas - Estadísticas generales"""
     try:
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Error conectando a la base de datos")
             return
-        
         c = conn.cursor()
-        
         if DATABASE_URL:
             c.execute("SELECT COUNT(*) as total FROM mensajes")
             total_msgs = c.fetchone()['total']
@@ -5301,8 +5279,7 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             total_recs = c.fetchone()['total']
             c.execute("SELECT COUNT(*) as total FROM tarjetas_profesional")
             total_tarjetas = c.fetchone()['total']
-            c.execute("""SELECT COUNT(*) as total FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
             msgs_7d = c.fetchone()['total']
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
@@ -5320,117 +5297,36 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
-        
         conn.close()
-        
+
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
-        # Pre-calcular maximos para los gauges ANTES del f-string
-        g1_max = max(int(msgs_hoy) * 3, 100)
-        g2_max = max(int(promedio_7d * 3), 50)
-        
-        # Generar mini-dashboard HTML con gauges ECharts
-        import json as _json
-        html = f"""<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Estadísticas Cofradía</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}}
-h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
-.sub{{text-align:center;color:#667788;margin-bottom:25px}}
-.gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
-.gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
-.stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
-.stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
-.foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
-</style></head><body>
-<h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
-<div class="sub">Resumen General — {datetime.now().strftime('%d/%m/%Y')}</div>
 
-<div class="gauges">
-<div class="gauge-box"><div id="g1" class="gauge"></div></div>
-<div class="gauge-box"><div id="g2" class="gauge"></div></div>
-<div class="gauge-box"><div id="g3" class="gauge"></div></div>
-</div>
-
-<div class="stats-grid">
-<div class="stat"><div class="val">{total_msgs:,}</div><div class="lbl">Mensajes Totales</div></div>
-<div class="stat"><div class="val">{total_usuarios:,}</div><div class="lbl">Usuarios Únicos</div></div>
-<div class="stat"><div class="val">{suscriptores:,}</div><div class="lbl">Miembros Activos</div></div>
-<div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
-<div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
-<div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-</div>
-
-<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
-
-<script>
-var gold='#c3a55a',blue='#3478c3';
-function gauge(id,val,max,title,color){{
-  var c=echarts.init(document.getElementById(id));
-  c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
-    pointer:{{show:true,length:'60%',width:4,itemStyle:{{color:color}}}},
-    progress:{{show:true,width:12,itemStyle:{{color:color}}}},
-    axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
-    axisTick:{{show:false}},splitLine:{{show:false}},
-    axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
-      offsetCenter:[0,'40%'],formatter:'{{value}}'}},
-    data:[{{value:val,name:title}}]
-  }}]}});
-  window.addEventListener('resize',()=>c.resize());
-}}
-gauge('g1',{msgs_hoy},{g1_max},'Mensajes Hoy',gold);
-gauge('g2',{promedio_7d},{g2_max},'Promedio 7d',blue);
-gauge('g3',{pct_tarjetas},100,'Tarjetas %',gold);
-</script></body></html>"""
-        
-        html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
-        try:
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(html)
-        except Exception as _he:
-            logger.warning(f"HTML write error: {_he}")
-            html_path = None
-        
-        mensaje = (
-            f"📊 ESTADÍSTICAS COFRADÍA\n"
-            f"{'━' * 28}\n\n"
-            f"📝 Mensajes totales: {total_msgs:,}\n"
-            f"👥 Usuarios únicos: {total_usuarios:,}\n"
-            f"✅ Miembros activos: {suscriptores:,}\n"
-            f"📅 Mensajes hoy: {msgs_hoy:,}\n"
-            f"⭐ Recomendaciones: {total_recs:,}\n"
-            f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
-            f"💡 Usa /graficos para dashboard completo."
-        )
-        await update.message.reply_text(mensaje)
-        
-        if html_path:
-            try:
-                with open(html_path, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                        caption="📊 Dashboard ECharts interactivo con gauges"
-                    )
-                os.remove(html_path)
-            except Exception as _fe:
-                logger.warning(f"Error enviando HTML estadisticas: {_fe}")
-        
+        sep = "━" * 28
+        lineas = [
+            "*📊 ESTADÍSTICAS COFRADÍA*",
+            sep,
+            "",
+            "*📝 Mensajes totales:* " + "{:,}".format(total_msgs),
+            "*👥 Usuarios únicos:* " + "{:,}".format(total_usuarios),
+            "*✅ Miembros activos:* " + "{:,}".format(suscriptores),
+            "*📅 Mensajes hoy:* " + "{:,}".format(msgs_hoy),
+            "*⭐ Recomendaciones:* " + "{:,}".format(total_recs),
+            "*📇 Tarjetas profesionales:* " + "{:,}".format(total_tarjetas),
+            "*📈 Promedio últimos 7 días:* " + str(promedio_7d) + " msg/día",
+            "*🎯 Tarjetas creadas:* " + str(pct_tarjetas) + "% de miembros",
+            "",
+            sep,
+            "💡 Usa /graficos para el dashboard completo con gráficos.",
+        ]
+        mensaje = "\n".join(lineas)
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
         registrar_servicio_usado(update.effective_user.id, 'estadisticas')
-        
+
     except Exception as e:
         import traceback as _tb
-        logger.error(f"Error en estadisticas: {e}\n{_tb.format_exc()}")
-        await update.message.reply_text(f"❌ Error estadísticas: {str(e)[:120]}\n\nRevisa logs de Render para detalle.")
+        logger.error("Error en estadisticas: " + str(e) + "\n" + _tb.format_exc())
+        await update.message.reply_text("❌ Error estadísticas: " + str(e)[:150])
 
 
 @requiere_suscripcion
@@ -15918,6 +15814,207 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Error en job recordatorio_agenda: {e}")
 
 
+
+# ==================== FERIADOS CHILE ====================
+
+@requiere_suscripcion
+async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /feriados [año] - Lista feriados legales de Chile con coincidencias de eventos"""
+    import re as _re
+
+    # Determinar año consultado
+    anio_actual = datetime.now().year
+    if context.args:
+        try:
+            anio = int(context.args[0])
+            if anio < 2020 or anio > 2035:
+                await update.message.reply_text("❌ Indica un año entre 2020 y 2035.\nEjemplo: /feriados 2025")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Formato: /feriados 2025")
+            return
+    else:
+        anio = anio_actual
+
+    msg = await update.message.reply_text("🗓 Consultando feriados legales de Chile " + str(anio) + "...")
+
+    feriados_data = []
+
+    # ── Fuente 1: API feriados.cl (JSON oficial) ──
+    try:
+        import asyncio as _afer
+        def _fetch_feriados_api():
+            url = "https://apis.digital.gob.cl/fl/feriados/" + str(anio)
+            r = requests.get(url, timeout=15, headers={'Accept': 'application/json'})
+            if r.status_code == 200:
+                return r.json()
+            return []
+        raw = await _afer.get_event_loop().run_in_executor(None, _fetch_feriados_api)
+        if raw and isinstance(raw, list):
+            for item in raw:
+                fecha_str = item.get('fecha', '')
+                nombre    = item.get('nombre', '')
+                tipo      = item.get('tipo', 'Legal')
+                if fecha_str and nombre:
+                    try:
+                        fecha_dt = datetime.strptime(fecha_str, '%Y-%m-%d')
+                        feriados_data.append({
+                            'fecha': fecha_dt,
+                            'nombre': nombre,
+                            'tipo': tipo
+                        })
+                    except:
+                        pass
+    except Exception as _e1:
+        logger.debug("Feriados API digital.gob.cl: " + str(_e1))
+
+    # ── Fuente 2: Web scraping si la API falla ──
+    if not feriados_data:
+        try:
+            import asyncio as _afer2
+            def _scrape_feriados():
+                return buscar_en_web(
+                    "feriados legales Chile " + str(anio) + " lista completa",
+                    extraer_contenido=True)
+            wr = await _afer2.get_event_loop().run_in_executor(None, _scrape_feriados)
+            if wr.get('resultados') or wr.get('contenido'):
+                ctx_web = formatear_contexto_web(wr)
+                prompt = (
+                    "Extrae TODOS los feriados legales de Chile para el año " + str(anio) + ".\n"
+                    "Contexto web:\n" + ctx_web[:3000] + "\n\n"
+                    "Responde SOLO con una lista JSON, sin texto adicional, formato:\n"
+                    '[{"fecha":"YYYY-MM-DD","nombre":"Nombre del feriado","tipo":"Legal"}]\n'
+                    "Incluye TODOS los feriados nacionales de Chile."
+                )
+                resp_json = llamar_groq(prompt, max_tokens=1200, temperature=0.1)
+                if resp_json:
+                    import json as _json2
+                    clean = resp_json.strip()
+                    # Extract JSON array
+                    m = _re.search(r'\[.*\]', clean, _re.DOTALL)
+                    if m:
+                        clean = m.group(0)
+                    items = _json2.loads(clean)
+                    for item in items:
+                        try:
+                            fd = datetime.strptime(item['fecha'], '%Y-%m-%d')
+                            feriados_data.append({'fecha': fd, 'nombre': item['nombre'], 'tipo': item.get('tipo', 'Legal')})
+                        except:
+                            pass
+        except Exception as _e2:
+            logger.debug("Feriados web scraping: " + str(_e2))
+
+    # ── Fuente 3: Hardcoded fallback para años conocidos ──
+    if not feriados_data:
+        FERIADOS_FIJOS = {
+            '01-01': 'Año Nuevo',
+            '05-01': 'Día del Trabajo',
+            '05-21': 'Día de las Glorias Navales',
+            '06-20': 'Día Nacional de los Pueblos Indígenas',
+            '06-29': 'San Pedro y San Pablo',
+            '07-16': 'Día de la Virgen del Carmen',
+            '08-15': 'Asunción de la Virgen',
+            '09-18': 'Independencia Nacional',
+            '09-19': 'Día de las Glorias del Ejército',
+            '10-12': 'Encuentro de Dos Mundos',
+            '10-31': 'Día de las Iglesias Evangélicas',
+            '11-01': 'Día de Todos los Santos',
+            '12-08': 'Inmaculada Concepción',
+            '12-25': 'Navidad',
+        }
+        for dd_mm, nombre in FERIADOS_FIJOS.items():
+            try:
+                fd = datetime.strptime(str(anio) + '-' + dd_mm, '%Y-%m-%d')
+                feriados_data.append({'fecha': fd, 'nombre': nombre, 'tipo': 'Legal'})
+            except:
+                pass
+
+    if not feriados_data:
+        await msg.edit_text("❌ No se pudo obtener los feriados de " + str(anio) + ". Intenta más tarde.")
+        return
+
+    # Ordenar por fecha
+    feriados_data.sort(key=lambda x: x['fecha'])
+
+    # ── Obtener eventos de la Cofradía para comparar ──
+    eventos_cofradia = {}
+    try:
+        conn_ev = get_db_connection()
+        if conn_ev:
+            c_ev = conn_ev.cursor()
+            if DATABASE_URL:
+                c_ev.execute(
+                    "SELECT fecha, titulo FROM eventos WHERE EXTRACT(YEAR FROM fecha) = %s",
+                    (anio,))
+            else:
+                c_ev.execute(
+                    "SELECT fecha, titulo FROM eventos WHERE strftime('%Y', fecha) = ?",
+                    (str(anio),))
+            for row in c_ev.fetchall():
+                fd = row['fecha'] if DATABASE_URL else row[0]
+                tit = row['titulo'] if DATABASE_URL else row[1]
+                if fd:
+                    try:
+                        if isinstance(fd, str):
+                            fd = datetime.strptime(fd[:10], '%Y-%m-%d')
+                        key = fd.strftime('%Y-%m-%d')
+                        eventos_cofradia[key] = tit
+                    except:
+                        pass
+            conn_ev.close()
+    except Exception as _ev:
+        logger.debug("Feriados: eventos query: " + str(_ev))
+
+    # ── Construir respuesta ──
+    DIAS_ES = {0: 'Lunes', 1: 'Martes', 2: 'Miércoles', 3: 'Jueves',
+               4: 'Viernes', 5: 'Sábado', 6: 'Domingo'}
+    MESES_ES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril',
+                5: 'Mayo', 6: 'Junio', 7: 'Julio', 8: 'Agosto',
+                9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+
+    lineas = [
+        "*🗓 FERIADOS LEGALES DE CHILE — " + str(anio) + "*",
+        "━" * 32,
+        "_Fuente: Gobierno Digital de Chile_",
+        "",
+    ]
+
+    mes_actual = 0
+    for f in feriados_data:
+        fd = f['fecha']
+        if fd.month != mes_actual:
+            mes_actual = fd.month
+            lineas.append("")
+            lineas.append("*📅 " + MESES_ES[fd.month].upper() + "*")
+        dia_str   = fd.strftime('%d') + " de " + MESES_ES[fd.month]
+        dia_sem   = DIAS_ES[fd.weekday()]
+        nombre_f  = f['nombre']
+        tipo_f    = f.get('tipo', 'Legal')
+        clave_ev  = fd.strftime('%Y-%m-%d')
+        evento_tag = ""
+        if clave_ev in eventos_cofradia:
+            evento_tag = "  🎯 _Evento Cofradía: " + eventos_cofradia[clave_ev] + "_"
+        icono = "🔴" if tipo_f == 'Legal' else "🟡"
+        lineas.append(icono + " *" + dia_str + "* (" + dia_sem + ") — " + nombre_f + evento_tag)
+
+    lineas.append("")
+    lineas.append("━" * 32)
+    lineas.append("*Total:* " + str(len(feriados_data)) + " feriados  •  🔴 Legal  🟡 Otros")
+    if eventos_cofradia:
+        lineas.append("🎯 *Eventos Cofradía que coinciden con feriados:* " + str(sum(1 for k in eventos_cofradia if any(f['fecha'].strftime('%Y-%m-%d') == k for f in feriados_data))))
+
+    texto_final = "\n".join(lineas)
+
+    # Telegram tiene límite de 4096 chars — dividir si necesario
+    if len(texto_final) <= 4096:
+        await msg.edit_text(texto_final, parse_mode='Markdown')
+    else:
+        await msg.edit_text(texto_final[:4090] + "...", parse_mode='Markdown')
+
+    registrar_servicio_usado(update.effective_user.id, 'feriados')
+
+
+
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
@@ -16190,6 +16287,7 @@ def main():
     application.add_handler(CommandHandler("mis_tareas", mis_tareas_comando))
     application.add_handler(CommandHandler("briefing", briefing_diario_comando))
     application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
+    application.add_handler(CommandHandler("feriados", feriados_comando))
     # Handlers dinámicos para /completar_ID, /ok_ID, /eliminar_agenda_ID
     application.add_handler(MessageHandler(
         filters.Regex(r'^/(completar_|ok_|eliminar_agenda_)\d+'),
