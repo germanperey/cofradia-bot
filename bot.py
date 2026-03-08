@@ -1577,6 +1577,55 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
         
+        # BÚSQUEDA HOLÍSTICA: RAG + Excel + Web (con caché para evitar scraping repetido)
+        ctx_voz_holistica = ''
+        ctx_fuentes_usadas = []
+        try:
+            import asyncio as _ah
+            # 1. RAG — base de conocimientos
+            try:
+                rag_res = await _ah.get_event_loop().run_in_executor(
+                    None, lambda: busqueda_unificada(texto_transcrito, top_k=3))
+                if rag_res:
+                    rag_txt = '\n'.join([(r['texto'] if isinstance(r, dict) else str(r))[:300] for r in rag_res[:3]])
+                    if rag_txt.strip():
+                        ctx_voz_holistica += '\n[BASE CONOCIMIENTOS]\n' + rag_txt
+                        ctx_fuentes_usadas.append('RAG')
+            except Exception as _er:
+                logger.debug('Voz RAG: ' + str(_er))
+            # 2. Excel Drive — directorio cofrades
+            try:
+                df_voz = await _ah.get_event_loop().run_in_executor(None, obtener_datos_excel_drive)
+                if df_voz is not None and len(df_voz) > 0:
+                    palabras_q = [p for p in texto_transcrito.lower().split() if len(p) > 3]
+                    matches_ex = []
+                    for _, row in df_voz.iterrows():
+                        fila_s = ' '.join([str(v) for v in row.values if str(v) not in ['nan','None','']]).lower()
+                        if sum(1 for p in palabras_q if p in fila_s) >= 2:
+                            n = str(row.iloc[2]) if len(row) > 2 else ''
+                            a = str(row.iloc[3]) if len(row) > 3 else ''
+                            emp = str(row.iloc[11]) if len(row) > 11 else ''
+                            prof = str(row.iloc[24]) if len(row) > 24 else ''
+                            matches_ex.append((n + ' ' + a).strip() + ' — ' + prof + (', ' + emp if emp not in ['nan',''] else ''))
+                        if len(matches_ex) >= 3: break
+                    if matches_ex:
+                        ctx_voz_holistica += '\n[DIRECTORIO COFRADÍA]\n' + '\n'.join(matches_ex)
+                        ctx_fuentes_usadas.append('Excel')
+            except Exception as _ex2:
+                logger.debug('Voz Excel: ' + str(_ex2))
+            # 3. Web — solo si RAG no tuvo resultado (con caché automático)
+            if not ctx_voz_holistica.strip():
+                try:
+                    web_voz = await _ah.get_event_loop().run_in_executor(
+                        None, lambda: buscar_en_web(texto_transcrito, extraer_contenido=False))
+                    if web_voz.get('resultados'):
+                        ctx_voz_holistica += '\n[WEB]\n' + formatear_contexto_web(web_voz)[:800]
+                        ctx_fuentes_usadas.append('Web')
+                except Exception as _ew:
+                    logger.debug('Voz Web: ' + str(_ew))
+        except Exception as _eh:
+            logger.debug('Voz holística: ' + str(_eh))
+
         # PASO 2.5: Detectar si el usuario dijo "comando [nombre]" para ejecutar un comando real
         comando_detectado = detectar_comando_por_voz(texto_transcrito)
         if comando_detectado:
@@ -1618,15 +1667,19 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.edit_text(f'🎙️ "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
 
         # Prompt sin DB — todo el conocimiento viene del LLM (hasta 2024)
+        _ctx_extra = ctx_voz_holistica.strip() if ctx_voz_holistica.strip() else ''
+        _fuentes_tag = (' [' + ', '.join(ctx_fuentes_usadas) + ']') if ctx_fuentes_usadas else ''
+        _ctx_seccion = ('\n\nCONTEXTO' + _fuentes_tag + ':\n' + _ctx_extra + '\n') if _ctx_extra else ''
         _prom = (
             "Eres el asistente IA de la Cofradía de Networking, comunidad profesional "
             "de oficiales navales chilenos.\n"
             f"Responde a {_nom} en voz: prosa fluida, sin listas, sin asteriscos.\n"
-            f'Empieza SIEMPRE con "{_nom},". Máximo 5 oraciones.\n'
-            "Responde con tu conocimiento (hasta 2024). "
-            "Nunca digas que no tienes información.\n"
-            "Al final agrega: 'Si quieres más detalles, escríbeme la misma pregunta como texto.'\n\n"
-            f"Pregunta: {texto_transcrito}"
+            f'Empieza SIEMPRE con "{_nom},". Máximo 5 oraciones concisas.\n'
+            "Usa TODA la información del contexto antes de responder.\n"
+            "Nunca digas que no tienes información — usa tu conocimiento hasta 2024.\n"
+            "Al final: 'Para más detalles escríbeme la misma pregunta como texto.'"
+            + _ctx_seccion
+            + f"\n\nPregunta: {texto_transcrito}"
         )
 
         # ── Función síncrona: 2 intentos, 8 s cada uno ────────────────────────
@@ -2396,6 +2449,19 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
             resultado += "📍 *Ubicación:* " + ubicacion_busqueda + "\n"
             resultado += "📅 *Fecha:* " + fecha_actual + "\n"
             resultado += "━" * 30 + "\n\n"
+            busqueda_encoded_r = urllib.parse.quote(busqueda_texto)
+            busqueda_laborum_r = busqueda_texto.replace(" ", "-").lower()
+            portales_footer = (
+                "\n" + "━" * 30 + "\n"
+                "*🔗 PORTALES ESPECIALIZADOS DE EMPLEO:*\n"
+                "• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords=" + busqueda_encoded_r + "&location=Chile)\n"
+                "• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q=" + busqueda_encoded_r + ")\n"
+                "• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-" + busqueda_laborum_r + ".html)\n"
+                "• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q=" + busqueda_encoded_r + "&l=Chile)\n"
+                "• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q=" + busqueda_encoded_r + ")\n"
+                "• [⚫ GetOnBoard](https://www.getonbrd.com/jobs?q=" + busqueda_encoded_r + ")\n"
+                "• [🟤 Bumeran](https://www.bumeran.cl/empleos-busqueda-" + busqueda_laborum_r + ".html)\n"
+            )
             for i, empleo in enumerate(empleos[:10], 1):
                 titulo        = empleo.get('job_title', 'Sin título')
                 empresa       = empleo.get('employer_name', 'Empresa no especificada')
@@ -2436,12 +2502,20 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
                 if fecha_str:
                     resultado += "  •  " + fecha_str
                 resultado += "\n"
+                descripcion_raw = empleo.get('job_description', '') or ''
+                if descripcion_raw:
+                    desc_clean = ' '.join(descripcion_raw.replace('\n', ' ').split())
+                    oraciones = [s.strip() for s in desc_clean.split('.') if len(s.strip()) > 20]
+                    desc_breve = '. '.join(oraciones[:2]) + '.' if oraciones else desc_clean[:200]
+                    if len(desc_breve) > 220:
+                        desc_breve = desc_breve[:220] + '...'
+                    resultado += "📝 _" + desc_breve + "_\n"
                 if link:
-                    resultado += "🔗 [POSTULAR AQUÍ](" + link + ")\n"
+                    resultado += "🔗 [*POSTULAR AQUÍ*](" + link + ")\n"
                 resultado += "\n"
-            resultado += "━" * 30 + "\n"
-            resultado += "_✅ Empleos reales de LinkedIn, Indeed, Glassdoor y otros._\n"
-            resultado += "_👆 Repite /empleo " + (cargo or '') + " para ver más resultados._"
+            resultado += portales_footer
+            resultado += "_✅ Datos reales de LinkedIn, Indeed, Glassdoor y otros._\n"
+            resultado += "_👆 Repite /empleo " + (cargo or '') + " para ver nuevas ofertas._"
             return resultado
 
     # FALLBACK: web scraping gratuito
@@ -2850,6 +2924,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 ESTADÍSTICAS
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
+/indicadores - Indicadores económicos Chile (UF, USD, IPC...)
 /top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
@@ -16015,6 +16090,228 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+
+# ==================== INDICADORES ECONÓMICOS CHILE ====================
+
+def obtener_indicadores_chile():
+    """Obtiene indicadores desde mindicador.cl (API REST gratuita, sin key)."""
+    BASE = "https://mindicador.cl/api"
+    config = [
+        ('uf',      'UF',         'Unidad de Fomento'),
+        ('dolar',   'Dólar USD',  'Tipo de cambio USD/CLP'),
+        ('euro',    'Euro EUR',   'Tipo de cambio EUR/CLP'),
+        ('utm',     'UTM',        'Unidad Tributaria Mensual'),
+        ('ipc',     'IPC',        'Índice Precios Consumidor'),
+        ('tpm',     'TPM',        'Tasa Política Monetaria (%)'),
+        ('bitcoin', 'Bitcoin',    'Bitcoin en CLP'),
+    ]
+    datos = {}
+    for cod, nombre, desc in config:
+        try:
+            r = requests.get(BASE + '/' + cod, timeout=8)
+            if r.status_code == 200:
+                j = r.json()
+                serie = j.get('serie', [])
+                if serie:
+                    datos[cod] = {
+                        'nombre': nombre, 'descripcion': desc,
+                        'valor': serie[0].get('valor', 0),
+                        'fecha': serie[0].get('fecha', '')[:10],
+                        'unidad': j.get('unidad_medida', ''),
+                        'serie': serie[:7],
+                    }
+        except Exception as _e:
+            logger.debug('mindicador/' + cod + ': ' + str(_e))
+    return datos
+
+
+def _generar_html_indicadores(datos):
+    """HTML ECharts con dashboard de indicadores económicos."""
+    import json as _j
+
+    COLORES = {
+        'uf': '#c3a55a', 'utm': '#e67e22',
+        'dolar': '#3478c3', 'euro': '#2980b9',
+        'ipc': '#2ecc71', 'tpm': '#27ae60',
+        'bitcoin': '#9b59b6',
+    }
+
+    def fmt(v, cod):
+        if cod in ('ipc','tpm'): return "{:.2f}%".format(v)
+        if cod == 'bitcoin':     return "${:,.0f}".format(v).replace(',','.')
+        return "${:,.2f}".format(v).replace(',','X').replace('.',',').replace('X','.')
+
+    def variacion(serie):
+        if len(serie) < 2: return 0, ''
+        v0 = serie[0].get('valor',0); v1 = serie[1].get('valor',1)
+        if not v1: return 0, ''
+        pct = ((v0-v1)/v1)*100
+        sig = '▲' if pct>=0 else '▼'
+        col = '#2ecc71' if pct>=0 else '#e74c3c'
+        return round(pct,3), '<span style="color:'+col+';font-size:.7em">'+sig+' {:.3f}%'.format(abs(pct))+'</span>'
+
+    cards_html = ''
+    spark_js   = ''
+    for cod, d in datos.items():
+        col  = COLORES.get(cod, '#3478c3')
+        vals = [s.get('valor',0) for s in reversed(d['serie'][:7])]
+        _, var_html = variacion(d['serie'])
+        spark_data  = _j.dumps([round(v,2) for v in vals])
+        n_pts = len(vals)
+        cards_html += (
+            '<div class="card">'
+            '<div class="cn">'+d['nombre']+'</div>'
+            '<div class="cv">'+fmt(d['valor'],cod)+' '+var_html+'</div>'
+            '<div class="cd">'+d['descripcion']+'</div>'
+            '<div id="sp_'+cod+'" class="spark"></div>'
+            '<div class="cf">'+d['fecha']+'</div>'
+            '</div>'
+        )
+        xdata = _j.dumps(list(range(n_pts)))
+        spark_js += (
+            '(function(){'
+            'var c=echarts.init(document.getElementById("sp_'+cod+'"));'
+            'c.setOption({'
+            'grid:{top:0,bottom:0,left:0,right:0},'
+            'xAxis:{type:"category",show:false,data:'+xdata+'},'
+            'yAxis:{type:"value",show:false},'
+            'series:[{type:"line",data:'+spark_data+',smooth:true,symbol:"none",'
+            'lineStyle:{color:"'+col+'",width:2},'
+            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+            'colorStops:[{offset:0,color:"'+col+'55"},{offset:1,color:"transparent"}]}}'
+            '}]});'
+            '})();'
+        )
+
+    now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
+    return (
+        '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Indicadores Económicos Chile</title>'
+        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
+        '<style>'
+        '*{margin:0;padding:0;box-sizing:border-box}'
+        'body{font-family:"Segoe UI",system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}'
+        'h1{text-align:center;color:#c3a55a;font-size:1.5em;margin:15px 0 4px;letter-spacing:2px}'
+        '.sub{text-align:center;color:#667788;margin-bottom:20px;font-size:.8em}'
+        '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:980px;margin:0 auto 20px}'
+        '.card{background:rgba(15,47,89,.7);border:1px solid rgba(195,165,90,.2);border-radius:10px;padding:14px;transition:transform .2s}'
+        '.card:hover{transform:translateY(-3px)}'
+        '.cn{font-size:.75em;color:#8899aa;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}'
+        '.cv{font-size:1.5em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
+        '.cd{font-size:.7em;color:#556677;margin-bottom:6px}'
+        '.spark{width:100%;height:36px;margin:4px 0}'
+        '.cf{font-size:.62em;color:#445566}'
+        '.foot{text-align:center;color:#445566;font-size:.72em;margin-top:16px;padding-top:10px;border-top:1px solid rgba(195,165,90,.15)}'
+        'a{color:#3478c3;text-decoration:none}'
+        '</style></head><body>'
+        '<h1>📈 INDICADORES ECONÓMICOS</h1>'
+        '<div class="sub">Chile · Datos diarios · <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '+now_str+'</div>'
+        '<div class="grid">'+cards_html+'</div>'
+        '<div class="foot">Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · API REST gratuita · Banco Central de Chile · Cofradía de Networking Bot v6</div>'
+        '<script>'+spark_js+'</script>'
+        '</body></html>'
+    )
+
+
+@requiere_suscripcion
+async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /indicadores — Indicadores económicos de Chile con ECharts (mindicador.cl)"""
+    msg = await update.message.reply_text("📈 Consultando indicadores económicos de Chile...")
+    try:
+        import asyncio as _aind
+        datos = await _aind.get_event_loop().run_in_executor(None, obtener_indicadores_chile)
+        if not datos:
+            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
+            return
+
+        sep = "━" * 30
+        lineas = ["*📈 INDICADORES ECONÓMICOS DE CHILE*", sep,
+                  "_Fuente: mindicador.cl — Banco Central de Chile_", ""]
+        for cod, d in datos.items():
+            v = d['valor']
+            if cod in ('ipc','tpm'):
+                vf = "{:.2f}%".format(v)
+            elif cod == 'bitcoin':
+                vf = "${:,.0f} CLP".format(v).replace(',','.')
+            else:
+                vf = "${:,.2f} CLP".format(v).replace(',','X').replace('.',',').replace('X','.')
+            serie = d.get('serie',[])
+            tend = ''
+            if len(serie) >= 2:
+                v0 = serie[0].get('valor',0); v1 = serie[1].get('valor',1)
+                if v1:
+                    pct = ((v0-v1)/v1)*100
+                    tend = ' ' + ('▲' if pct>=0 else '▼') + ' {:.3f}%'.format(abs(pct))
+            lineas.append("*" + d['nombre'] + ":* " + vf + tend + "  _(" + d['fecha'] + ")_")
+        lineas += ["", sep,
+                   "💡 Se adjunta *dashboard interactivo* con sparklines de los últimos 7 días.",
+                   "🔗 [mindicador.cl](https://mindicador.cl) · API REST gratuita"]
+
+        await update.message.reply_text("\n".join(lineas), parse_mode='Markdown')
+
+        html_ind  = _generar_html_indicadores(datos)
+        html_path = "/tmp/ind_" + str(update.effective_user.id) + ".html"
+        with open(html_path,'w',encoding='utf-8') as fh: fh.write(html_ind)
+        with open(html_path,'rb') as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename="indicadores_economicos_" + datetime.now().strftime('%Y%m%d') + ".html",
+                caption="📊 Abre en tu navegador para ver los sparklines interactivos"
+            )
+        try: import os as _os; _os.remove(html_path)
+        except: pass
+        await msg.delete()
+        registrar_servicio_usado(update.effective_user.id, 'indicadores')
+
+    except Exception as e:
+        import traceback as _tb
+        logger.error("indicadores_comando: " + str(e) + "\n" + _tb.format_exc())
+        await msg.edit_text("❌ Error indicadores: " + str(e)[:100])
+
+
+# ==================== GLOBAL ERROR HANDLER ====================
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Captura TODOS los errores no manejados del bot y los loguea correctamente."""
+    import traceback as _tb
+
+    error = context.error
+    tb_str = ''.join(_tb.format_exception(type(error), error, error.__traceback__))
+
+    # Errores esperados que no necesitan alerta (red, Telegram timeouts)
+    ignorar = (
+        'Message is not modified',
+        'Query is too old',
+        'Bad Gateway',
+        'Timed out',
+        'Connection reset',
+        'Network',
+        'httpx',
+        'ReadTimeout',
+        'ConnectTimeout',
+        'RetryAfter',
+    )
+    for patron in ignorar:
+        if patron.lower() in str(error).lower():
+            logger.debug(f"Error esperado ignorado: {error}")
+            return
+
+    logger.error(f"Exception no manejada:\n{tb_str}")
+
+    # Intentar notificar al usuario si hay update activo
+    if update:
+        try:
+            mensaje_error = "❌ Ocurrió un error inesperado. Por favor intenta de nuevo."
+            if hasattr(update, 'effective_message') and update.effective_message:
+                await update.effective_message.reply_text(mensaje_error)
+            elif hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.answer(mensaje_error, show_alert=True)
+        except Exception:
+            pass  # No propagar errores desde el error handler
+
+
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
@@ -16288,6 +16585,7 @@ def main():
     application.add_handler(CommandHandler("briefing", briefing_diario_comando))
     application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
     application.add_handler(CommandHandler("feriados", feriados_comando))
+    application.add_handler(CommandHandler("indicadores", indicadores_comando))
     # Handlers dinámicos para /completar_ID, /ok_ID, /eliminar_agenda_ID
     application.add_handler(MessageHandler(
         filters.Regex(r'^/(completar_|ok_|eliminar_agenda_)\d+'),
@@ -16980,6 +17278,10 @@ IMPORTANTE: Responde de forma COMPLETA y DETALLADA. No hagas respuestas de 3-4 l
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
+    # Registrar error handler global
+    application.add_error_handler(global_error_handler)
+    logger.info("✅ Error handler global registrado")
+
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
