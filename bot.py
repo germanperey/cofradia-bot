@@ -5379,14 +5379,22 @@ function gauge(id,val,max,title,color){{
   }}]}});
   window.addEventListener('resize',()=>c.resize());
 }}
-gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
-gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
-gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+gauge('g1',{msgs_hoy},{g1_max},'Mensajes Hoy',gold);
+gauge('g2',{promedio_7d},{g2_max},'Promedio 7d',blue);
+gauge('g3',{pct_tarjetas},100,'Tarjetas %',gold);
 </script></body></html>"""
         
+        # Pre-compute gauge maxima safely outside f-string
+        g1_max = max(int(msgs_hoy) * 3, 100)
+        g2_max = max(int(promedio_7d * 3), 50)
+
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html)
+        try:
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+        except Exception as _he:
+            logger.warning(f"HTML write error: {_he}")
+            html_path = None
         
         mensaje = (
             f"📊 ESTADÍSTICAS COFRADÍA\n"
@@ -5402,23 +5410,24 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
         )
         await update.message.reply_text(mensaje)
         
-        with open(html_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f,
-                filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts interactivo con gauges"
-            )
-        
-        try:
-            os.remove(html_path)
-        except:
-            pass
+        if html_path:
+            try:
+                with open(html_path, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
+                        caption="📊 Dashboard ECharts interactivo con gauges"
+                    )
+                os.remove(html_path)
+            except Exception as _fe:
+                logger.warning(f"Error enviando HTML estadisticas: {_fe}")
         
         registrar_servicio_usado(update.effective_user.id, 'estadisticas')
         
     except Exception as e:
-        logger.error(f"Error en estadisticas: {e}")
-        await update.message.reply_text("❌ Error obteniendo estadísticas")
+        import traceback as _tb
+        logger.error(f"Error en estadisticas: {e}\n{_tb.format_exc()}")
+        await update.message.reply_text(f"❌ Error estadísticas: {str(e)[:120]}\n\nRevisa logs de Render para detalle.")
 
 
 @requiere_suscripcion
@@ -11576,14 +11585,39 @@ async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if primer_arg.startswith('@'):
             objetivo_username = primer_arg.replace('@', '').lower()
             texto_rec = ' '.join(context.args[1:])
+            # Buscar por username de Telegram en suscripciones
             if DATABASE_URL:
-                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
+                c.execute("SELECT user_id, first_name, COALESCE(last_name,'') as last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
             else:
-                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
+                c.execute("SELECT user_id, first_name, COALESCE(last_name,'') as last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
             dest = c.fetchone()
+
+            # ── FALLBACK: buscar por nombre_completo en tarjetas_profesional ──
+            if not dest:
+                nombre_like = "%" + objetivo_username.replace("_", " ") + "%"
+                if DATABASE_URL:
+                    c.execute("""SELECT s.user_id, s.first_name, COALESCE(s.last_name,'') as last_name
+                                 FROM suscripciones s
+                                 JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                                 WHERE LOWER(REPLACE(t.nombre_completo,' ','')) LIKE LOWER(REPLACE(%s,' ',''))
+                                    OR LOWER(t.nombre_completo) LIKE %s
+                                 LIMIT 1""", (nombre_like, nombre_like))
+                else:
+                    c.execute("""SELECT s.user_id, s.first_name, COALESCE(s.last_name,'') as last_name
+                                 FROM suscripciones s
+                                 JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                                 WHERE LOWER(REPLACE(t.nombre_completo,' ','')) LIKE LOWER(REPLACE(?,' ',''))
+                                    OR LOWER(t.nombre_completo) LIKE ?
+                                 LIMIT 1""", (nombre_like, nombre_like))
+                dest = c.fetchone()
+
             if not dest:
                 conn.close()
-                await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
+                await update.message.reply_text(
+                    f"❌ No se encontró al usuario @{objetivo_username}\n\n"
+                    f"💡 Intenta con su nombre real:\n"
+                    f"   /recomendar Pedro González Excelente profesional"
+                )
                 return
         else:
             # Búsqueda por nombre
@@ -12593,61 +12627,166 @@ async def analisis_linkedin_comando(update: Update, context: ContextTypes.DEFAUL
         return
     msg = await update.message.reply_text("🔍 Analizando tu perfil profesional...")
     try:
-        linkedin_url = tarjeta.get('linkedin', '')
-        contenido_linkedin = ''
+        linkedin_url = tarjeta.get('linkedin', '') or ''
+        if linkedin_url and not linkedin_url.startswith('http'):
+            linkedin_url = "https://" + linkedin_url
 
-        # Leer perfil LinkedIn real con Jina AI
-        if linkedin_url:
-            if not linkedin_url.startswith('http'):
-                linkedin_url = f"https://{linkedin_url}"
-            await msg.edit_text("🔗 Leyendo tu perfil LinkedIn en tiempo real...")
+        await msg.edit_text("📂 Recopilando datos profesionales de múltiples fuentes...")
+
+        # 1. Datos del Excel Google Drive (experiencia, industrias, empresas)
+        drive_info = ""
+        drive_industrias = []
+        drive_empresas   = []
+        try:
             import asyncio as _ali
-            contenido_linkedin = await _ali.get_event_loop().run_in_executor(
-                None, lambda: leer_url_con_jina(linkedin_url))
-            if not contenido_linkedin:
-                nombre_b = tarjeta.get('nombre', '')
-                if nombre_b:
-                    await msg.edit_text("🌐 Buscando informacion profesional en internet...")
-                    wr = await _ali.get_event_loop().run_in_executor(
-                        None, lambda: buscar_en_web(
-                            f"LinkedIn {nombre_b} {tarjeta.get('profesion','')} {tarjeta.get('empresa','')}",
-                            extraer_contenido=False))
-                    if wr.get('resultados'):
-                        contenido_linkedin = formatear_contexto_web(wr)
+            df_drive = await _ali.get_event_loop().run_in_executor(
+                None, obtener_datos_excel_drive)
+            if df_drive is not None and len(df_drive) > 0:
+                nombre_buscar = (tarjeta.get('nombre','') or '').lower().strip()
+                partes_n = nombre_buscar.split()
+                for _, row in df_drive.iterrows():
+                    n_ex = str(row.iloc[2]).strip().lower() if len(row) > 2 else ''
+                    a_ex = str(row.iloc[3]).strip().lower() if len(row) > 3 else ''
+                    full = (n_ex + ' ' + a_ex).strip()
+                    match = False
+                    if nombre_buscar and (nombre_buscar in full or full in nombre_buscar):
+                        match = True
+                    elif len(partes_n) >= 2 and partes_n[0] in full and partes_n[-1] in full:
+                        match = True
+                    if match:
+                        def gc(r, i):
+                            try:
+                                v = str(r.iloc[i]).strip()
+                                return '' if v.lower() in ['nan','none','','null'] else v
+                            except:
+                                return ''
+                        gen  = gc(row, 1)
+                        prof = gc(row, 24)
+                        sit  = gc(row, 8)
+                        ciu  = gc(row, 7)
+                        ind1 = gc(row, 10); emp1 = gc(row, 11)
+                        ind2 = gc(row, 12); emp2 = gc(row, 13)
+                        ind3 = gc(row, 14); emp3 = gc(row, 15)
+                        for ind, emp in [(ind1,emp1),(ind2,emp2),(ind3,emp3)]:
+                            if ind: drive_industrias.append(ind)
+                            if emp: drive_empresas.append(emp)
+                        partes_info = []
+                        if gen:  partes_info.append("Generacion Escuela Naval: " + gen)
+                        if prof: partes_info.append("Profesion/Actividad: " + prof)
+                        if sit:  partes_info.append("Situacion laboral: " + sit)
+                        if ciu:  partes_info.append("Ciudad: " + ciu)
+                        for ind, emp in [(ind1,emp1),(ind2,emp2),(ind3,emp3)]:
+                            if emp and ind: partes_info.append("Empresa: " + emp + " (" + ind + ")")
+                            elif emp:       partes_info.append("Empresa: " + emp)
+                        drive_info = "\n".join(partes_info)
+                        break
+        except Exception as _ed:
+            logger.debug("analisis_linkedin drive: " + str(_ed))
 
-        await msg.edit_text("🧠 Generando analisis con IA...")
+        # 2. Busqueda web del nombre (informacion publica disponible)
+        web_info = ""
+        nombre_busqueda = tarjeta.get('nombre','')
+        if nombre_busqueda:
+            await msg.edit_text("🌐 Buscando información pública del profesional...")
+            try:
+                import asyncio as _ali2
+                query_web = nombre_busqueda + " " + tarjeta.get('empresa','') + " profesional Chile"
+                wr = await _ali2.get_event_loop().run_in_executor(
+                    None, lambda: buscar_en_web(query_web, extraer_contenido=False))
+                if wr.get('resultados'):
+                    snippets = []
+                    for item in wr['resultados'][:3]:
+                        s = item.get('snippet','')
+                        t = item.get('titulo','')
+                        if s and len(s) > 30:
+                            snippets.append("- " + t + ": " + s[:200])
+                    if snippets:
+                        web_info = "Informacion encontrada en web:\n" + "\n".join(snippets)
+            except Exception as _ew:
+                logger.debug("analisis_linkedin web: " + str(_ew))
 
-        seccion_li = ""
-        if contenido_linkedin and len(contenido_linkedin) > 80:
-            seccion_li = f"\nCONTENIDO REAL DEL PERFIL:\n{contenido_linkedin[:2000]}"
-        elif linkedin_url:
-            seccion_li = f"\nURL LinkedIn: {linkedin_url}"
+        # 3. Recomendaciones recibidas en Cofradia
+        recs_info = ""
+        try:
+            _conn_r = get_db_connection()
+            if _conn_r:
+                _c_r = _conn_r.cursor()
+                if DATABASE_URL:
+                    _c_r.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = %s ORDER BY id DESC LIMIT 3", (user_id,))
+                else:
+                    _c_r.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = ? ORDER BY id DESC LIMIT 3", (user_id,))
+                recs = _c_r.fetchall()
+                _conn_r.close()
+                if recs:
+                    recs_txt = []
+                    for r in recs:
+                        autor   = (r['autor_nombre'] if DATABASE_URL else r[0]) or 'Cofrade'
+                        texto_r = (r['texto']        if DATABASE_URL else r[1]) or ''
+                        if texto_r:
+                            recs_txt.append('  - ' + autor + ': "' + texto_r[:120] + '"')
+                    if recs_txt:
+                        recs_info = "Recomendaciones recibidas en Cofradia:\n" + "\n".join(recs_txt)
+        except Exception as _er:
+            logger.debug("analisis_linkedin recs: " + str(_er))
+
+        await msg.edit_text("🧠 Generando análisis profundo con IA...")
+
+        # Construir contexto con todos los datos recopilados
+        ctx_lineas = ["DATOS TARJETA PROFESIONAL:"]
+        ctx_lineas.append("- Nombre: " + tarjeta.get('nombre',''))
+        ctx_lineas.append("- Profesion: " + tarjeta.get('profesion',''))
+        ctx_lineas.append("- Empresa actual: " + tarjeta.get('empresa',''))
+        ctx_lineas.append("- Servicios/Especialidades: " + tarjeta.get('servicios',''))
+        ctx_lineas.append("- Ciudad: " + tarjeta.get('ciudad',''))
+        ctx_lineas.append("- LinkedIn URL: " + (linkedin_url or 'No registrado'))
+        if drive_info:
+            ctx_lineas.append("")
+            ctx_lineas.append("DATOS BASE DE DATOS COFRADIA:")
+            ctx_lineas.append(drive_info)
+        if drive_industrias:
+            ctx_lineas.append("- Industrias: " + ', '.join(set(drive_industrias)))
+        if web_info:
+            ctx_lineas.append("")
+            ctx_lineas.append(web_info)
+        if recs_info:
+            ctx_lineas.append("")
+            ctx_lineas.append(recs_info)
+        contexto_profesional = "\n".join(ctx_lineas)
+
+        fuente_badge = "📊 Análisis multi-fuente"
+        if drive_info:     fuente_badge = "📂 Datos reales Cofradía + web"
+        if recs_info:      fuente_badge += " + recomendaciones propias"
 
         prompt = (
-            f"Eres experto en LinkedIn y marca personal. Analiza este perfil profesional:\n"
-            f"Nombre: {tarjeta.get('nombre','')}, Profesion: {tarjeta.get('profesion','')},\n"
-            f"Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')}\n"
-            f"{seccion_li}\n\n"
-            f"Genera:\n1) FORTALEZAS del perfil (3 puntos concretos)\n"
-            f"2) HEADLINE sugerido (max. 120 caracteres)\n"
-            f"3) EXTRACTO/ABOUT sugerido (3-4 oraciones)\n"
-            f"4) 5 PALABRAS CLAVE para mejor visibilidad\n"
-            f"5) 3 ACCIONES CONCRETAS para mejorar visibilidad\n"
-            f"Si tienes contenido real del perfil, usalo. Sin asteriscos."
+            "Eres experto en LinkedIn, marca personal y desarrollo profesional. "
+            "Analiza el siguiente perfil y genera un analisis completo y accionable.\n\n"
+            + contexto_profesional + "\n\n"
+            "NOTA: LinkedIn requiere login para scraping — trabajas con los datos reales de arriba.\n\n"
+            "GENERA:\n"
+            "1) DIAGNOSTICO DEL PERFIL (2-3 lineas concisas)\n"
+            "2) HEADLINE LINKEDIN SUGERIDO (maximo 120 caracteres exactos)\n"
+            "3) SECCION ACERCA DE para LinkedIn (3-4 oraciones profesionales)\n"
+            "4) 6 PALABRAS CLAVE para aparecer en busquedas de LinkedIn\n"
+            "5) Como describir el cargo actual en Experiencia para mayor impacto\n"
+            "6) 3 ACCIONES CONCRETAS para esta semana (especificas, no genericas)\n"
+            "7) A que tipo de personas conectar segun este perfil profesional\n\n"
+            "Responde en espanol profesional. Sin asteriscos. Se especifico con los datos disponibles."
         )
-        resp = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
+
+        resp = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
         if not resp:
-            resp = llamar_gemini_texto(prompt, max_tokens=1400, temperature=0.6)
+            resp = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
+
         if resp:
-            badge = ("🔗 Basado en perfil LinkedIn real"
-                     if contenido_linkedin and len(contenido_linkedin) > 80
-                     else "📊 Basado en tarjeta profesional")
-            await msg.edit_text(f"🔍 ANALISIS DE PERFIL PROFESIONAL\n{'━'*30}\n{badge}\n\n{resp}")
+            header = "🔍 ANALISIS DE PERFIL PROFESIONAL\n" + ("━"*30) + "\n" + fuente_badge + "\n\n"
+            footer = ("\n\n💡 LinkedIn: " + linkedin_url) if linkedin_url else ""
+            await msg.edit_text((header + resp + footer)[:4000])
             registrar_servicio_usado(user_id, 'analisis_linkedin')
         else:
-            await msg.edit_text("❌ Error en el analisis.")
+            await msg.edit_text("❌ Error al generar el análisis.")
     except Exception as e:
-        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+        logger.error("analisis_linkedin: " + str(e), exc_info=True)
+        await msg.edit_text("❌ Error: " + str(e)[:100])
 
 
 # ==================== NIVEL 3: DASHBOARD PERSONAL (premium) ====================
@@ -16123,8 +16262,40 @@ def main():
             return
 
         mensaje = update.message.text.strip()
-        user_name = update.effective_user.first_name
-        
+        # Obtener nombre real del cofrade (tarjeta → suscripciones → Telegram)
+        _tg_name = update.effective_user.first_name or ''
+        user_name = _tg_name  # default
+        try:
+            _conn_n = get_db_connection()
+            if _conn_n:
+                _c_n = _conn_n.cursor()
+                # 1. Buscar nombre completo en tarjeta profesional
+                if DATABASE_URL:
+                    _c_n.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = %s", (update.effective_user.id,))
+                else:
+                    _c_n.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = ?", (update.effective_user.id,))
+                _row_n = _c_n.fetchone()
+                if _row_n:
+                    _nc = (_row_n['nombre_completo'] if DATABASE_URL else _row_n[0]) or ''
+                    if _nc.strip():
+                        # Usar solo el primer nombre del nombre completo registrado
+                        user_name = _nc.strip().split()[0]
+                else:
+                    # 2. Fallback a first_name en suscripciones
+                    if DATABASE_URL:
+                        _c_n.execute("SELECT first_name FROM suscripciones WHERE user_id = %s", (update.effective_user.id,))
+                    else:
+                        _c_n.execute("SELECT first_name FROM suscripciones WHERE user_id = ?", (update.effective_user.id,))
+                    _row_s = _c_n.fetchone()
+                    if _row_s:
+                        _fn = (_row_s['first_name'] if DATABASE_URL else _row_s[0]) or ''
+                        if _fn.strip():
+                            user_name = _fn.strip()
+                _conn_n.close()
+        except Exception as _en:
+            logger.debug(f"user_name lookup: {_en}")
+            user_name = _tg_name  # fallback seguro
+
         # SEGURIDAD: No aceptar instrucciones para modificar datos de usuarios
         patrones_peligrosos = [
             r'(?:su |el |la )?(?:apellido|nombre|generaci[oó]n)\s+(?:es|ser[ií]a|debe ser|cambia)',
