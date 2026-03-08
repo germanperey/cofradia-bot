@@ -16144,175 +16144,572 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-# ==================== INDICADORES ECONÓMICOS CHILE ====================
+
+# ==================== INDICADORES ECONÓMICOS CHILE v2 ====================
+
+# ==================== INDICADORES ECONÓMICOS CHILE v2 ====================
 
 def obtener_indicadores_chile():
-    """Obtiene indicadores desde mindicador.cl (API REST gratuita, sin key)."""
-    BASE = "https://mindicador.cl/api"
-    config = [
-        ('uf',      'UF',         'Unidad de Fomento'),
-        ('dolar',   'Dólar USD',  'Tipo de cambio USD/CLP'),
-        ('euro',    'Euro EUR',   'Tipo de cambio EUR/CLP'),
-        ('utm',     'UTM',        'Unidad Tributaria Mensual'),
-        ('ipc',     'IPC',        'Índice Precios Consumidor'),
-        ('tpm',     'TPM',        'Tasa Política Monetaria (%)'),
-        ('bitcoin', 'Bitcoin',    'Bitcoin en CLP'),
+    """
+    Obtiene indicadores desde mindicador.cl (API REST gratuita).
+    Retorna dict con:
+      - datos_actuales: cards con sparkline 30 días
+      - hist_6m: Dólar vs Euro últimos 6 meses (valor inicio de cada mes)
+      - hist_10a: series anuales últimos 10 años por indicador
+    Usa ThreadPoolExecutor para paralelizar las ~80 llamadas históricas.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    BASE    = 'https://mindicador.cl/api'
+    AHORA   = datetime.now()
+    ANIO_A  = AHORA.year
+
+    # ── Indicadores para cards actuales ──────────────────────────────────
+    CARDS_CFG = [
+        ('uf',             'UF',               'Unidad de Fomento',                  '#c3a55a'),
+        ('dolar',          'Dólar USD',         'Tipo de cambio USD/CLP',             '#3478c3'),
+        ('euro',           'Euro EUR',          'Tipo de cambio EUR/CLP',             '#2980b9'),
+        ('utm',            'UTM',               'Unidad Tributaria Mensual',          '#e67e22'),
+        ('ipc',            'IPC',               'Índice de Precios al Consumidor',    '#2ecc71'),
+        ('tpm',            'TPM',               'Tasa Política Monetaria (%)',        '#27ae60'),
+        ('bitcoin',        'Bitcoin',           'Bitcoin en CLP',                     '#9b59b6'),
+        ('tasa_desempleo', 'Desempleo',         'Tasa de Desempleo (%)',              '#e74c3c'),
+        ('imacec',         'IMACEC',            'Indicador Mensual Actividad Eco.(%)', '#f39c12'),
+        ('libra_cobre',    'Cobre (lb)',        'Precio Libra de Cobre USD',          '#cd7f32'),
+        ('ivp',            'IVP',               'Índice Valor Promedio',              '#1abc9c'),
+        ('tasa_desempleo', 'Desempleo',         'Tasa de Desempleo (%)',              '#e74c3c'),
     ]
-    datos = {}
-    for cod, nombre, desc in config:
+    # Deduplicar
+    seen = set()
+    CARDS_CFG_UNIQ = []
+    for t in CARDS_CFG:
+        if t[0] not in seen:
+            seen.add(t[0])
+            CARDS_CFG_UNIQ.append(t)
+
+    # ── Indicadores para histórico 10 años ────────────────────────────────
+    HIST_CFG = [
+        ('dolar',          'Dólar USD',         '#3478c3'),
+        ('euro',           'Euro EUR',          '#2980b9'),
+        ('uf',             'UF',               '#c3a55a'),
+        ('utm',            'UTM',               '#e67e22'),
+        ('ipc',            'IPC',               '#2ecc71'),
+        ('tasa_desempleo', 'Desempleo (%)',     '#e74c3c'),
+        ('imacec',         'IMACEC (%)',        '#f39c12'),
+        ('libra_cobre',    'Cobre (USD/lb)',    '#cd7f32'),
+        ('bitcoin',        'Bitcoin (CLP)',     '#9b59b6'),
+    ]
+
+    def fetch(url, timeout=10):
         try:
-            r = requests.get(BASE + '/' + cod, timeout=8)
+            r = requests.get(url, timeout=timeout,
+                             headers={'Accept': 'application/json'})
             if r.status_code == 200:
-                j = r.json()
+                return r.json()
+        except Exception as _e:
+            logger.debug('mindicador fetch: ' + str(_e))
+        return None
+
+    # ── 1. Cards: serie últimos 30 días ───────────────────────────────────
+    datos_actuales = {}
+    card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
+        for fut in as_completed(fut_map):
+            cod = fut_map[fut]
+            j   = fut.result()
+            if j:
                 serie = j.get('serie', [])
                 if serie:
-                    datos[cod] = {
-                        'nombre': nombre, 'descripcion': desc,
-                        'valor': serie[0].get('valor', 0),
-                        'fecha': serie[0].get('fecha', '')[:10],
-                        'unidad': j.get('unidad_medida', ''),
-                        'serie': serie[:7],
+                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
+                    datos_actuales[cod] = {
+                        'nombre':      cfg[1] if cfg else cod,
+                        'descripcion': cfg[2] if cfg else '',
+                        'color':       cfg[3] if cfg else '#3478c3',
+                        'valor':       serie[0].get('valor', 0),
+                        'fecha':       serie[0].get('fecha', '')[:10],
+                        'unidad':      j.get('unidad_medida', ''),
+                        'serie30':     serie[:30],
                     }
-        except Exception as _e:
-            logger.debug('mindicador/' + cod + ': ' + str(_e))
-    return datos
 
+    # ── 2. Dólar vs Euro últimos 6 meses (inicio de cada mes) ────────────
+    def primer_valor_mes(serie, anio, mes):
+        """Retorna el primer valor disponible para un año/mes dado."""
+        for s in reversed(serie):
+            f = s.get('fecha', '')[:7]  # 'YYYY-MM'
+            if f == '%04d-%02d' % (anio, mes):
+                return s.get('valor', None)
+        return None
 
-def _generar_html_indicadores(datos):
-    """HTML ECharts con dashboard de indicadores económicos."""
-    import json as _j
+    hist_6m = {}
+    meses_labels = []
+    meses_targets = []
+    for i in range(5, -1, -1):
+        # 0 = mes actual, 5 = 5 meses atrás
+        mes_offset = AHORA.month - i
+        yr_offset  = ANIO_A
+        if mes_offset <= 0:
+            mes_offset += 12
+            yr_offset  -= 1
+        meses_targets.append((yr_offset, mes_offset))
+        meses_labels.append('%02d/%d' % (mes_offset, yr_offset))
 
-    COLORES = {
-        'uf': '#c3a55a', 'utm': '#e67e22',
-        'dolar': '#3478c3', 'euro': '#2980b9',
-        'ipc': '#2ecc71', 'tpm': '#27ae60',
-        'bitcoin': '#9b59b6',
+    # Necesitamos año actual y posiblemente el anterior
+    anios_necesarios = list(set(yr for yr, _ in meses_targets))
+    serie_dol = {}
+    serie_eur = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {}
+        for yr in anios_necesarios:
+            futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
+            futs[ex.submit(fetch, BASE + '/euro/'  + str(yr))] = ('euro',  yr)
+        for fut in as_completed(futs):
+            cod, yr = futs[fut]
+            j = fut.result()
+            serie = j.get('serie', []) if j else []
+            if cod == 'dolar': serie_dol[yr] = serie
+            else:              serie_eur[yr] = serie
+
+    hist_6m['labels']  = meses_labels
+    hist_6m['dolar']   = []
+    hist_6m['euro']    = []
+    for yr, mes in meses_targets:
+        vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
+        ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
+        hist_6m['dolar'].append(round(vd, 2) if vd else None)
+        hist_6m['euro'].append(round(ve, 2) if ve else None)
+
+    # ── 3. Histórico 10 años (valor representativo por año) ───────────────
+    #    Para IPC, IMACEC, Desempleo → promedio anual
+    #    Para el resto → primer valor de diciembre (o último disponible)
+    ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
+    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_10, 'valores': []}
+                for cod, nom, col in HIST_CFG}
+
+    # Lanzar todas las peticiones anuales en paralelo
+    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_10]
+    raw_hist   = {}  # (cod, yr) -> serie
+
+    def fetch_year(cod_yr):
+        cod, yr = cod_yr
+        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=12)
+        return (cod, yr, j.get('serie', []) if j else [])
+
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        for cod, yr, serie in ex.map(fetch_year, tasks_hist):
+            raw_hist[(cod, yr)] = serie
+
+    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+    for cod, nom, col in HIST_CFG:
+        valores = []
+        for yr in ANIOS_10:
+            serie = raw_hist.get((cod, yr), [])
+            if not serie:
+                valores.append(None)
+                continue
+            if cod in PORCENTAJES:
+                # promedio anual
+                vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
+                v = round(sum(vals) / len(vals), 3) if vals else None
+            else:
+                # último valor del año (serie[0] = más reciente)
+                v = round(serie[0].get('valor', 0), 2)
+            valores.append(v)
+        hist_10a[cod]['valores'] = valores
+
+    return {
+        'datos_actuales': datos_actuales,
+        'hist_6m':        hist_6m,
+        'hist_10a':       hist_10a,
+        'generado':       AHORA.strftime('%d/%m/%Y %H:%M'),
     }
 
+
+def _generar_html_indicadores(all_data):
+    """
+    Dashboard ECharts completo:
+      Sección 1 — Cards actuales con sparkline 30 días
+      Sección 2 — Dólar vs Euro últimos 6 meses (línea doble)
+      Sección 3 — Histórico 10 años por indicador (grid de líneas)
+    """
+    import json as _j
+
+    datos    = all_data.get('datos_actuales', {})
+    hist_6m  = all_data.get('hist_6m', {})
+    hist_10a = all_data.get('hist_10a', {})
+    gen      = all_data.get('generado', '')
+
+    # ── Formateadores ────────────────────────────────────────────────────
     def fmt(v, cod):
-        if cod in ('ipc','tpm'): return "{:.2f}%".format(v)
-        if cod == 'bitcoin':     return "${:,.0f}".format(v).replace(',','.')
-        return "${:,.2f}".format(v).replace(',','X').replace('.',',').replace('X','.')
+        if v is None: return 'N/D'
+        if cod in ('ipc', 'tpm', 'tasa_desempleo', 'imacec'):
+            return '{:.2f}%'.format(v)
+        if cod == 'bitcoin':
+            return '${:,.0f}'.format(v).replace(',', '.')
+        if cod == 'libra_cobre':
+            return 'USD {:.4f}'.format(v)
+        return '${:,.2f}'.format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
 
-    def variacion(serie):
-        if len(serie) < 2: return 0, ''
-        v0 = serie[0].get('valor',0); v1 = serie[1].get('valor',1)
-        if not v1: return 0, ''
-        pct = ((v0-v1)/v1)*100
-        sig = '▲' if pct>=0 else '▼'
-        col = '#2ecc71' if pct>=0 else '#e74c3c'
-        return round(pct,3), '<span style="color:'+col+';font-size:.7em">'+sig+' {:.3f}%'.format(abs(pct))+'</span>'
+    def variacion_html(serie):
+        if len(serie) < 2: return ''
+        v0 = serie[0].get('valor', 0)
+        v1 = serie[1].get('valor', 1)
+        if not v1: return ''
+        pct = ((v0 - v1) / v1) * 100
+        sig = '▲' if pct >= 0 else '▼'
+        col = '#2ecc71' if pct >= 0 else '#e74c3c'
+        return '<span style="color:' + col + ';font-size:.68em">' + sig + ' {:.3f}%'.format(abs(pct)) + '</span>'
 
+    # ── Cards HTML + sparkline JS ────────────────────────────────────────
     cards_html = ''
     spark_js   = ''
-    for cod, d in datos.items():
-        col  = COLORES.get(cod, '#3478c3')
-        vals = [s.get('valor',0) for s in reversed(d['serie'][:7])]
-        _, var_html = variacion(d['serie'])
-        spark_data  = _j.dumps([round(v,2) for v in vals])
-        n_pts = len(vals)
+    ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
+             'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
+    for cod in ORDER:
+        d = datos.get(cod)
+        if not d: continue
+        col      = d['color']
+        vals30   = [s.get('valor', 0) for s in reversed(d['serie30'])]
+        spark_d  = _j.dumps([round(v, 2) for v in vals30])
+        xd       = _j.dumps(list(range(len(vals30))))
+        var_html = variacion_html(d['serie30'])
+        val_fmt  = fmt(d['valor'], cod)
+
         cards_html += (
             '<div class="card">'
-            '<div class="cn">'+d['nombre']+'</div>'
-            '<div class="cv">'+fmt(d['valor'],cod)+' '+var_html+'</div>'
-            '<div class="cd">'+d['descripcion']+'</div>'
-            '<div id="sp_'+cod+'" class="spark"></div>'
-            '<div class="cf">'+d['fecha']+'</div>'
+            '<div class="cn">' + d['nombre'] + '</div>'
+            '<div class="cv">' + val_fmt + ' ' + var_html + '</div>'
+            '<div class="cd">' + d['descripcion'] + '</div>'
+            '<div id="sp_' + cod + '" class="spark"></div>'
+            '<div class="cf">Actualizado: ' + d['fecha'] + '</div>'
             '</div>'
         )
-        xdata = _j.dumps(list(range(n_pts)))
         spark_js += (
             '(function(){'
-            'var c=echarts.init(document.getElementById("sp_'+cod+'"));'
+            'var c=echarts.init(document.getElementById("sp_' + cod + '"));'
             'c.setOption({'
             'grid:{top:0,bottom:0,left:0,right:0},'
-            'xAxis:{type:"category",show:false,data:'+xdata+'},'
+            'xAxis:{type:"category",show:false,data:' + xd + '},'
             'yAxis:{type:"value",show:false},'
-            'series:[{type:"line",data:'+spark_data+',smooth:true,symbol:"none",'
-            'lineStyle:{color:"'+col+'",width:2},'
+            'series:[{type:"line",data:' + spark_d + ',smooth:true,symbol:"none",'
+            'lineStyle:{color:"' + col + '",width:2},'
             'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-            'colorStops:[{offset:0,color:"'+col+'55"},{offset:1,color:"transparent"}]}}'
+            'colorStops:[{offset:0,color:"' + col + '55"},{offset:1,color:"transparent"}]}}'
             '}]});'
             '})();'
         )
 
-    now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
-    return (
-        '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Indicadores Económicos Chile</title>'
+    # ── Dólar vs Euro 6 meses ─────────────────────────────────────────────
+    labels_6m  = _j.dumps(hist_6m.get('labels', []))
+    dolar_6m   = _j.dumps(hist_6m.get('dolar', []))
+    euro_6m    = _j.dumps(hist_6m.get('euro', []))
+
+    # ── Histórico 10 años — charts ────────────────────────────────────────
+    hist_charts_js = ''
+    hist_cards_html = ''
+    HIST_ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tasa_desempleo',
+                  'imacec', 'libra_cobre', 'bitcoin']
+    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+
+    for i, cod in enumerate(HIST_ORDER):
+        d = hist_10a.get(cod)
+        if not d: continue
+        col     = d['color']
+        anios_j = _j.dumps([str(a) for a in d['anios']])
+        vals_j  = _j.dumps([v if v is not None else '-' for v in d['valores']])
+        is_pct  = 'true' if cod in PORCENTAJES else 'false'
+        chart_id = 'hist_' + cod
+
+        hist_cards_html += (
+            '<div class="hcard">'
+            '<div class="htitle">' + d['nombre'] + ' — Últimos 10 años</div>'
+            '<div id="' + chart_id + '" class="hchart"></div>'
+            '</div>'
+        )
+        hist_charts_js += (
+            '(function(){'
+            'var c=echarts.init(document.getElementById("' + chart_id + '"));'
+            'var isPct=' + is_pct + ';'
+            'c.setOption({'
+            'backgroundColor:"transparent",'
+            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",borderColor:"' + col + '",'
+            'textStyle:{color:"#c0c8d4"},'
+            'formatter:function(p){'
+            'var v=p[0].value; if(v===null||v==="-") return p[0].name+": N/D";'
+            'return p[0].name+": "+(isPct?v.toFixed(2)+"%":"$"+v.toLocaleString("es-CL"));'
+            '}},'
+            'grid:{left:"12%",right:"5%",bottom:"15%",top:"8%"},'
+            'xAxis:{type:"category",data:' + anios_j + ',axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
+            'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+            'yAxis:{type:"value",axisLabel:{color:"#8899aa",fontSize:10,'
+            'formatter:function(v){return isPct?v+"%":"$"+v.toLocaleString("es-CL");}},'
+            'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
+            'series:[{type:"line",data:' + vals_j + ',smooth:true,symbol:"circle",symbolSize:5,'
+            'lineStyle:{color:"' + col + '",width:2.5},'
+            'itemStyle:{color:"' + col + '"},'
+            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+            'colorStops:[{offset:0,color:"' + col + '44"},{offset:1,color:"transparent"}]}},'
+            'label:{show:false},'
+            'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",shadowBlur:8,shadowColor:"' + col + '"}}'
+            '}]'
+            '});'
+            '})();'
+        )
+
+    # ── HTML completo ──────────────────────────────────────────────────────
+    html = (
+        '<!DOCTYPE html><html lang="es"><head>'
+        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Indicadores Económicos Chile — Cofradía</title>'
         '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
         '<style>'
         '*{margin:0;padding:0;box-sizing:border-box}'
-        'body{font-family:"Segoe UI",system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}'
-        'h1{text-align:center;color:#c3a55a;font-size:1.5em;margin:15px 0 4px;letter-spacing:2px}'
-        '.sub{text-align:center;color:#667788;margin-bottom:20px;font-size:.8em}'
-        '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:980px;margin:0 auto 20px}'
-        '.card{background:rgba(15,47,89,.7);border:1px solid rgba(195,165,90,.2);border-radius:10px;padding:14px;transition:transform .2s}'
-        '.card:hover{transform:translateY(-3px)}'
-        '.cn{font-size:.75em;color:#8899aa;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}'
-        '.cv{font-size:1.5em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
-        '.cd{font-size:.7em;color:#556677;margin-bottom:6px}'
-        '.spark{width:100%;height:36px;margin:4px 0}'
-        '.cf{font-size:.62em;color:#445566}'
-        '.foot{text-align:center;color:#445566;font-size:.72em;margin-top:16px;padding-top:10px;border-top:1px solid rgba(195,165,90,.15)}'
-        'a{color:#3478c3;text-decoration:none}'
+        'body{font-family:"Segoe UI",system-ui,sans-serif;'
+        'background:linear-gradient(160deg,#06101e 0%,#0a1628 40%,#0f2f59 100%);'
+        'color:#e0e6ed;padding:20px 16px 40px;min-height:100vh}'
+
+        
+        'header{text-align:center;padding:24px 0 18px;'
+        'border-bottom:2px solid rgba(195,165,90,.35);margin-bottom:28px}'
+        'header h1{font-size:1.8em;color:#c3a55a;letter-spacing:3px;'
+        'text-shadow:0 2px 14px rgba(195,165,90,.35)}'
+        'header .sub{color:#667788;font-size:.82em;margin-top:5px}'
+        'header a{color:#3478c3;text-decoration:none}'
+
+        
+        '.section{margin-bottom:36px}'
+        '.section-title{font-size:1.15em;font-weight:700;color:#c3a55a;'
+        'border-left:4px solid #c3a55a;padding-left:12px;margin-bottom:16px;'
+        'letter-spacing:.5px}'
+
+        
+        '.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}'
+        '.card{background:rgba(15,47,89,.65);border:1px solid rgba(195,165,90,.18);'
+        'border-radius:11px;padding:14px;transition:transform .2s,box-shadow .2s}'
+        '.card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.4)}'
+        '.cn{font-size:.7em;color:#8899aa;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:4px}'
+        '.cv{font-size:1.45em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
+        '.cd{font-size:.68em;color:#445566;margin-bottom:5px;line-height:1.3}'
+        '.spark{width:100%;height:38px;margin:5px 0}'
+        '.cf{font-size:.6em;color:#334455}'
+
+        
+        '.chart-wide{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.2);'
+        'border-radius:12px;padding:16px}'
+        '.chart-wide .ctitle{font-size:1em;color:#c3a55a;margin-bottom:10px;font-weight:600}'
+        '#chart6m{width:100%;height:340px}'
+
+        
+        '.hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}'
+        '.hcard{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.18);'
+        'border-radius:12px;padding:14px}'
+        '.htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;'
+        'padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}'
+        '.hchart{width:100%;height:220px}'
+
+        
+        'footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;'
+        'padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}'
+        'footer a{color:#3478c3;text-decoration:none}'
         '</style></head><body>'
-        '<h1>📈 INDICADORES ECONÓMICOS</h1>'
-        '<div class="sub">Chile · Datos diarios · <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '+now_str+'</div>'
-        '<div class="grid">'+cards_html+'</div>'
-        '<div class="foot">Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · API REST gratuita · Banco Central de Chile · Cofradía de Networking Bot v6</div>'
-        '<script>'+spark_js+'</script>'
+
+        '<header>'
+        '<h1>📈 INDICADORES ECONÓMICOS DE CHILE</h1>'
+        '<div class="sub">Datos en tiempo real · '
+        '<a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
+        'Banco Central de Chile · Generado: ' + gen + '</div>'
+        '</header>'
+
+        # --- Sección 1: Cards actuales ---
+        '<div class="section">'
+        '<div class="section-title">📊 Indicadores del Día</div>'
+        '<div class="cards">' + cards_html + '</div>'
+        '</div>'
+
+        # --- Sección 2: Dólar vs Euro 6 meses ---
+        '<div class="section">'
+        '<div class="section-title">💱 Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)</div>'
+        '<div class="chart-wide">'
+        '<div id="chart6m"></div>'
+        '</div>'
+        '</div>'
+
+        # --- Sección 3: Histórico 10 años ---
+        '<div class="section">'
+        '<div class="section-title">📅 Series Históricas — Últimos 10 Años</div>'
+        '<div class="hist-grid">' + hist_cards_html + '</div>'
+        '</div>'
+
+        '<footer>'
+        'Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
+        'API REST gratuita · Banco Central de Chile · '
+        'Cofradía de Networking Bot v6'
+        '</footer>'
+
+        '<script>'
+        # Sparklines cards
+        + spark_js +
+
+        # Gráfico Dólar vs Euro 6 meses
+        'var c6m=echarts.init(document.getElementById("chart6m"));'
+        'c6m.setOption({'
+        'backgroundColor:"transparent",'
+        'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
+        'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
+        'formatter:function(p){'
+        'var s=p[0].name+"<br/>";'
+        'p.forEach(function(i){'
+        's+=\'<span style="color:\'+i.color+\'">●</span> \'+i.seriesName+\': \';'
+        'if(i.value===null||i.value==="-")s+="N/D";'
+        'else s+="$"+i.value.toLocaleString("es-CL");'
+        's+="<br/>";});return s;'
+        '}},'
+        'legend:{data:["Dólar USD","Euro EUR"],textStyle:{color:"#8899aa"},'
+        'top:4,right:10},'
+        'grid:{left:"10%",right:"5%",bottom:"12%",top:"14%"},'
+        'xAxis:{type:"category",data:' + labels_6m + ','
+        'axisLabel:{color:"#8899aa",fontSize:12},'
+        'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+        'yAxis:{type:"value",'
+        'axisLabel:{color:"#8899aa",formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
+        'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
+        'series:['
+        '{name:"Dólar USD",type:"line",data:' + dolar_6m + ','
+        'smooth:true,symbol:"circle",symbolSize:7,'
+        'lineStyle:{color:"#3478c3",width:3},'
+        'itemStyle:{color:"#3478c3"},'
+        'label:{show:true,position:"top",color:"#3478c3",fontSize:11,'
+        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:"#3478c344"},{offset:1,color:"transparent"}]}}},'
+        '{name:"Euro EUR",type:"line",data:' + euro_6m + ','
+        'smooth:true,symbol:"circle",symbolSize:7,'
+        'lineStyle:{color:"#2ecc71",width:3},'
+        'itemStyle:{color:"#2ecc71"},'
+        'label:{show:true,position:"bottom",color:"#2ecc71",fontSize:11,'
+        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:"#2ecc7133"},{offset:1,color:"transparent"}]}}}]'
+        '});'
+
+        # Gráficos históricos 10 años
+        + hist_charts_js +
+
+        # Resize handler
+        'window.addEventListener("resize",function(){'  
+        'if(c6m)c6m.resize();'
+        'echarts.getInstanceByDom&&[' + 
+        ','.join(['"hist_'+cod+'"' for cod in HIST_ORDER if hist_10a.get(cod)]) +
+        '].forEach(function(id){var inst=echarts.getInstanceByDom(document.getElementById(id));if(inst)inst.resize();});'
+        '});'
+        '</script>'
         '</body></html>'
     )
+    return html
 
 
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /indicadores — Indicadores económicos de Chile con ECharts (mindicador.cl)"""
-    msg = await update.message.reply_text("📈 Consultando indicadores económicos de Chile...")
+    """
+    /indicadores — Dashboard económico completo de Chile:
+      • 11 indicadores del día con sparkline 30 días
+      • Gráfico Dólar vs Euro últimos 6 meses
+      • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
+    Fuente: mindicador.cl (API REST gratuita, Banco Central de Chile)
+    """
+    msg = await update.message.reply_text(
+        "📈 Consultando indicadores económicos...\n"
+        "⏳ Descargando histórico 10 años (~15 s)"
+    )
     try:
         import asyncio as _aind
-        datos = await _aind.get_event_loop().run_in_executor(None, obtener_indicadores_chile)
+        all_data = await _aind.get_event_loop().run_in_executor(
+            None, obtener_indicadores_chile)
+
+        datos = all_data.get('datos_actuales', {})
         if not datos:
             await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
             return
 
-        sep = "━" * 30
-        lineas = ["*📈 INDICADORES ECONÓMICOS DE CHILE*", sep,
-                  "_Fuente: mindicador.cl — Banco Central de Chile_", ""]
-        for cod, d in datos.items():
-            v = d['valor']
-            if cod in ('ipc','tpm'):
+        # ── Mensaje de texto resumido ──────────────────────────────────
+        sep   = "━" * 30
+        lineas = [
+            "*📈 INDICADORES ECONÓMICOS DE CHILE*",
+            sep,
+            "_Fuente: mindicador.cl — Banco Central de Chile_",
+            "",
+        ]
+        ORDER_MSG = ['uf','dolar','euro','utm','ipc','tpm',
+                     'bitcoin','tasa_desempleo','imacec','libra_cobre','ivp']
+        PORCENTAJES = {'ipc','tpm','tasa_desempleo','imacec'}
+        for cod in ORDER_MSG:
+            d = datos.get(cod)
+            if not d: continue
+            v    = d['valor']
+            if cod in PORCENTAJES:
                 vf = "{:.2f}%".format(v)
             elif cod == 'bitcoin':
                 vf = "${:,.0f} CLP".format(v).replace(',','.')
+            elif cod == 'libra_cobre':
+                vf = "USD {:.4f}".format(v)
             else:
                 vf = "${:,.2f} CLP".format(v).replace(',','X').replace('.',',').replace('X','.')
-            serie = d.get('serie',[])
-            tend = ''
+            serie = d.get('serie30', [])
+            tend  = ''
             if len(serie) >= 2:
-                v0 = serie[0].get('valor',0); v1 = serie[1].get('valor',1)
+                v0 = serie[0].get('valor',0)
+                v1 = serie[1].get('valor',1)
                 if v1:
-                    pct = ((v0-v1)/v1)*100
-                    tend = ' ' + ('▲' if pct>=0 else '▼') + ' {:.3f}%'.format(abs(pct))
+                    pct  = ((v0-v1)/v1)*100
+                    tend = '  ' + ('▲' if pct>=0 else '▼') + ' {:.3f}%'.format(abs(pct))
             lineas.append("*" + d['nombre'] + ":* " + vf + tend + "  _(" + d['fecha'] + ")_")
-        lineas += ["", sep,
-                   "💡 Se adjunta *dashboard interactivo* con sparklines de los últimos 7 días.",
-                   "🔗 [mindicador.cl](https://mindicador.cl) · API REST gratuita"]
+
+        # Comparativa Dólar vs Euro del mes actual
+        hist_6m  = all_data.get('hist_6m', {})
+        d6l = hist_6m.get('dolar', [])
+        e6l = hist_6m.get('euro', [])
+        if d6l and e6l and d6l[-1] and e6l[-1]:
+            lineas += [
+                "",
+                sep,
+                "*💱 Dólar vs Euro — últimos 6 meses:*",
+                "",
+            ]
+            for label, vd, ve in zip(hist_6m.get('labels',[]), d6l, e6l):
+                vds = "${:,.0f}".format(vd).replace(',','.') if vd else 'N/D'
+                ves = "${:,.0f}".format(ve).replace(',','.') if ve else 'N/D'
+                lineas.append("  *" + label + "* — USD " + vds + "  |  EUR " + ves)
+
+        lineas += [
+            "",
+            sep,
+            "💡 Se adjunta *dashboard interactivo* con gráficos históricos ECharts.",
+            "🔗 [mindicador.cl](https://mindicador.cl)",
+        ]
 
         await update.message.reply_text("\n".join(lineas), parse_mode='Markdown')
 
-        html_ind  = _generar_html_indicadores(datos)
+        # ── Generar y enviar HTML ──────────────────────────────────────
+        await msg.edit_text("📊 Generando dashboard interactivo...")
+        html_ind  = _generar_html_indicadores(all_data)
         html_path = "/tmp/ind_" + str(update.effective_user.id) + ".html"
-        with open(html_path,'w',encoding='utf-8') as fh: fh.write(html_ind)
-        with open(html_path,'rb') as fh:
+        with open(html_path, 'w', encoding='utf-8') as fh:
+            fh.write(html_ind)
+        with open(html_path, 'rb') as fh:
             await update.message.reply_document(
                 document=fh,
-                filename="indicadores_economicos_" + datetime.now().strftime('%Y%m%d') + ".html",
-                caption="📊 Abre en tu navegador para ver los sparklines interactivos"
+                filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
+                caption=(
+                    "📊 *Dashboard Indicadores Económicos Chile*\n\n"
+                    "• 11 indicadores del día con sparklines\n"
+                    "• 💱 Dólar vs Euro últimos 6 meses\n"
+                    "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC · "
+                    "Desempleo · IMACEC · Cobre · Bitcoin\n\n"
+                    "Abre en tu navegador para ver los gráficos interactivos."
+                ),
+                parse_mode='Markdown'
             )
-        try: import os as _os; _os.remove(html_path)
+        try:
+            import os as _os; _os.remove(html_path)
         except: pass
         await msg.delete()
         registrar_servicio_usado(update.effective_user.id, 'indicadores')
@@ -16320,7 +16717,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         import traceback as _tb
         logger.error("indicadores_comando: " + str(e) + "\n" + _tb.format_exc())
-        await msg.edit_text("❌ Error indicadores: " + str(e)[:100])
+        await msg.edit_text("❌ Error indicadores: " + str(e)[:120])
 
 
 # ==================== GLOBAL ERROR HANDLER ====================
