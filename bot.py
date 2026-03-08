@@ -102,11 +102,31 @@ GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "")
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
 
+# ==================== CONFIGURACIÓN WEB SEARCH (MULTI-MOTOR GRATUITO) ====================
+# Motores disponibles (en orden de prioridad):
+#  1. Google Custom Search JSON  — 100 req/día gratis  (GOOGLE_CSE_KEY + GOOGLE_CSE_ID)
+#  2. DuckDuckGo HTML            — sin key, ilimitado   [SIEMPRE ACTIVO]
+#  3. DuckDuckGo Instant Answer  — JSON, sin key        [SIEMPRE ACTIVO]
+#  4. SearXNG instancias públicas— sin key              [SIEMPRE ACTIVO]
+#  5. Brave Search API           — 2000 req/mes         (BRAVE_API_KEY, pago opcional)
+# Extractor de contenido:
+#  - Jina AI Reader (r.jina.ai)  — GRATIS, sin key, extrae texto de cualquier URL
+#  - BeautifulSoup fallback      — local si Jina falla
+GOOGLE_CSE_KEY       = os.environ.get('GOOGLE_CSE_KEY', '')   # Gratis: console.developers.google.com
+GOOGLE_CSE_ID        = os.environ.get('GOOGLE_CSE_ID', '')   # Gratis: cse.google.com/cse
+BRAVE_API_KEY        = os.environ.get('BRAVE_API_KEY', '')   # Opcional pago: search.brave.com/api
+WEB_SEARCH_ENABLED   = True
+WEB_CACHE_TTL_HOURS  = 72      # Caché RAG válido 72h antes de re-buscar
+WEB_MAX_RESULTS      = 5       # Resultados por búsqueda
+WEB_MAX_CONTENT_CHARS= 1500    # Máx chars extraídos por página
+JINA_BASE_URL        = "https://r.jina.ai/"  # Extractor Jina AI — 100% GRATIS sin key
+
 # Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
 gemini_disponible = False
 jsearch_disponible = False
 db_disponible = False
+web_search_disponible = True   # DuckDuckGo activo por defecto sin key
 
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
@@ -2444,11 +2464,10 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             
             return resultado
     
-    # FALLBACK: Si JSearch no está disponible o no encontró resultados
-    # Crear links de búsqueda para portales reales
+    # FALLBACK: JSearch no disponible — usar Web Scraping gratuito
     busqueda_encoded = urllib.parse.quote(busqueda_texto)
     busqueda_laborum = busqueda_texto.replace(" ", "-").lower()
-    
+
     links_portales = f"""
 🔗 **BUSCA EN ESTOS PORTALES:**
 
@@ -2459,31 +2478,50 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 • [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q={busqueda_encoded})
 """
 
+    # Intentar scraping web de empleos reales con motores gratuitos
+    web_empleos_ctx = ''
+    try:
+        query_web = f"oferta empleo {busqueda_texto} Chile"
+        if ubicacion and ubicacion.lower() != 'chile':
+            query_web = f"oferta empleo {busqueda_texto} {ubicacion} Chile"
+        web_res = buscar_en_web(query_web, extraer_contenido=False)
+        if web_res.get('resultados'):
+            web_empleos_ctx = formatear_contexto_web(web_res)
+            logger.info(f"💼 Empleos web scraping: {len(web_res['resultados'])} resultados")
+    except Exception as e:
+        logger.debug(f"Web scraping empleos: {e}")
+
     if not ia_disponible:
         return f"🔍 **BÚSQUEDA DE EMPLEO**\n📋 Criterios: _{busqueda_texto}_\n{links_portales}\n\n💡 Haz clic en los links para ver ofertas reales."
     
     try:
         consulta = f"cargo: {cargo}" if cargo else "empleos generales"
         if ubicacion:
-            consulta += f", ubicación: {ubicacion}"
-        
-        prompt = f"""Genera 5 ejemplos de ofertas laborales REALISTAS para Chile.
+            consulta += f", ubicacion: {ubicacion}"
 
-BÚSQUEDA: {consulta}
+        contexto_web_empleos = web_empleos_ctx if 'web_empleos_ctx' in dir() else ''
+
+        if contexto_web_empleos:
+            prompt = f"""Eres experto en mercado laboral chileno.
+El usuario busca empleo: {consulta}
+
+{contexto_web_empleos}
+
+INSTRUCCION: Analiza los resultados web encontrados y presenta las mejores oportunidades laborales.
+Para cada oferta muestra: cargo, empresa, ubicacion, sueldo estimado si lo hay, link de postulacion.
+Complementa con sugerencias de portales. Responde en espanol profesional. Maximo 400 palabras."""
+        else:
+            prompt = f"""Genera 5 ejemplos de ofertas laborales REALISTAS para Chile.
+
+BUSQUEDA: {consulta}
 
 REGLAS:
-1. Sueldos MENSUALES LÍQUIDOS en pesos chilenos
+1. Sueldos MENSUALES LIQUIDOS en pesos chilenos
 2. Empresas REALES chilenas
 3. Si el cargo no existe exactamente, muestra CARGOS SIMILARES
 
 FORMATO:
-💼 **[CARGO]**
-🏢 Empresa: [Nombre]
-📍 Ubicación: [Ciudad], Chile
-💰 Sueldo: $X.XXX.XXX - $X.XXX.XXX mensuales
-📋 Modalidad: [Presencial/Híbrido/Remoto]
-
----
+Cargo, Empresa, Ubicacion, Sueldo estimado, Modalidad
 
 Solo las 5 ofertas, sin introducciones."""
 
@@ -8398,6 +8436,405 @@ def buscar_rag(query, limit=5):
         return [], 0.0
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MOTOR DE BÚSQUEDA WEB — Multi-motor gratuito con caché RAG inteligente
+#
+# Prioridad: Google CSE (key gratis) → DuckDuckGo HTML → DDG Instant → SearXNG → Brave
+# Extracción: Jina AI Reader (gratis, sin key) → BeautifulSoup fallback
+# Caché: rag_chunks source="WEB:..." — evita re-buscar hasta 72h
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _web_cache_existe(query_norm: str) -> list:
+    """Busca resultados web cacheados en rag_chunks dentro del TTL."""
+    try:
+        conn = get_db_connection()
+        if not conn: return []
+        c = conn.cursor()
+        cutoff = datetime.now() - timedelta(hours=WEB_CACHE_TTL_HOURS)
+        if DATABASE_URL:
+            c.execute("""SELECT chunk_text, source FROM rag_chunks
+                         WHERE source LIKE %s AND (created_at IS NULL OR created_at >= %s)
+                         ORDER BY id DESC LIMIT 10""",
+                      (f"WEB:{query_norm[:40]}%", cutoff))
+        else:
+            c.execute("""SELECT chunk_text, source FROM rag_chunks
+                         WHERE source LIKE ? AND (created_at IS NULL OR created_at >= ?)
+                         ORDER BY id DESC LIMIT 10""",
+                      (f"WEB:{query_norm[:40]}%", cutoff.strftime("%Y-%m-%d %H:%M:%S")))
+        rows = c.fetchall()
+        conn.close()
+        return [(r['chunk_text'], r['source']) if DATABASE_URL else (r[0], r[1]) for r in rows] if rows else []
+    except Exception as e:
+        logger.debug(f"_web_cache_existe: {e}")
+        return []
+
+
+def _web_guardar_cache(query_norm: str, resultados_web: list):
+    """Guarda resultados web en rag_chunks como caché persistente."""
+    if not resultados_web: return
+    try:
+        conn = get_db_connection()
+        if not conn: return
+        c = conn.cursor()
+        source_key = f"WEB:{query_norm[:60]}"
+        guardados = 0
+        for item in resultados_web[:WEB_MAX_RESULTS]:
+            chunk = (item.get('titulo','') + '\n' + item.get('snippet','')).strip()
+            contenido = item.get('contenido', '')
+            if contenido and contenido not in chunk:
+                chunk += '\n\n' + contenido[:WEB_MAX_CONTENT_CHARS]
+            if len(chunk) < 30: continue
+            meta = json.dumps({'tipo': 'web', 'url': item.get('url',''),
+                               'titulo': item.get('titulo',''), 'query': query_norm,
+                               'fecha': datetime.now().isoformat()})
+            kw = ' '.join(query_norm.split()[:10])
+            if DATABASE_URL:
+                c.execute("INSERT INTO rag_chunks (source,chunk_text,metadata,keywords) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                          (source_key, chunk, meta, kw))
+            else:
+                c.execute("SELECT id FROM rag_chunks WHERE source=? AND chunk_text=?", (source_key, chunk[:200]))
+                if not c.fetchone():
+                    c.execute("INSERT INTO rag_chunks (source,chunk_text,metadata,keywords) VALUES (?,?,?,?)",
+                              (source_key, chunk, meta, kw))
+            guardados += 1
+        conn.commit(); conn.close()
+        logger.info(f"💾 Web caché: {guardados} chunks guardados para '{query_norm[:40]}'")
+    except Exception as e:
+        logger.warning(f"_web_guardar_cache: {e}")
+
+
+def _jina_leer_url(url: str, timeout: int = 12) -> str:
+    """Jina AI Reader: extrae texto limpio de cualquier URL. GRATIS sin key."""
+    try:
+        r = requests.get(f"{JINA_BASE_URL}{url}",
+                         headers={'Accept': 'text/plain', 'User-Agent': 'CofradiaBot/1.0',
+                                  'X-Return-Format': 'text'},
+                         timeout=timeout)
+        if r.status_code == 200:
+            lineas = [l for l in r.text.strip().splitlines() if len(l.strip()) > 20]
+            return '\n'.join(lineas)[:WEB_MAX_CONTENT_CHARS * 3]
+        return ''
+    except Exception as e:
+        logger.debug(f"Jina {url[:50]}: {e}")
+        return ''
+
+
+def _bs4_extraer_contenido(url: str, timeout: int = 7) -> str:
+    """BS4 fallback: extrae párrafos de texto de una URL."""
+    try:
+        from bs4 import BeautifulSoup
+        r = requests.get(url, timeout=timeout, allow_redirects=True,
+                         headers={'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36',
+                                  'Accept-Language': 'es-CL,es;q=0.9'})
+        if r.status_code != 200: return ''
+        soup = BeautifulSoup(r.text, 'lxml')
+        for t in soup(['script','style','nav','footer','header','aside','form','iframe']): t.decompose()
+        return ' '.join(p.get_text(' ', strip=True) for p in soup.find_all(['p','li','h2','h3'])
+                        if len(p.get_text(strip=True)) > 60)[:WEB_MAX_CONTENT_CHARS * 2]
+    except Exception as e:
+        logger.debug(f"BS4 {url[:50]}: {e}")
+        return ''
+
+
+def _web_extraer_contenido(url: str) -> str:
+    """Extrae contenido: Jina AI primero, BS4 como fallback."""
+    if not url or not url.startswith('http'): return ''
+    SKIP_JINA = ('linkedin.com','facebook.com','instagram.com','twitter.com','x.com')
+    if any(s in url for s in SKIP_JINA):
+        return _bs4_extraer_contenido(url)
+    c = _jina_leer_url(url)
+    return c if c and len(c) > 100 else _bs4_extraer_contenido(url)
+
+
+def _buscar_google_cse(query: str) -> list:
+    """Google Custom Search JSON API — 100 req/día GRATIS con key."""
+    if not GOOGLE_CSE_KEY or not GOOGLE_CSE_ID: return []
+    try:
+        r = requests.get('https://www.googleapis.com/customsearch/v1',
+                         params={'key': GOOGLE_CSE_KEY, 'cx': GOOGLE_CSE_ID, 'q': query,
+                                 'num': WEB_MAX_RESULTS, 'lr': 'lang_es', 'gl': 'cl'},
+                         timeout=10)
+        if r.status_code != 200: return []
+        return [{'titulo': i.get('title',''), 'url': i.get('link',''),
+                 'snippet': i.get('snippet',''), 'contenido': ''}
+                for i in r.json().get('items', [])[:WEB_MAX_RESULTS]]
+    except Exception as e:
+        logger.warning(f"Google CSE: {e}"); return []
+
+
+def _buscar_duckduckgo_html(query: str) -> list:
+    """DuckDuckGo HTML — sin key, ilimitado. Motor principal."""
+    try:
+        from bs4 import BeautifulSoup
+        r = requests.post('https://html.duckduckgo.com/html/',
+                          headers={'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0',
+                                   'Accept-Language': 'es-CL,es;q=0.9'},
+                          data={'q': query, 'b': '', 'kl': 'cl-es'}, timeout=10)
+        if r.status_code != 200: return []
+        soup = BeautifulSoup(r.text, 'lxml')
+        resultados = []
+        for res in soup.select('.result')[:WEB_MAX_RESULTS + 3]:
+            t = res.select_one('.result__title a')
+            s = res.select_one('.result__snippet')
+            if not t: continue
+            url = t.get('href', '')
+            if not url or 'duckduckgo.com' in url or len(t.get_text(strip=True)) < 5: continue
+            if '//duckduckgo.com/l/?uddg=' in url or url.startswith('/l/?'):
+                try:
+                    p = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                    url = urllib.parse.unquote(p.get('uddg', [url])[0])
+                except: pass
+            resultados.append({'titulo': t.get_text(strip=True), 'url': url,
+                               'snippet': s.get_text(strip=True) if s else '', 'contenido': ''})
+        logger.info(f"🦆 DDG HTML: {len(resultados)} para '{query[:40]}'")
+        return resultados
+    except Exception as e:
+        logger.warning(f"DDG HTML: {e}"); return []
+
+
+def _buscar_duckduckgo_instant(query: str) -> list:
+    """DuckDuckGo Instant Answer JSON — sin key, sin límite. Complemento."""
+    try:
+        r = requests.get('https://api.duckduckgo.com/',
+                         params={'q': query, 'format': 'json', 'no_html': '1',
+                                 'skip_disambig': '1', 'kl': 'cl-es'},
+                         headers={'User-Agent': 'CofradiaBot/1.0'}, timeout=8)
+        if r.status_code != 200: return []
+        data = r.json()
+        res = []
+        if data.get('AbstractText') and data.get('AbstractURL'):
+            res.append({'titulo': data.get('Heading', query), 'url': data.get('AbstractURL',''),
+                        'snippet': data.get('AbstractText',''), 'contenido': ''})
+        for t in data.get('RelatedTopics', [])[:4]:
+            if isinstance(t, dict) and t.get('Text') and t.get('FirstURL'):
+                res.append({'titulo': t['Text'][:80], 'url': t['FirstURL'],
+                            'snippet': t['Text'], 'contenido': ''})
+        if res: logger.info(f"🦆 DDG Instant: {len(res)} para '{query[:40]}'")
+        return res
+    except Exception as e:
+        logger.warning(f"DDG Instant: {e}"); return []
+
+
+def _buscar_searxng(query: str) -> list:
+    """SearXNG instancias públicas — sin key. Fallback potente."""
+    INSTANCIAS = ['https://searx.be/search', 'https://search.disroot.org/search',
+                  'https://searx.tiekoetter.com/search', 'https://searx.ninja/search',
+                  'https://paulgo.io/search']
+    for inst in INSTANCIAS:
+        try:
+            r = requests.get(inst, params={'q': query, 'format': 'json', 'language': 'es',
+                                           'categories': 'general', 'engines': 'google,bing,duckduckgo'},
+                             headers={'User-Agent': 'Mozilla/5.0 CofradiaBot/1.0'}, timeout=8)
+            if r.status_code != 200: continue
+            res = [{'titulo': i.get('title',''), 'url': i.get('url',''),
+                    'snippet': i.get('content',''), 'contenido': ''}
+                   for i in r.json().get('results', [])[:WEB_MAX_RESULTS]]
+            if res:
+                logger.info(f"🔍 SearXNG ({inst.split('/')[2]}): {len(res)}")
+                return res
+        except: continue
+    return []
+
+
+def _buscar_brave(query: str) -> list:
+    """Brave Search API — 2000 req/mes. OPCIONAL pago."""
+    if not BRAVE_API_KEY: return []
+    try:
+        r = requests.get('https://api.search.brave.com/res/v1/web/search',
+                         headers={'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY},
+                         params={'q': query, 'count': WEB_MAX_RESULTS, 'lang': 'es', 'country': 'CL'},
+                         timeout=10)
+        if r.status_code != 200: return []
+        return [{'titulo': i.get('title',''), 'url': i.get('url',''),
+                 'snippet': i.get('description',''), 'contenido': ''}
+                for i in r.json().get('web',{}).get('results',[])[:WEB_MAX_RESULTS]]
+    except Exception as e:
+        logger.warning(f"Brave: {e}"); return []
+
+
+def buscar_en_web(query: str, extraer_contenido: bool = True) -> dict:
+    """
+    Motor principal de búsqueda web con caché RAG inteligente.
+    
+    1. Verifica caché rag_chunks (TTL 72h) — si hay, responde sin internet
+    2. Cascada de motores: Google CSE → DDG HTML → DDG Instant → SearXNG → Brave
+    3. Extrae contenido real (Jina AI → BS4 fallback)
+    4. Guarda en rag_chunks para caché persistente
+    """
+    import unicodedata as _ud
+    def _nq(t):
+        t = _ud.normalize('NFKD', t.lower().strip())
+        return ' '.join(''.join(c for c in t if not _ud.combining(c)).split())
+    
+    qn = _nq(query)
+    base = {'resultados': [], 'fuente_motor': 'ninguno', 'desde_cache': False,
+            'query': query, 'total': 0}
+    
+    # Caché primero
+    cache = _web_cache_existe(qn)
+    if cache:
+        logger.info(f"⚡ Web caché HIT: '{qn[:40]}' ({len(cache)} chunks)")
+        return {**base, 'resultados': [{'titulo': s, 'url': '', 'snippet': t, 'contenido': ''}
+                                       for t, s in cache],
+                'fuente_motor': 'cache', 'desde_cache': True, 'total': len(cache)}
+    
+    if not WEB_SEARCH_ENABLED: return base
+    
+    # Cascada de motores
+    raw, motor = [], 'ninguno'
+    for fn, name in [(_buscar_google_cse, 'google_cse'),
+                     (_buscar_duckduckgo_html, 'duckduckgo'),
+                     (_buscar_duckduckgo_instant, 'duckduckgo_instant'),
+                     (_buscar_searxng, 'searxng'),
+                     (_buscar_brave, 'brave')]:
+        raw = fn(query)
+        if raw: motor = name; break
+    
+    if not raw:
+        logger.warning(f"🌐 Web: sin resultados para '{qn[:40]}'")
+        return base
+    
+    # Extracción de contenido
+    if extraer_contenido:
+        for item in raw[:WEB_MAX_RESULTS]:
+            u = item.get('url', '')
+            if u and u.startswith('http'):
+                item['contenido'] = _web_extraer_contenido(u)
+    
+    _web_guardar_cache(qn, raw)
+    logger.info(f"🌐 Web OK: {len(raw)} resultados vía {motor} para '{qn[:40]}'")
+    return {'resultados': raw[:WEB_MAX_RESULTS], 'fuente_motor': motor,
+            'desde_cache': False, 'query': query, 'total': len(raw)}
+
+
+def formatear_contexto_web(web_result: dict) -> str:
+    """Formatea resultado web como contexto listo para prompt LLM."""
+    if not web_result or not web_result.get('resultados'): return ''
+    motor = web_result.get('fuente_motor', '')
+    badge = '(desde cache)' if web_result.get('desde_cache') else f'via {motor}'
+    query = web_result.get('query', '')
+    ctx = "\n\n[RESULTADOS BUSQUEDA WEB - " + badge + "]\nQuery: \"" + query + "\"\n\n"
+    for i, item in enumerate(web_result['resultados'], 1):
+        titulo   = item.get('titulo', '')
+        url      = item.get('url', '')
+        snippet  = item.get('snippet', '')
+        contenido= item.get('contenido', '')
+        ctx += f"[{i}] {titulo}\n"
+        if url:      ctx += "Fuente: " + url + "\n"
+        if snippet:  ctx += snippet + "\n"
+        if contenido and contenido not in snippet:
+            ctx += contenido[:600] + "\n"
+        ctx += "\n"
+    return ctx
+
+
+def leer_url_con_jina(url: str) -> str:
+    """Lee contenido completo de cualquier URL con Jina AI Reader (gratis, sin key).
+    Fallback a BS4 si Jina falla."""
+    if not url or not url.startswith('http'): return ''
+    try:
+        c = _jina_leer_url(url, timeout=15)
+        if c and len(c) > 100:
+            logger.info(f"✅ Jina: {len(c)} chars de {url[:60]}")
+            return c
+        c = _bs4_extraer_contenido(url, timeout=10)
+        if c: logger.info(f"✅ BS4 fallback: {len(c)} chars de {url[:60]}")
+        return c
+    except Exception as e:
+        logger.debug(f"leer_url_con_jina: {e}"); return ''
+
+
+@requiere_suscripcion
+@requiere_suscripcion
+@requiere_suscripcion
+async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        motores = "DuckDuckGo"
+        if GOOGLE_CSE_KEY: motores += " + Google CSE"
+        if BRAVE_API_KEY:  motores += " + Brave"
+        motores += " + SearXNG"
+        await update.message.reply_text(
+            "Uso: /buscar_web [consulta]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_web noticias economia Chile hoy\n"
+            "  /buscar_web precio cobre bolsa\n"
+            "  /buscar_web requisitos visa trabajo Australia\n\n"
+            "Motores: " + motores + "\n"
+            "Resultados guardados en base de conocimientos automaticamente."
+        )
+        return
+
+    consulta = ' '.join(context.args)
+    user_id  = update.effective_user.id
+    msg      = await update.message.reply_text("Buscando en Internet...")
+    try:
+        import asyncio as _aw
+        web_result = await _aw.get_event_loop().run_in_executor(
+            None, lambda: buscar_en_web(consulta, extraer_contenido=True))
+
+        if not web_result or not web_result.get('resultados'):
+            await msg.edit_text("No encontre resultados para: " + consulta)
+            return
+
+        desde_cache = web_result.get('desde_cache', False)
+        motor       = web_result.get('fuente_motor', 'web')
+        resultados  = web_result.get('resultados', [])
+        badge       = "(desde cache)" if desde_cache else "(via " + motor + ")"
+
+        if ia_disponible:
+            await msg.edit_text("Sintetizando con IA...")
+            ctx = formatear_contexto_web(web_result)
+            prompt = (
+                "Eres el asistente IA de la Cofradia de Networking.\n"
+                "El usuario busco en Internet: \"" + consulta + "\"\n\n"
+                + ctx +
+                "\nSintetiza los resultados de forma clara en espanol chileno. "
+                "Cita fuentes por nombre. Maximo 400 palabras."
+            )
+            import asyncio as _aw2
+            def _ia():
+                r = llamar_groq(prompt, max_tokens=1000, temperature=0.4)
+                return r or llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.4)
+            resp_ia = await _aw2.get_event_loop().run_in_executor(None, _ia)
+        else:
+            resp_ia = None
+
+        await msg.delete()
+
+        if resp_ia:
+            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n" + resp_ia + "\n\n"
+            for i, it in enumerate(resultados[:3], 1):
+                t = it.get('titulo','')[:60]
+                u = it.get('url','')
+                if t: texto += str(i) + ". " + t + ("\n   " + u if u else "") + "\n"
+        else:
+            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n"
+            for i, it in enumerate(resultados, 1):
+                texto += str(i) + ". " + it.get('titulo','Sin titulo') + "\n"
+                if it.get('snippet'): texto += it['snippet'][:200] + "\n"
+                if it.get('url'):     texto += it['url'] + "\n"
+                texto += "\n"
+
+        await enviar_mensaje_largo(update, texto)
+        registrar_servicio_usado(user_id, 'buscar_web')
+        if not desde_cache and web_result.get('total', 0) > 0:
+            await update.message.reply_text("Resultados guardados. Proxima busqueda similar sera instantanea.")
+    except Exception as e:
+        logger.error("buscar_web_comando: " + str(e), exc_info=True)
+        await msg.edit_text("Error en busqueda web: " + str(e)[:100])
+
+
+def buscar_en_web_para_ia(query: str) -> str:
+    """Versión interna: snippets rápidos sin extraer páginas. Solo cuando RAG no tiene info."""
+    try:
+        wr = buscar_en_web(query, extraer_contenido=False)
+        return formatear_contexto_web(wr) if wr and wr.get('resultados') else ''
+    except Exception as e:
+        logger.debug(f"buscar_en_web_para_ia: {e}"); return ''
+
+# ── FIN MOTOR WEB SEARCH ──────────────────────────────────────────────────────
+
 def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Incluye verificación de relevancia temática: si los docs no tratan el tema
@@ -8771,23 +9208,42 @@ def buscar_especialista_sec(especialidad, ciudad=""):
             except Exception as e:
                 logger.warning(f"Error scraping SEC: {e}")
         
-        # Mostrar resultados encontrados
+        # Mostrar resultados del scraping SEC
         if especialistas_encontrados:
-            resultado += f"✅ RESULTADOS ENCONTRADOS: {len(especialistas_encontrados)}\n\n"
+            resultado += f"✅ RESULTADOS SEC: {len(especialistas_encontrados)}\n\n"
             for i, esp in enumerate(especialistas_encontrados[:15], 1):
                 resultado += f"{i}. {esp['nombre']}\n"
-                if esp['rut']:
-                    resultado += f"   🆔 RUT: {esp['rut']}\n"
-                if esp['niveles']:
-                    resultado += f"   📜 Certificacion: {esp['niveles']}\n"
-                if esp['telefono']:
-                    resultado += f"   📞 Tel: {esp['telefono']}\n"
-                if esp['email']:
-                    resultado += f"   📧 Email: {esp['email']}\n"
+                if esp['rut']:     resultado += f"   🆔 RUT: {esp['rut']}\n"
+                if esp['niveles']: resultado += f"   📜 Certificacion: {esp['niveles']}\n"
+                if esp['telefono']:resultado += f"   📞 Tel: {esp['telefono']}\n"
+                if esp['email']:   resultado += f"   📧 Email: {esp['email']}\n"
                 resultado += "\n"
         else:
-            resultado += "⚠️ No se encontraron resultados via scraping.\n"
-            resultado += "El buscador SEC requiere navegador web.\n\n"
+            # Fallback: Web Scraping con motores gratuitos
+            try:
+                query_sec = f"especialista certificado SEC {especialidad}"
+                if ciudad: query_sec += f" {ciudad} Chile"
+                web_sec = buscar_en_web(query_sec, extraer_contenido=True)
+                if web_sec.get('resultados'):
+                    resultado += "🌐 RESULTADOS WEB (via DuckDuckGo/Google):\n\n"
+                    for i, item in enumerate(web_sec['resultados'][:4], 1):
+                        titulo   = item.get('titulo', '')
+                        snippet  = item.get('snippet', '')
+                        url      = item.get('url', '')
+                        contenido= item.get('contenido', '')
+                        resultado += f"{i}. {titulo}\n"
+                        if snippet: resultado += f"   {snippet[:150]}\n"
+                        if contenido and contenido not in snippet:
+                            resultado += f"   {contenido[:200]}\n"
+                        if url: resultado += f"   🔗 {url}\n"
+                        resultado += "\n"
+                    logger.info(f"✅ SEC web fallback: {len(web_sec['resultados'])} resultados")
+                else:
+                    resultado += "⚠️ No se encontraron resultados en SEC ni en web.\n"
+                    resultado += "El buscador SEC requiere navegador web.\n\n"
+            except Exception as _esec:
+                logger.debug(f"SEC web fallback: {_esec}")
+                resultado += "⚠️ No se encontraron resultados via scraping.\n\n"
         
         # Links directos siempre visibles
         resultado += "━" * 30 + "\n"
@@ -11929,12 +12385,22 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except:
         pass
     
-    # ===== PASO 5: Buscar info de LinkedIn si URL disponible =====
+    # ===== PASO 5: Leer LinkedIn real con Jina AI =====
     linkedin_info = ""
-    linkedin_url = tarjeta.get('linkedin', '')
+    linkedin_url  = tarjeta.get('linkedin', '')
     if linkedin_url:
-        linkedin_info = f"\nPERFIL LINKEDIN: {linkedin_url}\n(Considerar el perfil LinkedIn como fuente de información real del profesional)"
-    
+        if not linkedin_url.startswith('http'):
+            linkedin_url = f"https://{linkedin_url}"
+        await msg.edit_text("🔗 Leyendo perfil LinkedIn en tiempo real...")
+        import asyncio as _gcv
+        contenido_li = await _gcv.get_event_loop().run_in_executor(
+            None, lambda: leer_url_con_jina(linkedin_url))
+        if contenido_li and len(contenido_li) > 100:
+            linkedin_info = f"\nPERFIL LINKEDIN (contenido real extraido con IA):\n{contenido_li[:2500]}"
+            logger.info(f"✅ CV: LinkedIn leido para user {user_id}")
+        else:
+            linkedin_info = f"\nPERFIL LINKEDIN: {linkedin_url}\n(No se pudo extraer contenido — considera actualizar)"
+
     await msg.edit_text("📄 Generando CV profesional con IA...")
     
     try:
@@ -12127,19 +12593,59 @@ async def analisis_linkedin_comando(update: Update, context: ContextTypes.DEFAUL
         return
     msg = await update.message.reply_text("🔍 Analizando tu perfil profesional...")
     try:
-        prompt = f"""Eres experto en LinkedIn y marca personal. Analiza este perfil:
-Nombre: {tarjeta.get('nombre','')}, Profesión: {tarjeta.get('profesion','')},
-Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')},
-LinkedIn: {tarjeta.get('linkedin','')}
-Genera: 1) Fortalezas del perfil, 2) Headline sugerido (120 chars),
-3) Resumen/About sugerido (3-4 oraciones), 4) 5 palabras clave a incluir,
-5) 3 acciones concretas para mejorar visibilidad. No uses asteriscos."""
-        resp = llamar_groq(prompt, max_tokens=1200, temperature=0.6)
+        linkedin_url = tarjeta.get('linkedin', '')
+        contenido_linkedin = ''
+
+        # Leer perfil LinkedIn real con Jina AI
+        if linkedin_url:
+            if not linkedin_url.startswith('http'):
+                linkedin_url = f"https://{linkedin_url}"
+            await msg.edit_text("🔗 Leyendo tu perfil LinkedIn en tiempo real...")
+            import asyncio as _ali
+            contenido_linkedin = await _ali.get_event_loop().run_in_executor(
+                None, lambda: leer_url_con_jina(linkedin_url))
+            if not contenido_linkedin:
+                nombre_b = tarjeta.get('nombre', '')
+                if nombre_b:
+                    await msg.edit_text("🌐 Buscando informacion profesional en internet...")
+                    wr = await _ali.get_event_loop().run_in_executor(
+                        None, lambda: buscar_en_web(
+                            f"LinkedIn {nombre_b} {tarjeta.get('profesion','')} {tarjeta.get('empresa','')}",
+                            extraer_contenido=False))
+                    if wr.get('resultados'):
+                        contenido_linkedin = formatear_contexto_web(wr)
+
+        await msg.edit_text("🧠 Generando analisis con IA...")
+
+        seccion_li = ""
+        if contenido_linkedin and len(contenido_linkedin) > 80:
+            seccion_li = f"\nCONTENIDO REAL DEL PERFIL:\n{contenido_linkedin[:2000]}"
+        elif linkedin_url:
+            seccion_li = f"\nURL LinkedIn: {linkedin_url}"
+
+        prompt = (
+            f"Eres experto en LinkedIn y marca personal. Analiza este perfil profesional:\n"
+            f"Nombre: {tarjeta.get('nombre','')}, Profesion: {tarjeta.get('profesion','')},\n"
+            f"Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')}\n"
+            f"{seccion_li}\n\n"
+            f"Genera:\n1) FORTALEZAS del perfil (3 puntos concretos)\n"
+            f"2) HEADLINE sugerido (max. 120 caracteres)\n"
+            f"3) EXTRACTO/ABOUT sugerido (3-4 oraciones)\n"
+            f"4) 5 PALABRAS CLAVE para mejor visibilidad\n"
+            f"5) 3 ACCIONES CONCRETAS para mejorar visibilidad\n"
+            f"Si tienes contenido real del perfil, usalo. Sin asteriscos."
+        )
+        resp = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
+        if not resp:
+            resp = llamar_gemini_texto(prompt, max_tokens=1400, temperature=0.6)
         if resp:
-            await msg.edit_text(f"🔍 ANÁLISIS DE PERFIL PROFESIONAL\n{'━' * 30}\n\n{resp}")
+            badge = ("🔗 Basado en perfil LinkedIn real"
+                     if contenido_linkedin and len(contenido_linkedin) > 80
+                     else "📊 Basado en tarjeta profesional")
+            await msg.edit_text(f"🔍 ANALISIS DE PERFIL PROFESIONAL\n{'━'*30}\n{badge}\n\n{resp}")
             registrar_servicio_usado(user_id, 'analisis_linkedin')
         else:
-            await msg.edit_text("❌ Error en el análisis.")
+            await msg.edit_text("❌ Error en el analisis.")
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)[:100]}")
 
@@ -15276,6 +15782,7 @@ def main():
     logger.info(f"📊 Groq IA: {'✅' if GROQ_API_KEY else '❌'} | DeepSeek: {'✅' if deepseek_disponible else '❌'} | IA Global: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
     logger.info(f"💼 JSearch (empleos reales): {'✅' if jsearch_disponible else '❌'}")
+    logger.info(f"🌐 Web Search: DuckDuckGo ✅ | Google CSE: {'✅' if GOOGLE_CSE_KEY else '⬜ (opcional)'} | Brave: {'✅' if BRAVE_API_KEY else '⬜ (opcional)'} | Jina AI ✅")
     logger.info(f"🗄️ Base de datos: {'Supabase' if DATABASE_URL else 'SQLite local'}")
     
     # Inicializar BD
@@ -15360,6 +15867,7 @@ def main():
             BotCommand("ayuda", "Ver todos los comandos"),
             BotCommand("buscar", "Buscar en historial del grupo"),
             BotCommand("buscar_ia", "Busqueda inteligente con IA"),
+            BotCommand("buscar_web", "Buscar en Internet con IA"),
             BotCommand("rag_consulta", "Consultar documentos y libros"),
             BotCommand("buscar_profesional", "Buscar profesionales en Cofradia"),
             BotCommand("buscar_apoyo", "Buscar cofrades en busqueda laboral"),
@@ -15400,6 +15908,7 @@ def main():
                 comandos_grupo = [
                     BotCommand("buscar", "Buscar en historial"),
                     BotCommand("buscar_ia", "Busqueda con IA"),
+                    BotCommand("buscar_web", "Buscar en Internet"),
                     BotCommand("rag_consulta", "Consultar documentos y libros"),
                     BotCommand("buscar_profesional", "Buscar profesionales"),
                     BotCommand("buscar_apoyo", "Cofrades en busqueda laboral"),
@@ -15538,6 +16047,7 @@ def main():
     application.add_handler(CommandHandler("tarea", nueva_tarea_comando))
     application.add_handler(CommandHandler("mis_tareas", mis_tareas_comando))
     application.add_handler(CommandHandler("briefing", briefing_diario_comando))
+    application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
     # Handlers dinámicos para /completar_ID, /ok_ID, /eliminar_agenda_ID
     application.add_handler(MessageHandler(
         filters.Regex(r'^/(completar_|ok_|eliminar_agenda_)\d+'),
@@ -15878,6 +16388,24 @@ def main():
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_tematica = resultados_busq.get('rag_tematica', 'desconocida')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
+
+            # ── BÚSQUEDA WEB AUTOMÁTICA ─────────────────────────────────────────────
+            # Se activa SOLO cuando el RAG e historial no tienen información relevante
+            contexto_web = ""
+            if (WEB_SEARCH_ENABLED and
+                rag_confianza in ('ninguna', 'irrelevante', 'baja') and
+                not resultados_busq.get('historial')):
+                try:
+                    import asyncio as _awc
+                    contexto_web = await _awc.get_event_loop().run_in_executor(
+                        None, lambda: buscar_en_web_para_ia(query_para_busqueda))
+                    if contexto_web:
+                        fuentes_usadas.append("Web (DuckDuckGo/Google)")
+                        fuentes_str = " | ".join(fuentes_usadas)
+                        logger.info(f"🌐 Web auto-activado para '{query_para_busqueda[:40]}'")
+                except Exception as _ew:
+                    logger.debug(f"Web search en handler: {_ew}")
+            # ── FIN BÚSQUEDA WEB ────────────────────────────────────────────────────
             
             # Intent hint
             intent_hint = ""
@@ -15904,7 +16432,7 @@ def main():
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
                     f"para esta consulta. LÉELOS y sintetiza una respuesta completa basándote en ellos."
                 )
-                ctx_rag = contexto_completo[:7000]
+                ctx_rag = contexto_completo[:7000] + contexto_web
                 fuentes_str_final = fuentes_str
                 logger.info(f"💬 Modo RAG para '{mensaje[:40]}'")
             else:
@@ -15914,7 +16442,7 @@ def main():
                     "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
                     "No menciones documentos, no pidas más contexto. Solo responde lo que sabes."
                 )
-                ctx_rag = ""  # No pasar docs irrelevantes al LLM
+                ctx_rag = contexto_web  # Web context cuando RAG no tiene info
                 fuentes_str_final = "Conocimiento propio del modelo"
                 logger.info(f"💬 Modo LLM para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
