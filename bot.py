@@ -3424,6 +3424,10 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         has_drive = 'true' if drive_stats else 'false'
         
+        # Pre-compute gauge maxima BEFORE the f-string that uses them
+        g1_max = max(int(msgs_hoy) * 3, 100)
+        g2_max = max(int(promedio_7d * 3), 50)
+
         html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -5321,6 +5325,9 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
+        # Pre-calcular maximos para los gauges ANTES del f-string
+        g1_max = max(int(msgs_hoy) * 3, 100)
+        g2_max = max(int(promedio_7d * 3), 50)
         
         # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
@@ -5375,7 +5382,7 @@ function gauge(id,val,max,title,color){{
     title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
     detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
-    data:[{{value:{val},name:title}}]
+    data:[{{value:val,name:title}}]
   }}]}});
   window.addEventListener('resize',()=>c.resize());
 }}
@@ -5384,10 +5391,6 @@ gauge('g2',{promedio_7d},{g2_max},'Promedio 7d',blue);
 gauge('g3',{pct_tarjetas},100,'Tarjetas %',gold);
 </script></body></html>"""
         
-        # Pre-compute gauge maxima safely outside f-string
-        g1_max = max(int(msgs_hoy) * 3, 100)
-        g2_max = max(int(promedio_7d * 3), 50)
-
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
         try:
             with open(html_path, 'w', encoding='utf-8') as f:
