@@ -2462,11 +2462,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
                 "• [⚫ GetOnBoard](https://www.getonbrd.com/jobs?q=" + busqueda_encoded_r + ")\n"
                 "• [🟤 Bumeran](https://www.bumeran.cl/empleos-busqueda-" + busqueda_laborum_r + ".html)\n"
             )
+            def _md_safe(t):
+                """Escapa caracteres que rompen Markdown v1 en texto dinámico."""
+                for c in ('*', '_', '`', '[', ']'):
+                    t = t.replace(c, '\\' + c)
+                return t
+
             for i, empleo in enumerate(empleos[:10], 1):
-                titulo        = empleo.get('job_title', 'Sin título')
-                empresa       = empleo.get('employer_name', 'Empresa no especificada')
-                ciudad        = empleo.get('job_city') or empleo.get('job_state') or empleo.get('job_country', 'No especificada')
-                pais          = empleo.get('job_country', '')
+                titulo        = _md_safe(empleo.get('job_title', 'Sin título'))
+                empresa       = _md_safe(empleo.get('employer_name', 'Empresa no especificada'))
+                _ciudad_raw   = empleo.get('job_city') or empleo.get('job_state') or empleo.get('job_country', 'No especificada')
+                ciudad        = _md_safe(str(_ciudad_raw))
+                pais          = _md_safe(empleo.get('job_country', ''))
                 ubicacion_job = (ciudad + ", " + pais).strip(", ") if ciudad and pais and ciudad != pais else ciudad or pais or 'No especificada'
                 min_salary    = empleo.get('job_min_salary')
                 max_salary    = empleo.get('job_max_salary')
@@ -2509,7 +2516,9 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
                     desc_breve = '. '.join(oraciones[:2]) + '.' if oraciones else desc_clean[:200]
                     if len(desc_breve) > 220:
                         desc_breve = desc_breve[:220] + '...'
-                    resultado += "📝 _" + desc_breve + "_\n"
+                    # Escapar solo _ y * dentro del texto italic para no romper Markdown
+                    desc_safe = desc_breve.replace('_', '\\_').replace('*', '\\*')
+                    resultado += "📝 _" + desc_safe + "_\n"
                 if link:
                     resultado += "🔗 [*POSTULAR AQUÍ*](" + link + ")\n"
                 resultado += "\n"
@@ -10588,7 +10597,44 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-                        caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
+                        # ── Recomendaciones recibidas ──────────────────────────────
+                        try:
+                            conn_r = get_db_connection()
+                            if conn_r:
+                                c_r = conn_r.cursor()
+                                if DATABASE_URL:
+                                    c_r.execute(
+                                        "SELECT COUNT(*) AS n FROM recomendaciones WHERE destinatario_id = %s",
+                                        (user_id,))
+                                    n_recs = (c_r.fetchone() or {}).get('n', 0)
+                                else:
+                                    c_r.execute(
+                                        "SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?",
+                                        (user_id,))
+                                    row_r = c_r.fetchone()
+                                    n_recs = row_r[0] if row_r else 0
+                                conn_r.close()
+                            else:
+                                n_recs = 0
+                        except Exception:
+                            n_recs = 0
+                        n_recs_int = int(n_recs) if n_recs else 0
+                        if n_recs_int > 0:
+                            _sp = 'es' if n_recs_int != 1 else ''
+                            _bot_user = getattr(context.bot, 'username', None) or ''
+                            _rec_link = 'https://t.me/' + _bot_user if _bot_user else ''
+                            if _rec_link:
+                                caption += (
+                                    f"\n⭐ <b>{n_recs_int} recomendación{_sp}</b> recibida{_sp} · "
+                                    f"<a href=\"{_rec_link}\">Ver en el bot</a>\n"
+                                    f"<i>(escribe /mis_recomendaciones en el chat)</i>\n"
+                                )
+                            else:
+                                caption += f"\n⭐ <b>{n_recs_int} recomendación{_sp}</b> recibida{_sp}\n"
+                                caption += "<i>Escribe /mis_recomendaciones para verlas</i>\n"
+                        else:
+                            caption += "\n⭐ <i>Sin recomendaciones aún · pide a cofrades que te recomienden con /recomendar</i>\n"
+                        caption += "\n✏️ <b>Editar:</b> /mi_tarjeta [campo] [valor]" 
                         
                         await update.message.reply_photo(
                             photo=img_buffer,
