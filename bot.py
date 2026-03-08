@@ -3472,10 +3472,6 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_drive_reg = drive_stats.get('total_registros', 0)
         
         has_drive = 'true' if drive_stats else 'false'
-        
-        # Pre-compute gauge maxima BEFORE the f-string that uses them
-        g1_max = max(int(msgs_hoy) * 3, 100)
-        g2_max = max(int(promedio_7d * 3), 50)
 
         html = f"""<!DOCTYPE html>
 <html lang="es">
@@ -9756,40 +9752,84 @@ def obtener_cumpleanos_hoy():
 
 
 async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
-    """Tarea programada para enviar felicitaciones de cumpleaños a las 8:00 AM"""
+    """Tarea programada: felicitaciones de cumpleaños a las 8:00 AM Chile"""
     try:
-        cumpleaneros = obtener_cumpleanos_hoy()
-        
+        import asyncio as _acumple
+        # obtener_cumpleanos_hoy() hace HTTP a Google Drive — DEBE ir en executor
+        cumpleaneros = await _acumple.get_event_loop().run_in_executor(
+            None, obtener_cumpleanos_hoy)
+
         if not cumpleaneros:
-            logger.info("No hay cumpleaños hoy")
+            logger.info("🎂 No hay cumpleaños hoy")
             return
-        
-        # Crear mensaje de cumpleaños
+
         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-        
-        mensaje = "🎂🎉 CUMPLEANOS DEL DIA! 🎉🎂\n"
-        mensaje += "━" * 30 + "\n"
-        mensaje += f"📅 {fecha_hoy}\n\n"
-        
-        mensaje += "🥳 Hoy celebramos a:\n\n"
-        
+        sep = "━" * 30
+
+        lineas = [
+            "*🎂🎉 CUMPLEAÑOS DEL DÍA 🎉🎂*",
+            sep,
+            f"📅 *Fecha:* {fecha_hoy}",
+            "",
+            "*🥳 Hoy celebramos a:*",
+            "",
+        ]
         for nombre in cumpleaneros:
-            mensaje += f"🎈 {nombre}\n"
-        
-        mensaje += "\n" + "━" * 30 + "\n"
-        mensaje += "💐 Felicidades! Les deseamos un excelente dia.\n\n"
-        mensaje += "👉 Saluda a los cumpleaneros en el subgrupo 'Cumpleanos, Eventos y Efemerides COFRADIA'"
-        
-        # Enviar al grupo SIN parse_mode
+            lineas.append(f"🎈 *{nombre}*")
+
+        lineas += [
+            "",
+            sep,
+            "💐 ¡Felicidades! Les deseamos un excelente día.",
+            "",
+            "👉 _Saluda a los cumpleañeros en el subgrupo_",
+            "_'Cumpleaños, Eventos y Efemérides COFRADÍA'_",
+        ]
+        mensaje = "\n".join(lineas)
+
+        # Enviar al grupo principal
         if COFRADIA_GROUP_ID:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID,
-                text=mensaje
+                text=mensaje,
+                parse_mode='Markdown'
             )
-            logger.info(f"✅ Enviado mensaje de cumpleaños: {len(cumpleaneros)} cumpleañeros")
-        
+            logger.info(f"✅ Cumpleaños enviados: {len(cumpleaneros)} cumpleañeros")
+        else:
+            logger.warning("⚠️ COFRADIA_GROUP_ID no configurado — no se enviaron cumpleaños")
+
+        # También notificar en privado a cada cumpleañero si tiene user_id en suscripciones
+        try:
+            conn_c = get_db_connection()
+            if conn_c:
+                c_c = conn_c.cursor()
+                for nombre in cumpleaneros:
+                    partes = nombre.strip().split()
+                    if not partes: continue
+                    like = "%" + partes[0] + "%"
+                    if DATABASE_URL:
+                        c_c.execute("SELECT user_id FROM suscripciones WHERE first_name ILIKE %s AND estado='activo' LIMIT 1", (like,))
+                    else:
+                        c_c.execute("SELECT user_id FROM suscripciones WHERE first_name LIKE ? AND estado='activo' LIMIT 1", (like,))
+                    row_c = c_c.fetchone()
+                    if row_c:
+                        uid_c = row_c['user_id'] if DATABASE_URL else row_c[0]
+                        try:
+                            await context.bot.send_message(
+                                chat_id=uid_c,
+                                text=f"🎂 *¡Feliz Cumpleaños, {partes[0]}!*\n\n"
+                                     "¡Toda la Cofradía de Networking te desea un día espectacular! 🎉\n\n"
+                                     "_Con cariño, el equipo de la Cofradía_ ⚓",
+                                parse_mode='Markdown'
+                            )
+                        except Exception as _ep:
+                            logger.debug(f"Privado cumpleaños {uid_c}: {_ep}")
+                conn_c.close()
+        except Exception as _epr:
+            logger.debug(f"Notif privada cumpleaños: {_epr}")
+
     except Exception as e:
-        logger.error(f"Error enviando cumpleaños: {e}")
+        logger.error(f"Error enviando cumpleaños: {e}", exc_info=True)
 
 
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
@@ -14751,11 +14791,23 @@ async def verificar_recordatorios(context):
         else:
             c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= ?", (ahora.isoformat(),))
         pendientes = c.fetchall()
-        for rec_id, uid, msg in pendientes:
+        for row in pendientes:
             try:
-                await context.bot.send_message(chat_id=uid, text=f"Recordatorio:\n\n{msg}")
+                # Supabase devuelve dict, SQLite devuelve tuple
+                if DATABASE_URL:
+                    rec_id = row['id']
+                    uid    = row['user_id']
+                    msg    = row['mensaje']
+                else:
+                    rec_id, uid, msg = row[0], row[1], row[2]
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text="⏰ *Recordatorio Cofradía*\n\n" + str(msg),
+                    parse_mode='Markdown'
+                )
                 ph = "%s" if DATABASE_URL else "?"
                 c.execute(f"UPDATE recordatorios SET enviado=1 WHERE id={ph}", (rec_id,))
+                logger.info(f"✅ Recordatorio {rec_id} enviado a {uid}")
             except Exception as e:
                 logger.warning(f"Error recordatorio {rec_id}: {e}")
         conn.commit()
