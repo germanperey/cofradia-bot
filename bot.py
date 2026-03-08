@@ -14176,102 +14176,197 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Error en job recordatorio_agenda: {e}")
 
 
-# ==================== INDICADORES ECONÓMICOS CHILE (v6.0) ====================
+
+
+# ==================== INDICADORES ECONÓMICOS CHILE v6.0 + IA ====================
 
 def obtener_indicadores_chile():
     """
-    Obtiene indicadores económicos de Chile desde la API de mindicador.cl
-    Retorna dict con nombre, valor_actual, valor_anterior, variacion, unidad, fecha
+    Obtiene indicadores desde mindicador.cl (API REST gratuita del Banco Central).
+    Retorna dict con:
+      - datos_actuales: 11 cards con sparkline 30 días + variación
+      - hist_6m: Dólar vs Euro últimos 6 meses (valor inicio de cada mes)
+      - hist_10a: series anuales últimos 10 años por indicador
+    Usa ThreadPoolExecutor para paralelizar ~80 llamadas históricas.
     """
-    indicadores_map = {
-        'uf':       {'nombre': 'UF',           'unidad': 'CLP',  'emoji': '📐'},
-        'utm':      {'nombre': 'UTM',          'unidad': 'CLP',  'emoji': '📋'},
-        'dolar':    {'nombre': 'Dólar (USD)',   'unidad': 'CLP',  'emoji': '🇺🇸'},
-        'euro':     {'nombre': 'Euro (EUR)',    'unidad': 'CLP',  'emoji': '🇪🇺'},
-        'ipc':      {'nombre': 'IPC',          'unidad': '%',    'emoji': '📈'},
-        'tpm':      {'nombre': 'Tasa Política Monetaria', 'unidad': '%', 'emoji': '🏦'},
-    }
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    BASE   = 'https://mindicador.cl/api'
+    AHORA  = datetime.now()
+    ANIO_A = AHORA.year
 
-    resultados = {}
-    for codigo, meta in indicadores_map.items():
+    # ── Indicadores para cards actuales ──────────────────────────────────
+    CARDS_CFG = [
+        ('uf',             'UF',              'Unidad de Fomento',                   '#c3a55a'),
+        ('dolar',          'Dólar USD',       'Tipo de cambio USD/CLP',              '#3478c3'),
+        ('euro',           'Euro EUR',        'Tipo de cambio EUR/CLP',              '#2980b9'),
+        ('utm',            'UTM',             'Unidad Tributaria Mensual',           '#e67e22'),
+        ('ipc',            'IPC',             'Índice de Precios al Consumidor',     '#2ecc71'),
+        ('tpm',            'TPM',             'Tasa Política Monetaria (%)',         '#27ae60'),
+        ('bitcoin',        'Bitcoin',         'Bitcoin en CLP',                      '#9b59b6'),
+        ('tasa_desempleo', 'Desempleo',       'Tasa de Desempleo (%)',               '#e74c3c'),
+        ('imacec',         'IMACEC',          'Indicador Mensual Actividad Eco. (%)', '#f39c12'),
+        ('libra_cobre',    'Cobre (lb)',      'Precio Libra de Cobre USD',           '#cd7f32'),
+        ('ivp',            'IVP',             'Índice Valor Promedio',               '#1abc9c'),
+    ]
+    # Deduplicar
+    seen = set()
+    CARDS_CFG_UNIQ = [t for t in CARDS_CFG if t[0] not in seen and not seen.add(t[0])]
+
+    # ── Indicadores para histórico 10 años ────────────────────────────────
+    HIST_CFG = [
+        ('dolar',          'Dólar USD',       '#3478c3'),
+        ('euro',           'Euro EUR',        '#2980b9'),
+        ('uf',             'UF',              '#c3a55a'),
+        ('utm',            'UTM',             '#e67e22'),
+        ('ipc',            'IPC',             '#2ecc71'),
+        ('tasa_desempleo', 'Desempleo (%)',   '#e74c3c'),
+        ('imacec',         'IMACEC (%)',      '#f39c12'),
+        ('libra_cobre',    'Cobre (USD/lb)',  '#cd7f32'),
+        ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
+    ]
+
+    def fetch(url, timeout=12):
         try:
-            url = f"https://mindicador.cl/api/{codigo}"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code != 200:
+            r = requests.get(url, timeout=timeout,
+                             headers={'Accept': 'application/json'})
+            if r.status_code == 200:
+                return r.json()
+        except Exception as _e:
+            logger.debug('mindicador fetch: ' + str(_e))
+        return None
+
+    # ── 1. Cards: serie últimos 30 días ───────────────────────────────────
+    datos_actuales = {}
+    card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
+        for fut in as_completed(fut_map):
+            cod = fut_map[fut]
+            j   = fut.result()
+            if j:
+                serie = j.get('serie', [])
+                if serie:
+                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
+                    datos_actuales[cod] = {
+                        'nombre':      cfg[1] if cfg else cod,
+                        'descripcion': cfg[2] if cfg else '',
+                        'color':       cfg[3] if cfg else '#3478c3',
+                        'valor':       serie[0].get('valor', 0),
+                        'fecha':       serie[0].get('fecha', '')[:10],
+                        'unidad':      j.get('unidad_medida', ''),
+                        'serie30':     serie[:30],
+                    }
+
+    # ── 2. Dólar vs Euro últimos 6 meses (inicio de cada mes) ────────────
+    def primer_valor_mes(serie, anio, mes):
+        for s in reversed(serie):
+            f = s.get('fecha', '')[:7]
+            if f == '%04d-%02d' % (anio, mes):
+                return s.get('valor', None)
+        return None
+
+    hist_6m = {}
+    meses_labels   = []
+    meses_targets  = []
+    for i in range(5, -1, -1):
+        mes_offset = AHORA.month - i
+        yr_offset  = ANIO_A
+        if mes_offset <= 0:
+            mes_offset += 12
+            yr_offset  -= 1
+        meses_targets.append((yr_offset, mes_offset))
+        meses_labels.append('%02d/%d' % (mes_offset, yr_offset))
+
+    anios_necesarios = list(set(yr for yr, _ in meses_targets))
+    serie_dol = {}
+    serie_eur = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {}
+        for yr in anios_necesarios:
+            futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
+            futs[ex.submit(fetch, BASE + '/euro/'  + str(yr))] = ('euro',  yr)
+        for fut in as_completed(futs):
+            cod, yr = futs[fut]
+            j = fut.result()
+            serie = j.get('serie', []) if j else []
+            if cod == 'dolar': serie_dol[yr] = serie
+            else:              serie_eur[yr] = serie
+
+    hist_6m['labels'] = meses_labels
+    hist_6m['dolar']  = []
+    hist_6m['euro']   = []
+    for yr, mes in meses_targets:
+        vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
+        ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
+        hist_6m['dolar'].append(round(vd, 2) if vd else None)
+        hist_6m['euro'].append(round(ve, 2) if ve else None)
+
+    # ── 3. Histórico 10 años (valor representativo por año) ───────────────
+    ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
+    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_10, 'valores': []}
+                for cod, nom, col in HIST_CFG}
+
+    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_10]
+    raw_hist   = {}
+
+    def fetch_year(cod_yr):
+        cod, yr = cod_yr
+        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=14)
+        return (cod, yr, j.get('serie', []) if j else [])
+
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        for cod, yr, serie in ex.map(fetch_year, tasks_hist):
+            raw_hist[(cod, yr)] = serie
+
+    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+    for cod, nom, col in HIST_CFG:
+        valores = []
+        for yr in ANIOS_10:
+            serie = raw_hist.get((cod, yr), [])
+            if not serie:
+                valores.append(None)
                 continue
-            data = resp.json()
-            serie = data.get('serie', [])
-            if len(serie) < 2:
-                continue
+            if cod in PORCENTAJES:
+                vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
+                v = round(sum(vals) / len(vals), 3) if vals else None
+            else:
+                v = round(serie[0].get('valor', 0), 2)
+            valores.append(v)
+        hist_10a[cod]['valores'] = valores
 
-            val_actual  = float(serie[0]['valor'])
-            val_ant     = float(serie[1]['valor'])
-            variacion   = val_actual - val_ant
-            variacion_pct = (variacion / val_ant * 100) if val_ant else 0.0
-            fecha_actual = serie[0]['fecha'][:10]
-
-            resultados[codigo] = {
-                **meta,
-                'codigo':        codigo,
-                'valor_actual':  val_actual,
-                'valor_anterior': val_ant,
-                'variacion':     variacion,
-                'variacion_pct': variacion_pct,
-                'fecha':         fecha_actual,
-            }
-        except Exception as e:
-            logger.warning(f"Error obteniendo indicador {codigo}: {e}")
-
-    return resultados
+    return {
+        'datos_actuales': datos_actuales,
+        'hist_6m':        hist_6m,
+        'hist_10a':       hist_10a,
+        'generado':       AHORA.strftime('%d/%m/%Y %H:%M'),
+    }
 
 
 def scraping_bcentral_noticias():
     """
-    Web scraping de noticias y comunicados recientes del Banco Central de Chile
-    Retorna lista de titulares relevantes (máx. 5)
+    Web scraping de noticias y comunicados recientes del Banco Central de Chile.
+    Retorna lista de titulares relevantes (máx. 5).
     """
     noticias = []
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/1.0)'}
-        # Comunicados de prensa del BCCH
         resp = requests.get(
-            "https://www.bcentral.cl/web/guest/comunicados-de-prensa",
+            'https://www.bcentral.cl/web/guest/comunicados-de-prensa',
             headers=headers, timeout=12
         )
         if resp.status_code == 200 and bs4_disponible:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Buscar titulares en la estructura del sitio
             for item in soup.find_all(['h3', 'h4', 'a'], limit=60):
                 texto = item.get_text(strip=True)
                 if len(texto) > 30 and any(kw in texto.lower() for kw in
                         ['tasa', 'inflación', 'ipc', 'política monetaria',
                          'dólar', 'tipo de cambio', 'pib', 'crecimiento',
-                         'uf', 'utm', 'banca']):
+                         'uf', 'utm', 'banca', 'desempleo', 'imacec']):
                     noticias.append(texto[:160])
                     if len(noticias) >= 5:
                         break
     except Exception as e:
-        logger.warning(f"Scraping BCCH: {e}")
-
-    # Fallback: intentar RSS o página de estadísticas
-    if not noticias:
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(
-                "https://www.bcentral.cl/web/guest/estadisticas/macro",
-                headers=headers, timeout=12
-            )
-            if resp.status_code == 200 and bs4_disponible:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                for p in soup.find_all('p', limit=30):
-                    texto = p.get_text(strip=True)
-                    if len(texto) > 40:
-                        noticias.append(texto[:160])
-                        if len(noticias) >= 3:
-                            break
-        except Exception:
-            pass
-
+        logger.warning(f'Scraping BCCH: {e}')
     return noticias
 
 
@@ -14283,302 +14378,528 @@ def consultar_rag_economia(query, limit=8):
     try:
         resultados, score = buscar_rag(query, limit=limit)
         if not resultados:
-            return ""
+            return ''
         fragmentos = []
         for texto, source in resultados[:4]:
             nombre_libro = source.replace('.pdf', '').replace('_', ' ')
-            fragmento_corto = texto[:300].strip()
-            fragmentos.append(f"[{nombre_libro}]: {fragmento_corto}")
-        return "\n\n".join(fragmentos)
+            fragmentos.append(f'[{nombre_libro}]: {texto[:300].strip()}')
+        return '\n\n'.join(fragmentos)
     except Exception as e:
-        logger.warning(f"RAG economia error: {e}")
-        return ""
+        logger.warning(f'RAG economia error: {e}')
+        return ''
 
 
 def generar_explicacion_indicador(codigo, datos, contexto_bcch, fragmento_rag):
     """
-    Usa Groq para generar una explicación breve y precisa de la variación del indicador.
-    Máximo 2 oraciones. Sin emojis ni markdown.
+    Usa Groq para generar una explicación breve y precisa (2 oraciones)
+    del por qué varió el indicador. Fusiona Banco Central + RAG.
     """
-    nombre     = datos['nombre']
-    val_act    = datos['valor_actual']
-    val_ant    = datos['valor_anterior']
-    var_pct    = datos['variacion_pct']
-    unidad     = datos['unidad']
-    tendencia  = "subió" if var_pct > 0 else ("bajó" if var_pct < 0 else "se mantuvo")
+    nombre    = datos['nombre']
+    val_act   = datos['valor']
+    val_ant_list = datos.get('serie30', [])
+    val_ant   = val_ant_list[1].get('valor', val_act) if len(val_ant_list) >= 2 else val_act
+    if val_ant and val_ant != 0:
+        var_pct = ((val_act - val_ant) / val_ant) * 100
+    else:
+        var_pct = 0.0
+    tendencia = 'subió' if var_pct > 0 else ('bajó' if var_pct < 0 else 'se mantuvo')
 
-    contexto_extra = ""
+    contexto_extra = ''
     if contexto_bcch:
-        contexto_extra += f"\nContexto Banco Central de Chile:\n{contexto_bcch[:600]}\n"
+        contexto_extra += f'\nContexto Banco Central de Chile:\n{contexto_bcch[:500]}\n'
     if fragmento_rag:
-        contexto_extra += f"\nReferencia bibliográfica:\n{fragmento_rag[:400]}\n"
+        contexto_extra += f'\nReferencia bibliográfica:\n{fragmento_rag[:350]}\n'
 
-    prompt = f"""Eres un economista chileno experto. En MÁXIMO 2 oraciones breves y directas, explica POR QUÉ el indicador {nombre} {tendencia} de {val_ant:.2f} a {val_act:.2f} {unidad} ({var_pct:+.2f}%). 
-Usa el contexto del Banco Central y la teoría económica si corresponde.
-NO uses emojis, asteriscos ni formatos especiales. Responde solo las 2 oraciones, sin introducción.
-{contexto_extra}"""
-
+    prompt = (
+        f'Eres un economista chileno experto. En MÁXIMO 2 oraciones breves y directas, '
+        f'explica POR QUÉ el indicador {nombre} {tendencia} de {val_ant:.2f} a {val_act:.2f} '
+        f'({var_pct:+.3f}%). '
+        f'Usa el contexto del Banco Central y la teoría económica si corresponde. '
+        f'NO uses emojis, asteriscos ni formatos especiales. Solo las 2 oraciones.'
+        f'{contexto_extra}'
+    )
     resp = llamar_groq(prompt, max_tokens=150, temperature=0.3)
     if not resp:
         if var_pct > 0:
-            return f"{nombre} aumentó {abs(var_pct):.2f}% respecto al período anterior."
+            return f'{nombre} aumentó {abs(var_pct):.3f}% respecto al período anterior.'
         elif var_pct < 0:
-            return f"{nombre} disminuyó {abs(var_pct):.2f}% respecto al período anterior."
+            return f'{nombre} disminuyó {abs(var_pct):.3f}% respecto al período anterior.'
         else:
-            return f"{nombre} se mantuvo sin variación respecto al período anterior."
+            return f'{nombre} se mantuvo sin variación respecto al período anterior.'
     return resp.strip()
 
 
-def crear_grafico_indicadores(indicadores, explicaciones):
+def generar_html_indicadores(all_data, explicaciones):
     """
-    Genera imagen PNG con un dashboard de los indicadores económicos
-    incluyendo barras de variación y cuadros de texto con explicaciones.
+    Dashboard ECharts COMPLETO — fusión versión v2 + análisis IA:
+      Sección 1  — 11 Cards actuales con sparkline 30 días
+      Sección 2  — Análisis IA: por qué varió cada indicador (con Groq + RAG)
+      Sección 3  — Dólar vs Euro últimos 6 meses (línea doble)
+      Sección 4  — Series históricas últimos 10 años (grid 9 gráficos de área)
     """
-    import matplotlib.patches as mpatches
-    import matplotlib.gridspec as gridspec
-    import textwrap
+    import json as _j
 
-    n = len(indicadores)
-    if n == 0:
-        return None
+    datos    = all_data.get('datos_actuales', {})
+    hist_6m  = all_data.get('hist_6m', {})
+    hist_10a = all_data.get('hist_10a', {})
+    gen      = all_data.get('generado', '')
 
-    # Paleta naval premium
-    COLOR_FONDO      = '#0B1929'
-    COLOR_PANEL      = '#0F2540'
-    COLOR_BORDE      = '#1E3A5F'
-    COLOR_TITULO     = '#E8F4FD'
-    COLOR_SUBTITULO  = '#7FB3D3'
-    COLOR_SUBE       = '#2ECC71'
-    COLOR_BAJA       = '#E74C3C'
-    COLOR_NEUTRO     = '#95A5A6'
-    COLOR_TEXTO      = '#D6EAF8'
-    COLOR_EXPLICACION= '#AED6F1'
-    COLOR_ACENTO     = '#F39C12'
+    PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
+    HIST_ORDER  = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tasa_desempleo',
+                   'imacec', 'libra_cobre', 'bitcoin']
 
-    fig = plt.figure(figsize=(14, 4 + n * 2.1), facecolor=COLOR_FONDO)
-    fig.patch.set_facecolor(COLOR_FONDO)
+    def fmt(v, cod):
+        if v is None: return 'N/D'
+        if cod in PORCENTAJES: return '{:.2f}%'.format(v)
+        if cod == 'bitcoin':   return '${:,.0f}'.format(v).replace(',', '.')
+        if cod == 'libra_cobre': return 'USD {:.4f}'.format(v)
+        return '${:,.2f}'.format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
 
-    # Título general
-    fig.text(
-        0.5, 0.985,
-        '📊  INDICADORES ECONÓMICOS CHILE',
-        ha='center', va='top',
-        fontsize=18, fontweight='bold', color=COLOR_TITULO,
-        fontfamily='DejaVu Sans'
-    )
-    hoy = datetime.now().strftime('%d/%m/%Y  %H:%M')
-    fig.text(
-        0.5, 0.968,
-        f'Fuente: Banco Central de Chile · mindicador.cl  ·  {hoy}',
-        ha='center', va='top',
-        fontsize=9, color=COLOR_SUBTITULO
-    )
+    def variacion_html(serie):
+        if len(serie) < 2: return ''
+        v0 = serie[0].get('valor', 0)
+        v1 = serie[1].get('valor', 1)
+        if not v1: return ''
+        pct = ((v0 - v1) / v1) * 100
+        sig = '▲' if pct >= 0 else '▼'
+        col = '#2ecc71' if pct >= 0 else '#e74c3c'
+        return '<span style="color:' + col + ';font-size:.68em">' + sig + ' {:.3f}%</span>'.format(abs(pct))
 
-    # GridSpec: una fila por indicador
-    gs = gridspec.GridSpec(
-        n, 2,
-        figure=fig,
-        left=0.03, right=0.97,
-        top=0.94, bottom=0.02,
-        hspace=0.55, wspace=0.08,
-        width_ratios=[1, 2.8]
-    )
-
-    items = list(indicadores.items())
-
-    for i, (codigo, datos) in enumerate(items):
-        var_pct = datos['variacion_pct']
-        color_var = COLOR_SUBE if var_pct > 0 else (COLOR_BAJA if var_pct < 0 else COLOR_NEUTRO)
-        flecha = '▲' if var_pct > 0 else ('▼' if var_pct < 0 else '►')
-
-        # ── Celda izquierda: métricas ──────────────────────────────────────────
-        ax_num = fig.add_subplot(gs[i, 0])
-        ax_num.set_facecolor(COLOR_PANEL)
-        for spine in ax_num.spines.values():
-            spine.set_edgecolor(COLOR_BORDE)
-            spine.set_linewidth(1.2)
-        ax_num.set_xticks([])
-        ax_num.set_yticks([])
-
-        emoji = datos.get('emoji', '📊')
-        nombre = datos['nombre']
-        val_act = datos['valor_actual']
-        unidad = datos['unidad']
-        val_ant = datos['valor_anterior']
-        fecha = datos['fecha']
-
-        # Nombre del indicador
-        ax_num.text(0.5, 0.88, f"{emoji}  {nombre}",
-                    ha='center', va='top', fontsize=11, fontweight='bold',
-                    color=COLOR_TITULO, transform=ax_num.transAxes)
-
-        # Valor actual grande
-        fmt_val = f"{val_act:,.2f}" if unidad == 'CLP' else f"{val_act:.2f}%"
-        ax_num.text(0.5, 0.58, fmt_val,
-                    ha='center', va='center', fontsize=15, fontweight='bold',
-                    color=COLOR_TITULO, transform=ax_num.transAxes)
-
-        # Unidad
-        ax_num.text(0.5, 0.34, unidad,
-                    ha='center', va='center', fontsize=8,
-                    color=COLOR_SUBTITULO, transform=ax_num.transAxes)
-
-        # Variación con color
-        ax_num.text(0.5, 0.13,
-                    f"{flecha}  {var_pct:+.2f}%  vs anterior",
-                    ha='center', va='bottom', fontsize=9, fontweight='bold',
-                    color=color_var, transform=ax_num.transAxes)
-
-        # Fecha
-        ax_num.text(0.98, 0.04, fecha,
-                    ha='right', va='bottom', fontsize=7,
-                    color=COLOR_SUBTITULO, transform=ax_num.transAxes)
-
-        # Borde de color según tendencia
-        rect = mpatches.FancyBboxPatch(
-            (0.0, 0.0), 1.0, 1.0,
-            boxstyle="round,pad=0.0",
-            linewidth=2.5,
-            edgecolor=color_var,
-            facecolor='none',
-            transform=ax_num.transAxes,
-            clip_on=False
+    # ── Cards + sparklines ────────────────────────────────────────────────
+    ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
+             'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
+    cards_html = ''
+    spark_js   = ''
+    for cod in ORDER:
+        d = datos.get(cod)
+        if not d: continue
+        col     = d['color']
+        vals30  = [s.get('valor', 0) for s in reversed(d['serie30'])]
+        spark_d = _j.dumps([round(v, 2) for v in vals30])
+        xd      = _j.dumps(list(range(len(vals30))))
+        var_h   = variacion_html(d['serie30'])
+        val_fmt = fmt(d['valor'], cod)
+        cards_html += (
+            '<div class="card">'
+            '<div class="cn">' + d['nombre'] + '</div>'
+            '<div class="cv">' + val_fmt + ' ' + var_h + '</div>'
+            '<div class="cd">' + d['descripcion'] + '</div>'
+            '<div id="sp_' + cod + '" class="spark"></div>'
+            '<div class="cf">Actualizado: ' + d['fecha'] + '</div>'
+            '</div>'
         )
-        ax_num.add_patch(rect)
+        spark_js += (
+            '(function(){'
+            'var c=echarts.init(document.getElementById("sp_' + cod + '"));'
+            'c.setOption({'
+            'grid:{top:0,bottom:0,left:0,right:0},'
+            'xAxis:{type:"category",show:false,data:' + xd + '},'
+            'yAxis:{type:"value",show:false},'
+            'series:[{type:"line",data:' + spark_d + ',smooth:true,symbol:"none",'
+            'lineStyle:{color:"' + col + '",width:2},'
+            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+            'colorStops:[{offset:0,color:"' + col + '55"},{offset:1,color:"transparent"}]}}'
+            '}]});'
+            '})();'
+        )
 
-        # ── Celda derecha: explicación ─────────────────────────────────────────
-        ax_exp = fig.add_subplot(gs[i, 1])
-        ax_exp.set_facecolor('#0D1F33')
-        for spine in ax_exp.spines.values():
-            spine.set_edgecolor(COLOR_BORDE)
-            spine.set_linewidth(0.8)
-        ax_exp.set_xticks([])
-        ax_exp.set_yticks([])
+    # ── Cards de análisis IA ─────────────────────────────────────────────
+    exp_cards_html = ''
+    EXP_ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
+                 'tasa_desempleo', 'imacec', 'libra_cobre']
+    for cod in EXP_ORDER:
+        d   = datos.get(cod)
+        exp = explicaciones.get(cod, '')
+        if not d or not exp: continue
+        serie = d.get('serie30', [])
+        v0 = serie[0].get('valor', 0) if serie else 0
+        v1 = serie[1].get('valor', v0) if len(serie) >= 2 else v0
+        if v1 and v1 != 0:
+            pct = ((v0 - v1) / v1) * 100
+        else:
+            pct = 0.0
+        flecha = '▲' if pct >= 0 else '▼'
+        col_borde = '#2ecc71' if pct >= 0 else '#e74c3c'
+        val_fmt     = fmt(v0, cod)
+        val_ant_fmt = fmt(v1, cod)
+        exp_cards_html += (
+            '<div class="exp-card" style="border-left:4px solid ' + col_borde + '">'
+            '<div class="exp-hdr">'
+            '<span class="exp-nm">' + d['nombre'] + '</span>'
+            '<span class="exp-badge" style="background:' + col_borde + '22;color:' + col_borde + ';border:1px solid ' + col_borde + '55">'
+            + flecha + ' {:.3f}%</span>'.format(abs(pct)) +
+            '</div>'
+            '<div class="exp-vals">'
+            '<span class="lbl">Actual:</span>'
+            '<span style="font-weight:700;color:' + col_borde + '">' + val_fmt + '</span>'
+            '<span class="sep">vs</span>'
+            '<span class="lbl">Anterior:</span>'
+            '<span style="color:#8899aa">' + val_ant_fmt + '</span>'
+            '</div>'
+            '<div class="exp-why">&#129302; ¿POR QUÉ?</div>'
+            '<div class="exp-txt">' + exp.replace('<', '&lt;').replace('>', '&gt;') + '</div>'
+            '<div class="exp-src">Fuentes: Banco Central de Chile &middot; mindicador.cl &middot; RAG Biblioteca Financiera &middot; Groq IA</div>'
+            '</div>'
+        )
 
-        ax_exp.text(0.02, 0.94, "¿POR QUÉ?",
-                    ha='left', va='top', fontsize=8, fontweight='bold',
-                    color=COLOR_ACENTO, transform=ax_exp.transAxes)
+    # ── Dólar vs Euro 6 meses ─────────────────────────────────────────────
+    labels_6m = _j.dumps(hist_6m.get('labels', []))
+    dolar_6m  = _j.dumps(hist_6m.get('dolar', []))
+    euro_6m   = _j.dumps(hist_6m.get('euro', []))
 
-        explicacion = explicaciones.get(codigo, "Sin datos suficientes.")
-        wrapped = textwrap.fill(explicacion, width=88)
-        ax_exp.text(0.02, 0.73, wrapped,
-                    ha='left', va='top', fontsize=8.5,
-                    color=COLOR_EXPLICACION,
-                    transform=ax_exp.transAxes,
-                    linespacing=1.45,
-                    wrap=True)
+    # ── Histórico 10 años ─────────────────────────────────────────────────
+    hist_charts_js   = ''
+    hist_cards_html  = ''
+    for cod in HIST_ORDER:
+        d = hist_10a.get(cod)
+        if not d: continue
+        col     = d['color']
+        anios_j = _j.dumps([str(a) for a in d['anios']])
+        vals_j  = _j.dumps([v if v is not None else None for v in d['valores']])
+        is_pct  = 'true' if cod in PORCENTAJES else 'false'
+        cid     = 'hist_' + cod
+        hist_cards_html += (
+            '<div class="hcard">'
+            '<div class="htitle">' + d['nombre'] + ' — Últimos 10 años</div>'
+            '<div id="' + cid + '" class="hchart"></div>'
+            '</div>'
+        )
+        hist_charts_js += (
+            '(function(){'
+            'var c=echarts.init(document.getElementById("' + cid + '"));'
+            'var isPct=' + is_pct + ';'
+            'c.setOption({'
+            'backgroundColor:"transparent",'
+            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",borderColor:"' + col + '",'
+            'textStyle:{color:"#c0c8d4"},'
+            'formatter:function(p){'
+            'var v=p[0].value;if(v===null)return p[0].name+": N/D";'
+            'return p[0].name+": "+(isPct?v.toFixed(2)+"%":"$"+v.toLocaleString("es-CL"));'
+            '}},'
+            'grid:{left:"12%",right:"5%",bottom:"18%",top:"8%"},'
+            'xAxis:{type:"category",data:' + anios_j + ',axisLabel:{color:"#8899aa",fontSize:10,rotate:30},axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+            'yAxis:{type:"value",axisLabel:{color:"#8899aa",fontSize:10,'
+            'formatter:function(v){return isPct?v+"%":"$"+v.toLocaleString("es-CL");}},'
+            'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
+            'series:[{type:"line",data:' + vals_j + ',smooth:true,symbol:"circle",symbolSize:5,'
+            'connectNulls:true,'
+            'lineStyle:{color:"' + col + '",width:2.5},'
+            'itemStyle:{color:"' + col + '"},'
+            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+            'colorStops:[{offset:0,color:"' + col + '44"},{offset:1,color:"transparent"}]}},'
+            'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",shadowBlur:8,shadowColor:"' + col + '"}}'
+            '}]});'
+            '})();'
+        )
 
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=130, bbox_inches='tight',
-                facecolor=COLOR_FONDO, edgecolor='none')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    # ── HTML completo ──────────────────────────────────────────────────────
+    hist_ids_js = ','.join(['"hist_' + cod + '"' for cod in HIST_ORDER if hist_10a.get(cod)])
+
+    html = (
+        '<!DOCTYPE html><html lang="es"><head>'
+        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Indicadores Económicos Chile — Cofradía de Networking</title>'
+        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
+        '<style>'
+        '*{margin:0;padding:0;box-sizing:border-box}'
+        'body{font-family:"Segoe UI",system-ui,sans-serif;'
+        'background:linear-gradient(160deg,#06101e 0%,#0a1628 40%,#0f2f59 100%);'
+        'color:#e0e6ed;padding:20px 16px 40px;min-height:100vh}'
+
+        'header{text-align:center;padding:28px 0 18px;'
+        'border-bottom:2px solid rgba(195,165,90,.35);margin-bottom:28px}'
+        'header h1{font-size:1.9em;color:#c3a55a;letter-spacing:3px;'
+        'text-shadow:0 2px 14px rgba(195,165,90,.35)}'
+        'header .sub{color:#667788;font-size:.83em;margin-top:5px}'
+        'header a{color:#3478c3;text-decoration:none}'
+
+        '.section{margin-bottom:36px}'
+        '.section-title{font-size:1.15em;font-weight:700;color:#c3a55a;'
+        'border-left:4px solid #c3a55a;padding-left:12px;margin-bottom:16px;letter-spacing:.5px}'
+        '.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px}'
+        '.card{background:rgba(15,47,89,.65);border:1px solid rgba(195,165,90,.18);'
+        'border-radius:11px;padding:14px;transition:transform .2s,box-shadow .2s}'
+        '.card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.4)}'
+        '.cn{font-size:.7em;color:#8899aa;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:4px}'
+        '.cv{font-size:1.45em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
+        '.cd{font-size:.68em;color:#445566;margin-bottom:5px;line-height:1.3}'
+        '.spark{width:100%;height:38px;margin:5px 0}'
+        '.cf{font-size:.6em;color:#334455}'
+        '.exp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}'
+        '.exp-card{background:rgba(13,27,48,.85);border-radius:11px;padding:15px;'
+        'box-shadow:0 4px 16px rgba(0,0,0,.3);transition:transform .2s}'
+        '.exp-card:hover{transform:translateY(-2px)}'
+        '.exp-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}'
+        '.exp-nm{font-size:.95em;font-weight:700;color:#e0e6ed}'
+        '.exp-badge{font-size:.75em;font-weight:700;padding:3px 9px;border-radius:18px;white-space:nowrap}'
+        '.exp-vals{display:flex;align-items:center;gap:7px;font-size:.8em;margin-bottom:10px;'
+        'padding:6px 9px;background:rgba(255,255,255,.04);border-radius:7px;flex-wrap:wrap}'
+        '.lbl{color:#8899aa}.sep{color:#445566}'
+        '.exp-why{font-size:.7em;color:#f39c12;font-weight:800;letter-spacing:1.5px;margin-bottom:6px}'
+        '.exp-txt{font-size:.88em;color:#aed6f1;line-height:1.65;margin-bottom:9px}'
+        '.exp-src{font-size:.63em;color:#445566;border-top:1px solid rgba(52,120,195,.12);padding-top:7px}'
+        '.chart-wide{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.2);'
+        'border-radius:12px;padding:16px}'
+        '.chart-wide .ctitle{font-size:1em;color:#c3a55a;margin-bottom:10px;font-weight:600}'
+        '#chart6m{width:100%;height:340px}'
+        '.hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}'
+        '.hcard{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.18);'
+        'border-radius:12px;padding:14px}'
+        '.htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;'
+        'padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}'
+        '.hchart{width:100%;height:220px}'
+
+        'footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;'
+        'padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}'
+        'footer a{color:#3478c3;text-decoration:none}'
+
+        '@media(max-width:600px){'
+        '.cards,.exp-grid,.hist-grid{grid-template-columns:1fr}'
+        '}'
+
+        '</style></head><body>'
+
+        '<header>'
+        '<h1>&#9875; INDICADORES ECONÓMICOS DE CHILE</h1>'
+        '<div class="sub">Datos en tiempo real · Análisis IA · '
+        '<a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
+        'Banco Central de Chile · ' + gen + '</div>'
+        '</header>'
+
+        # Sección 1: Cards actuales
+        '<div class="section">'
+        '<div class="section-title">&#128202; Indicadores del Día — 11 Indicadores con Tendencia 30 días</div>'
+        '<div class="cards">' + cards_html + '</div>'
+        '</div>'
+
+        # Sección 2: Análisis IA
+        '<div class="section">'
+        '<div class="section-title">&#129302; Análisis IA — ¿Por qué varió cada indicador?</div>'
+        '<div class="exp-grid">' + exp_cards_html + '</div>'
+        '</div>'
+
+        # Sección 3: Dólar vs Euro 6 meses
+        '<div class="section">'
+        '<div class="section-title">&#128178; Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)</div>'
+        '<div class="chart-wide"><div id="chart6m"></div></div>'
+        '</div>'
+
+        # Sección 4: Histórico 10 años
+        '<div class="section">'
+        '<div class="section-title">&#128197; Series Históricas — Últimos 10 Años</div>'
+        '<div class="hist-grid">' + hist_cards_html + '</div>'
+        '</div>'
+
+        '<footer>'
+        'Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
+        'API REST Banco Central de Chile · Análisis IA: Groq LLaMA 3.3 70B + RAG Biblioteca Finanzas · '
+        'Cofradía de Networking Bot v6.0'
+        '</footer>'
+
+        '<script>'
+        + spark_js +
+
+        'var c6m=echarts.init(document.getElementById("chart6m"));'
+        'c6m.setOption({'
+        'backgroundColor:"transparent",'
+        'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
+        'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
+        'formatter:function(p){'
+        'var s=p[0].name+"<br/>";'
+        'p.forEach(function(i){'
+        's+=\'<span style="color:\'+i.color+\'">●</span> \'+i.seriesName+\': \';'
+        'if(i.value===null)s+="N/D";'
+        'else s+="$"+i.value.toLocaleString("es-CL");'
+        's+="<br/>";});return s;'
+        '}},'
+        'legend:{data:["Dólar USD","Euro EUR"],textStyle:{color:"#8899aa"},top:4,right:10},'
+        'grid:{left:"10%",right:"5%",bottom:"12%",top:"14%"},'
+        'xAxis:{type:"category",data:' + labels_6m + ','
+        'axisLabel:{color:"#8899aa",fontSize:12},'
+        'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+        'yAxis:{type:"value",'
+        'axisLabel:{color:"#8899aa",formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
+        'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
+        'series:['
+        '{name:"Dólar USD",type:"line",data:' + dolar_6m + ','
+        'smooth:true,symbol:"circle",symbolSize:7,'
+        'lineStyle:{color:"#3478c3",width:3},itemStyle:{color:"#3478c3"},'
+        'label:{show:true,position:"top",color:"#3478c3",fontSize:11,'
+        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:"#3478c344"},{offset:1,color:"transparent"}]}}},'
+        '{name:"Euro EUR",type:"line",data:' + euro_6m + ','
+        'smooth:true,symbol:"circle",symbolSize:7,'
+        'lineStyle:{color:"#2ecc71",width:3},itemStyle:{color:"#2ecc71"},'
+        'label:{show:true,position:"bottom",color:"#2ecc71",fontSize:11,'
+        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:"#2ecc7133"},{offset:1,color:"transparent"}]}}}]'
+        '});'
+
+        + hist_charts_js +
+
+        'window.addEventListener("resize",function(){'
+        'if(c6m)c6m.resize();'
+        '[' + hist_ids_js + '].forEach(function(id){'
+        'var el=document.getElementById(id);'
+        'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
+        '});});'
+
+        '</script>'
+        '</body></html>'
+    )
+    return html
 
 
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard de indicadores económicos de Chile con explicaciones IA.
-    Fuentes: API Banco Central (mindicador.cl) + Web Scraping BCCH + RAG Libros de Finanzas.
+    /indicadores — Dashboard económico completo de Chile con análisis IA:
+      • 11 indicadores del día con sparkline 30 días
+      • Análisis IA del por qué varió cada indicador (Groq + RAG + BCCH)
+      • Dólar vs Euro últimos 6 meses
+      • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
+    Fuentes: mindicador.cl (Banco Central) + Web Scraping BCCH + RAG Biblioteca Finanzas
     """
     msg = await update.message.reply_text(
-        "📊 Obteniendo indicadores del Banco Central...\n"
-        "⏳ Consultando fuentes y generando explicaciones con IA..."
+        "📈 Consultando indicadores económicos...\n"
+        "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
     )
     try:
-        # ── 1. Obtener datos numéricos ─────────────────────────────────────
         loop = asyncio.get_running_loop()
-        indicadores = await loop.run_in_executor(None, obtener_indicadores_chile)
 
-        if not indicadores:
-            await msg.edit_text(
-                "❌ No se pudo obtener datos del Banco Central.\n"
-                "Intenta más tarde o visita https://mindicador.cl"
-            )
+        # 1. Datos completos (histórico + actuales) — fetch paralelo ~80 peticiones
+        all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
+        datos = all_data.get('datos_actuales', {})
+        if not datos:
+            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
             return
 
         await msg.edit_text(
-            f"📊 {len(indicadores)} indicadores obtenidos.\n"
+            f"✅ {len(datos)} indicadores obtenidos.\n"
             "🔍 Web scraping del Banco Central...\n"
             "📚 Consultando biblioteca financiera RAG..."
         )
 
-        # ── 2. Web scraping BCCH ───────────────────────────────────────────
+        # 2. Web scraping BCCH
         noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
         contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
 
-        # ── 3. Consultar RAG para cada indicador ──────────────────────────
+        # 3. RAG por indicador
         queries_rag = {
-            'uf':    'unidad de fomento inflación reajuste Chile',
-            'utm':   'unidad tributaria mensual impuestos Chile',
-            'dolar': 'tipo de cambio dólar peso chileno política cambiaria',
-            'euro':  'tipo de cambio euro moneda extranjera',
-            'ipc':   'índice de precios al consumidor inflación causas efectos',
-            'tpm':   'tasa de política monetaria banco central tasas de interés inflación',
+            'uf':            'unidad de fomento inflacion reajuste Chile',
+            'dolar':         'tipo de cambio dolar peso chileno politica cambiaria',
+            'euro':          'tipo de cambio euro moneda extranjera',
+            'utm':           'unidad tributaria mensual impuestos Chile',
+            'ipc':           'indice de precios al consumidor inflacion causas efectos',
+            'tpm':           'tasa de politica monetaria banco central tasas de interes',
+            'bitcoin':       'bitcoin criptomoneda volatilidad mercado digital',
+            'tasa_desempleo':'desempleo mercado laboral Chile causas empleo',
+            'imacec':        'IMACEC actividad economica Chile indicador mensual PIB',
+            'libra_cobre':   'precio cobre Chile exportaciones materias primas',
+            'ivp':           'indice valor promedio creditos hipotecarios Chile',
         }
-
         fragmentos_rag = {}
-        for codigo in indicadores:
-            query = queries_rag.get(codigo, f'indicador económico {codigo} Chile')
-            frag = await loop.run_in_executor(None, consultar_rag_economia, query)
-            fragmentos_rag[codigo] = frag
+        for cod in datos:
+            query = queries_rag.get(cod, f'indicador economico {cod} Chile')
+            frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
+            fragmentos_rag[cod] = frag
 
-        # ── 4. Generar explicaciones con IA ───────────────────────────────
+        # 4. Explicaciones IA
         await msg.edit_text(
-            f"🤖 Generando explicaciones con IA ({len(indicadores)} indicadores)...\n"
-            "📊 Creando gráfico de análisis..."
+            f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
+            "📊 Construyendo dashboard interactivo..."
         )
-
         explicaciones = {}
-        for codigo, datos in indicadores.items():
+        for cod, d in datos.items():
             exp = await loop.run_in_executor(
-                None,
-                generar_explicacion_indicador,
-                codigo,
-                datos,
-                contexto_bcch,
-                fragmentos_rag.get(codigo, '')
+                None, generar_explicacion_indicador,
+                cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
             )
-            explicaciones[codigo] = exp
+            explicaciones[cod] = exp
 
-        # ── 5. Generar gráfico ────────────────────────────────────────────
-        imagen_buf = await loop.run_in_executor(
-            None, crear_grafico_indicadores, indicadores, explicaciones
+        # 5. Mensaje de texto resumido en Telegram
+        sep = "━" * 30
+        PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
+        ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
+                     'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
+        lineas = [
+            "📈 INDICADORES ECONÓMICOS DE CHILE",
+            sep,
+            "Fuente: mindicador.cl — Banco Central de Chile",
+            "",
+        ]
+        for cod in ORDER_MSG:
+            d = datos.get(cod)
+            if not d: continue
+            v = d['valor']
+            if cod in PORCENTAJES:
+                vf = "{:.2f}%".format(v)
+            elif cod == 'bitcoin':
+                vf = "${:,.0f} CLP".format(v).replace(',', '.')
+            elif cod == 'libra_cobre':
+                vf = "USD {:.4f}".format(v)
+            else:
+                vf = "${:,.2f} CLP".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
+            serie = d.get('serie30', [])
+            tend  = ''
+            if len(serie) >= 2:
+                v0 = serie[0].get('valor', 0)
+                v1 = serie[1].get('valor', 1)
+                if v1:
+                    pct  = ((v0 - v1) / v1) * 100
+                    tend = '  ' + ('▲' if pct >= 0 else '▼') + ' {:.3f}%'.format(abs(pct))
+            lineas.append(d['nombre'] + ": " + vf + tend + "  (" + d['fecha'] + ")")
+
+        hist_6m = all_data.get('hist_6m', {})
+        d6l = hist_6m.get('dolar', [])
+        e6l = hist_6m.get('euro',  [])
+        if d6l and e6l:
+            lineas += ["", sep, "Dólar vs Euro — últimos 6 meses:", ""]
+            for label, vd, ve in zip(hist_6m.get('labels', []), d6l, e6l):
+                vds = "${:,.0f}".format(vd).replace(',', '.') if vd else 'N/D'
+                ves = "${:,.0f}".format(ve).replace(',', '.') if ve else 'N/D'
+                lineas.append("  " + label + " — USD " + vds + "  |  EUR " + ves)
+
+        lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
+        await update.message.reply_text("\n".join(lineas))
+
+        # 6. Generar y enviar HTML
+        await msg.edit_text("📊 Generando dashboard HTML interactivo...")
+        html_content = await loop.run_in_executor(
+            None, generar_html_indicadores, all_data, explicaciones
         )
-
-        if not imagen_buf:
-            await msg.edit_text("❌ Error generando gráfico.")
-            return
-
-        # ── 6. Enviar imagen ──────────────────────────────────────────────
-        hoy = datetime.now().strftime('%d/%m/%Y')
-        caption_lines = [f"📊 INDICADORES ECONÓMICOS CHILE — {hoy}",
-                         "━" * 32,
-                         "Fuentes: Banco Central · mindicador.cl · Biblioteca RAG",
-                         ""]
-        for codigo, datos in indicadores.items():
-            var = datos['variacion_pct']
-            flecha = "▲" if var > 0 else ("▼" if var < 0 else "►")
-            caption_lines.append(
-                f"{datos['emoji']} {datos['nombre']}: {datos['valor_actual']:,.2f} {datos['unidad']}  "
-                f"{flecha}{abs(var):.2f}%"
+        html_path = f"/tmp/ind_{update.effective_user.id}.html"
+        with open(html_path, 'w', encoding='utf-8') as fh:
+            fh.write(html_content)
+        with open(html_path, 'rb') as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
+                caption=(
+                    "📊 Dashboard Indicadores Económicos Chile\n\n"
+                    "• 11 indicadores del día con sparklines 30 días\n"
+                    "• 🤖 Análisis IA del por qué de cada variación\n"
+                    "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
+                    "• 💱 Dólar vs Euro últimos 6 meses\n"
+                    "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
+                    "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
+                    "Abre en tu navegador para los gráficos interactivos."
+                )
             )
-
-        caption = "\n".join(caption_lines)
-
-        await update.message.reply_photo(
-            photo=imagen_buf,
-            caption=caption[:1024]
-        )
+        try:
+            os.remove(html_path)
+        except Exception:
+            pass
         await msg.delete()
-
         registrar_servicio_usado(update.effective_user.id, 'indicadores')
 
     except Exception as e:
-        logger.error(f"Error en indicadores_comando: {e}", exc_info=True)
+        import traceback as _tb
+        logger.error("indicadores_comando: " + str(e) + "\n" + _tb.format_exc())
         try:
-            await msg.edit_text(f"❌ Error inesperado: {str(e)[:120]}")
+            await msg.edit_text("❌ Error indicadores: " + str(e)[:120])
         except Exception:
             pass
 
