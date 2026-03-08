@@ -85,56 +85,43 @@ ONBOARD_NOMBRE, ONBOARD_GENERACION, ONBOARD_RECOMENDADO, ONBOARD_PREGUNTA4, ONBO
 # ==================== CONFIGURACIÓN DE LLMs ====================
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_MODEL_FAST = "llama3-8b-8192"       # Fallback Groq rápido — límite separado
-GROQ_MODEL_MIX  = "mixtral-8x7b-32768"   # Fallback Groq alternativo
 
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_TEXT_URL        = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_FLASH15_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-GEMINI_FLASH15_8B_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-latest:generateContent"
-GEMINI_FLASH20_8B_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
-GEMINI_FLASH_EXP_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
-# API Key 2 (cuota completamente separada — 1500 req/día adicionales)
-GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "")
+GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # ==================== CONFIGURACIÓN DE JSEARCH (EMPLEOS REALES) ====================
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
-
-# ==================== CONFIGURACIÓN WEB SEARCH (MULTI-MOTOR GRATUITO) ====================
-# Motores disponibles (en orden de prioridad):
-#  1. Google Custom Search JSON  — 100 req/día gratis  (GOOGLE_CSE_KEY + GOOGLE_CSE_ID)
-#  2. DuckDuckGo HTML            — sin key, ilimitado   [SIEMPRE ACTIVO]
-#  3. DuckDuckGo Instant Answer  — JSON, sin key        [SIEMPRE ACTIVO]
-#  4. SearXNG instancias públicas— sin key              [SIEMPRE ACTIVO]
-#  5. Brave Search API           — 2000 req/mes         (BRAVE_API_KEY, pago opcional)
-# Extractor de contenido:
-#  - Jina AI Reader (r.jina.ai)  — GRATIS, sin key, extrae texto de cualquier URL
-#  - BeautifulSoup fallback      — local si Jina falla
-GOOGLE_CSE_KEY       = os.environ.get('GOOGLE_CSE_KEY', '')   # Gratis: console.developers.google.com
-GOOGLE_CSE_ID        = os.environ.get('GOOGLE_CSE_ID', '')   # Gratis: cse.google.com/cse
-BRAVE_API_KEY        = os.environ.get('BRAVE_API_KEY', '')   # Opcional pago: search.brave.com/api
-WEB_SEARCH_ENABLED   = True
-WEB_CACHE_TTL_HOURS  = 72      # Caché RAG válido 72h antes de re-buscar
-WEB_MAX_RESULTS      = 5       # Resultados por búsqueda
-WEB_MAX_CONTENT_CHARS= 1500    # Máx chars extraídos por página
-JINA_BASE_URL        = "https://r.jina.ai/"  # Extractor Jina AI — 100% GRATIS sin key
 
 # Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
 gemini_disponible = False
 jsearch_disponible = False
 db_disponible = False
-web_search_disponible = True   # DuckDuckGo activo por defecto sin key
 
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
 if GROQ_API_KEY:
-    # No hacer test al arranque (consume cuota) — asumir disponible si la key existe
-    ia_disponible = True
-    logger.info(f"✅ Groq AI configurado (modelo: {GROQ_MODEL}) — key presente")
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        test_payload = {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": "Hola"}],
+            "max_tokens": 10
+        }
+        response = requests.post(GROQ_API_URL, headers=headers, json=test_payload, timeout=10)
+        if response.status_code == 200:
+            ia_disponible = True
+            logger.info(f"✅ Groq AI inicializado correctamente (modelo: {GROQ_MODEL})")
+        else:
+            logger.error(f"❌ Error conectando con Groq: {response.status_code}")
+    except Exception as e:
+        logger.error(f"❌ Error inicializando Groq: {str(e)[:100]}")
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
@@ -146,8 +133,7 @@ if GEMINI_API_KEY:
     gemini_texto_disponible = True
     if not ia_disponible:
         ia_disponible = True
-    # Sin test al arranque — evita consumir cuota innecesariamente
-    logger.info("✅ Gemini configurado (5 modelos como fallback de Groq)")
+    logger.info("✅ Gemini 2.0 Flash activo (texto + OCR)")
 else:
     logger.warning("⚠️ GEMINI_API_KEY no configurada")
 
@@ -383,92 +369,6 @@ def init_db():
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                voz_idioma TEXT DEFAULT 'es-US-Wavenet-A',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS confirmaciones_lectura (
-                id SERIAL PRIMARY KEY,
-                anuncio_id BIGINT,
-                user_id BIGINT,
-                first_name TEXT,
-                fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(anuncio_id, user_id)
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'El bot está en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            c.execute('''INSERT INTO modo_mantenimiento (id, activo) VALUES (1, 0)
-                ON CONFLICT (id) DO NOTHING''')
-
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'Bot en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            try:
-                if DATABASE_URL:
-                    c.execute('''INSERT INTO modo_mantenimiento (id,activo) VALUES (1,0) ON CONFLICT (id) DO NOTHING''')
-                else:
-                    c.execute('''INSERT OR IGNORE INTO modo_mantenimiento (id,activo) VALUES (1,0)''')
-            except Exception:
-                pass
-
             c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
@@ -745,92 +645,6 @@ def init_db():
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                voz_idioma TEXT DEFAULT 'es-US-Wavenet-A',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS confirmaciones_lectura (
-                id SERIAL PRIMARY KEY,
-                anuncio_id BIGINT,
-                user_id BIGINT,
-                first_name TEXT,
-                fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(anuncio_id, user_id)
-            )''')
-
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'El bot está en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            c.execute('''INSERT INTO modo_mantenimiento (id, activo) VALUES (1, 0)
-                ON CONFLICT (id) DO NOTHING''')
-
-            # ── NUEVAS TABLAS v6.0 ──────────────────────────────────────
-            c.execute('''CREATE TABLE IF NOT EXISTS preferencias_usuario (
-                user_id BIGINT PRIMARY KEY,
-                voz_velocidad TEXT DEFAULT 'normal',
-                resumen_diario INTEGER DEFAULT 0,
-                hora_resumen INTEGER DEFAULT 9,
-                fecha_actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS servicios_cofrades (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tipo TEXT,
-                descripcion TEXT,
-                activo INTEGER DEFAULT 1,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS recordatorios (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                mensaje TEXT,
-                fecha_recordar TIMESTAMP,
-                enviado INTEGER DEFAULT 0,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            c.execute('''CREATE TABLE IF NOT EXISTS modo_mantenimiento (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                activo INTEGER DEFAULT 0,
-                mensaje TEXT DEFAULT 'Bot en mantenimiento. Vuelve pronto.',
-                activado_por BIGINT,
-                fecha_inicio TIMESTAMP
-            )''')
-            try:
-                if DATABASE_URL:
-                    c.execute('''INSERT INTO modo_mantenimiento (id,activo) VALUES (1,0) ON CONFLICT (id) DO NOTHING''')
-                else:
-                    c.execute('''INSERT OR IGNORE INTO modo_mantenimiento (id,activo) VALUES (1,0)''')
-            except Exception:
-                pass
-
             c.execute('''CREATE TABLE IF NOT EXISTS consultas_cofrades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -1040,7 +854,7 @@ Tu personalidad:
     
     for intento in range(reintentos):
         try:
-            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
@@ -1051,14 +865,7 @@ Tu personalidad:
             elif response.status_code == 429:
                 logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
                 import time
-                time.sleep(3 * (intento + 1))
-                # Cambiar a modelo más liviano en reintentos
-                if intento == 1:
-                    payload["model"] = GROQ_MODEL_FAST
-                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_FAST}")
-                elif intento == 2:
-                    payload["model"] = GROQ_MODEL_MIX
-                    logger.info(f"Cambiando a modelo Groq: {GROQ_MODEL_MIX}")
+                time.sleep(2 * (intento + 1))
                 
             elif response.status_code >= 500:
                 logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
@@ -1066,15 +873,15 @@ Tu personalidad:
                 time.sleep(1)
                 
             else:
-                logger.error(f"❌ Groq API error {response.status_code}: {response.text[:400]}")
-                break  # Ir al fallback Gemini
+                logger.error(f"Error Groq API: {response.status_code} - {response.text[:200]}")
+                return None
                 
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout Groq (intento {intento + 1})")
             continue
         except Exception as e:
             logger.error(f"Error inesperado Groq: {str(e)[:100]}")
-            break  # Ir al fallback Gemini
+            return None
     
     # FALLBACK: Groq falló → Gemini 2.0 Flash
     logger.warning("⚠️ Groq falló → Gemini 2.0 Flash")
@@ -1086,77 +893,46 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
-def _llamar_gemini_url(url_base: str, prompt: str, max_tokens: int, temperature: float, nombre: str, api_key: str = None) -> str:
-    """Llama a un endpoint específico de Gemini."""
-    key = api_key or GEMINI_API_KEY
-    if not key:
-        return None
-    try:
-        url = f"{url_base}?key={key}"
-        sistema = (
-            "Eres el asistente de IA de Cofradía de Networking, "
-            "comunidad profesional chilena de alto nivel. "
-            "Responde siempre en español chileno, profesional y cercano.\n\n"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": sistema + prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
-        }
-        r = requests.post(url, json=payload, timeout=30)
-        if r.status_code == 200:
-            candidatos = r.json().get("candidates", [])
-            if candidatos:
-                texto = candidatos[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                if texto and texto.strip():
-                    logger.info(f"✅ Respuesta {nombre} OK")
-                    return texto.strip()
-        elif r.status_code == 429:
-            logger.warning(f"⚠️ {nombre} cuota agotada (429)")
-        else:
-            logger.error(f"❌ {nombre} HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        logger.error(f"❌ {nombre} excepción: {e}")
-    return None
-
-
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Cadena Gemini: 5 modelos x 2 API keys = hasta 10 intentos antes de rendirse.
-    Cuota gratuita: cada modelo tiene ~1500 req/día independientes."""
+    """Gemini 2.0 Flash — fallback de Groq (1500 req/día, gratis)."""
     if not GEMINI_API_KEY:
         logger.warning("⚠️ GEMINI_API_KEY no configurada")
         return None
-
-    # Lista de (url, nombre) — cuotas completamente separadas entre modelos
-    modelos = [
-        (GEMINI_TEXT_URL,       "Gemini 2.0 Flash"),
-        (GEMINI_FLASH20_8B_URL, "Gemini 2.0 Flash-Lite"),
-        (GEMINI_FLASH15_URL,    "Gemini 1.5 Flash"),
-        (GEMINI_FLASH_EXP_URL,  "Gemini 2.0 Flash-Exp"),
-        (GEMINI_FLASH15_8B_URL, "Gemini 1.5 Flash-8B"),
-    ]
-
-    # Primer intento: con API Key principal
-    for url, nombre in modelos:
-        r = _llamar_gemini_url(url, prompt, max_tokens, temperature, nombre)
-        if r:
-            return r
-
-    # Segundo intento: con API Key 2 si está configurada (cuota completamente independiente)
-    if GEMINI_API_KEY_2:
-        logger.info("🔄 Cambiando a GEMINI_API_KEY_2")
-        for url, nombre in modelos[:3]:  # Solo los 3 principales con key2
-            r = _llamar_gemini_url(url, prompt, max_tokens, temperature, f"{nombre} (key2)", api_key=GEMINI_API_KEY_2)
-            if r:
-                return r
-
-    logger.error("❌ Todos los modelos Gemini agotaron su cuota diaria")
+    try:
+        url = f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": (
+                        "Eres el asistente de IA de Cofradía de Networking, "
+                        "comunidad profesional chilena de alto nivel. "
+                        "Responde siempre en español chileno, profesional y cercano.\n\n"
+                        + prompt
+                    )
+                }]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            }
+        }
+        r = requests.post(url, json=payload, timeout=30)
+        if r.status_code == 200:
+            texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            if texto and texto.strip():
+                logger.info("✅ Respuesta Gemini 2.0 Flash")
+                return texto.strip()
+        else:
+            logger.warning(f"Gemini error: {r.status_code} — {r.text[:300]}")
+    except Exception as e:
+        logger.warning(f"Error Gemini: {e}")
     return None
 
 
 # ==================== FUNCIONES DE VOZ (STT + TTS) ====================
 
 # Configuración de voz
-VOZ_TTS = os.environ.get('VOZ_TTS', 'es-MX-DaliaNeural')  # Voz femenina cálida y natural
+VOZ_TTS = os.environ.get('VOZ_TTS', 'es-CL-CatalinaNeural')  # Voz chilena femenina
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
 
@@ -1234,19 +1010,17 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     # ── INTENTO 2: edge-TTS mejorado (Catalina más natural) ──
     try:
         import edge_tts
-        # Pausas naturales y expresivas (mejoran la calidez percibida)
+        # Pausas naturales
         texto_voz = texto_voz.replace('. ', '... ')
-        texto_voz = texto_voz.replace('! ', '!... ')
-        texto_voz = texto_voz.replace('? ', '?... ')
-        texto_voz = texto_voz.replace(': ', ', ')
-        texto_voz = texto_voz.replace('; ', '... ')
+        texto_voz = texto_voz.replace(': ', ':... ')
+        texto_voz = texto_voz.replace('; ', ';... ')
 
         communicate = edge_tts.Communicate(
             texto_voz,
             VOZ_TTS,
-            rate   = "-8%",    # ritmo levemente pausado — natural, no lento
-            pitch  = "+2Hz",   # tono ligeramente más agudo — cálido y femenino
-            volume = "+10%"    # presencia y calidez
+            rate  = "-12%",   # más pausada y natural
+            pitch = "-4Hz",   # tono más grave y humano
+            volume = "+8%"    # más presencia
         )
         await communicate.save(filename)
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
@@ -1307,6 +1081,17 @@ COMANDOS_VOZ = {
     'ranking': 'top_usuarios',
     'mi perfil': 'mi_perfil',
     'perfil': 'mi_perfil',
+    # Indicadores económicos
+    'indicadores': 'indicadores',
+    'indicadores económicos': 'indicadores',
+    'indicadores economicos': 'indicadores',
+    'economía': 'indicadores',
+    'economia chile': 'indicadores',
+    'dólar hoy': 'indicadores',
+    'dolar hoy': 'indicadores',
+    'uf hoy': 'indicadores',
+    'ipc': 'indicadores',
+    'tpm': 'indicadores',
     # Resúmenes
     'resumen': 'resumen',
     'resumen del día': 'resumen',
@@ -1460,6 +1245,7 @@ async def ejecutar_comando_voz(comando: str, argumentos: str, update: Update, co
             'ver_consulta': ver_consulta_comando,
             'graficos': graficos_comando,
             'estadisticas': estadisticas_comando,
+            'indicadores': indicadores_comando,
             'top_usuarios': top_usuarios_comando,
             'mi_perfil': mi_perfil_comando,
             'resumen': resumen_comando,
@@ -1577,55 +1363,6 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
         
-        # BÚSQUEDA HOLÍSTICA: RAG + Excel + Web (con caché para evitar scraping repetido)
-        ctx_voz_holistica = ''
-        ctx_fuentes_usadas = []
-        try:
-            import asyncio as _ah
-            # 1. RAG — base de conocimientos
-            try:
-                rag_res = await _ah.get_event_loop().run_in_executor(
-                    None, lambda: busqueda_unificada(texto_transcrito, top_k=3))
-                if rag_res:
-                    rag_txt = '\n'.join([(r['texto'] if isinstance(r, dict) else str(r))[:300] for r in rag_res[:3]])
-                    if rag_txt.strip():
-                        ctx_voz_holistica += '\n[BASE CONOCIMIENTOS]\n' + rag_txt
-                        ctx_fuentes_usadas.append('RAG')
-            except Exception as _er:
-                logger.debug('Voz RAG: ' + str(_er))
-            # 2. Excel Drive — directorio cofrades
-            try:
-                df_voz = await _ah.get_event_loop().run_in_executor(None, obtener_datos_excel_drive)
-                if df_voz is not None and len(df_voz) > 0:
-                    palabras_q = [p for p in texto_transcrito.lower().split() if len(p) > 3]
-                    matches_ex = []
-                    for _, row in df_voz.iterrows():
-                        fila_s = ' '.join([str(v) for v in row.values if str(v) not in ['nan','None','']]).lower()
-                        if sum(1 for p in palabras_q if p in fila_s) >= 2:
-                            n = str(row.iloc[2]) if len(row) > 2 else ''
-                            a = str(row.iloc[3]) if len(row) > 3 else ''
-                            emp = str(row.iloc[11]) if len(row) > 11 else ''
-                            prof = str(row.iloc[24]) if len(row) > 24 else ''
-                            matches_ex.append((n + ' ' + a).strip() + ' — ' + prof + (', ' + emp if emp not in ['nan',''] else ''))
-                        if len(matches_ex) >= 3: break
-                    if matches_ex:
-                        ctx_voz_holistica += '\n[DIRECTORIO COFRADÍA]\n' + '\n'.join(matches_ex)
-                        ctx_fuentes_usadas.append('Excel')
-            except Exception as _ex2:
-                logger.debug('Voz Excel: ' + str(_ex2))
-            # 3. Web — solo si RAG no tuvo resultado (con caché automático)
-            if not ctx_voz_holistica.strip():
-                try:
-                    web_voz = await _ah.get_event_loop().run_in_executor(
-                        None, lambda: buscar_en_web(texto_transcrito, extraer_contenido=False))
-                    if web_voz.get('resultados'):
-                        ctx_voz_holistica += '\n[WEB]\n' + formatear_contexto_web(web_voz)[:800]
-                        ctx_fuentes_usadas.append('Web')
-                except Exception as _ew:
-                    logger.debug('Voz Web: ' + str(_ew))
-        except Exception as _eh:
-            logger.debug('Voz holística: ' + str(_eh))
-
         # PASO 2.5: Detectar si el usuario dijo "comando [nombre]" para ejecutar un comando real
         comando_detectado = detectar_comando_por_voz(texto_transcrito)
         if comando_detectado:
@@ -1662,111 +1399,125 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning(f"Error ejecutando comando por voz: {e}")
                 # Si falla, continuar con procesamiento normal de IA
         
-        # ── PASO 3-5: IA + texto + audio (máx 10 s garantizados) ────────────────
-        _nom = user.first_name
-        await msg.edit_text(f'🎙️ "{texto_transcrito[:60]}{"..." if len(texto_transcrito)>60 else ""}"')
-
-        # Prompt sin DB — todo el conocimiento viene del LLM (hasta 2024)
-        _ctx_extra = ctx_voz_holistica.strip() if ctx_voz_holistica.strip() else ''
-        _fuentes_tag = (' [' + ', '.join(ctx_fuentes_usadas) + ']') if ctx_fuentes_usadas else ''
-        _ctx_seccion = ('\n\nCONTEXTO' + _fuentes_tag + ':\n' + _ctx_extra + '\n') if _ctx_extra else ''
-        _prom = (
-            "Eres el asistente IA de la Cofradía de Networking, comunidad profesional "
-            "de oficiales navales chilenos.\n"
-            f"Responde a {_nom} en voz: prosa fluida, sin listas, sin asteriscos.\n"
-            f'Empieza SIEMPRE con "{_nom},". Máximo 5 oraciones concisas.\n'
-            "Usa TODA la información del contexto antes de responder.\n"
-            "Nunca digas que no tienes información — usa tu conocimiento hasta 2024.\n"
-            "Al final: 'Para más detalles escríbeme la misma pregunta como texto.'"
-            + _ctx_seccion
-            + f"\n\nPregunta: {texto_transcrito}"
-        )
-
-        # ── Función síncrona: 2 intentos, 8 s cada uno ────────────────────────
-        import requests as _rq
-
-        def _ia_voz():
-            # Intento 1: Groq
-            if GROQ_API_KEY:
-                try:
-                    _r = _rq.post(
-                        GROQ_API_URL,
-                        headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                                 "Content-Type": "application/json"},
-                        json={"model": GROQ_MODEL,
-                              "messages": [{"role": "user", "content": _prom}],
-                              "max_tokens": 400, "temperature": 0.7},
-                        timeout=8
-                    )
-                    if _r.status_code == 200:
-                        return _r.json()["choices"][0]["message"]["content"].strip()
-                    logger.warning(f"Groq audio {_r.status_code}")
-                except Exception as _eg:
-                    logger.warning(f"Groq audio: {_eg}")
-            # Intento 2: Gemini 2.0 Flash
-            if GEMINI_API_KEY:
-                try:
-                    _g = _rq.post(
-                        f"{GEMINI_TEXT_URL}?key={GEMINI_API_KEY}",
-                        json={"contents": [{"parts": [{"text": _prom}]}],
-                              "generationConfig": {"maxOutputTokens": 400,
-                                                   "temperature": 0.7}},
-                        timeout=8
-                    )
-                    if _g.status_code == 200:
-                        _cc = _g.json().get("candidates", [])
-                        if _cc:
-                            return _cc[0]["content"]["parts"][0]["text"].strip()
-                    logger.warning(f"Gemini audio {_g.status_code}")
-                except Exception as _eg2:
-                    logger.warning(f"Gemini audio: {_eg2}")
-            return None
-
-        # ── Ejecutar con timeout duro de 10 s (get_running_loop = correcto Py3.10+) ──
-        import asyncio as _aio
-        _resp = None
-        try:
-            _resp = await _aio.wait_for(
-                _aio.get_running_loop().run_in_executor(None, _ia_voz),
-                timeout=10.0
+        # PASO 3: Procesar consulta con IA - búsqueda exhaustiva en todas las fuentes
+        # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
+        intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
+        texto_para_busqueda = intencion_voz['query_mejorada']
+        
+        # Si detectó un comando claro, ejecutarlo directamente
+        if intencion_voz['ejecutar_comando'] and intencion_voz['comando']:
+            ejecutado = await ejecutar_comando_desde_intencion(
+                intencion_voz['comando'], intencion_voz['args'], update, context
             )
-        except _aio.TimeoutError:
-            logger.warning("⏰ Audio timeout 10s")
-        except Exception as _ex:
-            logger.warning(f"Audio IA: {_ex}")
-
-        if not _resp:
-            _resp = (
-                f"{_nom}, recibí tu pregunta. Los servidores de IA tienen alta "
-                "demanda ahora. Escríbeme la misma pregunta como texto y te "
-                "respondo de inmediato con todos los detalles."
-            )
-
-        # PASO 4: texto
-        try:
-            await msg.edit_text(
-                f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{_resp}"
-            )
-        except Exception as _ee:
-            if "not modified" not in str(_ee).lower():
-                logger.debug(f"edit voz: {_ee}")
-
-        # PASO 5: audio TTS
-        try:
-            _af = await generar_audio_tts(_resp)
-            if _af:
-                with open(_af, "rb") as _fv:
-                    await update.message.reply_voice(
-                        voice=_fv, caption="🔊 Respuesta de voz"
-                    )
+            if ejecutado:
                 try:
-                    os.remove(_af)
-                except Exception:
+                    await msg.delete()
+                except:
                     pass
-        except Exception as _et:
-            logger.warning(f"TTS audio: {_et}")
+                registrar_servicio_usado(user_id, 'voz_comando')
+                return
+        
+        resultados = busqueda_unificada(texto_para_busqueda, limit_historial=15, limit_rag=40)
+        contexto = formatear_contexto_unificado(resultados, texto_para_busqueda)
+        
+        # Generar también contexto de tarjetas profesionales si hay nombres relevantes
+        contexto_tarjetas = ""
+        try:
+            conn_tc = get_db_connection()
+            if conn_tc:
+                c_tc = conn_tc.cursor()
+                # Usar query mejorada para mejor búsqueda de tarjetas
+                palabras_busq = [p for p in texto_para_busqueda.lower().split() if len(p) > 3][:5]
+                if palabras_busq:
+                    cond_tc = []
+                    params_tc = []
+                    for p in palabras_busq:
+                        if DATABASE_URL:
+                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
+                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
+                        else:
+                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
+                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
+                    if cond_tc:
+                        wh = " OR ".join(cond_tc)
+                        if DATABASE_URL:
+                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
+                        else:
+                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
+                        tarjetas = c_tc.fetchall()
+                        if tarjetas:
+                            ctx_list = []
+                            for t in tarjetas:
+                                if DATABASE_URL:
+                                    ctx_list.append(f"{t['nombre_completo']} - {t['profesion']} en {t['empresa']} ({t['ciudad']}): {t['servicios']}")
+                                else:
+                                    ctx_list.append(f"{t[0]} - {t[1]} en {t[2]} ({t[3]}): {t[4]}")
+                            contexto_tarjetas = "\n=== PROFESIONALES COFRADÍA (Tarjetas) ===\n" + "\n".join(ctx_list)
+                conn_tc.close()
+        except Exception as e_tc:
+            logger.debug(f"No se pudo buscar tarjetas para audio: {e_tc}")
+        
+        fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
+        rag_conf = resultados.get('rag_confianza', 'ninguna')
+        
+        modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
+                      else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
+        
+        # Contexto de intención para el prompt
+        intent_audio_hint = ""
+        if texto_para_busqueda != texto_transcrito:
+            intent_audio_hint = f"\n(La búsqueda usó la consulta enriquecida: \"{texto_para_busqueda[:100]}\")"
+        
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
 
-                # Registrar uso del servicio
+{user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
+Empieza directamente: "{user.first_name}, [respuesta]..."
+
+MODO: {modo_audio}
+NUNCA digas "no tengo información" si sabes del tema como LLM.
+NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
+
+He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
+
+{contexto}
+{contexto_tarjetas}
+
+{user.first_name} pregunta (audio): {texto_transcrito}"""
+
+        respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
+        
+        if not respuesta_texto:
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
+        
+        if not respuesta_texto:
+            respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
+        
+        # PASO 4: Enviar respuesta en texto
+        texto_respuesta_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}"
+        try:
+            await msg.edit_text(texto_respuesta_display, parse_mode='Markdown')
+        except Exception:
+            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}")
+        
+        # PASO 5: Generar y enviar audio de respuesta
+        try:
+            audio_file = await generar_audio_tts(respuesta_texto)
+            if audio_file:
+                with open(audio_file, 'rb') as f:
+                    await update.message.reply_voice(
+                        voice=f,
+                        caption="🔊 Respuesta de voz"
+                    )
+                # Limpiar archivo temporal
+                try:
+                    os.remove(audio_file)
+                except:
+                    pass
+        except Exception as e:
+            logger.warning(f"No se pudo enviar audio TTS: {e}")
+            # No es crítico - ya se envió la respuesta en texto
+        
+        # Registrar uso del servicio
         registrar_servicio_usado(user_id, 'voz')
         
         # Guardar mensaje en historial si es grupo
@@ -1781,19 +1532,11 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         
     except Exception as e:
-        err_str = str(e).lower()
-        # Ignorar errores de Telegram que no son críticos
-        if "not modified" in err_str or "message to edit not found" in err_str:
-            logger.debug(f"Telegram no-crítico en voz: {e}")
-            return
         logger.error(f"Error procesando voz: {e}")
         import traceback
         logger.error(traceback.format_exc())
         try:
-            await msg.edit_text(
-                f"Ocurrió un error procesando tu audio.\n"
-                "Intenta de nuevo en unos segundos."
-            )
+            await msg.edit_text(f"❌ Error procesando audio: {str(e)[:100]}")
         except:
             pass
 
@@ -2429,175 +2172,155 @@ def buscar_empleos_jsearch(query: str, ubicacion: str = "Chile", num_pages: int 
         return None
 
 
-async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None, offset=0):
-    """Busca empleos reales (JSearch) con fallback a web scraping. offset para variar resultados."""
-    import random
-
+async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
+    """Busca empleos - primero intenta JSearch (reales), luego fallback a IA"""
+    
     busqueda_texto = cargo or "empleo"
     ubicacion_busqueda = ubicacion or "Chile"
-
-    # Intentar empleos REALES con JSearch
+    
+    # Intentar buscar empleos REALES con JSearch
     if jsearch_disponible:
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
+        
         if empleos and len(empleos) > 0:
-            # Rotar resultados si hay offset (búsqueda repetida)
-            if offset > 0 and len(empleos) > 5:
-                empleos = empleos[offset:] + empleos[:offset]
+            # Formatear empleos reales
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado  = "*🔎 EMPLEOS REALES ENCONTRADOS*\n"
-            resultado += "📋 *Búsqueda:* " + busqueda_texto + "\n"
-            resultado += "📍 *Ubicación:* " + ubicacion_busqueda + "\n"
-            resultado += "📅 *Fecha:* " + fecha_actual + "\n"
+            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
+            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
+            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado += f"📅 Fecha: {fecha_actual}\n"
+            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
-            busqueda_encoded_r = urllib.parse.quote(busqueda_texto)
-            busqueda_laborum_r = busqueda_texto.replace(" ", "-").lower()
-            portales_footer = (
-                "\n" + "━" * 30 + "\n"
-                "*🔗 PORTALES ESPECIALIZADOS DE EMPLEO:*\n"
-                "• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords=" + busqueda_encoded_r + "&location=Chile)\n"
-                "• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q=" + busqueda_encoded_r + ")\n"
-                "• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-" + busqueda_laborum_r + ".html)\n"
-                "• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q=" + busqueda_encoded_r + "&l=Chile)\n"
-                "• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q=" + busqueda_encoded_r + ")\n"
-                "• [⚫ GetOnBoard](https://www.getonbrd.com/jobs?q=" + busqueda_encoded_r + ")\n"
-                "• [🟤 Bumeran](https://www.bumeran.cl/empleos-busqueda-" + busqueda_laborum_r + ".html)\n"
-            )
-            def _md_safe(t):
-                """Escapa caracteres que rompen Markdown v1 en texto dinámico."""
-                for c in ('*', '_', '`', '[', ']'):
-                    t = t.replace(c, '\\' + c)
-                return t
-
-            for i, empleo in enumerate(empleos[:10], 1):
-                titulo        = _md_safe(empleo.get('job_title', 'Sin título'))
-                empresa       = _md_safe(empleo.get('employer_name', 'Empresa no especificada'))
-                _ciudad_raw   = empleo.get('job_city') or empleo.get('job_state') or empleo.get('job_country', 'No especificada')
-                ciudad        = _md_safe(str(_ciudad_raw))
-                pais          = _md_safe(empleo.get('job_country', ''))
-                ubicacion_job = (ciudad + ", " + pais).strip(", ") if ciudad and pais and ciudad != pais else ciudad or pais or 'No especificada'
-                min_salary    = empleo.get('job_min_salary')
-                max_salary    = empleo.get('job_max_salary')
+            
+            for i, empleo in enumerate(empleos[:8], 1):
+                titulo = empleo.get('job_title', 'Sin título')
+                empresa = empleo.get('employer_name', 'Empresa no especificada')
+                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
+                
+                # Sueldo
+                min_salary = empleo.get('job_min_salary')
+                max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                salary_curr   = empleo.get('job_salary_currency', 'USD')
+                
                 if min_salary and max_salary:
-                    sueldo = salary_curr + " " + "{:,.0f}".format(min_salary) + " - " + "{:,.0f}".format(max_salary)
-                    if salary_period: sueldo += " /" + salary_period.lower()
+                    sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
+                    if salary_period:
+                        sueldo += f" ({salary_period})"
                 elif min_salary:
-                    sueldo = "Desde " + salary_curr + " " + "{:,.0f}".format(min_salary)
-                    if salary_period: sueldo += " /" + salary_period.lower()
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
                 else:
                     sueldo = "No especificado"
-                tipo = empleo.get('job_employment_type', '')
-                tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo', 'CONTRACTOR': 'Contrato', 'INTERN': 'Práctica'}
-                tipo = tipo_map.get(tipo, tipo) or 'No especificado'
+                
+                # Tipo de empleo
+                tipo = empleo.get('job_employment_type', 'No especificado')
+                if tipo == 'FULLTIME':
+                    tipo = 'Tiempo completo'
+                elif tipo == 'PARTTIME':
+                    tipo = 'Medio tiempo'
+                elif tipo == 'CONTRACTOR':
+                    tipo = 'Contrato'
+                
+                # Link de postulación
                 link = empleo.get('job_apply_link', '')
+                
+                # Fecha de publicación
                 posted = empleo.get('job_posted_at_datetime_utc', '')
                 if posted:
                     try:
-                        fp = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias = (datetime.now(fp.tzinfo) - fp).days
-                        fecha_str = "Hoy" if dias == 0 else ("Ayer" if dias == 1 else "Hace " + str(dias) + " días")
+                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        if dias_atras == 0:
+                            fecha_str = "Hoy"
+                        elif dias_atras == 1:
+                            fecha_str = "Ayer"
+                        else:
+                            fecha_str = f"Hace {dias_atras} días"
                     except:
                         fecha_str = ""
                 else:
                     fecha_str = ""
-                resultado += "*" + str(i) + ". " + titulo + "*\n"
-                resultado += "🏢 *Empresa:* " + empresa + "\n"
-                resultado += "📍 *Ubicación:* " + ubicacion_job + "\n"
-                resultado += "💰 *Salario:* " + sueldo + "\n"
-                resultado += "📋 *Modalidad:* " + tipo
+                
+                resultado += f"**{i}. {titulo}**\n"
+                resultado += f"🏢 {empresa}\n"
+                resultado += f"📍 {ubicacion_job}\n"
+                resultado += f"💰 {sueldo}\n"
+                resultado += f"📋 {tipo}"
                 if fecha_str:
-                    resultado += "  •  " + fecha_str
+                    resultado += f" • {fecha_str}"
                 resultado += "\n"
-                descripcion_raw = empleo.get('job_description', '') or ''
-                if descripcion_raw:
-                    desc_clean = ' '.join(descripcion_raw.replace('\n', ' ').split())
-                    oraciones = [s.strip() for s in desc_clean.split('.') if len(s.strip()) > 20]
-                    desc_breve = '. '.join(oraciones[:2]) + '.' if oraciones else desc_clean[:200]
-                    if len(desc_breve) > 220:
-                        desc_breve = desc_breve[:220] + '...'
-                    # Escapar solo _ y * dentro del texto italic para no romper Markdown
-                    desc_safe = desc_breve.replace('_', '\\_').replace('*', '\\*')
-                    resultado += "📝 _" + desc_safe + "_\n"
+                
                 if link:
-                    resultado += "🔗 [*POSTULAR AQUÍ*](" + link + ")\n"
+                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
+                
                 resultado += "\n"
-            resultado += portales_footer
-            resultado += "_✅ Datos reales de LinkedIn, Indeed, Glassdoor y otros._\n"
-            resultado += "_👆 Repite /empleo " + (cargo or '') + " para ver nuevas ofertas._"
+            
+            resultado += "━" * 30 + "\n"
+            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
+            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            
             return resultado
-
-    # FALLBACK: web scraping gratuito
+    
+    # FALLBACK: Si JSearch no está disponible o no encontró resultados
+    # Crear links de búsqueda para portales reales
     busqueda_encoded = urllib.parse.quote(busqueda_texto)
     busqueda_laborum = busqueda_texto.replace(" ", "-").lower()
-    links_portales = (
-        "\n*🔗 BUSCA EN ESTOS PORTALES:*\n\n"
-        "• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords=" + busqueda_encoded + "&location=Chile)\n"
-        "• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q=" + busqueda_encoded + ")\n"
-        "• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-" + busqueda_laborum + ".html)\n"
-        "• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q=" + busqueda_encoded + "&l=Chile)\n"
-        "• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q=" + busqueda_encoded + ")\n"
-    )
-    web_empleos_ctx = ''
-    try:
-        query_web = "oferta empleo " + busqueda_texto + " Chile salario empresa"
-        if ubicacion and ubicacion.lower() != 'chile':
-            query_web = "oferta empleo " + busqueda_texto + " " + ubicacion + " Chile"
-        # Variar query si es búsqueda repetida
-        if offset > 0:
-            variantes = ["sueldo renta", "contrato", "requisitos experiencia", "empresa cargo"]
-            query_web += " " + variantes[offset % len(variantes)]
-        web_res = buscar_en_web(query_web, extraer_contenido=False)
-        if web_res.get('resultados'):
-            web_empleos_ctx = formatear_contexto_web(web_res)
-    except Exception as e:
-        logger.debug("Web scraping empleos: " + str(e))
+    
+    links_portales = f"""
+🔗 **BUSCA EN ESTOS PORTALES:**
+
+• [🔵 LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={busqueda_encoded}&location=Chile)
+• [🟠 Trabajando.com](https://www.trabajando.cl/empleos?q={busqueda_encoded})
+• [🟢 Laborum](https://www.laborum.cl/empleos-busqueda-{busqueda_laborum}.html)
+• [🔴 Indeed Chile](https://cl.indeed.com/jobs?q={busqueda_encoded}&l=Chile)
+• [🟣 Computrabajo](https://www.computrabajo.cl/empleos?q={busqueda_encoded})
+"""
 
     if not ia_disponible:
-        return "*🔍 BÚSQUEDA DE EMPLEO*\n📋 Criterios: " + busqueda_texto + "\n" + links_portales
+        return f"🔍 **BÚSQUEDA DE EMPLEO**\n📋 Criterios: _{busqueda_texto}_\n{links_portales}\n\n💡 Haz clic en los links para ver ofertas reales."
+    
     try:
-        consulta = "cargo: " + cargo if cargo else "empleos generales"
-        if ubicacion: consulta += ", ubicacion: " + ubicacion
-        if renta:     consulta += ", renta esperada: " + renta
-        if web_empleos_ctx:
-            prompt = (
-                "Eres experto en mercado laboral chileno.\n"
-                "El usuario busca: " + consulta + "\n\n"
-                + web_empleos_ctx + "\n\n"
-                "INSTRUCCION: Analiza los resultados y presenta las MEJORES oportunidades.\n"
-                "Para CADA oferta indica OBLIGATORIAMENTE: cargo, empresa, ubicacion, salario mensual liquido estimado en CLP, modalidad.\n"
-                "Presenta minimo 5 ofertas. Responde en espanol profesional."
-            )
-        else:
-            # Usar semilla aleatoria para variar respuestas en búsquedas repetidas
-            seed_var = ["junior", "senior", "full-time", "remoto", "hibrido"][offset % 5] if offset > 0 else ""
-            prompt = (
-                "Genera 8 ofertas laborales REALISTAS para Chile.\n\n"
-                "BUSQUEDA: " + consulta + ("  [Variante: " + seed_var + "]" if seed_var else "") + "\n\n"
-                "REGLAS:\n"
-                "1. Sueldos MENSUALES LIQUIDOS en pesos chilenos (rango realista)\n"
-                "2. Empresas REALES chilenas o multinacionales presentes en Chile\n"
-                "3. Indica ciudad (Santiago, Valparaíso, Concepción, etc.)\n"
-                "4. Indica modalidad (presencial/remoto/híbrido)\n\n"
-                "FORMATO por oferta:\n"
-                "CARGO | EMPRESA | CIUDAD | SALARIO | MODALIDAD\n\n"
-                "Solo las 8 ofertas sin introducciones."
-            )
-        respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.75)
+        consulta = f"cargo: {cargo}" if cargo else "empleos generales"
+        if ubicacion:
+            consulta += f", ubicación: {ubicacion}"
+        
+        prompt = f"""Genera 5 ejemplos de ofertas laborales REALISTAS para Chile.
+
+BÚSQUEDA: {consulta}
+
+REGLAS:
+1. Sueldos MENSUALES LÍQUIDOS en pesos chilenos
+2. Empresas REALES chilenas
+3. Si el cargo no existe exactamente, muestra CARGOS SIMILARES
+
+FORMATO:
+💼 **[CARGO]**
+🏢 Empresa: [Nombre]
+📍 Ubicación: [Ciudad], Chile
+💰 Sueldo: $X.XXX.XXX - $X.XXX.XXX mensuales
+📋 Modalidad: [Presencial/Híbrido/Remoto]
+
+---
+
+Solo las 5 ofertas, sin introducciones."""
+
+        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
+        
         if respuesta:
-            resultado  = "*🔎 SUGERENCIAS DE EMPLEO*\n"
-            resultado += "📋 *Búsqueda:* " + consulta + "\n"
+            resultado = f"🔎 **SUGERENCIAS DE EMPLEO (IA)**\n"
+            resultado += f"📋 Búsqueda: _{consulta}_\n"
             resultado += "━" * 30 + "\n\n"
             resultado += respuesta
             resultado += "\n\n" + "━" * 30
-            resultado += "\n_⚠️ Sugerencias de IA. Para ofertas reales:_\n"
+            resultado += "\n⚠️ _Estas son sugerencias de IA. Para ofertas reales:_\n"
             resultado += links_portales
             return resultado
         else:
-            return "*🔍 BÚSQUEDA DE EMPLEO*\n" + links_portales
+            return f"🔍 **BÚSQUEDA DE EMPLEO**\n{links_portales}\n💡 Usa los links para buscar directamente."
+            
     except Exception as e:
-        logger.error("buscar_empleos_web: " + str(e))
-        return "*🔍 BÚSQUEDA DE EMPLEO*\n" + links_portales
+        logger.error(f"Error en buscar_empleos_web: {e}")
+        return f"❌ Error al buscar.\n{links_portales}"
+
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
 
@@ -2803,6 +2526,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👥 Encontrar profesionales - /buscar_profesional
 💼 Buscar empleos - /empleo
 📊 Ver estadisticas - /graficos
+📈 Indicadores económicos - /indicadores
 📝 Resumenes diarios - /resumen
 🤖 Preguntarme - @Cofradia_Premium_Bot + pregunta
 
@@ -2904,8 +2628,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
 /empleo [cargo] - Buscar empleos
-/buscar_web [consulta] - Búsqueda web en tiempo real con IA
-/feriados [año] - Feriados legales de Chile
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
@@ -2933,7 +2655,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 ESTADÍSTICAS
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
-/indicadores - Indicadores económicos Chile (UF, USD, IPC...)
 /top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
@@ -3481,7 +3202,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_drive_reg = drive_stats.get('total_registros', 0)
         
         has_drive = 'true' if drive_stats else 'false'
-
+        
         html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -3998,60 +3719,15 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cargo = texto
     
     msg = await update.message.reply_text("🔍 Buscando ofertas de empleo...")
-
-    # Calcular offset para variar resultados en búsquedas repetidas
-    _emp_key = "empleo_count_" + str(update.effective_user.id)
-    _emp_count = context.bot_data.get(_emp_key, 0)
-    context.bot_data[_emp_key] = _emp_count + 1
-    _offset = (_emp_count * 3) % 15  # rota cada 3 búsquedas, ciclo de 15
-
-    resultado = await buscar_empleos_web(cargo, ubicacion, renta, offset=_offset)
-
+    
+    resultado = await buscar_empleos_web(cargo, ubicacion, renta)
+    
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
+    await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
-# ==================== CALLBACK VELOCIDAD VOZ ====================
-
-async def callback_velocidad_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones de velocidad de voz."""
-    query = update.callback_query
-    await query.answer()
-    partes = query.data.split(":")  # voz_vel:lento:user_id
-    if len(partes) < 3:
-        return
-    _, velocidad, uid_str = partes[0], partes[1], partes[2]
-    try:
-        uid = int(uid_str)
-    except ValueError:
-        uid = query.from_user.id
-    # Solo el propio usuario puede cambiar su velocidad
-    if query.from_user.id != uid:
-        await query.answer("Solo puedes cambiar tu propia preferencia.", show_alert=True)
-        return
-    set_preferencia_voz(uid, velocidad)
-    nombres = {"lento": "🐢 Lento", "normal": "▶️ Normal", "rapido": "🐇 Rápido"}
-    nombre_vel = nombres.get(velocidad, velocidad)
-    # Feedback inmediato al toque del botón
-    await query.answer(f"✅ {nombre_vel}", show_alert=False)
-    # Actualizar los botones para mostrar checkmark en el seleccionado
-    new_markup = botones_velocidad_voz(uid)
-    try:
-        await query.edit_message_reply_markup(reply_markup=new_markup)
-    except Exception as e1:
-        if "not modified" not in str(e1).lower():
-            try:
-                await query.edit_message_caption(
-                    caption=f"🔊 Velocidad: {nombre_vel}",
-                    reply_markup=new_markup
-                )
-            except Exception:
-                pass
-    logger.info(f"Usuario {uid} cambio velocidad voz a: {velocidad}")
-
 # ==================== CALLBACKS ====================
-
 
 async def callback_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback cuando seleccionan un plan"""
@@ -5339,13 +5015,15 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Error conectando a la base de datos")
             return
+        
         c = conn.cursor()
+        
         if DATABASE_URL:
             c.execute("SELECT COUNT(*) as total FROM mensajes")
             total_msgs = c.fetchone()['total']
@@ -5359,7 +5037,8 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             total_recs = c.fetchone()['total']
             c.execute("SELECT COUNT(*) as total FROM tarjetas_profesional")
             total_tarjetas = c.fetchone()['total']
-            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
+            c.execute("""SELECT COUNT(*) as total FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
@@ -5377,36 +5056,109 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
+        
         conn.close()
-
+        
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
+        
+        # Generar mini-dashboard HTML con gauges ECharts
+        import json as _json
+        html = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Estadísticas Cofradía</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}}
+h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
+.sub{{text-align:center;color:#667788;margin-bottom:25px}}
+.gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
+.gauge{{width:100%;height:100%}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
+.stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
+.stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
+</style></head><body>
+<h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
+<div class="sub">Resumen General — {datetime.now().strftime('%d/%m/%Y')}</div>
 
-        sep = "━" * 28
-        lineas = [
-            "*📊 ESTADÍSTICAS COFRADÍA*",
-            sep,
-            "",
-            "*📝 Mensajes totales:* " + "{:,}".format(total_msgs),
-            "*👥 Usuarios únicos:* " + "{:,}".format(total_usuarios),
-            "*✅ Miembros activos:* " + "{:,}".format(suscriptores),
-            "*📅 Mensajes hoy:* " + "{:,}".format(msgs_hoy),
-            "*⭐ Recomendaciones:* " + "{:,}".format(total_recs),
-            "*📇 Tarjetas profesionales:* " + "{:,}".format(total_tarjetas),
-            "*📈 Promedio últimos 7 días:* " + str(promedio_7d) + " msg/día",
-            "*🎯 Tarjetas creadas:* " + str(pct_tarjetas) + "% de miembros",
-            "",
-            sep,
-            "💡 Usa /graficos para el dashboard completo con gráficos.",
-        ]
-        mensaje = "\n".join(lineas)
-        await update.message.reply_text(mensaje, parse_mode='Markdown')
+<div class="gauges">
+<div class="gauge-box"><div id="g1" class="gauge"></div></div>
+<div class="gauge-box"><div id="g2" class="gauge"></div></div>
+<div class="gauge-box"><div id="g3" class="gauge"></div></div>
+</div>
+
+<div class="stats-grid">
+<div class="stat"><div class="val">{total_msgs:,}</div><div class="lbl">Mensajes Totales</div></div>
+<div class="stat"><div class="val">{total_usuarios:,}</div><div class="lbl">Usuarios Únicos</div></div>
+<div class="stat"><div class="val">{suscriptores:,}</div><div class="lbl">Miembros Activos</div></div>
+<div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
+<div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
+<div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+</div>
+
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
+
+<script>
+var gold='#c3a55a',blue='#3478c3';
+function gauge(id,val,max,title,color){{
+  var c=echarts.init(document.getElementById(id));
+  c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
+    pointer:{{show:true,length:'60%',width:4,itemStyle:{{color:color}}}},
+    progress:{{show:true,width:12,itemStyle:{{color:color}}}},
+    axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
+    axisTick:{{show:false}},splitLine:{{show:false}},
+    axisLabel:{{show:false}},
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
+      offsetCenter:[0,'40%'],formatter:'{{value}}'}},
+    data:[{{value:{val},name:title}}]
+  }}]}});
+  window.addEventListener('resize',()=>c.resize());
+}}
+gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
+gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
+gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+</script></body></html>"""
+        
+        html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        mensaje = (
+            f"📊 ESTADÍSTICAS COFRADÍA\n"
+            f"{'━' * 28}\n\n"
+            f"📝 Mensajes totales: {total_msgs:,}\n"
+            f"👥 Usuarios únicos: {total_usuarios:,}\n"
+            f"✅ Miembros activos: {suscriptores:,}\n"
+            f"📅 Mensajes hoy: {msgs_hoy:,}\n"
+            f"⭐ Recomendaciones: {total_recs:,}\n"
+            f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
+            f"💡 Usa /graficos para dashboard completo."
+        )
+        await update.message.reply_text(mensaje)
+        
+        with open(html_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
+                caption="📊 Dashboard ECharts interactivo con gauges"
+            )
+        
+        try:
+            os.remove(html_path)
+        except:
+            pass
+        
         registrar_servicio_usado(update.effective_user.id, 'estadisticas')
-
+        
     except Exception as e:
-        import traceback as _tb
-        logger.error("Error en estadisticas: " + str(e) + "\n" + _tb.format_exc())
-        await update.message.reply_text("❌ Error estadísticas: " + str(e)[:150])
+        logger.error(f"Error en estadisticas: {e}")
+        await update.message.reply_text("❌ Error obteniendo estadísticas")
 
 
 @requiere_suscripcion
@@ -8424,405 +8176,6 @@ def buscar_rag(query, limit=5):
         return [], 0.0
 
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MOTOR DE BÚSQUEDA WEB — Multi-motor gratuito con caché RAG inteligente
-#
-# Prioridad: Google CSE (key gratis) → DuckDuckGo HTML → DDG Instant → SearXNG → Brave
-# Extracción: Jina AI Reader (gratis, sin key) → BeautifulSoup fallback
-# Caché: rag_chunks source="WEB:..." — evita re-buscar hasta 72h
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _web_cache_existe(query_norm: str) -> list:
-    """Busca resultados web cacheados en rag_chunks dentro del TTL."""
-    try:
-        conn = get_db_connection()
-        if not conn: return []
-        c = conn.cursor()
-        cutoff = datetime.now() - timedelta(hours=WEB_CACHE_TTL_HOURS)
-        if DATABASE_URL:
-            c.execute("""SELECT chunk_text, source FROM rag_chunks
-                         WHERE source LIKE %s AND (created_at IS NULL OR created_at >= %s)
-                         ORDER BY id DESC LIMIT 10""",
-                      (f"WEB:{query_norm[:40]}%", cutoff))
-        else:
-            c.execute("""SELECT chunk_text, source FROM rag_chunks
-                         WHERE source LIKE ? AND (created_at IS NULL OR created_at >= ?)
-                         ORDER BY id DESC LIMIT 10""",
-                      (f"WEB:{query_norm[:40]}%", cutoff.strftime("%Y-%m-%d %H:%M:%S")))
-        rows = c.fetchall()
-        conn.close()
-        return [(r['chunk_text'], r['source']) if DATABASE_URL else (r[0], r[1]) for r in rows] if rows else []
-    except Exception as e:
-        logger.debug(f"_web_cache_existe: {e}")
-        return []
-
-
-def _web_guardar_cache(query_norm: str, resultados_web: list):
-    """Guarda resultados web en rag_chunks como caché persistente."""
-    if not resultados_web: return
-    try:
-        conn = get_db_connection()
-        if not conn: return
-        c = conn.cursor()
-        source_key = f"WEB:{query_norm[:60]}"
-        guardados = 0
-        for item in resultados_web[:WEB_MAX_RESULTS]:
-            chunk = (item.get('titulo','') + '\n' + item.get('snippet','')).strip()
-            contenido = item.get('contenido', '')
-            if contenido and contenido not in chunk:
-                chunk += '\n\n' + contenido[:WEB_MAX_CONTENT_CHARS]
-            if len(chunk) < 30: continue
-            meta = json.dumps({'tipo': 'web', 'url': item.get('url',''),
-                               'titulo': item.get('titulo',''), 'query': query_norm,
-                               'fecha': datetime.now().isoformat()})
-            kw = ' '.join(query_norm.split()[:10])
-            if DATABASE_URL:
-                c.execute("INSERT INTO rag_chunks (source,chunk_text,metadata,keywords) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                          (source_key, chunk, meta, kw))
-            else:
-                c.execute("SELECT id FROM rag_chunks WHERE source=? AND chunk_text=?", (source_key, chunk[:200]))
-                if not c.fetchone():
-                    c.execute("INSERT INTO rag_chunks (source,chunk_text,metadata,keywords) VALUES (?,?,?,?)",
-                              (source_key, chunk, meta, kw))
-            guardados += 1
-        conn.commit(); conn.close()
-        logger.info(f"💾 Web caché: {guardados} chunks guardados para '{query_norm[:40]}'")
-    except Exception as e:
-        logger.warning(f"_web_guardar_cache: {e}")
-
-
-def _jina_leer_url(url: str, timeout: int = 12) -> str:
-    """Jina AI Reader: extrae texto limpio de cualquier URL. GRATIS sin key."""
-    try:
-        r = requests.get(f"{JINA_BASE_URL}{url}",
-                         headers={'Accept': 'text/plain', 'User-Agent': 'CofradiaBot/1.0',
-                                  'X-Return-Format': 'text'},
-                         timeout=timeout)
-        if r.status_code == 200:
-            lineas = [l for l in r.text.strip().splitlines() if len(l.strip()) > 20]
-            return '\n'.join(lineas)[:WEB_MAX_CONTENT_CHARS * 3]
-        return ''
-    except Exception as e:
-        logger.debug(f"Jina {url[:50]}: {e}")
-        return ''
-
-
-def _bs4_extraer_contenido(url: str, timeout: int = 7) -> str:
-    """BS4 fallback: extrae párrafos de texto de una URL."""
-    try:
-        from bs4 import BeautifulSoup
-        r = requests.get(url, timeout=timeout, allow_redirects=True,
-                         headers={'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36',
-                                  'Accept-Language': 'es-CL,es;q=0.9'})
-        if r.status_code != 200: return ''
-        soup = BeautifulSoup(r.text, 'lxml')
-        for t in soup(['script','style','nav','footer','header','aside','form','iframe']): t.decompose()
-        return ' '.join(p.get_text(' ', strip=True) for p in soup.find_all(['p','li','h2','h3'])
-                        if len(p.get_text(strip=True)) > 60)[:WEB_MAX_CONTENT_CHARS * 2]
-    except Exception as e:
-        logger.debug(f"BS4 {url[:50]}: {e}")
-        return ''
-
-
-def _web_extraer_contenido(url: str) -> str:
-    """Extrae contenido: Jina AI primero, BS4 como fallback."""
-    if not url or not url.startswith('http'): return ''
-    SKIP_JINA = ('linkedin.com','facebook.com','instagram.com','twitter.com','x.com')
-    if any(s in url for s in SKIP_JINA):
-        return _bs4_extraer_contenido(url)
-    c = _jina_leer_url(url)
-    return c if c and len(c) > 100 else _bs4_extraer_contenido(url)
-
-
-def _buscar_google_cse(query: str) -> list:
-    """Google Custom Search JSON API — 100 req/día GRATIS con key."""
-    if not GOOGLE_CSE_KEY or not GOOGLE_CSE_ID: return []
-    try:
-        r = requests.get('https://www.googleapis.com/customsearch/v1',
-                         params={'key': GOOGLE_CSE_KEY, 'cx': GOOGLE_CSE_ID, 'q': query,
-                                 'num': WEB_MAX_RESULTS, 'lr': 'lang_es', 'gl': 'cl'},
-                         timeout=10)
-        if r.status_code != 200: return []
-        return [{'titulo': i.get('title',''), 'url': i.get('link',''),
-                 'snippet': i.get('snippet',''), 'contenido': ''}
-                for i in r.json().get('items', [])[:WEB_MAX_RESULTS]]
-    except Exception as e:
-        logger.warning(f"Google CSE: {e}"); return []
-
-
-def _buscar_duckduckgo_html(query: str) -> list:
-    """DuckDuckGo HTML — sin key, ilimitado. Motor principal."""
-    try:
-        from bs4 import BeautifulSoup
-        r = requests.post('https://html.duckduckgo.com/html/',
-                          headers={'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0',
-                                   'Accept-Language': 'es-CL,es;q=0.9'},
-                          data={'q': query, 'b': '', 'kl': 'cl-es'}, timeout=10)
-        if r.status_code != 200: return []
-        soup = BeautifulSoup(r.text, 'lxml')
-        resultados = []
-        for res in soup.select('.result')[:WEB_MAX_RESULTS + 3]:
-            t = res.select_one('.result__title a')
-            s = res.select_one('.result__snippet')
-            if not t: continue
-            url = t.get('href', '')
-            if not url or 'duckduckgo.com' in url or len(t.get_text(strip=True)) < 5: continue
-            if '//duckduckgo.com/l/?uddg=' in url or url.startswith('/l/?'):
-                try:
-                    p = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                    url = urllib.parse.unquote(p.get('uddg', [url])[0])
-                except: pass
-            resultados.append({'titulo': t.get_text(strip=True), 'url': url,
-                               'snippet': s.get_text(strip=True) if s else '', 'contenido': ''})
-        logger.info(f"🦆 DDG HTML: {len(resultados)} para '{query[:40]}'")
-        return resultados
-    except Exception as e:
-        logger.warning(f"DDG HTML: {e}"); return []
-
-
-def _buscar_duckduckgo_instant(query: str) -> list:
-    """DuckDuckGo Instant Answer JSON — sin key, sin límite. Complemento."""
-    try:
-        r = requests.get('https://api.duckduckgo.com/',
-                         params={'q': query, 'format': 'json', 'no_html': '1',
-                                 'skip_disambig': '1', 'kl': 'cl-es'},
-                         headers={'User-Agent': 'CofradiaBot/1.0'}, timeout=8)
-        if r.status_code != 200: return []
-        data = r.json()
-        res = []
-        if data.get('AbstractText') and data.get('AbstractURL'):
-            res.append({'titulo': data.get('Heading', query), 'url': data.get('AbstractURL',''),
-                        'snippet': data.get('AbstractText',''), 'contenido': ''})
-        for t in data.get('RelatedTopics', [])[:4]:
-            if isinstance(t, dict) and t.get('Text') and t.get('FirstURL'):
-                res.append({'titulo': t['Text'][:80], 'url': t['FirstURL'],
-                            'snippet': t['Text'], 'contenido': ''})
-        if res: logger.info(f"🦆 DDG Instant: {len(res)} para '{query[:40]}'")
-        return res
-    except Exception as e:
-        logger.warning(f"DDG Instant: {e}"); return []
-
-
-def _buscar_searxng(query: str) -> list:
-    """SearXNG instancias públicas — sin key. Fallback potente."""
-    INSTANCIAS = ['https://searx.be/search', 'https://search.disroot.org/search',
-                  'https://searx.tiekoetter.com/search', 'https://searx.ninja/search',
-                  'https://paulgo.io/search']
-    for inst in INSTANCIAS:
-        try:
-            r = requests.get(inst, params={'q': query, 'format': 'json', 'language': 'es',
-                                           'categories': 'general', 'engines': 'google,bing,duckduckgo'},
-                             headers={'User-Agent': 'Mozilla/5.0 CofradiaBot/1.0'}, timeout=8)
-            if r.status_code != 200: continue
-            res = [{'titulo': i.get('title',''), 'url': i.get('url',''),
-                    'snippet': i.get('content',''), 'contenido': ''}
-                   for i in r.json().get('results', [])[:WEB_MAX_RESULTS]]
-            if res:
-                logger.info(f"🔍 SearXNG ({inst.split('/')[2]}): {len(res)}")
-                return res
-        except: continue
-    return []
-
-
-def _buscar_brave(query: str) -> list:
-    """Brave Search API — 2000 req/mes. OPCIONAL pago."""
-    if not BRAVE_API_KEY: return []
-    try:
-        r = requests.get('https://api.search.brave.com/res/v1/web/search',
-                         headers={'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY},
-                         params={'q': query, 'count': WEB_MAX_RESULTS, 'lang': 'es', 'country': 'CL'},
-                         timeout=10)
-        if r.status_code != 200: return []
-        return [{'titulo': i.get('title',''), 'url': i.get('url',''),
-                 'snippet': i.get('description',''), 'contenido': ''}
-                for i in r.json().get('web',{}).get('results',[])[:WEB_MAX_RESULTS]]
-    except Exception as e:
-        logger.warning(f"Brave: {e}"); return []
-
-
-def buscar_en_web(query: str, extraer_contenido: bool = True) -> dict:
-    """
-    Motor principal de búsqueda web con caché RAG inteligente.
-    
-    1. Verifica caché rag_chunks (TTL 72h) — si hay, responde sin internet
-    2. Cascada de motores: Google CSE → DDG HTML → DDG Instant → SearXNG → Brave
-    3. Extrae contenido real (Jina AI → BS4 fallback)
-    4. Guarda en rag_chunks para caché persistente
-    """
-    import unicodedata as _ud
-    def _nq(t):
-        t = _ud.normalize('NFKD', t.lower().strip())
-        return ' '.join(''.join(c for c in t if not _ud.combining(c)).split())
-    
-    qn = _nq(query)
-    base = {'resultados': [], 'fuente_motor': 'ninguno', 'desde_cache': False,
-            'query': query, 'total': 0}
-    
-    # Caché primero
-    cache = _web_cache_existe(qn)
-    if cache:
-        logger.info(f"⚡ Web caché HIT: '{qn[:40]}' ({len(cache)} chunks)")
-        return {**base, 'resultados': [{'titulo': s, 'url': '', 'snippet': t, 'contenido': ''}
-                                       for t, s in cache],
-                'fuente_motor': 'cache', 'desde_cache': True, 'total': len(cache)}
-    
-    if not WEB_SEARCH_ENABLED: return base
-    
-    # Cascada de motores
-    raw, motor = [], 'ninguno'
-    for fn, name in [(_buscar_google_cse, 'google_cse'),
-                     (_buscar_duckduckgo_html, 'duckduckgo'),
-                     (_buscar_duckduckgo_instant, 'duckduckgo_instant'),
-                     (_buscar_searxng, 'searxng'),
-                     (_buscar_brave, 'brave')]:
-        raw = fn(query)
-        if raw: motor = name; break
-    
-    if not raw:
-        logger.warning(f"🌐 Web: sin resultados para '{qn[:40]}'")
-        return base
-    
-    # Extracción de contenido
-    if extraer_contenido:
-        for item in raw[:WEB_MAX_RESULTS]:
-            u = item.get('url', '')
-            if u and u.startswith('http'):
-                item['contenido'] = _web_extraer_contenido(u)
-    
-    _web_guardar_cache(qn, raw)
-    logger.info(f"🌐 Web OK: {len(raw)} resultados vía {motor} para '{qn[:40]}'")
-    return {'resultados': raw[:WEB_MAX_RESULTS], 'fuente_motor': motor,
-            'desde_cache': False, 'query': query, 'total': len(raw)}
-
-
-def formatear_contexto_web(web_result: dict) -> str:
-    """Formatea resultado web como contexto listo para prompt LLM."""
-    if not web_result or not web_result.get('resultados'): return ''
-    motor = web_result.get('fuente_motor', '')
-    badge = '(desde cache)' if web_result.get('desde_cache') else f'via {motor}'
-    query = web_result.get('query', '')
-    ctx = "\n\n[RESULTADOS BUSQUEDA WEB - " + badge + "]\nQuery: \"" + query + "\"\n\n"
-    for i, item in enumerate(web_result['resultados'], 1):
-        titulo   = item.get('titulo', '')
-        url      = item.get('url', '')
-        snippet  = item.get('snippet', '')
-        contenido= item.get('contenido', '')
-        ctx += f"[{i}] {titulo}\n"
-        if url:      ctx += "Fuente: " + url + "\n"
-        if snippet:  ctx += snippet + "\n"
-        if contenido and contenido not in snippet:
-            ctx += contenido[:600] + "\n"
-        ctx += "\n"
-    return ctx
-
-
-def leer_url_con_jina(url: str) -> str:
-    """Lee contenido completo de cualquier URL con Jina AI Reader (gratis, sin key).
-    Fallback a BS4 si Jina falla."""
-    if not url or not url.startswith('http'): return ''
-    try:
-        c = _jina_leer_url(url, timeout=15)
-        if c and len(c) > 100:
-            logger.info(f"✅ Jina: {len(c)} chars de {url[:60]}")
-            return c
-        c = _bs4_extraer_contenido(url, timeout=10)
-        if c: logger.info(f"✅ BS4 fallback: {len(c)} chars de {url[:60]}")
-        return c
-    except Exception as e:
-        logger.debug(f"leer_url_con_jina: {e}"); return ''
-
-
-@requiere_suscripcion
-@requiere_suscripcion
-@requiere_suscripcion
-async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        motores = "DuckDuckGo"
-        if GOOGLE_CSE_KEY: motores += " + Google CSE"
-        if BRAVE_API_KEY:  motores += " + Brave"
-        motores += " + SearXNG"
-        await update.message.reply_text(
-            "Uso: /buscar_web [consulta]\n\n"
-            "Ejemplos:\n"
-            "  /buscar_web noticias economia Chile hoy\n"
-            "  /buscar_web precio cobre bolsa\n"
-            "  /buscar_web requisitos visa trabajo Australia\n\n"
-            "Motores: " + motores + "\n"
-            "Resultados guardados en base de conocimientos automaticamente."
-        )
-        return
-
-    consulta = ' '.join(context.args)
-    user_id  = update.effective_user.id
-    msg      = await update.message.reply_text("Buscando en Internet...")
-    try:
-        import asyncio as _aw
-        web_result = await _aw.get_event_loop().run_in_executor(
-            None, lambda: buscar_en_web(consulta, extraer_contenido=True))
-
-        if not web_result or not web_result.get('resultados'):
-            await msg.edit_text("No encontre resultados para: " + consulta)
-            return
-
-        desde_cache = web_result.get('desde_cache', False)
-        motor       = web_result.get('fuente_motor', 'web')
-        resultados  = web_result.get('resultados', [])
-        badge       = "(desde cache)" if desde_cache else "(via " + motor + ")"
-
-        if ia_disponible:
-            await msg.edit_text("Sintetizando con IA...")
-            ctx = formatear_contexto_web(web_result)
-            prompt = (
-                "Eres el asistente IA de la Cofradia de Networking.\n"
-                "El usuario busco en Internet: \"" + consulta + "\"\n\n"
-                + ctx +
-                "\nSintetiza los resultados de forma clara en espanol chileno. "
-                "Cita fuentes por nombre. Maximo 400 palabras."
-            )
-            import asyncio as _aw2
-            def _ia():
-                r = llamar_groq(prompt, max_tokens=1000, temperature=0.4)
-                return r or llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.4)
-            resp_ia = await _aw2.get_event_loop().run_in_executor(None, _ia)
-        else:
-            resp_ia = None
-
-        await msg.delete()
-
-        if resp_ia:
-            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n" + resp_ia + "\n\n"
-            for i, it in enumerate(resultados[:3], 1):
-                t = it.get('titulo','')[:60]
-                u = it.get('url','')
-                if t: texto += str(i) + ". " + t + ("\n   " + u if u else "") + "\n"
-        else:
-            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n"
-            for i, it in enumerate(resultados, 1):
-                texto += str(i) + ". " + it.get('titulo','Sin titulo') + "\n"
-                if it.get('snippet'): texto += it['snippet'][:200] + "\n"
-                if it.get('url'):     texto += it['url'] + "\n"
-                texto += "\n"
-
-        await enviar_mensaje_largo(update, texto)
-        registrar_servicio_usado(user_id, 'buscar_web')
-        if not desde_cache and web_result.get('total', 0) > 0:
-            await update.message.reply_text("Resultados guardados. Proxima busqueda similar sera instantanea.")
-    except Exception as e:
-        logger.error("buscar_web_comando: " + str(e), exc_info=True)
-        await msg.edit_text("Error en busqueda web: " + str(e)[:100])
-
-
-def buscar_en_web_para_ia(query: str) -> str:
-    """Versión interna: snippets rápidos sin extraer páginas. Solo cuando RAG no tiene info."""
-    try:
-        wr = buscar_en_web(query, extraer_contenido=False)
-        return formatear_contexto_web(wr) if wr and wr.get('resultados') else ''
-    except Exception as e:
-        logger.debug(f"buscar_en_web_para_ia: {e}"); return ''
-
-# ── FIN MOTOR WEB SEARCH ──────────────────────────────────────────────────────
-
 def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Incluye verificación de relevancia temática: si los docs no tratan el tema
@@ -9196,42 +8549,23 @@ def buscar_especialista_sec(especialidad, ciudad=""):
             except Exception as e:
                 logger.warning(f"Error scraping SEC: {e}")
         
-        # Mostrar resultados del scraping SEC
+        # Mostrar resultados encontrados
         if especialistas_encontrados:
-            resultado += f"✅ RESULTADOS SEC: {len(especialistas_encontrados)}\n\n"
+            resultado += f"✅ RESULTADOS ENCONTRADOS: {len(especialistas_encontrados)}\n\n"
             for i, esp in enumerate(especialistas_encontrados[:15], 1):
                 resultado += f"{i}. {esp['nombre']}\n"
-                if esp['rut']:     resultado += f"   🆔 RUT: {esp['rut']}\n"
-                if esp['niveles']: resultado += f"   📜 Certificacion: {esp['niveles']}\n"
-                if esp['telefono']:resultado += f"   📞 Tel: {esp['telefono']}\n"
-                if esp['email']:   resultado += f"   📧 Email: {esp['email']}\n"
+                if esp['rut']:
+                    resultado += f"   🆔 RUT: {esp['rut']}\n"
+                if esp['niveles']:
+                    resultado += f"   📜 Certificacion: {esp['niveles']}\n"
+                if esp['telefono']:
+                    resultado += f"   📞 Tel: {esp['telefono']}\n"
+                if esp['email']:
+                    resultado += f"   📧 Email: {esp['email']}\n"
                 resultado += "\n"
         else:
-            # Fallback: Web Scraping con motores gratuitos
-            try:
-                query_sec = f"especialista certificado SEC {especialidad}"
-                if ciudad: query_sec += f" {ciudad} Chile"
-                web_sec = buscar_en_web(query_sec, extraer_contenido=True)
-                if web_sec.get('resultados'):
-                    resultado += "🌐 RESULTADOS WEB (via DuckDuckGo/Google):\n\n"
-                    for i, item in enumerate(web_sec['resultados'][:4], 1):
-                        titulo   = item.get('titulo', '')
-                        snippet  = item.get('snippet', '')
-                        url      = item.get('url', '')
-                        contenido= item.get('contenido', '')
-                        resultado += f"{i}. {titulo}\n"
-                        if snippet: resultado += f"   {snippet[:150]}\n"
-                        if contenido and contenido not in snippet:
-                            resultado += f"   {contenido[:200]}\n"
-                        if url: resultado += f"   🔗 {url}\n"
-                        resultado += "\n"
-                    logger.info(f"✅ SEC web fallback: {len(web_sec['resultados'])} resultados")
-                else:
-                    resultado += "⚠️ No se encontraron resultados en SEC ni en web.\n"
-                    resultado += "El buscador SEC requiere navegador web.\n\n"
-            except Exception as _esec:
-                logger.debug(f"SEC web fallback: {_esec}")
-                resultado += "⚠️ No se encontraron resultados via scraping.\n\n"
+            resultado += "⚠️ No se encontraron resultados via scraping.\n"
+            resultado += "El buscador SEC requiere navegador web.\n\n"
         
         # Links directos siempre visibles
         resultado += "━" * 30 + "\n"
@@ -9471,184 +8805,7 @@ def buscar_apoyo_profesional(query):
         return f"❌ Error: {str(e)[:150]}"
 
 
-# ==================== FALLBACK DE EMERGENCIA ====================
-
-def llamar_ia_emergencia(pregunta: str, nombre: str) -> str:
-    """Prompt mínimo sin contexto RAG — último recurso cuando la IA falla con prompt largo."""
-    prompt_min = (
-        f"Eres un asistente profesional chileno. "
-        f"Responde directamente la siguiente pregunta de {nombre} en máximo 4 oraciones claras.\n\n"
-        f"Pregunta: {pregunta}"
-    )
-    # Intentar con cada modelo disponible con prompt mínimo
-    r = llamar_groq(prompt_min, max_tokens=600, temperature=0.7)
-    if r: return r
-    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini emergencia")
-    if r: return r
-    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt_min, 600, 0.7, "Gemini 1.5 emergencia")
-    if r: return r
-    if GEMINI_API_KEY_2:
-        r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini key2 emergencia", api_key=GEMINI_API_KEY_2)
-        if r: return r
-    return None
-
-# ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
-
-
-def get_preferencia_voz(user_id: int) -> dict:
-    """Obtiene preferencias de voz del usuario."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=%s", (user_id,))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"velocidad": row[0], "resumen_diario": row[1], "hora_resumen": row[2]}
-    except Exception:
-        pass
-    return {"velocidad": "normal", "resumen_diario": 0, "hora_resumen": 9}
-
-def set_preferencia_voz(user_id: int, velocidad: str):
-    """Guarda preferencia de velocidad de voz."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET voz_velocidad=EXCLUDED.voz_velocidad,
-                    fecha_actualizado=CURRENT_TIMESTAMP""", (user_id, velocidad))
-            else:
-                c.execute("""INSERT OR REPLACE INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (?, ?)""", (user_id, velocidad))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error guardando preferencia voz: {e}")
-
-def velocidad_a_rate(velocidad: str) -> str:
-    """Convierte preferencia a parámetro de rate para TTS."""
-    return {"lento": "-25%", "normal": "-12%", "rapido": "+20%"}.get(velocidad, "-12%")
-
-def velocidad_a_pitch(velocidad: str) -> float:
-    """Convierte preferencia a pitch para Google TTS."""
-    return {"lento": -6.0, "normal": -4.0, "rapido": -2.0}.get(velocidad, -4.0)
-
-def velocidad_a_rate_google(velocidad: str) -> float:
-    """Convierte preferencia a speakingRate para Google TTS."""
-    return {"lento": 0.75, "normal": 0.85, "rapido": 1.15}.get(velocidad, 0.85)
-
-async def generar_audio_con_velocidad(texto: str, user_id: int, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio respetando la preferencia de velocidad del usuario."""
-    pref = get_preferencia_voz(user_id)
-    velocidad = pref.get("velocidad", "normal")
-    import re, os
-
-    if len(texto) > 2000:
-        texto = texto[:1997] + "..."
-    texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═⚓]', '', texto)
-    texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
-    texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
-
-    # Intentar Google TTS con velocidad personalizada
-    google_key = os.getenv("GOOGLE_TTS_KEY", "")
-    if google_key:
-        try:
-            import requests as _req, base64
-            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={google_key}"
-            payload = {
-                "input": {"text": texto_voz},
-                "voice": {"languageCode": "es-US", "name": "es-US-Wavenet-A"},
-                "audioConfig": {
-                    "audioEncoding": "MP3",
-                    "speakingRate": velocidad_a_rate_google(velocidad),
-                    "pitch": velocidad_a_pitch(velocidad),
-                    "volumeGainDb": 1.0,
-                }
-            }
-            r = _req.post(url, json=payload, timeout=15)
-            if r.status_code == 200:
-                audio = base64.b64decode(r.json().get("audioContent", ""))
-                if audio:
-                    with open(filename, "wb") as f:
-                        f.write(audio)
-                    logger.info(f"🎤 Audio Wavenet ({velocidad}) generado: {len(audio):,} bytes")
-                    return filename
-        except Exception as e:
-            logger.warning(f"Google TTS velocidad falló: {e}")
-
-    # Fallback: edge-TTS con velocidad
-    try:
-        import edge_tts
-        texto_voz2 = texto_voz.replace('. ', '... ').replace(': ', ':... ')
-        communicate = edge_tts.Communicate(
-            texto_voz2, VOZ_TTS,
-            rate=velocidad_a_rate(velocidad),
-            pitch="-4Hz", volume="+8%"
-        )
-        await communicate.save(filename)
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            return filename
-    except Exception as e:
-        logger.error(f"Error TTS con velocidad: {e}")
-    return None
-
-def botones_velocidad_voz(user_id: int) -> 'InlineKeyboardMarkup':
-    """Genera botones inline para ajustar velocidad de voz."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    pref = get_preferencia_voz(user_id)
-    actual = pref.get("velocidad", "normal")
-    # Mostrar checkmark SOLO en el botón activo
-    lbl_lento  = "🐢✓ Lento"  if actual == "lento"  else "🐢 Lento"
-    lbl_normal = "▶️✓ Normal" if actual == "normal" else "▶️ Normal"
-    lbl_rapido = "🐇✓ Rápido" if actual == "rapido" else "🐇 Rápido"
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(lbl_lento,  callback_data=f"voz_vel:lento:{user_id}"),
-        InlineKeyboardButton(lbl_normal, callback_data=f"voz_vel:normal:{user_id}"),
-        InlineKeyboardButton(lbl_rapido, callback_data=f"voz_vel:rapido:{user_id}"),
-    ]])
-
-# ==================== MODO MANTENIMIENTO ====================
-
-def get_modo_mantenimiento() -> dict:
-    """Retorna estado del modo mantenimiento."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT activo, mensaje FROM modo_mantenimiento WHERE id=1")
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"activo": bool(row[0]), "mensaje": row[1]}
-    except Exception:
-        pass
-    return {"activo": False, "mensaje": ""}
-
-def set_modo_mantenimiento(activo: bool, mensaje: str, admin_id: int):
-    """Activa o desactiva el modo mantenimiento."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""UPDATE modo_mantenimiento SET activo=%s, mensaje=%s,
-                    activado_por=%s, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            else:
-                c.execute("""UPDATE modo_mantenimiento SET activo=?, mensaje=?,
-                    activado_por=?, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error modo mantenimiento: {e}")
-
 # ==================== SISTEMA DE CUMPLEAÑOS ====================
-
 
 def obtener_cumpleanos_hoy():
     """
@@ -9761,84 +8918,40 @@ def obtener_cumpleanos_hoy():
 
 
 async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
-    """Tarea programada: felicitaciones de cumpleaños a las 8:00 AM Chile"""
+    """Tarea programada para enviar felicitaciones de cumpleaños a las 8:00 AM"""
     try:
-        import asyncio as _acumple
-        # obtener_cumpleanos_hoy() hace HTTP a Google Drive — DEBE ir en executor
-        cumpleaneros = await _acumple.get_event_loop().run_in_executor(
-            None, obtener_cumpleanos_hoy)
-
+        cumpleaneros = obtener_cumpleanos_hoy()
+        
         if not cumpleaneros:
-            logger.info("🎂 No hay cumpleaños hoy")
+            logger.info("No hay cumpleaños hoy")
             return
-
+        
+        # Crear mensaje de cumpleaños
         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-        sep = "━" * 30
-
-        lineas = [
-            "*🎂🎉 CUMPLEAÑOS DEL DÍA 🎉🎂*",
-            sep,
-            f"📅 *Fecha:* {fecha_hoy}",
-            "",
-            "*🥳 Hoy celebramos a:*",
-            "",
-        ]
+        
+        mensaje = "🎂🎉 CUMPLEANOS DEL DIA! 🎉🎂\n"
+        mensaje += "━" * 30 + "\n"
+        mensaje += f"📅 {fecha_hoy}\n\n"
+        
+        mensaje += "🥳 Hoy celebramos a:\n\n"
+        
         for nombre in cumpleaneros:
-            lineas.append(f"🎈 *{nombre}*")
-
-        lineas += [
-            "",
-            sep,
-            "💐 ¡Felicidades! Les deseamos un excelente día.",
-            "",
-            "👉 _Saluda a los cumpleañeros en el subgrupo_",
-            "_'Cumpleaños, Eventos y Efemérides COFRADÍA'_",
-        ]
-        mensaje = "\n".join(lineas)
-
-        # Enviar al grupo principal
+            mensaje += f"🎈 {nombre}\n"
+        
+        mensaje += "\n" + "━" * 30 + "\n"
+        mensaje += "💐 Felicidades! Les deseamos un excelente dia.\n\n"
+        mensaje += "👉 Saluda a los cumpleaneros en el subgrupo 'Cumpleanos, Eventos y Efemerides COFRADIA'"
+        
+        # Enviar al grupo SIN parse_mode
         if COFRADIA_GROUP_ID:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID,
-                text=mensaje,
-                parse_mode='Markdown'
+                text=mensaje
             )
-            logger.info(f"✅ Cumpleaños enviados: {len(cumpleaneros)} cumpleañeros")
-        else:
-            logger.warning("⚠️ COFRADIA_GROUP_ID no configurado — no se enviaron cumpleaños")
-
-        # También notificar en privado a cada cumpleañero si tiene user_id en suscripciones
-        try:
-            conn_c = get_db_connection()
-            if conn_c:
-                c_c = conn_c.cursor()
-                for nombre in cumpleaneros:
-                    partes = nombre.strip().split()
-                    if not partes: continue
-                    like = "%" + partes[0] + "%"
-                    if DATABASE_URL:
-                        c_c.execute("SELECT user_id FROM suscripciones WHERE first_name ILIKE %s AND estado='activo' LIMIT 1", (like,))
-                    else:
-                        c_c.execute("SELECT user_id FROM suscripciones WHERE first_name LIKE ? AND estado='activo' LIMIT 1", (like,))
-                    row_c = c_c.fetchone()
-                    if row_c:
-                        uid_c = row_c['user_id'] if DATABASE_URL else row_c[0]
-                        try:
-                            await context.bot.send_message(
-                                chat_id=uid_c,
-                                text=f"🎂 *¡Feliz Cumpleaños, {partes[0]}!*\n\n"
-                                     "¡Toda la Cofradía de Networking te desea un día espectacular! 🎉\n\n"
-                                     "_Con cariño, el equipo de la Cofradía_ ⚓",
-                                parse_mode='Markdown'
-                            )
-                        except Exception as _ep:
-                            logger.debug(f"Privado cumpleaños {uid_c}: {_ep}")
-                conn_c.close()
-        except Exception as _epr:
-            logger.debug(f"Notif privada cumpleaños: {_epr}")
-
+            logger.info(f"✅ Enviado mensaje de cumpleaños: {len(cumpleaneros)} cumpleañeros")
+        
     except Exception as e:
-        logger.error(f"Error enviando cumpleaños: {e}", exc_info=True)
+        logger.error(f"Error enviando cumpleaños: {e}")
 
 
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
@@ -10597,44 +9710,7 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-                        # ── Recomendaciones recibidas ──────────────────────────────
-                        try:
-                            conn_r = get_db_connection()
-                            if conn_r:
-                                c_r = conn_r.cursor()
-                                if DATABASE_URL:
-                                    c_r.execute(
-                                        "SELECT COUNT(*) AS n FROM recomendaciones WHERE destinatario_id = %s",
-                                        (user_id,))
-                                    n_recs = (c_r.fetchone() or {}).get('n', 0)
-                                else:
-                                    c_r.execute(
-                                        "SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?",
-                                        (user_id,))
-                                    row_r = c_r.fetchone()
-                                    n_recs = row_r[0] if row_r else 0
-                                conn_r.close()
-                            else:
-                                n_recs = 0
-                        except Exception:
-                            n_recs = 0
-                        n_recs_int = int(n_recs) if n_recs else 0
-                        if n_recs_int > 0:
-                            _sp = 'es' if n_recs_int != 1 else ''
-                            _bot_user = getattr(context.bot, 'username', None) or ''
-                            _rec_link = 'https://t.me/' + _bot_user if _bot_user else ''
-                            if _rec_link:
-                                caption += (
-                                    f"\n⭐ <b>{n_recs_int} recomendación{_sp}</b> recibida{_sp} · "
-                                    f"<a href=\"{_rec_link}\">Ver en el bot</a>\n"
-                                    f"<i>(escribe /mis_recomendaciones en el chat)</i>\n"
-                                )
-                            else:
-                                caption += f"\n⭐ <b>{n_recs_int} recomendación{_sp}</b> recibida{_sp}\n"
-                                caption += "<i>Escribe /mis_recomendaciones para verlas</i>\n"
-                        else:
-                            caption += "\n⭐ <i>Sin recomendaciones aún · pide a cofrades que te recomienden con /recomendar</i>\n"
-                        caption += "\n✏️ <b>Editar:</b> /mi_tarjeta [campo] [valor]" 
+                        caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
                             photo=img_buffer,
@@ -10696,65 +9772,24 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         return
     
-    # Editar campo — normalizar tildes y variantes para tolerancia de errores
-    import unicodedata as _ud
-    def _norm(t):
-        t = _ud.normalize('NFKD', t.lower())
-        return ''.join(c for c in t if not _ud.combining(c))
-
-    campo_raw = context.args[0]
-    campo = _norm(campo_raw)
-
-    # Aliases tolerantes: acepta variantes con/sin tilde y sinónimos comunes
-    _aliases = {
-        'profesion': 'profesion', 'profesión': 'profesion',
-        'cargo': 'profesion', 'ocupacion': 'profesion', 'ocupación': 'profesion',
-        'empresa': 'empresa', 'compania': 'empresa', 'compañia': 'empresa',
-        'trabajo': 'empresa', 'empleador': 'empresa',
-        'servicios': 'servicios', 'servicio': 'servicios',
-        'telefono': 'telefono', 'teléfono': 'telefono', 'fono': 'telefono',
-        'celular': 'telefono', 'movil': 'telefono', 'móvil': 'telefono',
-        'email': 'email', 'correo': 'email', 'mail': 'email',
-        'ciudad': 'ciudad', 'ubicacion': 'ciudad', 'ubicación': 'ciudad',
-        'linkedin': 'linkedin', 'linked': 'linkedin',
-        'nro_kdt': 'nro_kdt', 'numero': 'nro_kdt', 'número': 'nro_kdt',
-        'nro': 'nro_kdt', 'kdt': 'nro_kdt', 'cadete': 'nro_kdt',
-    }
-    campo = _aliases.get(campo, campo)
+    # Editar campo
+    campo = context.args[0].lower()
     campos_validos = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt']
-
+    
     if campo not in campos_validos:
         await update.message.reply_text(
-            f"❌ Campo '{campo_raw}' no reconocido.\n\n"
-            "Campos disponibles:\n"
-            "• profesion — tu cargo o profesión\n"
-            "• empresa — donde trabajas\n"
-            "• servicios — qué ofreces\n"
-            "• telefono — celular o fijo\n"
-            "• email — correo de contacto\n"
-            "• ciudad — donde estás ubicado\n"
-            "• linkedin — tu perfil LinkedIn\n"
-            "• nro_kdt — número de cadete\n\n"
-            "Ejemplo: /mi_tarjeta profesion Ingeniero Civil"
+            "❌ Campo no válido.\n\n"
+            "Campos: profesion, empresa, servicios, telefono,\n"
+            "email, ciudad, linkedin, nro_kdt\n\n"
+            "Ejemplo: /mi_tarjeta nro_kdt 322"
         )
         return
     
-    valor = ' '.join(context.args[1:]).strip()
+    valor = ' '.join(context.args[1:])
     if not valor:
         await update.message.reply_text(f"❌ Uso: /mi_tarjeta {campo} [valor]")
         return
-
-    # Ajustar valor largo: si la última palabra supera 10 caracteres y el total > 30,
-    # truncarla a 7 letras + punto (ej: "Internacional" → "Interna.")
-    palabras_valor = valor.split()
-    if len(palabras_valor) >= 2 and len(valor) > 30:
-        ultima = palabras_valor[-1]
-        if len(ultima) > 10:
-            palabras_valor[-1] = ultima[:7] + "."
-            valor = ' '.join(palabras_valor)
-
-    logger.info(f"🪪 /mi_tarjeta: user={user_id} campo='{campo}' valor='{valor}'")
-
+    
     # nro_kdt: validar y rellenar a 3 dígitos
     if campo == 'nro_kdt':
         digitos = ''.join(ch for ch in valor if ch.isdigit())
@@ -11645,39 +10680,14 @@ async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if primer_arg.startswith('@'):
             objetivo_username = primer_arg.replace('@', '').lower()
             texto_rec = ' '.join(context.args[1:])
-            # Buscar por username de Telegram en suscripciones
             if DATABASE_URL:
-                c.execute("SELECT user_id, first_name, COALESCE(last_name,'') as last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
+                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = %s", (objetivo_username,))
             else:
-                c.execute("SELECT user_id, first_name, COALESCE(last_name,'') as last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
+                c.execute("SELECT user_id, first_name, last_name FROM suscripciones WHERE LOWER(username) = ?", (objetivo_username,))
             dest = c.fetchone()
-
-            # ── FALLBACK: buscar por nombre_completo en tarjetas_profesional ──
-            if not dest:
-                nombre_like = "%" + objetivo_username.replace("_", " ") + "%"
-                if DATABASE_URL:
-                    c.execute("""SELECT s.user_id, s.first_name, COALESCE(s.last_name,'') as last_name
-                                 FROM suscripciones s
-                                 JOIN tarjetas_profesional t ON s.user_id = t.user_id
-                                 WHERE LOWER(REPLACE(t.nombre_completo,' ','')) LIKE LOWER(REPLACE(%s,' ',''))
-                                    OR LOWER(t.nombre_completo) LIKE %s
-                                 LIMIT 1""", (nombre_like, nombre_like))
-                else:
-                    c.execute("""SELECT s.user_id, s.first_name, COALESCE(s.last_name,'') as last_name
-                                 FROM suscripciones s
-                                 JOIN tarjetas_profesional t ON s.user_id = t.user_id
-                                 WHERE LOWER(REPLACE(t.nombre_completo,' ','')) LIKE LOWER(REPLACE(?,' ',''))
-                                    OR LOWER(t.nombre_completo) LIKE ?
-                                 LIMIT 1""", (nombre_like, nombre_like))
-                dest = c.fetchone()
-
             if not dest:
                 conn.close()
-                await update.message.reply_text(
-                    f"❌ No se encontró al usuario @{objetivo_username}\n\n"
-                    f"💡 Intenta con su nombre real:\n"
-                    f"   /recomendar Pedro González Excelente profesional"
-                )
+                await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
                 return
         else:
             # Búsqueda por nombre
@@ -12479,22 +11489,12 @@ async def generar_cv_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except:
         pass
     
-    # ===== PASO 5: Leer LinkedIn real con Jina AI =====
+    # ===== PASO 5: Buscar info de LinkedIn si URL disponible =====
     linkedin_info = ""
-    linkedin_url  = tarjeta.get('linkedin', '')
+    linkedin_url = tarjeta.get('linkedin', '')
     if linkedin_url:
-        if not linkedin_url.startswith('http'):
-            linkedin_url = f"https://{linkedin_url}"
-        await msg.edit_text("🔗 Leyendo perfil LinkedIn en tiempo real...")
-        import asyncio as _gcv
-        contenido_li = await _gcv.get_event_loop().run_in_executor(
-            None, lambda: leer_url_con_jina(linkedin_url))
-        if contenido_li and len(contenido_li) > 100:
-            linkedin_info = f"\nPERFIL LINKEDIN (contenido real extraido con IA):\n{contenido_li[:2500]}"
-            logger.info(f"✅ CV: LinkedIn leido para user {user_id}")
-        else:
-            linkedin_info = f"\nPERFIL LINKEDIN: {linkedin_url}\n(No se pudo extraer contenido — considera actualizar)"
-
+        linkedin_info = f"\nPERFIL LINKEDIN: {linkedin_url}\n(Considerar el perfil LinkedIn como fuente de información real del profesional)"
+    
     await msg.edit_text("📄 Generando CV profesional con IA...")
     
     try:
@@ -12687,166 +11687,21 @@ async def analisis_linkedin_comando(update: Update, context: ContextTypes.DEFAUL
         return
     msg = await update.message.reply_text("🔍 Analizando tu perfil profesional...")
     try:
-        linkedin_url = tarjeta.get('linkedin', '') or ''
-        if linkedin_url and not linkedin_url.startswith('http'):
-            linkedin_url = "https://" + linkedin_url
-
-        await msg.edit_text("📂 Recopilando datos profesionales de múltiples fuentes...")
-
-        # 1. Datos del Excel Google Drive (experiencia, industrias, empresas)
-        drive_info = ""
-        drive_industrias = []
-        drive_empresas   = []
-        try:
-            import asyncio as _ali
-            df_drive = await _ali.get_event_loop().run_in_executor(
-                None, obtener_datos_excel_drive)
-            if df_drive is not None and len(df_drive) > 0:
-                nombre_buscar = (tarjeta.get('nombre','') or '').lower().strip()
-                partes_n = nombre_buscar.split()
-                for _, row in df_drive.iterrows():
-                    n_ex = str(row.iloc[2]).strip().lower() if len(row) > 2 else ''
-                    a_ex = str(row.iloc[3]).strip().lower() if len(row) > 3 else ''
-                    full = (n_ex + ' ' + a_ex).strip()
-                    match = False
-                    if nombre_buscar and (nombre_buscar in full or full in nombre_buscar):
-                        match = True
-                    elif len(partes_n) >= 2 and partes_n[0] in full and partes_n[-1] in full:
-                        match = True
-                    if match:
-                        def gc(r, i):
-                            try:
-                                v = str(r.iloc[i]).strip()
-                                return '' if v.lower() in ['nan','none','','null'] else v
-                            except:
-                                return ''
-                        gen  = gc(row, 1)
-                        prof = gc(row, 24)
-                        sit  = gc(row, 8)
-                        ciu  = gc(row, 7)
-                        ind1 = gc(row, 10); emp1 = gc(row, 11)
-                        ind2 = gc(row, 12); emp2 = gc(row, 13)
-                        ind3 = gc(row, 14); emp3 = gc(row, 15)
-                        for ind, emp in [(ind1,emp1),(ind2,emp2),(ind3,emp3)]:
-                            if ind: drive_industrias.append(ind)
-                            if emp: drive_empresas.append(emp)
-                        partes_info = []
-                        if gen:  partes_info.append("Generacion Escuela Naval: " + gen)
-                        if prof: partes_info.append("Profesion/Actividad: " + prof)
-                        if sit:  partes_info.append("Situacion laboral: " + sit)
-                        if ciu:  partes_info.append("Ciudad: " + ciu)
-                        for ind, emp in [(ind1,emp1),(ind2,emp2),(ind3,emp3)]:
-                            if emp and ind: partes_info.append("Empresa: " + emp + " (" + ind + ")")
-                            elif emp:       partes_info.append("Empresa: " + emp)
-                        drive_info = "\n".join(partes_info)
-                        break
-        except Exception as _ed:
-            logger.debug("analisis_linkedin drive: " + str(_ed))
-
-        # 2. Busqueda web del nombre (informacion publica disponible)
-        web_info = ""
-        nombre_busqueda = tarjeta.get('nombre','')
-        if nombre_busqueda:
-            await msg.edit_text("🌐 Buscando información pública del profesional...")
-            try:
-                import asyncio as _ali2
-                query_web = nombre_busqueda + " " + tarjeta.get('empresa','') + " profesional Chile"
-                wr = await _ali2.get_event_loop().run_in_executor(
-                    None, lambda: buscar_en_web(query_web, extraer_contenido=False))
-                if wr.get('resultados'):
-                    snippets = []
-                    for item in wr['resultados'][:3]:
-                        s = item.get('snippet','')
-                        t = item.get('titulo','')
-                        if s and len(s) > 30:
-                            snippets.append("- " + t + ": " + s[:200])
-                    if snippets:
-                        web_info = "Informacion encontrada en web:\n" + "\n".join(snippets)
-            except Exception as _ew:
-                logger.debug("analisis_linkedin web: " + str(_ew))
-
-        # 3. Recomendaciones recibidas en Cofradia
-        recs_info = ""
-        try:
-            _conn_r = get_db_connection()
-            if _conn_r:
-                _c_r = _conn_r.cursor()
-                if DATABASE_URL:
-                    _c_r.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = %s ORDER BY id DESC LIMIT 3", (user_id,))
-                else:
-                    _c_r.execute("SELECT autor_nombre, texto FROM recomendaciones WHERE destinatario_id = ? ORDER BY id DESC LIMIT 3", (user_id,))
-                recs = _c_r.fetchall()
-                _conn_r.close()
-                if recs:
-                    recs_txt = []
-                    for r in recs:
-                        autor   = (r['autor_nombre'] if DATABASE_URL else r[0]) or 'Cofrade'
-                        texto_r = (r['texto']        if DATABASE_URL else r[1]) or ''
-                        if texto_r:
-                            recs_txt.append('  - ' + autor + ': "' + texto_r[:120] + '"')
-                    if recs_txt:
-                        recs_info = "Recomendaciones recibidas en Cofradia:\n" + "\n".join(recs_txt)
-        except Exception as _er:
-            logger.debug("analisis_linkedin recs: " + str(_er))
-
-        await msg.edit_text("🧠 Generando análisis profundo con IA...")
-
-        # Construir contexto con todos los datos recopilados
-        ctx_lineas = ["DATOS TARJETA PROFESIONAL:"]
-        ctx_lineas.append("- Nombre: " + tarjeta.get('nombre',''))
-        ctx_lineas.append("- Profesion: " + tarjeta.get('profesion',''))
-        ctx_lineas.append("- Empresa actual: " + tarjeta.get('empresa',''))
-        ctx_lineas.append("- Servicios/Especialidades: " + tarjeta.get('servicios',''))
-        ctx_lineas.append("- Ciudad: " + tarjeta.get('ciudad',''))
-        ctx_lineas.append("- LinkedIn URL: " + (linkedin_url or 'No registrado'))
-        if drive_info:
-            ctx_lineas.append("")
-            ctx_lineas.append("DATOS BASE DE DATOS COFRADIA:")
-            ctx_lineas.append(drive_info)
-        if drive_industrias:
-            ctx_lineas.append("- Industrias: " + ', '.join(set(drive_industrias)))
-        if web_info:
-            ctx_lineas.append("")
-            ctx_lineas.append(web_info)
-        if recs_info:
-            ctx_lineas.append("")
-            ctx_lineas.append(recs_info)
-        contexto_profesional = "\n".join(ctx_lineas)
-
-        fuente_badge = "📊 Análisis multi-fuente"
-        if drive_info:     fuente_badge = "📂 Datos reales Cofradía + web"
-        if recs_info:      fuente_badge += " + recomendaciones propias"
-
-        prompt = (
-            "Eres experto en LinkedIn, marca personal y desarrollo profesional. "
-            "Analiza el siguiente perfil y genera un analisis completo y accionable.\n\n"
-            + contexto_profesional + "\n\n"
-            "NOTA: LinkedIn requiere login para scraping — trabajas con los datos reales de arriba.\n\n"
-            "GENERA:\n"
-            "1) DIAGNOSTICO DEL PERFIL (2-3 lineas concisas)\n"
-            "2) HEADLINE LINKEDIN SUGERIDO (maximo 120 caracteres exactos)\n"
-            "3) SECCION ACERCA DE para LinkedIn (3-4 oraciones profesionales)\n"
-            "4) 6 PALABRAS CLAVE para aparecer en busquedas de LinkedIn\n"
-            "5) Como describir el cargo actual en Experiencia para mayor impacto\n"
-            "6) 3 ACCIONES CONCRETAS para esta semana (especificas, no genericas)\n"
-            "7) A que tipo de personas conectar segun este perfil profesional\n\n"
-            "Responde en espanol profesional. Sin asteriscos. Se especifico con los datos disponibles."
-        )
-
-        resp = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
-        if not resp:
-            resp = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
-
+        prompt = f"""Eres experto en LinkedIn y marca personal. Analiza este perfil:
+Nombre: {tarjeta.get('nombre','')}, Profesión: {tarjeta.get('profesion','')},
+Empresa: {tarjeta.get('empresa','')}, Servicios: {tarjeta.get('servicios','')},
+LinkedIn: {tarjeta.get('linkedin','')}
+Genera: 1) Fortalezas del perfil, 2) Headline sugerido (120 chars),
+3) Resumen/About sugerido (3-4 oraciones), 4) 5 palabras clave a incluir,
+5) 3 acciones concretas para mejorar visibilidad. No uses asteriscos."""
+        resp = llamar_groq(prompt, max_tokens=1200, temperature=0.6)
         if resp:
-            header = "🔍 ANALISIS DE PERFIL PROFESIONAL\n" + ("━"*30) + "\n" + fuente_badge + "\n\n"
-            footer = ("\n\n💡 LinkedIn: " + linkedin_url) if linkedin_url else ""
-            await msg.edit_text((header + resp + footer)[:4000])
+            await msg.edit_text(f"🔍 ANÁLISIS DE PERFIL PROFESIONAL\n{'━' * 30}\n\n{resp}")
             registrar_servicio_usado(user_id, 'analisis_linkedin')
         else:
-            await msg.edit_text("❌ Error al generar el análisis.")
+            await msg.edit_text("❌ Error en el análisis.")
     except Exception as e:
-        logger.error("analisis_linkedin: " + str(e), exc_info=True)
-        await msg.edit_text("❌ Error: " + str(e)[:100])
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
 
 
 # ==================== NIVEL 3: DASHBOARD PERSONAL (premium) ====================
@@ -14205,6 +13060,7 @@ CATALOGO_COMANDOS_INTENCION = {
     'agente': 'Plan de networking personalizado por IA',
     'match': 'Encontrar los mejores matches profesionales',
     'briefing': 'Briefing diario personalizado',
+    'indicadores': 'Dashboard indicadores economicos Chile',
     'mi_agenda': 'Ver agenda personal de networking',
     'mis_tareas': 'Ver tareas de networking pendientes',
     'mis_coins': 'Ver saldo de Cofra-Coins',
@@ -14244,11 +13100,6 @@ def mejorar_intencion(mensaje_raw: str, user_name: str, user_id: int,
         if len(palabras) <= 3 and all(p in saludos for p in palabras):
             return _intencion_default(mensaje, tipo='saludo')
         
-        # Para mensajes cortos (<50 chars) no desperdiciar cuota de IA
-        # Reservar los tokens para la respuesta real
-        if len(mensaje) < 50:
-            return _intencion_default(mensaje)
-
         # Construir catálogo compacto para el prompt
         catalogo_str = "\n".join([f"  /{cmd}: {desc}" for cmd, desc in CATALOGO_COMANDOS_INTENCION.items()])
         
@@ -14274,12 +13125,11 @@ CRITERIO PARA ejecutar_comando=false: Si el usuario hace una pregunta abierta, c
 RESPONDE SOLO EL JSON, sin bloques de código:
 {{"query_mejorada": "...", "comando": "..." o null, "args": "...", "tipo": "...", "ejecutar_comando": true/false, "razon": "..."}}"""
 
-        # Usar modelo ligero para intención — no consumir cuota del modelo principal
-        respuesta_raw = _llamar_gemini_url(
-            GEMINI_FLASH15_8B_URL, prompt_intencion, 300, 0.2, "Gemini 1.5 Flash-8B (intencion)"
+        respuesta_raw = llamar_groq(
+            prompt_intencion,
+            max_tokens=300,
+            temperature=0.2  # Baja temperatura = más determinista y preciso
         )
-        if not respuesta_raw:
-            respuesta_raw = llamar_groq(prompt_intencion, max_tokens=300, temperature=0.2)
         
         if not respuesta_raw:
             return _intencion_default(mensaje)
@@ -14429,667 +13279,6 @@ async def ejecutar_comando_desde_intencion(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ==================== FALLBACK DE EMERGENCIA ====================
-
-def llamar_ia_emergencia(pregunta: str, nombre: str) -> str:
-    """Prompt mínimo sin contexto RAG — último recurso cuando la IA falla con prompt largo."""
-    prompt_min = (
-        f"Eres un asistente profesional chileno. "
-        f"Responde directamente la siguiente pregunta de {nombre} en máximo 4 oraciones claras.\n\n"
-        f"Pregunta: {pregunta}"
-    )
-    # Intentar con cada modelo disponible con prompt mínimo
-    r = llamar_groq(prompt_min, max_tokens=600, temperature=0.7)
-    if r: return r
-    r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini emergencia")
-    if r: return r
-    r = _llamar_gemini_url(GEMINI_FLASH15_URL, prompt_min, 600, 0.7, "Gemini 1.5 emergencia")
-    if r: return r
-    if GEMINI_API_KEY_2:
-        r = _llamar_gemini_url(GEMINI_TEXT_URL, prompt_min, 600, 0.7, "Gemini key2 emergencia", api_key=GEMINI_API_KEY_2)
-        if r: return r
-    return None
-
-# ==================== PREFERENCIAS DE VOZ Y VELOCIDAD ====================
-
-
-def get_preferencia_voz(user_id: int) -> dict:
-    """Obtiene preferencias de voz del usuario."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=%s" if DATABASE_URL else
-                      "SELECT voz_velocidad, resumen_diario, hora_resumen FROM preferencias_usuario WHERE user_id=?", (user_id,))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"velocidad": row[0], "resumen_diario": row[1], "hora_resumen": row[2]}
-    except Exception:
-        pass
-    return {"velocidad": "normal", "resumen_diario": 0, "hora_resumen": 9}
-
-
-def set_preferencia_voz(user_id: int, velocidad: str):
-    """Guarda preferencia de velocidad de voz."""
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, voz_velocidad)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET voz_velocidad=EXCLUDED.voz_velocidad,
-                    fecha_actualizado=CURRENT_TIMESTAMP""", (user_id, velocidad))
-            else:
-                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, voz_velocidad) VALUES (?, ?)", (user_id, velocidad))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error guardando preferencia voz: {e}")
-
-
-def velocidad_a_rate_google(velocidad: str) -> float:
-    return {"lento": 0.75, "normal": 0.85, "rapido": 1.15}.get(velocidad, 0.85)
-
-
-def velocidad_a_pitch(velocidad: str) -> float:
-    return {"lento": -6.0, "normal": -4.0, "rapido": -2.0}.get(velocidad, -4.0)
-
-
-def velocidad_a_rate_edge(velocidad: str) -> str:
-    return {"lento": "-25%", "normal": "-12%", "rapido": "+20%"}.get(velocidad, "-12%")
-
-
-async def generar_audio_con_velocidad(texto: str, user_id: int, filename: str = "/tmp/respuesta_tts.mp3") -> str:
-    """Genera audio respetando la preferencia de velocidad del usuario."""
-    import re, os, base64, requests as _req
-    pref = get_preferencia_voz(user_id)
-    velocidad = pref.get("velocidad", "normal")
-
-    if len(texto) > 2000:
-        texto = texto[:1997] + "..."
-    texto_voz = re.sub(r'[^\w\s,.!?;:()\-áéíóúüñÁÉÍÓÚÜÑ]', ' ', texto)
-    texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
-
-    google_key = os.getenv("GOOGLE_TTS_KEY", "")
-    if google_key:
-        try:
-            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={google_key}"
-            payload = {
-                "input": {"text": texto_voz},
-                "voice": {"languageCode": "es-US", "name": "es-US-Wavenet-A"},
-                "audioConfig": {
-                    "audioEncoding": "MP3",
-                    "speakingRate": velocidad_a_rate_google(velocidad),
-                    "pitch": velocidad_a_pitch(velocidad),
-                    "volumeGainDb": 1.0,
-                }
-            }
-            r = _req.post(url, json=payload, timeout=15)
-            if r.status_code == 200:
-                audio = base64.b64decode(r.json().get("audioContent", ""))
-                if audio:
-                    with open(filename, "wb") as f:
-                        f.write(audio)
-                    logger.info(f"Audio Wavenet ({velocidad}): {len(audio):,} bytes")
-                    return filename
-        except Exception as e:
-            logger.warning(f"Google TTS velocidad fallo: {e}")
-
-    try:
-        import edge_tts
-        texto_voz2 = texto_voz.replace('. ', '... ').replace(': ', ':... ')
-        communicate = edge_tts.Communicate(
-            texto_voz2, VOZ_TTS,
-            rate=velocidad_a_rate_edge(velocidad),
-            pitch="-4Hz", volume="+8%"
-        )
-        await communicate.save(filename)
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            return filename
-    except Exception as e:
-        logger.error(f"Error TTS velocidad: {e}")
-    return None
-
-
-def botones_velocidad_voz(user_id: int):
-    """Genera botones inline para ajustar velocidad de voz."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    pref = get_preferencia_voz(user_id)
-    actual = pref.get("velocidad", "normal")
-    lbl_l = "🐢✓ Lento" if actual == "lento" else "🐢 Lento"
-    lbl_n = "▶️✓ Normal" if actual == "normal" else "▶️ Normal"
-    lbl_r = "🐇✓ Rápido" if actual == "rapido" else "🐇 Rápido"
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(lbl_l, callback_data=f"voz_vel:lento:{user_id}"),
-        InlineKeyboardButton(lbl_n, callback_data=f"voz_vel:normal:{user_id}"),
-        InlineKeyboardButton(lbl_r, callback_data=f"voz_vel:rapido:{user_id}"),
-    ]])
-
-
-# ==================== MODO MANTENIMIENTO ====================
-
-def get_modo_mantenimiento() -> dict:
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            c.execute("SELECT activo, mensaje FROM modo_mantenimiento WHERE id=1")
-            row = c.fetchone()
-            conn.close()
-            if row:
-                return {"activo": bool(row[0]), "mensaje": row[1]}
-    except Exception:
-        pass
-    return {"activo": False, "mensaje": ""}
-
-
-def set_modo_mantenimiento(activo: bool, mensaje: str, admin_id: int):
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""UPDATE modo_mantenimiento SET activo=%s, mensaje=%s,
-                    activado_por=%s, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            else:
-                c.execute("""UPDATE modo_mantenimiento SET activo=?, mensaje=?,
-                    activado_por=?, fecha_inicio=CURRENT_TIMESTAMP WHERE id=1""",
-                    (1 if activo else 0, mensaje, admin_id))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error modo mantenimiento: {e}")
-
-
-# ==================== COMANDOS v6.0 ====================
-
-async def match_cofrades_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sugiere 3 cofrades compatibles basado en perfil profesional."""
-    user = update.effective_user
-    await update.message.reply_text("🔍 Analizando perfiles para encontrar tus mejores conexiones...")
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("No se pudo conectar a la base de datos.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        c.execute(f"SELECT nombre, cargo, empresa FROM tarjetas_profesional WHERE user_id={ph}", (user.id,))
-        mi_perfil = c.fetchone()
-        c.execute(f"""SELECT t.user_id, t.nombre, t.cargo, t.empresa, s.username
-            FROM tarjetas_profesional t
-            JOIN suscripciones s ON t.user_id=s.user_id
-            WHERE t.user_id != {ph} AND s.estado='activo'
-            LIMIT 20""", (user.id,))
-        candidatos = c.fetchall()
-        conn.close()
-
-        if not candidatos:
-            await update.message.reply_text(
-                "No hay suficientes perfiles aun.\n"
-                "Completa tu tarjeta profesional con /mi_perfil primero."
-            )
-            return
-
-        perfil_str = f"{mi_perfil[1]} en {mi_perfil[2]}" if mi_perfil else "Sin perfil definido"
-        candidatos_str = "\n".join([f"- {r[1]}, {r[2]} en {r[3]}" for r in candidatos[:10]])
-
-        prompt = (
-            f"Eres experto en networking profesional naval chileno.\n"
-            f"Mi perfil: {perfil_str}\n"
-            f"Candidatos:\n{candidatos_str}\n\n"
-            f"Selecciona los 3 mas compatibles. Explica en 1 linea por que cada uno es buena conexion.\n"
-            f"Formato:\n1. [nombre] - [razon breve]\n2. [nombre] - [razon breve]\n3. [nombre] - [razon breve]"
-        )
-
-        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.7)
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=300, temperature=0.7)
-
-        texto = f"*Tus 3 mejores conexiones en la Cofradia:*\n\n{respuesta}\n\n"
-        texto += "Usa /buscar\\_profesional para ver el perfil completo."
-        await update.message.reply_text(texto, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error match_cofrades: {e}")
-        await update.message.reply_text("Error al buscar matches. Intenta de nuevo.")
-
-
-async def ofrezco_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Registra un servicio ofrecido."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Publicar tu servicio:*\n\n"
-            "`/ofrezco [descripcion]`\n\n"
-            "Ejemplo:\n`/ofrezco Asesoria en derecho maritimo`",
-            parse_mode='Markdown'
-        )
-        return
-    descripcion = " ".join(context.args)[:300]
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"UPDATE servicios_cofrades SET activo=0 WHERE user_id={ph} AND tipo='ofrezco'", (user.id,))
-            c.execute(f"INSERT INTO servicios_cofrades (user_id, tipo, descripcion) VALUES ({ph},'ofrezco',{ph})", (user.id, descripcion))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Servicio publicado:\n_{descripcion}_\n\nLos cofrades te encontraran con `/busco`.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error ofrezco: {e}")
-        await update.message.reply_text("Error al registrar el servicio.")
-
-
-async def busco_servicio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Busca cofrades que ofrecen un servicio."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Buscar servicio:*\n\n`/busco [lo que necesitas]`\n\nEjemplo:\n`/busco asesoria legal`",
-            parse_mode='Markdown'
-        )
-        return
-    busqueda = " ".join(context.args).lower()
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        if DATABASE_URL:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE %s
-                LIMIT 5""", (f"%{busqueda}%",))
-        else:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE ?
-                LIMIT 5""", (f"%{busqueda}%",))
-        resultados = c.fetchall()
-        conn.close()
-
-        if not resultados:
-            await update.message.reply_text(
-                f"Nadie ofrece *{busqueda}* por ahora.\n\n"
-                "Si tu lo ofreces, publicate con `/ofrezco [descripcion]`",
-                parse_mode='Markdown'
-            )
-            return
-
-        texto = f"*Cofrades que ofrecen '{busqueda}':*\n\n"
-        for desc, fname, uname in resultados:
-            contacto = f"@{uname}" if uname else fname
-            texto += f"*{fname}* ({contacto})\n_{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error busco_servicio: {e}")
-        await update.message.reply_text("Error al buscar.")
-
-
-async def mis_servicios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra servicios publicados por el usuario."""
-    user = update.effective_user
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        c.execute(f"SELECT tipo, descripcion FROM servicios_cofrades WHERE user_id={ph} AND activo=1", (user.id,))
-        servicios = c.fetchall()
-        conn.close()
-
-        if not servicios:
-            await update.message.reply_text(
-                "No tienes servicios publicados.\n\n"
-                "• `/ofrezco [descripcion]` — publica lo que ofreces\n"
-                "• `/busco [servicio]` — busca lo que necesitas"
-            )
-            return
-
-        texto = "*Tus servicios publicados:*\n\n"
-        for tipo, desc in servicios:
-            icono = "🟢" if tipo == "ofrezco" else "🔵"
-            texto += f"{icono} _{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error mis_servicios: {e}")
-        await update.message.reply_text("Error al obtener servicios.")
-
-
-async def recordar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Crea recordatorio. Uso: /recordar 2h Llamar a Juan"""
-    user = update.effective_user
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "*Crear recordatorio:*\n\n"
-            "`/recordar [tiempo] [mensaje]`\n\n"
-            "*Ejemplos:*\n"
-            "`/recordar 30m Revisar propuesta`\n"
-            "`/recordar 2h Llamar al cliente`\n"
-            "`/recordar 1d Seguimiento reunion`",
-            parse_mode='Markdown'
-        )
-        return
-
-    tiempo_str = context.args[0].lower()
-    mensaje = " ".join(context.args[1:])
-    from datetime import datetime, timedelta
-    ahora = datetime.utcnow()
-    try:
-        if tiempo_str.endswith('m'):
-            delta = timedelta(minutes=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('h'):
-            delta = timedelta(hours=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('d'):
-            delta = timedelta(days=int(tiempo_str[:-1]))
-        else:
-            raise ValueError()
-        fecha_recordar = ahora + delta
-    except Exception:
-        await update.message.reply_text("Formato invalido. Usa: 30m, 2h, 1d")
-        return
-
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"INSERT INTO recordatorios (user_id, mensaje, fecha_recordar) VALUES ({ph},{ph},{ph})",
-                     (user.id, mensaje, fecha_recordar if DATABASE_URL else fecha_recordar.isoformat()))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Recordatorio creado:\n_{mensaje}_\n\nTe avisare en {tiempo_str}.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error recordar: {e}")
-        await update.message.reply_text("Error al crear recordatorio.")
-
-
-async def verificar_recordatorios(context):
-    """Job: envía recordatorios pendientes cada minuto."""
-    from datetime import datetime
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        ahora = datetime.utcnow()
-        if DATABASE_URL:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= %s", (ahora,))
-        else:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= ?", (ahora.isoformat(),))
-        pendientes = c.fetchall()
-        for row in pendientes:
-            try:
-                # Supabase devuelve dict, SQLite devuelve tuple
-                if DATABASE_URL:
-                    rec_id = row['id']
-                    uid    = row['user_id']
-                    msg    = row['mensaje']
-                else:
-                    rec_id, uid, msg = row[0], row[1], row[2]
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text="⏰ *Recordatorio Cofradía*\n\n" + str(msg),
-                    parse_mode='Markdown'
-                )
-                ph = "%s" if DATABASE_URL else "?"
-                c.execute(f"UPDATE recordatorios SET enviado=1 WHERE id={ph}", (rec_id,))
-                logger.info(f"✅ Recordatorio {rec_id} enviado a {uid}")
-            except Exception as e:
-                logger.warning(f"Error recordatorio {rec_id}: {e}")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Error verificando recordatorios: {e}")
-
-
-async def mantenimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: activa/desactiva modo mantenimiento."""
-    user = update.effective_user
-    if user.id != OWNER_ID:
-        await update.message.reply_text("Solo el administrador puede usar este comando.")
-        return
-    if not context.args:
-        estado = get_modo_mantenimiento()
-        txt = "ACTIVO" if estado["activo"] else "INACTIVO"
-        await update.message.reply_text(
-            f"Modo Mantenimiento: *{txt}*\n\n"
-            "`/mantenimiento on [mensaje]`\n`/mantenimiento off`",
-            parse_mode='Markdown'
-        )
-        return
-    accion = context.args[0].lower()
-    if accion == "on":
-        msg_c = " ".join(context.args[1:]) if len(context.args) > 1 else "El bot esta en mantenimiento. Volvemos pronto."
-        set_modo_mantenimiento(True, msg_c, user.id)
-        await update.message.reply_text(f"Modo mantenimiento ACTIVADO\n\n_{msg_c}_", parse_mode='Markdown')
-    elif accion == "off":
-        set_modo_mantenimiento(False, "", user.id)
-        await update.message.reply_text("Modo mantenimiento DESACTIVADO — Bot operativo.")
-    else:
-        await update.message.reply_text("Usa: `/mantenimiento on` o `/mantenimiento off`", parse_mode='Markdown')
-
-
-async def velocidad_voz_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ajusta velocidad de la voz del bot."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    actual = pref.get("velocidad", "normal")
-    emojis = {"lento": "🐢", "normal": "▶️", "rapido": "🐇"}
-    await update.message.reply_text(
-        f"Velocidad de voz actual: {emojis.get(actual,'')} *{actual.upper()}*\n\nSelecciona tu preferencia:",
-        parse_mode='Markdown'
-    )
-
-
-async def resumen_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activa/desactiva resumen diario personalizado por audio."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    activo = pref.get("resumen_diario", 0)
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            nuevo = 0 if activo else 1
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, resumen_diario)
-                    VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET resumen_diario=EXCLUDED.resumen_diario""",
-                    (user.id, nuevo))
-            else:
-                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, resumen_diario) VALUES (?, ?)", (user.id, nuevo))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error resumen_diario: {e}")
-
-    if activo:
-        await update.message.reply_text("Resumen diario *desactivado*.", parse_mode='Markdown')
-    else:
-        await update.message.reply_text(
-            "Resumen diario *activado*\n\n"
-            "Recibiras un audio cada manana a las 9:00 AM Chile\n"
-            "con novedades relevantes para ti.\n\n"
-            "Para desactivar, usa `/resumen_diario` de nuevo.",
-            parse_mode='Markdown'
-        )
-
-
-async def enviar_resumenes_diarios(context):
-    """Job matutino: envia resumen personalizado por audio."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        c.execute("""SELECT p.user_id, s.first_name FROM preferencias_usuario p
-            JOIN suscripciones s ON p.user_id=s.user_id
-            WHERE p.resumen_diario=1 AND s.estado='activo'""")
-        usuarios = c.fetchall()
-        conn.close()
-        for uid, nombre in usuarios:
-            try:
-                prompt = (
-                    f"Crea un resumen ejecutivo breve (4 oraciones maximas) para {nombre}, "
-                    "miembro de Cofradia de Networking. Incluye: novedades networking profesional, "
-                    "mercado laboral chileno, y algo motivador. Sin listas ni emojis."
-                )
-                resumen = llamar_groq(prompt, max_tokens=200, temperature=0.7)
-                if not resumen:
-                    resumen = llamar_gemini_texto(prompt, max_tokens=200, temperature=0.7)
-                if resumen:
-                    audio_file = await generar_audio_con_velocidad(resumen, uid, f"/tmp/resumen_{uid}.mp3")
-                    if audio_file:
-                        import os
-                        with open(audio_file, 'rb') as f:
-                            await context.bot.send_voice(
-                                chat_id=uid, voice=f,
-                                caption=f"Buenos dias, {nombre}! Tu resumen diario de la Cofradia."
-                            )
-                        try:
-                            os.remove(audio_file)
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"Error resumen a {uid}: {e}")
-    except Exception as e:
-        logger.warning(f"Error resumenes diarios: {e}")
-
-
-# ==================== ANÁLISIS DE USUARIOS ====================
-
-async def analizar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analiza mensajes recientes de un cofrade. Uso: /analizar @username"""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Analizar a un cofrade:*\n\n"
-            "`/analizar @username` o `/analizar Nombre`\n\n"
-            "Busca sus mensajes recientes y genera un análisis de su expertise, "
-            "temas de interes y aportes destacados.",
-            parse_mode="Markdown"
-        )
-        return
-
-    busqueda = " ".join(context.args).replace("@", "").strip()
-    msg = await update.message.reply_text(f"Analizando mensajes recientes de *{busqueda}*...", parse_mode="Markdown")
-
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await msg.edit_text("Error de conexion.")
-            return
-        c = conn.cursor()
-
-        if DATABASE_URL:
-            c.execute("""SELECT user_id, first_name, username FROM suscripciones
-                WHERE LOWER(username) = %s OR LOWER(first_name) LIKE %s LIMIT 1""",
-                (busqueda.lower(), f"%{busqueda.lower()}%"))
-        else:
-            c.execute("""SELECT user_id, first_name, username FROM suscripciones
-                WHERE LOWER(username) = ? OR LOWER(first_name) LIKE ? LIMIT 1""",
-                (busqueda.lower(), f"%{busqueda.lower()}%"))
-        cofrade = c.fetchone()
-
-        if not cofrade:
-            await msg.edit_text(f"No encontre a *{busqueda}* en la Cofradia.", parse_mode="Markdown")
-            conn.close()
-            return
-
-        if DATABASE_URL:
-            uid_c = cofrade["user_id"]
-            nombre_c = cofrade["first_name"]
-            uname_c = cofrade.get("username", "") or ""
-        else:
-            uid_c, nombre_c, uname_c = cofrade[0], cofrade[1], (cofrade[2] or "")
-
-        if DATABASE_URL:
-            c.execute("""SELECT contenido FROM mensajes
-                WHERE user_id = %s AND contenido IS NOT NULL
-                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
-        else:
-            c.execute("""SELECT contenido FROM mensajes
-                WHERE user_id = ? AND contenido IS NOT NULL
-                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
-        rows = c.fetchall()
-        conn.close()
-
-        if not rows:
-            await msg.edit_text(
-                f"*{nombre_c}* no tiene mensajes recientes en el sistema.",
-                parse_mode="Markdown"
-            )
-            return
-
-        textos = [r["contenido"] if DATABASE_URL else r[0] for r in rows if (r["contenido"] if DATABASE_URL else r[0])]
-        mensajes_str = "\n---\n".join(textos[:20])
-
-        prompt = (
-            f"Eres un analista experto en networking profesional chileno.\n"
-            f"Analiza los mensajes recientes de {nombre_c} en la Cofradia de Networking:\n\n"
-            f"MENSAJES:\n{mensajes_str}\n\n"
-            f"Genera un analisis con:\n"
-            f"1. Temas de interes y expertise demostrado\n"
-            f"2. Recomendaciones o insights destacados que ha compartido\n"
-            f"3. Perfil profesional inferido\n"
-            f"4. Tu evaluacion y que agregas al respecto\n\n"
-            f"Se especifico y menciona ejemplos concretos. Maximo 200 palabras."
-        )
-
-        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.7)
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
-        if not respuesta:
-            await msg.edit_text("No pude generar el analisis ahora. Intenta en un momento.")
-            return
-
-        contacto = f"@{uname_c}" if uname_c else nombre_c
-        texto_final = (
-            f"Analisis de *{nombre_c}* ({contacto})\n"
-            f"Basado en {len(textos)} mensajes recientes\n\n"
-            f"{respuesta}"
-        )
-        await msg.edit_text(texto_final, parse_mode="Markdown")
-
-        # Audio del analisis
-        try:
-            audio_file = await generar_audio_con_velocidad(respuesta, user.id, f"/tmp/analisis_{uid_c}.mp3")
-            if audio_file:
-                import os as _os
-                with open(audio_file, "rb") as af:
-                    await update.message.reply_voice(
-                        voice=af,
-                        caption=f"Analisis de {nombre_c}"
-                    )
-                try: _os.remove(audio_file)
-                except: pass
-        except Exception as e:
-            logger.warning(f"Error audio analisis: {e}")
-
-    except Exception as e:
-        logger.error(f"Error analizar_usuario: {e}")
-        await msg.edit_text("Error al analizar. Intenta de nuevo.")
-
-
 # ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
 
 async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15987,824 +14176,411 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Error en job recordatorio_agenda: {e}")
 
 
-
-# ==================== FERIADOS CHILE ====================
-
-@requiere_suscripcion
-async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /feriados [año] - Lista feriados legales de Chile con coincidencias de eventos"""
-    import re as _re
-
-    # Determinar año consultado
-    anio_actual = datetime.now().year
-    if context.args:
-        try:
-            anio = int(context.args[0])
-            if anio < 2020 or anio > 2035:
-                await update.message.reply_text("❌ Indica un año entre 2020 y 2035.\nEjemplo: /feriados 2025")
-                return
-        except ValueError:
-            await update.message.reply_text("❌ Formato: /feriados 2025")
-            return
-    else:
-        anio = anio_actual
-
-    msg = await update.message.reply_text("🗓 Consultando feriados legales de Chile " + str(anio) + "...")
-
-    feriados_data = []
-
-    # ── Fuente 1: API feriados.cl (JSON oficial) ──
-    try:
-        import asyncio as _afer
-        def _fetch_feriados_api():
-            url = "https://apis.digital.gob.cl/fl/feriados/" + str(anio)
-            r = requests.get(url, timeout=15, headers={'Accept': 'application/json'})
-            if r.status_code == 200:
-                return r.json()
-            return []
-        raw = await _afer.get_event_loop().run_in_executor(None, _fetch_feriados_api)
-        if raw and isinstance(raw, list):
-            for item in raw:
-                fecha_str = item.get('fecha', '')
-                nombre    = item.get('nombre', '')
-                tipo      = item.get('tipo', 'Legal')
-                if fecha_str and nombre:
-                    try:
-                        fecha_dt = datetime.strptime(fecha_str, '%Y-%m-%d')
-                        feriados_data.append({
-                            'fecha': fecha_dt,
-                            'nombre': nombre,
-                            'tipo': tipo
-                        })
-                    except:
-                        pass
-    except Exception as _e1:
-        logger.debug("Feriados API digital.gob.cl: " + str(_e1))
-
-    # ── Fuente 2: Web scraping si la API falla ──
-    if not feriados_data:
-        try:
-            import asyncio as _afer2
-            def _scrape_feriados():
-                return buscar_en_web(
-                    "feriados legales Chile " + str(anio) + " lista completa",
-                    extraer_contenido=True)
-            wr = await _afer2.get_event_loop().run_in_executor(None, _scrape_feriados)
-            if wr.get('resultados') or wr.get('contenido'):
-                ctx_web = formatear_contexto_web(wr)
-                prompt = (
-                    "Extrae TODOS los feriados legales de Chile para el año " + str(anio) + ".\n"
-                    "Contexto web:\n" + ctx_web[:3000] + "\n\n"
-                    "Responde SOLO con una lista JSON, sin texto adicional, formato:\n"
-                    '[{"fecha":"YYYY-MM-DD","nombre":"Nombre del feriado","tipo":"Legal"}]\n'
-                    "Incluye TODOS los feriados nacionales de Chile."
-                )
-                resp_json = llamar_groq(prompt, max_tokens=1200, temperature=0.1)
-                if resp_json:
-                    import json as _json2
-                    clean = resp_json.strip()
-                    # Extract JSON array
-                    m = _re.search(r'\[.*\]', clean, _re.DOTALL)
-                    if m:
-                        clean = m.group(0)
-                    items = _json2.loads(clean)
-                    for item in items:
-                        try:
-                            fd = datetime.strptime(item['fecha'], '%Y-%m-%d')
-                            feriados_data.append({'fecha': fd, 'nombre': item['nombre'], 'tipo': item.get('tipo', 'Legal')})
-                        except:
-                            pass
-        except Exception as _e2:
-            logger.debug("Feriados web scraping: " + str(_e2))
-
-    # ── Fuente 3: Hardcoded fallback para años conocidos ──
-    if not feriados_data:
-        FERIADOS_FIJOS = {
-            '01-01': 'Año Nuevo',
-            '05-01': 'Día del Trabajo',
-            '05-21': 'Día de las Glorias Navales',
-            '06-20': 'Día Nacional de los Pueblos Indígenas',
-            '06-29': 'San Pedro y San Pablo',
-            '07-16': 'Día de la Virgen del Carmen',
-            '08-15': 'Asunción de la Virgen',
-            '09-18': 'Independencia Nacional',
-            '09-19': 'Día de las Glorias del Ejército',
-            '10-12': 'Encuentro de Dos Mundos',
-            '10-31': 'Día de las Iglesias Evangélicas',
-            '11-01': 'Día de Todos los Santos',
-            '12-08': 'Inmaculada Concepción',
-            '12-25': 'Navidad',
-        }
-        for dd_mm, nombre in FERIADOS_FIJOS.items():
-            try:
-                fd = datetime.strptime(str(anio) + '-' + dd_mm, '%Y-%m-%d')
-                feriados_data.append({'fecha': fd, 'nombre': nombre, 'tipo': 'Legal'})
-            except:
-                pass
-
-    if not feriados_data:
-        await msg.edit_text("❌ No se pudo obtener los feriados de " + str(anio) + ". Intenta más tarde.")
-        return
-
-    # Ordenar por fecha
-    feriados_data.sort(key=lambda x: x['fecha'])
-
-    # ── Obtener eventos de la Cofradía para comparar ──
-    eventos_cofradia = {}
-    try:
-        conn_ev = get_db_connection()
-        if conn_ev:
-            c_ev = conn_ev.cursor()
-            if DATABASE_URL:
-                c_ev.execute(
-                    "SELECT fecha, titulo FROM eventos WHERE EXTRACT(YEAR FROM fecha) = %s",
-                    (anio,))
-            else:
-                c_ev.execute(
-                    "SELECT fecha, titulo FROM eventos WHERE strftime('%Y', fecha) = ?",
-                    (str(anio),))
-            for row in c_ev.fetchall():
-                fd = row['fecha'] if DATABASE_URL else row[0]
-                tit = row['titulo'] if DATABASE_URL else row[1]
-                if fd:
-                    try:
-                        if isinstance(fd, str):
-                            fd = datetime.strptime(fd[:10], '%Y-%m-%d')
-                        key = fd.strftime('%Y-%m-%d')
-                        eventos_cofradia[key] = tit
-                    except:
-                        pass
-            conn_ev.close()
-    except Exception as _ev:
-        logger.debug("Feriados: eventos query: " + str(_ev))
-
-    # ── Construir respuesta ──
-    DIAS_ES = {0: 'Lunes', 1: 'Martes', 2: 'Miércoles', 3: 'Jueves',
-               4: 'Viernes', 5: 'Sábado', 6: 'Domingo'}
-    MESES_ES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril',
-                5: 'Mayo', 6: 'Junio', 7: 'Julio', 8: 'Agosto',
-                9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
-
-    lineas = [
-        "*🗓 FERIADOS LEGALES DE CHILE — " + str(anio) + "*",
-        "━" * 32,
-        "_Fuente: Gobierno Digital de Chile_",
-        "",
-    ]
-
-    mes_actual = 0
-    for f in feriados_data:
-        fd = f['fecha']
-        if fd.month != mes_actual:
-            mes_actual = fd.month
-            lineas.append("")
-            lineas.append("*📅 " + MESES_ES[fd.month].upper() + "*")
-        dia_str   = fd.strftime('%d') + " de " + MESES_ES[fd.month]
-        dia_sem   = DIAS_ES[fd.weekday()]
-        nombre_f  = f['nombre']
-        tipo_f    = f.get('tipo', 'Legal')
-        clave_ev  = fd.strftime('%Y-%m-%d')
-        evento_tag = ""
-        if clave_ev in eventos_cofradia:
-            evento_tag = "  🎯 _Evento Cofradía: " + eventos_cofradia[clave_ev] + "_"
-        icono = "🔴" if tipo_f == 'Legal' else "🟡"
-        lineas.append(icono + " *" + dia_str + "* (" + dia_sem + ") — " + nombre_f + evento_tag)
-
-    lineas.append("")
-    lineas.append("━" * 32)
-    lineas.append("*Total:* " + str(len(feriados_data)) + " feriados  •  🔴 Legal  🟡 Otros")
-    if eventos_cofradia:
-        lineas.append("🎯 *Eventos Cofradía que coinciden con feriados:* " + str(sum(1 for k in eventos_cofradia if any(f['fecha'].strftime('%Y-%m-%d') == k for f in feriados_data))))
-
-    texto_final = "\n".join(lineas)
-
-    # Telegram tiene límite de 4096 chars — dividir si necesario
-    if len(texto_final) <= 4096:
-        await msg.edit_text(texto_final, parse_mode='Markdown')
-    else:
-        await msg.edit_text(texto_final[:4090] + "...", parse_mode='Markdown')
-
-    registrar_servicio_usado(update.effective_user.id, 'feriados')
-
-
-
-
-
-
-# ==================== INDICADORES ECONÓMICOS CHILE v2 ====================
-
-# ==================== INDICADORES ECONÓMICOS CHILE v2 ====================
+# ==================== INDICADORES ECONÓMICOS CHILE (v6.0) ====================
 
 def obtener_indicadores_chile():
     """
-    Obtiene indicadores desde mindicador.cl (API REST gratuita).
-    Retorna dict con:
-      - datos_actuales: cards con sparkline 30 días
-      - hist_6m: Dólar vs Euro últimos 6 meses (valor inicio de cada mes)
-      - hist_10a: series anuales últimos 10 años por indicador
-    Usa ThreadPoolExecutor para paralelizar las ~80 llamadas históricas.
+    Obtiene indicadores económicos de Chile desde la API de mindicador.cl
+    Retorna dict con nombre, valor_actual, valor_anterior, variacion, unidad, fecha
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    BASE    = 'https://mindicador.cl/api'
-    AHORA   = datetime.now()
-    ANIO_A  = AHORA.year
-
-    # ── Indicadores para cards actuales ──────────────────────────────────
-    CARDS_CFG = [
-        ('uf',             'UF',               'Unidad de Fomento',                  '#c3a55a'),
-        ('dolar',          'Dólar USD',         'Tipo de cambio USD/CLP',             '#3478c3'),
-        ('euro',           'Euro EUR',          'Tipo de cambio EUR/CLP',             '#2980b9'),
-        ('utm',            'UTM',               'Unidad Tributaria Mensual',          '#e67e22'),
-        ('ipc',            'IPC',               'Índice de Precios al Consumidor',    '#2ecc71'),
-        ('tpm',            'TPM',               'Tasa Política Monetaria (%)',        '#27ae60'),
-        ('bitcoin',        'Bitcoin',           'Bitcoin en CLP',                     '#9b59b6'),
-        ('tasa_desempleo', 'Desempleo',         'Tasa de Desempleo (%)',              '#e74c3c'),
-        ('imacec',         'IMACEC',            'Indicador Mensual Actividad Eco.(%)', '#f39c12'),
-        ('libra_cobre',    'Cobre (lb)',        'Precio Libra de Cobre USD',          '#cd7f32'),
-        ('ivp',            'IVP',               'Índice Valor Promedio',              '#1abc9c'),
-        ('tasa_desempleo', 'Desempleo',         'Tasa de Desempleo (%)',              '#e74c3c'),
-    ]
-    # Deduplicar
-    seen = set()
-    CARDS_CFG_UNIQ = []
-    for t in CARDS_CFG:
-        if t[0] not in seen:
-            seen.add(t[0])
-            CARDS_CFG_UNIQ.append(t)
-
-    # ── Indicadores para histórico 10 años ────────────────────────────────
-    HIST_CFG = [
-        ('dolar',          'Dólar USD',         '#3478c3'),
-        ('euro',           'Euro EUR',          '#2980b9'),
-        ('uf',             'UF',               '#c3a55a'),
-        ('utm',            'UTM',               '#e67e22'),
-        ('ipc',            'IPC',               '#2ecc71'),
-        ('tasa_desempleo', 'Desempleo (%)',     '#e74c3c'),
-        ('imacec',         'IMACEC (%)',        '#f39c12'),
-        ('libra_cobre',    'Cobre (USD/lb)',    '#cd7f32'),
-        ('bitcoin',        'Bitcoin (CLP)',     '#9b59b6'),
-    ]
-
-    def fetch(url, timeout=10):
-        try:
-            r = requests.get(url, timeout=timeout,
-                             headers={'Accept': 'application/json'})
-            if r.status_code == 200:
-                return r.json()
-        except Exception as _e:
-            logger.debug('mindicador fetch: ' + str(_e))
-        return None
-
-    # ── 1. Cards: serie últimos 30 días ───────────────────────────────────
-    datos_actuales = {}
-    card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
-    with ThreadPoolExecutor(max_workers=12) as ex:
-        fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
-        for fut in as_completed(fut_map):
-            cod = fut_map[fut]
-            j   = fut.result()
-            if j:
-                serie = j.get('serie', [])
-                if serie:
-                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
-                    datos_actuales[cod] = {
-                        'nombre':      cfg[1] if cfg else cod,
-                        'descripcion': cfg[2] if cfg else '',
-                        'color':       cfg[3] if cfg else '#3478c3',
-                        'valor':       serie[0].get('valor', 0),
-                        'fecha':       serie[0].get('fecha', '')[:10],
-                        'unidad':      j.get('unidad_medida', ''),
-                        'serie30':     serie[:30],
-                    }
-
-    # ── 2. Dólar vs Euro últimos 6 meses (inicio de cada mes) ────────────
-    def primer_valor_mes(serie, anio, mes):
-        """Retorna el primer valor disponible para un año/mes dado."""
-        for s in reversed(serie):
-            f = s.get('fecha', '')[:7]  # 'YYYY-MM'
-            if f == '%04d-%02d' % (anio, mes):
-                return s.get('valor', None)
-        return None
-
-    hist_6m = {}
-    meses_labels = []
-    meses_targets = []
-    for i in range(5, -1, -1):
-        # 0 = mes actual, 5 = 5 meses atrás
-        mes_offset = AHORA.month - i
-        yr_offset  = ANIO_A
-        if mes_offset <= 0:
-            mes_offset += 12
-            yr_offset  -= 1
-        meses_targets.append((yr_offset, mes_offset))
-        meses_labels.append('%02d/%d' % (mes_offset, yr_offset))
-
-    # Necesitamos año actual y posiblemente el anterior
-    anios_necesarios = list(set(yr for yr, _ in meses_targets))
-    serie_dol = {}
-    serie_eur = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futs = {}
-        for yr in anios_necesarios:
-            futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
-            futs[ex.submit(fetch, BASE + '/euro/'  + str(yr))] = ('euro',  yr)
-        for fut in as_completed(futs):
-            cod, yr = futs[fut]
-            j = fut.result()
-            serie = j.get('serie', []) if j else []
-            if cod == 'dolar': serie_dol[yr] = serie
-            else:              serie_eur[yr] = serie
-
-    hist_6m['labels']  = meses_labels
-    hist_6m['dolar']   = []
-    hist_6m['euro']    = []
-    for yr, mes in meses_targets:
-        vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
-        ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
-        hist_6m['dolar'].append(round(vd, 2) if vd else None)
-        hist_6m['euro'].append(round(ve, 2) if ve else None)
-
-    # ── 3. Histórico 10 años (valor representativo por año) ───────────────
-    #    Para IPC, IMACEC, Desempleo → promedio anual
-    #    Para el resto → primer valor de diciembre (o último disponible)
-    ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
-    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_10, 'valores': []}
-                for cod, nom, col in HIST_CFG}
-
-    # Lanzar todas las peticiones anuales en paralelo
-    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_10]
-    raw_hist   = {}  # (cod, yr) -> serie
-
-    def fetch_year(cod_yr):
-        cod, yr = cod_yr
-        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=12)
-        return (cod, yr, j.get('serie', []) if j else [])
-
-    with ThreadPoolExecutor(max_workers=30) as ex:
-        for cod, yr, serie in ex.map(fetch_year, tasks_hist):
-            raw_hist[(cod, yr)] = serie
-
-    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
-    for cod, nom, col in HIST_CFG:
-        valores = []
-        for yr in ANIOS_10:
-            serie = raw_hist.get((cod, yr), [])
-            if not serie:
-                valores.append(None)
-                continue
-            if cod in PORCENTAJES:
-                # promedio anual
-                vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
-                v = round(sum(vals) / len(vals), 3) if vals else None
-            else:
-                # último valor del año (serie[0] = más reciente)
-                v = round(serie[0].get('valor', 0), 2)
-            valores.append(v)
-        hist_10a[cod]['valores'] = valores
-
-    return {
-        'datos_actuales': datos_actuales,
-        'hist_6m':        hist_6m,
-        'hist_10a':       hist_10a,
-        'generado':       AHORA.strftime('%d/%m/%Y %H:%M'),
+    indicadores_map = {
+        'uf':       {'nombre': 'UF',           'unidad': 'CLP',  'emoji': '📐'},
+        'utm':      {'nombre': 'UTM',          'unidad': 'CLP',  'emoji': '📋'},
+        'dolar':    {'nombre': 'Dólar (USD)',   'unidad': 'CLP',  'emoji': '🇺🇸'},
+        'euro':     {'nombre': 'Euro (EUR)',    'unidad': 'CLP',  'emoji': '🇪🇺'},
+        'ipc':      {'nombre': 'IPC',          'unidad': '%',    'emoji': '📈'},
+        'tpm':      {'nombre': 'Tasa Política Monetaria', 'unidad': '%', 'emoji': '🏦'},
     }
 
+    resultados = {}
+    for codigo, meta in indicadores_map.items():
+        try:
+            url = f"https://mindicador.cl/api/{codigo}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            serie = data.get('serie', [])
+            if len(serie) < 2:
+                continue
 
-def _generar_html_indicadores(all_data):
+            val_actual  = float(serie[0]['valor'])
+            val_ant     = float(serie[1]['valor'])
+            variacion   = val_actual - val_ant
+            variacion_pct = (variacion / val_ant * 100) if val_ant else 0.0
+            fecha_actual = serie[0]['fecha'][:10]
+
+            resultados[codigo] = {
+                **meta,
+                'codigo':        codigo,
+                'valor_actual':  val_actual,
+                'valor_anterior': val_ant,
+                'variacion':     variacion,
+                'variacion_pct': variacion_pct,
+                'fecha':         fecha_actual,
+            }
+        except Exception as e:
+            logger.warning(f"Error obteniendo indicador {codigo}: {e}")
+
+    return resultados
+
+
+def scraping_bcentral_noticias():
     """
-    Dashboard ECharts completo:
-      Sección 1 — Cards actuales con sparkline 30 días
-      Sección 2 — Dólar vs Euro últimos 6 meses (línea doble)
-      Sección 3 — Histórico 10 años por indicador (grid de líneas)
+    Web scraping de noticias y comunicados recientes del Banco Central de Chile
+    Retorna lista de titulares relevantes (máx. 5)
     """
-    import json as _j
-
-    datos    = all_data.get('datos_actuales', {})
-    hist_6m  = all_data.get('hist_6m', {})
-    hist_10a = all_data.get('hist_10a', {})
-    gen      = all_data.get('generado', '')
-
-    # ── Formateadores ────────────────────────────────────────────────────
-    def fmt(v, cod):
-        if v is None: return 'N/D'
-        if cod in ('ipc', 'tpm', 'tasa_desempleo', 'imacec'):
-            return '{:.2f}%'.format(v)
-        if cod == 'bitcoin':
-            return '${:,.0f}'.format(v).replace(',', '.')
-        if cod == 'libra_cobre':
-            return 'USD {:.4f}'.format(v)
-        return '${:,.2f}'.format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
-
-    def variacion_html(serie):
-        if len(serie) < 2: return ''
-        v0 = serie[0].get('valor', 0)
-        v1 = serie[1].get('valor', 1)
-        if not v1: return ''
-        pct = ((v0 - v1) / v1) * 100
-        sig = '▲' if pct >= 0 else '▼'
-        col = '#2ecc71' if pct >= 0 else '#e74c3c'
-        return '<span style="color:' + col + ';font-size:.68em">' + sig + ' {:.3f}%'.format(abs(pct)) + '</span>'
-
-    # ── Cards HTML + sparkline JS ────────────────────────────────────────
-    cards_html = ''
-    spark_js   = ''
-    ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
-             'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
-    for cod in ORDER:
-        d = datos.get(cod)
-        if not d: continue
-        col      = d['color']
-        vals30   = [s.get('valor', 0) for s in reversed(d['serie30'])]
-        spark_d  = _j.dumps([round(v, 2) for v in vals30])
-        xd       = _j.dumps(list(range(len(vals30))))
-        var_html = variacion_html(d['serie30'])
-        val_fmt  = fmt(d['valor'], cod)
-
-        cards_html += (
-            '<div class="card">'
-            '<div class="cn">' + d['nombre'] + '</div>'
-            '<div class="cv">' + val_fmt + ' ' + var_html + '</div>'
-            '<div class="cd">' + d['descripcion'] + '</div>'
-            '<div id="sp_' + cod + '" class="spark"></div>'
-            '<div class="cf">Actualizado: ' + d['fecha'] + '</div>'
-            '</div>'
+    noticias = []
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/1.0)'}
+        # Comunicados de prensa del BCCH
+        resp = requests.get(
+            "https://www.bcentral.cl/web/guest/comunicados-de-prensa",
+            headers=headers, timeout=12
         )
-        spark_js += (
-            '(function(){'
-            'var c=echarts.init(document.getElementById("sp_' + cod + '"));'
-            'c.setOption({'
-            'grid:{top:0,bottom:0,left:0,right:0},'
-            'xAxis:{type:"category",show:false,data:' + xd + '},'
-            'yAxis:{type:"value",show:false},'
-            'series:[{type:"line",data:' + spark_d + ',smooth:true,symbol:"none",'
-            'lineStyle:{color:"' + col + '",width:2},'
-            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-            'colorStops:[{offset:0,color:"' + col + '55"},{offset:1,color:"transparent"}]}}'
-            '}]});'
-            '})();'
-        )
+        if resp.status_code == 200 and bs4_disponible:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # Buscar titulares en la estructura del sitio
+            for item in soup.find_all(['h3', 'h4', 'a'], limit=60):
+                texto = item.get_text(strip=True)
+                if len(texto) > 30 and any(kw in texto.lower() for kw in
+                        ['tasa', 'inflación', 'ipc', 'política monetaria',
+                         'dólar', 'tipo de cambio', 'pib', 'crecimiento',
+                         'uf', 'utm', 'banca']):
+                    noticias.append(texto[:160])
+                    if len(noticias) >= 5:
+                        break
+    except Exception as e:
+        logger.warning(f"Scraping BCCH: {e}")
 
-    # ── Dólar vs Euro 6 meses ─────────────────────────────────────────────
-    labels_6m  = _j.dumps(hist_6m.get('labels', []))
-    dolar_6m   = _j.dumps(hist_6m.get('dolar', []))
-    euro_6m    = _j.dumps(hist_6m.get('euro', []))
+    # Fallback: intentar RSS o página de estadísticas
+    if not noticias:
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            resp = requests.get(
+                "https://www.bcentral.cl/web/guest/estadisticas/macro",
+                headers=headers, timeout=12
+            )
+            if resp.status_code == 200 and bs4_disponible:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                for p in soup.find_all('p', limit=30):
+                    texto = p.get_text(strip=True)
+                    if len(texto) > 40:
+                        noticias.append(texto[:160])
+                        if len(noticias) >= 3:
+                            break
+        except Exception:
+            pass
 
-    # ── Histórico 10 años — charts ────────────────────────────────────────
-    hist_charts_js = ''
-    hist_cards_html = ''
-    HIST_ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tasa_desempleo',
-                  'imacec', 'libra_cobre', 'bitcoin']
-    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+    return noticias
 
-    for i, cod in enumerate(HIST_ORDER):
-        d = hist_10a.get(cod)
-        if not d: continue
-        col     = d['color']
-        anios_j = _j.dumps([str(a) for a in d['anios']])
-        vals_j  = _j.dumps([v if v is not None else '-' for v in d['valores']])
-        is_pct  = 'true' if cod in PORCENTAJES else 'false'
-        chart_id = 'hist_' + cod
 
-        hist_cards_html += (
-            '<div class="hcard">'
-            '<div class="htitle">' + d['nombre'] + ' — Últimos 10 años</div>'
-            '<div id="' + chart_id + '" class="hchart"></div>'
-            '</div>'
-        )
-        hist_charts_js += (
-            '(function(){'
-            'var c=echarts.init(document.getElementById("' + chart_id + '"));'
-            'var isPct=' + is_pct + ';'
-            'c.setOption({'
-            'backgroundColor:"transparent",'
-            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",borderColor:"' + col + '",'
-            'textStyle:{color:"#c0c8d4"},'
-            'formatter:function(p){'
-            'var v=p[0].value; if(v===null||v==="-") return p[0].name+": N/D";'
-            'return p[0].name+": "+(isPct?v.toFixed(2)+"%":"$"+v.toLocaleString("es-CL"));'
-            '}},'
-            'grid:{left:"12%",right:"5%",bottom:"15%",top:"8%"},'
-            'xAxis:{type:"category",data:' + anios_j + ',axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
-            'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
-            'yAxis:{type:"value",axisLabel:{color:"#8899aa",fontSize:10,'
-            'formatter:function(v){return isPct?v+"%":"$"+v.toLocaleString("es-CL");}},'
-            'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
-            'series:[{type:"line",data:' + vals_j + ',smooth:true,symbol:"circle",symbolSize:5,'
-            'lineStyle:{color:"' + col + '",width:2.5},'
-            'itemStyle:{color:"' + col + '"},'
-            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-            'colorStops:[{offset:0,color:"' + col + '44"},{offset:1,color:"transparent"}]}},'
-            'label:{show:false},'
-            'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",shadowBlur:8,shadowColor:"' + col + '"}}'
-            '}]'
-            '});'
-            '})();'
-        )
+def consultar_rag_economia(query, limit=8):
+    """
+    Busca en la biblioteca RAG fragmentos sobre el tema económico dado.
+    Retorna string con los fragmentos más relevantes.
+    """
+    try:
+        resultados, score = buscar_rag(query, limit=limit)
+        if not resultados:
+            return ""
+        fragmentos = []
+        for texto, source in resultados[:4]:
+            nombre_libro = source.replace('.pdf', '').replace('_', ' ')
+            fragmento_corto = texto[:300].strip()
+            fragmentos.append(f"[{nombre_libro}]: {fragmento_corto}")
+        return "\n\n".join(fragmentos)
+    except Exception as e:
+        logger.warning(f"RAG economia error: {e}")
+        return ""
 
-    # ── HTML completo ──────────────────────────────────────────────────────
-    html = (
-        '<!DOCTYPE html><html lang="es"><head>'
-        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Indicadores Económicos Chile — Cofradía</title>'
-        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
-        '<style>'
-        '*{margin:0;padding:0;box-sizing:border-box}'
-        'body{font-family:"Segoe UI",system-ui,sans-serif;'
-        'background:linear-gradient(160deg,#06101e 0%,#0a1628 40%,#0f2f59 100%);'
-        'color:#e0e6ed;padding:20px 16px 40px;min-height:100vh}'
 
-        
-        'header{text-align:center;padding:24px 0 18px;'
-        'border-bottom:2px solid rgba(195,165,90,.35);margin-bottom:28px}'
-        'header h1{font-size:1.8em;color:#c3a55a;letter-spacing:3px;'
-        'text-shadow:0 2px 14px rgba(195,165,90,.35)}'
-        'header .sub{color:#667788;font-size:.82em;margin-top:5px}'
-        'header a{color:#3478c3;text-decoration:none}'
+def generar_explicacion_indicador(codigo, datos, contexto_bcch, fragmento_rag):
+    """
+    Usa Groq para generar una explicación breve y precisa de la variación del indicador.
+    Máximo 2 oraciones. Sin emojis ni markdown.
+    """
+    nombre     = datos['nombre']
+    val_act    = datos['valor_actual']
+    val_ant    = datos['valor_anterior']
+    var_pct    = datos['variacion_pct']
+    unidad     = datos['unidad']
+    tendencia  = "subió" if var_pct > 0 else ("bajó" if var_pct < 0 else "se mantuvo")
 
-        
-        '.section{margin-bottom:36px}'
-        '.section-title{font-size:1.15em;font-weight:700;color:#c3a55a;'
-        'border-left:4px solid #c3a55a;padding-left:12px;margin-bottom:16px;'
-        'letter-spacing:.5px}'
+    contexto_extra = ""
+    if contexto_bcch:
+        contexto_extra += f"\nContexto Banco Central de Chile:\n{contexto_bcch[:600]}\n"
+    if fragmento_rag:
+        contexto_extra += f"\nReferencia bibliográfica:\n{fragmento_rag[:400]}\n"
 
-        
-        '.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}'
-        '.card{background:rgba(15,47,89,.65);border:1px solid rgba(195,165,90,.18);'
-        'border-radius:11px;padding:14px;transition:transform .2s,box-shadow .2s}'
-        '.card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.4)}'
-        '.cn{font-size:.7em;color:#8899aa;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:4px}'
-        '.cv{font-size:1.45em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
-        '.cd{font-size:.68em;color:#445566;margin-bottom:5px;line-height:1.3}'
-        '.spark{width:100%;height:38px;margin:5px 0}'
-        '.cf{font-size:.6em;color:#334455}'
+    prompt = f"""Eres un economista chileno experto. En MÁXIMO 2 oraciones breves y directas, explica POR QUÉ el indicador {nombre} {tendencia} de {val_ant:.2f} a {val_act:.2f} {unidad} ({var_pct:+.2f}%). 
+Usa el contexto del Banco Central y la teoría económica si corresponde.
+NO uses emojis, asteriscos ni formatos especiales. Responde solo las 2 oraciones, sin introducción.
+{contexto_extra}"""
 
-        
-        '.chart-wide{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.2);'
-        'border-radius:12px;padding:16px}'
-        '.chart-wide .ctitle{font-size:1em;color:#c3a55a;margin-bottom:10px;font-weight:600}'
-        '#chart6m{width:100%;height:340px}'
+    resp = llamar_groq(prompt, max_tokens=150, temperature=0.3)
+    if not resp:
+        if var_pct > 0:
+            return f"{nombre} aumentó {abs(var_pct):.2f}% respecto al período anterior."
+        elif var_pct < 0:
+            return f"{nombre} disminuyó {abs(var_pct):.2f}% respecto al período anterior."
+        else:
+            return f"{nombre} se mantuvo sin variación respecto al período anterior."
+    return resp.strip()
 
-        
-        '.hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}'
-        '.hcard{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.18);'
-        'border-radius:12px;padding:14px}'
-        '.htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;'
-        'padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}'
-        '.hchart{width:100%;height:220px}'
 
-        
-        'footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;'
-        'padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}'
-        'footer a{color:#3478c3;text-decoration:none}'
-        '</style></head><body>'
+def crear_grafico_indicadores(indicadores, explicaciones):
+    """
+    Genera imagen PNG con un dashboard de los indicadores económicos
+    incluyendo barras de variación y cuadros de texto con explicaciones.
+    """
+    import matplotlib.patches as mpatches
+    import matplotlib.gridspec as gridspec
+    import textwrap
 
-        '<header>'
-        '<h1>📈 INDICADORES ECONÓMICOS DE CHILE</h1>'
-        '<div class="sub">Datos en tiempo real · '
-        '<a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
-        'Banco Central de Chile · Generado: ' + gen + '</div>'
-        '</header>'
+    n = len(indicadores)
+    if n == 0:
+        return None
 
-        # --- Sección 1: Cards actuales ---
-        '<div class="section">'
-        '<div class="section-title">📊 Indicadores del Día</div>'
-        '<div class="cards">' + cards_html + '</div>'
-        '</div>'
+    # Paleta naval premium
+    COLOR_FONDO      = '#0B1929'
+    COLOR_PANEL      = '#0F2540'
+    COLOR_BORDE      = '#1E3A5F'
+    COLOR_TITULO     = '#E8F4FD'
+    COLOR_SUBTITULO  = '#7FB3D3'
+    COLOR_SUBE       = '#2ECC71'
+    COLOR_BAJA       = '#E74C3C'
+    COLOR_NEUTRO     = '#95A5A6'
+    COLOR_TEXTO      = '#D6EAF8'
+    COLOR_EXPLICACION= '#AED6F1'
+    COLOR_ACENTO     = '#F39C12'
 
-        # --- Sección 2: Dólar vs Euro 6 meses ---
-        '<div class="section">'
-        '<div class="section-title">💱 Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)</div>'
-        '<div class="chart-wide">'
-        '<div id="chart6m"></div>'
-        '</div>'
-        '</div>'
+    fig = plt.figure(figsize=(14, 4 + n * 2.1), facecolor=COLOR_FONDO)
+    fig.patch.set_facecolor(COLOR_FONDO)
 
-        # --- Sección 3: Histórico 10 años ---
-        '<div class="section">'
-        '<div class="section-title">📅 Series Históricas — Últimos 10 Años</div>'
-        '<div class="hist-grid">' + hist_cards_html + '</div>'
-        '</div>'
-
-        '<footer>'
-        'Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
-        'API REST gratuita · Banco Central de Chile · '
-        'Cofradía de Networking Bot v6'
-        '</footer>'
-
-        '<script>'
-        # Sparklines cards
-        + spark_js +
-
-        # Gráfico Dólar vs Euro 6 meses
-        'var c6m=echarts.init(document.getElementById("chart6m"));'
-        'c6m.setOption({'
-        'backgroundColor:"transparent",'
-        'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
-        'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
-        'formatter:function(p){'
-        'var s=p[0].name+"<br/>";'
-        'p.forEach(function(i){'
-        's+=\'<span style="color:\'+i.color+\'">●</span> \'+i.seriesName+\': \';'
-        'if(i.value===null||i.value==="-")s+="N/D";'
-        'else s+="$"+i.value.toLocaleString("es-CL");'
-        's+="<br/>";});return s;'
-        '}},'
-        'legend:{data:["Dólar USD","Euro EUR"],textStyle:{color:"#8899aa"},'
-        'top:4,right:10},'
-        'grid:{left:"10%",right:"5%",bottom:"12%",top:"14%"},'
-        'xAxis:{type:"category",data:' + labels_6m + ','
-        'axisLabel:{color:"#8899aa",fontSize:12},'
-        'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
-        'yAxis:{type:"value",'
-        'axisLabel:{color:"#8899aa",formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
-        'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
-        'series:['
-        '{name:"Dólar USD",type:"line",data:' + dolar_6m + ','
-        'smooth:true,symbol:"circle",symbolSize:7,'
-        'lineStyle:{color:"#3478c3",width:3},'
-        'itemStyle:{color:"#3478c3"},'
-        'label:{show:true,position:"top",color:"#3478c3",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
-        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-        'colorStops:[{offset:0,color:"#3478c344"},{offset:1,color:"transparent"}]}}},'
-        '{name:"Euro EUR",type:"line",data:' + euro_6m + ','
-        'smooth:true,symbol:"circle",symbolSize:7,'
-        'lineStyle:{color:"#2ecc71",width:3},'
-        'itemStyle:{color:"#2ecc71"},'
-        'label:{show:true,position:"bottom",color:"#2ecc71",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
-        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-        'colorStops:[{offset:0,color:"#2ecc7133"},{offset:1,color:"transparent"}]}}}]'
-        '});'
-
-        # Gráficos históricos 10 años
-        + hist_charts_js +
-
-        # Resize handler
-        'window.addEventListener("resize",function(){'  
-        'if(c6m)c6m.resize();'
-        'echarts.getInstanceByDom&&[' + 
-        ','.join(['"hist_'+cod+'"' for cod in HIST_ORDER if hist_10a.get(cod)]) +
-        '].forEach(function(id){var inst=echarts.getInstanceByDom(document.getElementById(id));if(inst)inst.resize();});'
-        '});'
-        '</script>'
-        '</body></html>'
+    # Título general
+    fig.text(
+        0.5, 0.985,
+        '📊  INDICADORES ECONÓMICOS CHILE',
+        ha='center', va='top',
+        fontsize=18, fontweight='bold', color=COLOR_TITULO,
+        fontfamily='DejaVu Sans'
     )
-    return html
+    hoy = datetime.now().strftime('%d/%m/%Y  %H:%M')
+    fig.text(
+        0.5, 0.968,
+        f'Fuente: Banco Central de Chile · mindicador.cl  ·  {hoy}',
+        ha='center', va='top',
+        fontsize=9, color=COLOR_SUBTITULO
+    )
+
+    # GridSpec: una fila por indicador
+    gs = gridspec.GridSpec(
+        n, 2,
+        figure=fig,
+        left=0.03, right=0.97,
+        top=0.94, bottom=0.02,
+        hspace=0.55, wspace=0.08,
+        width_ratios=[1, 2.8]
+    )
+
+    items = list(indicadores.items())
+
+    for i, (codigo, datos) in enumerate(items):
+        var_pct = datos['variacion_pct']
+        color_var = COLOR_SUBE if var_pct > 0 else (COLOR_BAJA if var_pct < 0 else COLOR_NEUTRO)
+        flecha = '▲' if var_pct > 0 else ('▼' if var_pct < 0 else '►')
+
+        # ── Celda izquierda: métricas ──────────────────────────────────────────
+        ax_num = fig.add_subplot(gs[i, 0])
+        ax_num.set_facecolor(COLOR_PANEL)
+        for spine in ax_num.spines.values():
+            spine.set_edgecolor(COLOR_BORDE)
+            spine.set_linewidth(1.2)
+        ax_num.set_xticks([])
+        ax_num.set_yticks([])
+
+        emoji = datos.get('emoji', '📊')
+        nombre = datos['nombre']
+        val_act = datos['valor_actual']
+        unidad = datos['unidad']
+        val_ant = datos['valor_anterior']
+        fecha = datos['fecha']
+
+        # Nombre del indicador
+        ax_num.text(0.5, 0.88, f"{emoji}  {nombre}",
+                    ha='center', va='top', fontsize=11, fontweight='bold',
+                    color=COLOR_TITULO, transform=ax_num.transAxes)
+
+        # Valor actual grande
+        fmt_val = f"{val_act:,.2f}" if unidad == 'CLP' else f"{val_act:.2f}%"
+        ax_num.text(0.5, 0.58, fmt_val,
+                    ha='center', va='center', fontsize=15, fontweight='bold',
+                    color=COLOR_TITULO, transform=ax_num.transAxes)
+
+        # Unidad
+        ax_num.text(0.5, 0.34, unidad,
+                    ha='center', va='center', fontsize=8,
+                    color=COLOR_SUBTITULO, transform=ax_num.transAxes)
+
+        # Variación con color
+        ax_num.text(0.5, 0.13,
+                    f"{flecha}  {var_pct:+.2f}%  vs anterior",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold',
+                    color=color_var, transform=ax_num.transAxes)
+
+        # Fecha
+        ax_num.text(0.98, 0.04, fecha,
+                    ha='right', va='bottom', fontsize=7,
+                    color=COLOR_SUBTITULO, transform=ax_num.transAxes)
+
+        # Borde de color según tendencia
+        rect = mpatches.FancyBboxPatch(
+            (0.0, 0.0), 1.0, 1.0,
+            boxstyle="round,pad=0.0",
+            linewidth=2.5,
+            edgecolor=color_var,
+            facecolor='none',
+            transform=ax_num.transAxes,
+            clip_on=False
+        )
+        ax_num.add_patch(rect)
+
+        # ── Celda derecha: explicación ─────────────────────────────────────────
+        ax_exp = fig.add_subplot(gs[i, 1])
+        ax_exp.set_facecolor('#0D1F33')
+        for spine in ax_exp.spines.values():
+            spine.set_edgecolor(COLOR_BORDE)
+            spine.set_linewidth(0.8)
+        ax_exp.set_xticks([])
+        ax_exp.set_yticks([])
+
+        ax_exp.text(0.02, 0.94, "¿POR QUÉ?",
+                    ha='left', va='top', fontsize=8, fontweight='bold',
+                    color=COLOR_ACENTO, transform=ax_exp.transAxes)
+
+        explicacion = explicaciones.get(codigo, "Sin datos suficientes.")
+        wrapped = textwrap.fill(explicacion, width=88)
+        ax_exp.text(0.02, 0.73, wrapped,
+                    ha='left', va='top', fontsize=8.5,
+                    color=COLOR_EXPLICACION,
+                    transform=ax_exp.transAxes,
+                    linespacing=1.45,
+                    wrap=True)
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=130, bbox_inches='tight',
+                facecolor=COLOR_FONDO, edgecolor='none')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico completo de Chile:
-      • 11 indicadores del día con sparkline 30 días
-      • Gráfico Dólar vs Euro últimos 6 meses
-      • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
-    Fuente: mindicador.cl (API REST gratuita, Banco Central de Chile)
+    /indicadores — Dashboard de indicadores económicos de Chile con explicaciones IA.
+    Fuentes: API Banco Central (mindicador.cl) + Web Scraping BCCH + RAG Libros de Finanzas.
     """
     msg = await update.message.reply_text(
-        "📈 Consultando indicadores económicos...\n"
-        "⏳ Descargando histórico 10 años (~15 s)"
+        "📊 Obteniendo indicadores del Banco Central...\n"
+        "⏳ Consultando fuentes y generando explicaciones con IA..."
     )
     try:
-        import asyncio as _aind
-        all_data = await _aind.get_event_loop().run_in_executor(
-            None, obtener_indicadores_chile)
+        # ── 1. Obtener datos numéricos ─────────────────────────────────────
+        loop = asyncio.get_running_loop()
+        indicadores = await loop.run_in_executor(None, obtener_indicadores_chile)
 
-        datos = all_data.get('datos_actuales', {})
-        if not datos:
-            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
+        if not indicadores:
+            await msg.edit_text(
+                "❌ No se pudo obtener datos del Banco Central.\n"
+                "Intenta más tarde o visita https://mindicador.cl"
+            )
             return
 
-        # ── Mensaje de texto resumido ──────────────────────────────────
-        sep   = "━" * 30
-        lineas = [
-            "*📈 INDICADORES ECONÓMICOS DE CHILE*",
-            sep,
-            "_Fuente: mindicador.cl — Banco Central de Chile_",
-            "",
-        ]
-        ORDER_MSG = ['uf','dolar','euro','utm','ipc','tpm',
-                     'bitcoin','tasa_desempleo','imacec','libra_cobre','ivp']
-        PORCENTAJES = {'ipc','tpm','tasa_desempleo','imacec'}
-        for cod in ORDER_MSG:
-            d = datos.get(cod)
-            if not d: continue
-            v    = d['valor']
-            if cod in PORCENTAJES:
-                vf = "{:.2f}%".format(v)
-            elif cod == 'bitcoin':
-                vf = "${:,.0f} CLP".format(v).replace(',','.')
-            elif cod == 'libra_cobre':
-                vf = "USD {:.4f}".format(v)
-            else:
-                vf = "${:,.2f} CLP".format(v).replace(',','X').replace('.',',').replace('X','.')
-            serie = d.get('serie30', [])
-            tend  = ''
-            if len(serie) >= 2:
-                v0 = serie[0].get('valor',0)
-                v1 = serie[1].get('valor',1)
-                if v1:
-                    pct  = ((v0-v1)/v1)*100
-                    tend = '  ' + ('▲' if pct>=0 else '▼') + ' {:.3f}%'.format(abs(pct))
-            lineas.append("*" + d['nombre'] + ":* " + vf + tend + "  _(" + d['fecha'] + ")_")
+        await msg.edit_text(
+            f"📊 {len(indicadores)} indicadores obtenidos.\n"
+            "🔍 Web scraping del Banco Central...\n"
+            "📚 Consultando biblioteca financiera RAG..."
+        )
 
-        # Comparativa Dólar vs Euro del mes actual
-        hist_6m  = all_data.get('hist_6m', {})
-        d6l = hist_6m.get('dolar', [])
-        e6l = hist_6m.get('euro', [])
-        if d6l and e6l and d6l[-1] and e6l[-1]:
-            lineas += [
-                "",
-                sep,
-                "*💱 Dólar vs Euro — últimos 6 meses:*",
-                "",
-            ]
-            for label, vd, ve in zip(hist_6m.get('labels',[]), d6l, e6l):
-                vds = "${:,.0f}".format(vd).replace(',','.') if vd else 'N/D'
-                ves = "${:,.0f}".format(ve).replace(',','.') if ve else 'N/D'
-                lineas.append("  *" + label + "* — USD " + vds + "  |  EUR " + ves)
+        # ── 2. Web scraping BCCH ───────────────────────────────────────────
+        noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
+        contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
 
-        lineas += [
-            "",
-            sep,
-            "💡 Se adjunta *dashboard interactivo* con gráficos históricos ECharts.",
-            "🔗 [mindicador.cl](https://mindicador.cl)",
-        ]
+        # ── 3. Consultar RAG para cada indicador ──────────────────────────
+        queries_rag = {
+            'uf':    'unidad de fomento inflación reajuste Chile',
+            'utm':   'unidad tributaria mensual impuestos Chile',
+            'dolar': 'tipo de cambio dólar peso chileno política cambiaria',
+            'euro':  'tipo de cambio euro moneda extranjera',
+            'ipc':   'índice de precios al consumidor inflación causas efectos',
+            'tpm':   'tasa de política monetaria banco central tasas de interés inflación',
+        }
 
-        await update.message.reply_text("\n".join(lineas), parse_mode='Markdown')
+        fragmentos_rag = {}
+        for codigo in indicadores:
+            query = queries_rag.get(codigo, f'indicador económico {codigo} Chile')
+            frag = await loop.run_in_executor(None, consultar_rag_economia, query)
+            fragmentos_rag[codigo] = frag
 
-        # ── Generar y enviar HTML ──────────────────────────────────────
-        await msg.edit_text("📊 Generando dashboard interactivo...")
-        html_ind  = _generar_html_indicadores(all_data)
-        html_path = "/tmp/ind_" + str(update.effective_user.id) + ".html"
-        with open(html_path, 'w', encoding='utf-8') as fh:
-            fh.write(html_ind)
-        with open(html_path, 'rb') as fh:
-            await update.message.reply_document(
-                document=fh,
-                filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
-                caption=(
-                    "📊 *Dashboard Indicadores Económicos Chile*\n\n"
-                    "• 11 indicadores del día con sparklines\n"
-                    "• 💱 Dólar vs Euro últimos 6 meses\n"
-                    "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC · "
-                    "Desempleo · IMACEC · Cobre · Bitcoin\n\n"
-                    "Abre en tu navegador para ver los gráficos interactivos."
-                ),
-                parse_mode='Markdown'
+        # ── 4. Generar explicaciones con IA ───────────────────────────────
+        await msg.edit_text(
+            f"🤖 Generando explicaciones con IA ({len(indicadores)} indicadores)...\n"
+            "📊 Creando gráfico de análisis..."
+        )
+
+        explicaciones = {}
+        for codigo, datos in indicadores.items():
+            exp = await loop.run_in_executor(
+                None,
+                generar_explicacion_indicador,
+                codigo,
+                datos,
+                contexto_bcch,
+                fragmentos_rag.get(codigo, '')
             )
-        try:
-            import os as _os; _os.remove(html_path)
-        except: pass
+            explicaciones[codigo] = exp
+
+        # ── 5. Generar gráfico ────────────────────────────────────────────
+        imagen_buf = await loop.run_in_executor(
+            None, crear_grafico_indicadores, indicadores, explicaciones
+        )
+
+        if not imagen_buf:
+            await msg.edit_text("❌ Error generando gráfico.")
+            return
+
+        # ── 6. Enviar imagen ──────────────────────────────────────────────
+        hoy = datetime.now().strftime('%d/%m/%Y')
+        caption_lines = [f"📊 INDICADORES ECONÓMICOS CHILE — {hoy}",
+                         "━" * 32,
+                         "Fuentes: Banco Central · mindicador.cl · Biblioteca RAG",
+                         ""]
+        for codigo, datos in indicadores.items():
+            var = datos['variacion_pct']
+            flecha = "▲" if var > 0 else ("▼" if var < 0 else "►")
+            caption_lines.append(
+                f"{datos['emoji']} {datos['nombre']}: {datos['valor_actual']:,.2f} {datos['unidad']}  "
+                f"{flecha}{abs(var):.2f}%"
+            )
+
+        caption = "\n".join(caption_lines)
+
+        await update.message.reply_photo(
+            photo=imagen_buf,
+            caption=caption[:1024]
+        )
         await msg.delete()
+
         registrar_servicio_usado(update.effective_user.id, 'indicadores')
 
     except Exception as e:
-        import traceback as _tb
-        logger.error("indicadores_comando: " + str(e) + "\n" + _tb.format_exc())
-        await msg.edit_text("❌ Error indicadores: " + str(e)[:120])
-
-
-# ==================== GLOBAL ERROR HANDLER ====================
-
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Captura TODOS los errores no manejados del bot y los loguea correctamente."""
-    import traceback as _tb
-
-    error = context.error
-    tb_str = ''.join(_tb.format_exception(type(error), error, error.__traceback__))
-
-    # Errores esperados que no necesitan alerta (red, Telegram timeouts)
-    ignorar = (
-        'Message is not modified',
-        'Query is too old',
-        'Bad Gateway',
-        'Timed out',
-        'Connection reset',
-        'Network',
-        'httpx',
-        'ReadTimeout',
-        'ConnectTimeout',
-        'RetryAfter',
-    )
-    for patron in ignorar:
-        if patron.lower() in str(error).lower():
-            logger.debug(f"Error esperado ignorado: {error}")
-            return
-
-    logger.error(f"Exception no manejada:\n{tb_str}")
-
-    # Intentar notificar al usuario si hay update activo
-    if update:
+        logger.error(f"Error en indicadores_comando: {e}", exc_info=True)
         try:
-            mensaje_error = "❌ Ocurrió un error inesperado. Por favor intenta de nuevo."
-            if hasattr(update, 'effective_message') and update.effective_message:
-                await update.effective_message.reply_text(mensaje_error)
-            elif hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.answer(mensaje_error, show_alert=True)
+            await msg.edit_text(f"❌ Error inesperado: {str(e)[:120]}")
         except Exception:
-            pass  # No propagar errores desde el error handler
+            pass
 
 
 def main():
@@ -16813,7 +14589,6 @@ def main():
     logger.info(f"📊 Groq IA: {'✅' if GROQ_API_KEY else '❌'} | DeepSeek: {'✅' if deepseek_disponible else '❌'} | IA Global: {'✅' if ia_disponible else '❌'}")
     logger.info(f"📷 Gemini OCR: {'✅' if gemini_disponible else '❌'}")
     logger.info(f"💼 JSearch (empleos reales): {'✅' if jsearch_disponible else '❌'}")
-    logger.info(f"🌐 Web Search: DuckDuckGo ✅ | Google CSE: {'✅' if GOOGLE_CSE_KEY else '⬜ (opcional)'} | Brave: {'✅' if BRAVE_API_KEY else '⬜ (opcional)'} | Jina AI ✅")
     logger.info(f"🗄️ Base de datos: {'Supabase' if DATABASE_URL else 'SQLite local'}")
     
     # Inicializar BD
@@ -16835,18 +14610,16 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook + evitar Conflict con instancias anteriores"""
-        # PASO 1: Esperar que instancias anteriores terminen
-        import time
-        time.sleep(3)
-        # PASO 2: Limpiar webhook y updates pendientes
+        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
+        # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Webhook eliminado — sin conflictos")
+            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
-        # PASO 3: Pausa para que Telegram procese la eliminación
-        await asyncio.sleep(3)
+        
+        # PASO 2: Esperar un momento para que Telegram procese la eliminación
+        await asyncio.sleep(2)
         
         # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
@@ -16898,7 +14671,6 @@ def main():
             BotCommand("ayuda", "Ver todos los comandos"),
             BotCommand("buscar", "Buscar en historial del grupo"),
             BotCommand("buscar_ia", "Busqueda inteligente con IA"),
-            BotCommand("buscar_web", "Buscar en Internet con IA"),
             BotCommand("rag_consulta", "Consultar documentos y libros"),
             BotCommand("buscar_profesional", "Buscar profesionales en Cofradia"),
             BotCommand("buscar_apoyo", "Buscar cofrades en busqueda laboral"),
@@ -16930,6 +14702,7 @@ def main():
             BotCommand("tarea", "Agregar tarea de networking"),
             BotCommand("mis_tareas", "Ver tus tareas pendientes"),
             BotCommand("briefing", "Briefing diario de networking"),
+            BotCommand("indicadores", "Indicadores economicos Chile con analisis IA"),
         ]
         try:
             await app.bot.set_my_commands(commands)
@@ -16939,7 +14712,6 @@ def main():
                 comandos_grupo = [
                     BotCommand("buscar", "Buscar en historial"),
                     BotCommand("buscar_ia", "Busqueda con IA"),
-                    BotCommand("buscar_web", "Buscar en Internet"),
                     BotCommand("rag_consulta", "Consultar documentos y libros"),
                     BotCommand("buscar_profesional", "Buscar profesionales"),
                     BotCommand("buscar_apoyo", "Cofrades en busqueda laboral"),
@@ -16950,6 +14722,7 @@ def main():
                     BotCommand("consultas", "Consultas abiertas"),
                     BotCommand("graficos", "Graficos de actividad"),
                     BotCommand("estadisticas", "Estadisticas del grupo"),
+                    BotCommand("indicadores", "Indicadores economicos Chile"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
                     BotCommand("mi_perfil", "Tu perfil de actividad"),
                     BotCommand("dotacion", "Total de integrantes"),
@@ -16969,16 +14742,6 @@ def main():
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
-    # ── Comandos v6.0 ──
-    application.add_handler(CommandHandler("match", match_cofrades_comando))
-    application.add_handler(CommandHandler("analizar", analizar_usuario_comando))
-    application.add_handler(CommandHandler("ofrezco", ofrezco_comando))
-    application.add_handler(CommandHandler("busco_servicio", busco_servicio_comando))
-    application.add_handler(CommandHandler("mis_servicios", mis_servicios_comando))
-    application.add_handler(CommandHandler("recordar", recordar_comando))
-    application.add_handler(CommandHandler("mantenimiento", mantenimiento_comando))
-    application.add_handler(CommandHandler("velocidad_voz", velocidad_voz_comando))
-    application.add_handler(CommandHandler("resumen_diario", resumen_diario_comando))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
     application.add_handler(CommandHandler("renovar", renovar_comando))
@@ -16995,6 +14758,7 @@ def main():
     # Handlers de estadísticas
     application.add_handler(CommandHandler("graficos", graficos_comando))
     application.add_handler(CommandHandler("estadisticas", estadisticas_comando))
+    application.add_handler(CommandHandler("indicadores", indicadores_comando))
     application.add_handler(CommandHandler("top_usuarios", top_usuarios_comando))
     application.add_handler(CommandHandler("categorias", categorias_comando))
     application.add_handler(CommandHandler("mi_perfil", mi_perfil_comando))
@@ -17078,9 +14842,6 @@ def main():
     application.add_handler(CommandHandler("tarea", nueva_tarea_comando))
     application.add_handler(CommandHandler("mis_tareas", mis_tareas_comando))
     application.add_handler(CommandHandler("briefing", briefing_diario_comando))
-    application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
-    application.add_handler(CommandHandler("feriados", feriados_comando))
-    application.add_handler(CommandHandler("indicadores", indicadores_comando))
     # Handlers dinámicos para /completar_ID, /ok_ID, /eliminar_agenda_ID
     application.add_handler(MessageHandler(
         filters.Regex(r'^/(completar_|ok_|eliminar_agenda_)\d+'),
@@ -17127,8 +14888,6 @@ def main():
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     
     # Handler de mensajes de voz (privado y grupo)
-    # Callback velocidad voz
-    # Botones velocidad eliminados
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
@@ -17149,47 +14908,9 @@ def main():
         if not es_owner and not verificar_suscripcion_activa(user_id):
             return  # El catch-all redirigirá a /start
         
-        # Verificar modo mantenimiento
-        mant = get_modo_mantenimiento()
-        if mant["activo"] and update.effective_user.id != OWNER_ID:
-            await update.message.reply_text(mant["mensaje"])
-            return
-
         mensaje = update.message.text.strip()
-        # Obtener nombre real del cofrade (tarjeta → suscripciones → Telegram)
-        _tg_name = update.effective_user.first_name or ''
-        user_name = _tg_name  # default
-        try:
-            _conn_n = get_db_connection()
-            if _conn_n:
-                _c_n = _conn_n.cursor()
-                # 1. Buscar nombre completo en tarjeta profesional
-                if DATABASE_URL:
-                    _c_n.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = %s", (update.effective_user.id,))
-                else:
-                    _c_n.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = ?", (update.effective_user.id,))
-                _row_n = _c_n.fetchone()
-                if _row_n:
-                    _nc = (_row_n['nombre_completo'] if DATABASE_URL else _row_n[0]) or ''
-                    if _nc.strip():
-                        # Usar solo el primer nombre del nombre completo registrado
-                        user_name = _nc.strip().split()[0]
-                else:
-                    # 2. Fallback a first_name en suscripciones
-                    if DATABASE_URL:
-                        _c_n.execute("SELECT first_name FROM suscripciones WHERE user_id = %s", (update.effective_user.id,))
-                    else:
-                        _c_n.execute("SELECT first_name FROM suscripciones WHERE user_id = ?", (update.effective_user.id,))
-                    _row_s = _c_n.fetchone()
-                    if _row_s:
-                        _fn = (_row_s['first_name'] if DATABASE_URL else _row_s[0]) or ''
-                        if _fn.strip():
-                            user_name = _fn.strip()
-                _conn_n.close()
-        except Exception as _en:
-            logger.debug(f"user_name lookup: {_en}")
-            user_name = _tg_name  # fallback seguro
-
+        user_name = update.effective_user.first_name
+        
         # SEGURIDAD: No aceptar instrucciones para modificar datos de usuarios
         patrones_peligrosos = [
             r'(?:su |el |la )?(?:apellido|nombre|generaci[oó]n)\s+(?:es|ser[ií]a|debe ser|cambia)',
@@ -17383,11 +15104,8 @@ def main():
             
             # ===== BÚSQUEDA EXHAUSTIVA EN TODAS LAS FUENTES =====
             # Usar query mejorada para búsqueda más precisa
-            # 1. Búsqueda unificada en thread para no bloquear el event loop
-            import asyncio as _asyncio
-            resultados_busq = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
-            )
+            # 1. Búsqueda unificada: historial + RAG (30-60 chunks)
+            resultados_busq = busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
             contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
             
@@ -17453,24 +15171,6 @@ def main():
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_tematica = resultados_busq.get('rag_tematica', 'desconocida')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
-
-            # ── BÚSQUEDA WEB AUTOMÁTICA ─────────────────────────────────────────────
-            # Se activa SOLO cuando el RAG e historial no tienen información relevante
-            contexto_web = ""
-            if (WEB_SEARCH_ENABLED and
-                rag_confianza in ('ninguna', 'irrelevante', 'baja') and
-                not resultados_busq.get('historial')):
-                try:
-                    import asyncio as _awc
-                    contexto_web = await _awc.get_event_loop().run_in_executor(
-                        None, lambda: buscar_en_web_para_ia(query_para_busqueda))
-                    if contexto_web:
-                        fuentes_usadas.append("Web (DuckDuckGo/Google)")
-                        fuentes_str = " | ".join(fuentes_usadas)
-                        logger.info(f"🌐 Web auto-activado para '{query_para_busqueda[:40]}'")
-                except Exception as _ew:
-                    logger.debug(f"Web search en handler: {_ew}")
-            # ── FIN BÚSQUEDA WEB ────────────────────────────────────────────────────
             
             # Intent hint
             intent_hint = ""
@@ -17497,7 +15197,7 @@ def main():
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
                     f"para esta consulta. LÉELOS y sintetiza una respuesta completa basándote en ellos."
                 )
-                ctx_rag = contexto_completo[:7000] + contexto_web
+                ctx_rag = contexto_completo[:7000]
                 fuentes_str_final = fuentes_str
                 logger.info(f"💬 Modo RAG para '{mensaje[:40]}'")
             else:
@@ -17507,81 +15207,46 @@ def main():
                     "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
                     "No menciones documentos, no pidas más contexto. Solo responde lo que sabes."
                 )
-                ctx_rag = contexto_web  # Web context cuando RAG no tiene info
+                ctx_rag = ""  # No pasar docs irrelevantes al LLM
                 fuentes_str_final = "Conocimiento propio del modelo"
                 logger.info(f"💬 Modo LLM para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
             prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
 
-Responde a {user_name} empezando con "{user_name},". Sé directo, completo y útil.{intent_hint}
+Responde a {user_name} empezando con "{user_name}," de forma directa y natural.{intent_hint}
 
 INSTRUCCIÓN: {instruccion}
 
-REGLAS OBLIGATORIAS:
-- NUNCA digas "no tengo información" si conoces el tema — responde con tu conocimiento hasta 2024
-- NUNCA inventes nombres de personas de la Cofradía
-- DESARROLLA la respuesta completamente: explica el tema en detalle, cubre pasos, requisitos, consideraciones
-- Usa formato claro: párrafos bien estructurados, puedes usar listas cuando ayude la claridad
-- Responde en español chileno profesional
-- Si hay documentos abajo, extrae y sintetiza la información relevante de ellos
+REGLAS:
+- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
+- Nunca inventes personas de la Cofradía
+- Responde completo, útil, en español, sin asteriscos
 
 {ctx_rag}
-{contexto_tarjetas[:800] if contexto_tarjetas else ''}
-{contexto_eventos[:300] if contexto_eventos else ''}
+{contexto_tarjetas[:600] if contexto_tarjetas else ''}
+{contexto_eventos[:200] if contexto_eventos else ''}
 
-PREGUNTA: {mensaje}{sugerencia_cmd}
-
-IMPORTANTE: Responde de forma COMPLETA y DETALLADA. No hagas respuestas de 3-4 líneas cuando el tema lo merece."""
+PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             fuentes_str = fuentes_str_final
 
             await msg.edit_text("🧠 Generando respuesta completa...")
-            import asyncio as _asyncio3
-
-            def _llamar_ia_texto():
-                r = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
-                if not r:
-                    r = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
-                return r
-
-            respuesta = await _asyncio3.get_event_loop().run_in_executor(None, _llamar_ia_texto)
+            respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
             
-            # Fallback emergencia si el prompt completo falló
             if not respuesta:
-                logger.warning(f"🚨 Texto prompt completo falló — emergencia para '{mensaje[:40]}'")
-                respuesta = llamar_ia_emergencia(mensaje, user_name)
-
+                respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
+            
             if respuesta:
-                # Enviar respuesta en texto (sin Markdown para evitar errores)
-                fuentes_footer = f"\n──────────────────\n🔍 Fuentes: {fuentes_str}"
-                respuesta_final = respuesta + fuentes_footer
+                # Agregar footer con fuentes consultadas
+                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}"
+                respuesta_final = respuesta + footer
                 try:
                     await msg.edit_text(respuesta_final, parse_mode='Markdown')
                 except Exception:
-                    try:
-                        await msg.edit_text(respuesta_final)
-                    except Exception as e_edit2:
-                        if "not modified" not in str(e_edit2).lower():
-                            logger.debug(f"edit_text texto: {e_edit2}")
-                # Generar audio de la respuesta
-                try:
-                    audio_txt = await generar_audio_tts(respuesta)
-                    if audio_txt:
-                        with open(audio_txt, "rb") as af:
-                            await update.message.reply_voice(voice=af, caption="🔊 Escuchar respuesta")
-                        try:
-                            import os as _ost
-                            _ost.remove(audio_txt)
-                        except:
-                            pass
-                except Exception as e_aud:
-                    logger.debug(f"Audio texto: {e_aud}")
+                    await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
             else:
-                await msg.edit_text(
-                    "Los modelos de IA están temporalmente ocupados.\n"
-                    "Intenta en 30 segundos o usa /buscar_ia para buscar en el historial."
-                )
+                await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
                 
         except Exception as e:
             logger.error(f"Error en chat privado: {e}")
@@ -17749,34 +15414,11 @@ IMPORTANTE: Responde de forma COMPLETA y DETALLADA. No hagas respuestas de 3-4 l
             logger.info("📧 Newsletter email programado: lunes 10:15 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter email: {e}")
-
-        # Job: Verificar recordatorios cada minuto
-        try:
-            job_queue.run_repeating(verificar_recordatorios, interval=60, first=10, name='recordatorios')
-            logger.info("⏰ Verificador de recordatorios activo (cada 1 min)")
-        except Exception as e:
-            logger.warning(f"No se pudo programar recordatorios: {e}")
-
-        # Job: Resumen diario personalizado — 12:00 UTC = 9:00 AM Chile
-        try:
-            from datetime import time as dt_time2
-            job_queue.run_daily(
-                enviar_resumenes_diarios,
-                time=dt_time2(hour=12, minute=0),
-                name='resumen_diario'
-            )
-            logger.info("☀️ Resumen diario programado: 9:00 AM Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar resumen diario: {e}")
     
     logger.info("✅ Bot iniciado!")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
-    # Registrar error handler global
-    application.add_error_handler(global_error_handler)
-    logger.info("✅ Error handler global registrado")
-
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
