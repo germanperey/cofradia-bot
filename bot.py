@@ -2654,7 +2654,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📅 EVENTOS Y CALENDARIO
 /eventos - Ver próximos eventos
 /asistir [ID] - Confirmar asistencia
-/feriados - Feriados legales de Chile 📅
+/feriados [año] - Feriados legales de Chile 📅
 
 🔔 ALERTAS
 /alertas - Ver/gestionar alertas
@@ -3738,7 +3738,7 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado)
+    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -14816,10 +14816,10 @@ def generar_html_indicadores(all_data, explicaciones):
     def fmt(v, cod):
         if v is None: return "N/D"
         if cod in PORCENTAJES: return "{:.2f}%".format(v)
-        if cod == "bitcoin":   return "${:,.0f}".format(v).replace(",", ".")
+        if cod == "bitcoin":   return "${:,.0f} USD".format(v).replace(",", ".")
         if cod == "libra_cobre": return "USD {:.4f}".format(v)
         if cod == "ipsa":      return "{:,.0f} pts".format(v).replace(",", ".")
-        if cod in ("solana", "ethereum"): return "${:,.0f} CLP".format(v).replace(",", ".")
+        if cod in ("solana", "ethereum"): return "${:,.0f} USD".format(v).replace(",", ".")
         return "${:,.2f}".format(v).replace(",", "X").replace(".", ",").replace("X", ".")
 
     def variacion_html(serie):
@@ -15538,13 +15538,13 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             elif cod in PORCENTAJES:
                 vf = "{:.2f}%".format(v)
             elif cod == 'bitcoin':
-                vf = "${:,.0f} CLP".format(v).replace(',', '.')
+                vf = "${:,.0f} USD".format(v).replace(',', '.')
             elif cod == 'libra_cobre':
                 vf = "USD {:.4f}".format(v)
             elif cod == 'ipsa':
                 vf = "{:,.0f} pts".format(v).replace(',', '.')
             elif cod in ('solana', 'ethereum'):
-                vf = "${:,.0f} CLP".format(v).replace(',', '.')
+                vf = "${:,.0f} USD".format(v).replace(',', '.')
             else:
                 vf = "${:,.2f} CLP".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
             serie = d.get('serie30', [])
@@ -15646,107 +15646,220 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @requiere_suscripcion
 async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /feriados - Feriados legales de Chile (año actual y próximo)"""
-    msg = await update.message.reply_text("📅 Consultando feriados legales de Chile...")
-    try:
-        loop  = asyncio.get_running_loop()
-        AHORA = datetime.now()
-        MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",
-                    5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",
-                    9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
-        DIAS_ES = {"Monday":"Lunes","Tuesday":"Martes","Wednesday":"Miercoles",
-                   "Thursday":"Jueves","Friday":"Viernes","Saturday":"Sabado","Sunday":"Domingo"}
-        TIPO_EMOJI = {"Civil":"🔵","Religioso":"✝️","Bancario":"🏦","Irrenunciable":"⭐"}
+    """
+    Comando /feriados [año] — Feriados legales de Chile.
+    Fuentes (en orden de preferencia):
+      1. API oficial Gobierno de Chile: apis.digital.gob.cl/fl/feriados/{año}
+      2. Backup boostr.cl: api.boostr.cl/holidays.json  (filtra por año)
+    """
+    AHORA     = datetime.now()
+    anio_arg  = None
+    if context.args:
+        try:
+            anio_arg = int(context.args[0])
+            if not (2000 <= anio_arg <= 2100):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Año inválido. Uso: /feriados [año]\n"
+                "Ejemplos: /feriados   /feriados 2026   /feriados 2027"
+            )
+            return
 
-        def _fetch_feriados(anio):
+    anio_base   = anio_arg or AHORA.year
+    anio_proxi  = None if anio_arg else (anio_base + 1)
+
+    msg = await update.message.reply_text(
+        f"📅 Consultando feriados de Chile {anio_base}..."
+    )
+    try:
+        loop = asyncio.get_running_loop()
+
+        MESES_ES  = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",
+                     5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",
+                     9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
+        DIAS_ES   = {"Monday":"Lunes","Tuesday":"Martes","Wednesday":"Miercoles",
+                     "Thursday":"Jueves","Friday":"Viernes",
+                     "Saturday":"Sabado","Sunday":"Domingo"}
+        TIPO_EMO  = {"Civil":"🔵","Religioso":"✝️","Bancario":"🏦",
+                     "Irrenunciable":"⭐","Religioso Irrenunciable":"⭐✝️"}
+
+        # ── Fuente 1: API Gobierno de Chile ──────────────────────────────────
+        def _fetch_gob(anio):
             try:
                 r = requests.get(
                     f"https://apis.digital.gob.cl/fl/feriados/{anio}",
                     headers={"Accept":"application/json","User-Agent":"CofrBot/6.0"},
-                    timeout=12
+                    timeout=10
                 )
                 if r.status_code == 200:
-                    return r.json()
+                    data = r.json()
+                    if isinstance(data, list) and data:
+                        return data, "Gobierno de Chile"
             except Exception as _e:
-                logger.debug(f"feriados API {anio}: {_e}")
-            return []
+                logger.debug(f"feriados gob {anio}: {_e}")
+            return None, None
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _afc
+        # ── Fuente 2: boostr.cl (backup) ─────────────────────────────────────
+        def _fetch_boostr(anio):
+            try:
+                r = requests.get(
+                    "https://api.boostr.cl/holidays.json",
+                    headers={"Accept":"application/json","User-Agent":"CofrBot/6.0"},
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    j = r.json()
+                    # Estructura: {"status":"success","data":[{"date":"YYYY-MM-DD","title":...,"type":...}]}
+                    raw = j if isinstance(j, list) else (j.get("data") or [])
+                    # Filtrar por año
+                    filtered = [
+                        {
+                            "fecha":  item.get("date") or item.get("fecha") or "",
+                            "nombre": item.get("title") or item.get("nombre") or "",
+                            "tipo":   item.get("type")  or item.get("tipo")  or "Civil",
+                        }
+                        for item in raw
+                        if str(item.get("date","") or item.get("fecha",""))[:4] == str(anio)
+                    ]
+                    if filtered:
+                        return filtered, "boostr.cl"
+            except Exception as _e:
+                logger.debug(f"feriados boostr {anio}: {_e}")
+            return None, None
+
+        def _get_feriados(anio):
+            data, fuente = _fetch_gob(anio)
+            if data:
+                return data, fuente
+            data, fuente = _fetch_boostr(anio)
+            if data:
+                return data, fuente
+            return [], "sin datos"
+
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as ex:
-            fa = ex.submit(_fetch_feriados, AHORA.year)
-            fb = ex.submit(_fetch_feriados, AHORA.year + 1)
-            fer_actual  = fa.result() or []
-            fer_proximo = fb.result() or []
+            fa = ex.submit(_get_feriados, anio_base)
+            fb = ex.submit(_get_feriados, anio_proxi) if anio_proxi else None
+            fer_base,  fuente_base  = fa.result()
+            fer_proxi, fuente_proxi = fb.result() if fb else ([], "")
 
-        if not fer_actual:
+        if not fer_base:
             await msg.edit_text(
-                "❌ No se pudieron obtener los feriados.\n"
-                "La API del Gobierno puede estar temporalmente inaccesible."
+                f"❌ No se pudieron obtener feriados para {anio_base}.\n"
+                "Ambas fuentes (Gobierno de Chile y boostr.cl) están inaccesibles.\n"
+                "Intenta nuevamente en unos minutos."
             )
             return
 
+        # ── Procesar y clasificar ──────────────────────────────────────────
         hoy      = AHORA.date()
         proximos = []
         pasados  = []
-        for f in fer_actual:
+
+        for f in fer_base:
+            fecha_raw = str(f.get("fecha") or f.get("date") or "")[:10]
+            if not fecha_raw:
+                continue
             try:
-                fd = __import__('datetime').date.fromisoformat(f["fecha"][:10])
+                from datetime import date as _date
+                fd = _date.fromisoformat(fecha_raw)
                 f["_date"] = fd
-                (proximos if fd >= hoy else pasados).append(f)
+                if anio_arg:
+                    proximos.append(f)   # si se pidió un año específico, todos van como "lista"
+                elif fd >= hoy:
+                    proximos.append(f)
+                else:
+                    pasados.append(f)
             except Exception:
                 pass
-        proximos.sort(key=lambda x: x["_date"])
-        pasados.sort(key=lambda x: x["_date"], reverse=True)
 
-        sep   = "━" * 32
-        lineas = [
-            "📅 FERIADOS LEGALES DE CHILE",
-            sep,
-            f"Año {AHORA.year}",
-            "",
-        ]
+        proximos.sort(key=lambda x: x.get("_date", hoy))
+        pasados.sort(key=lambda x: x.get("_date", hoy), reverse=True)
 
-        if proximos:
-            lineas.append("🔜 PRÓXIMOS FERIADOS:")
-            for f in proximos[:8]:
+        sep = "━" * 32
+
+        # ── Construir mensaje ──────────────────────────────────────────────
+        if anio_arg:
+            lineas = [
+                f"📅 FERIADOS DE CHILE — {anio_base}",
+                sep,
+                f"Fuente: {fuente_base}",
+                "",
+            ]
+            # Lista completa del año solicitado
+            for f in proximos:
                 fd   = f["_date"]
-                diff = (fd - hoy).days
-                nom  = f.get("nombre") or ""
-                tipo = f.get("tipo") or ""
-                emo  = TIPO_EMOJI.get(tipo, "📌")
+                nom  = f.get("nombre") or f.get("title") or ""
+                tipo = f.get("tipo")   or f.get("type")  or ""
+                emo  = TIPO_EMO.get(tipo, "📌")
                 dia  = DIAS_ES.get(fd.strftime("%A"), fd.strftime("%A"))
                 mes  = MESES_ES.get(fd.month, str(fd.month))
-                if diff == 0:   cerca = "  ← HOY 🎉"
-                elif diff == 1: cerca = "  ← ¡Mañana!"
-                elif diff <= 7: cerca = f"  ← en {diff} días"
-                else:           cerca = ""
-                lineas.append(f"{emo} {dia} {fd.day} {mes} {fd.year}{cerca}")
-                lineas.append(f"   {nom} [{tipo}]")
+                lineas.append(f"{emo} {dia} {fd.day} {mes} — {nom}")
+            lineas += [
+                "", sep,
+                f"📊 Total: {len(proximos)} feriados en {anio_base}",
+                "🔵 Civil  ✝️ Religioso  🏦 Bancario  ⭐ Irrenunciable",
+                f"Fuente: {fuente_base}"
+            ]
         else:
-            lineas.append("✅ No quedan feriados en el año actual.")
+            lineas = [
+                "📅 FERIADOS LEGALES DE CHILE",
+                sep,
+                f"Año {anio_base}  ·  Fuente: {fuente_base}",
+                "",
+            ]
+            # Próximos del año actual
+            if proximos:
+                lineas.append("🔜 PRÓXIMOS FERIADOS:")
+                for f in proximos[:10]:
+                    fd   = f["_date"]
+                    diff = (fd - hoy).days
+                    nom  = f.get("nombre") or f.get("title") or ""
+                    tipo = f.get("tipo")   or f.get("type")  or ""
+                    emo  = TIPO_EMO.get(tipo, "📌")
+                    dia  = DIAS_ES.get(fd.strftime("%A"), fd.strftime("%A"))
+                    mes  = MESES_ES.get(fd.month, str(fd.month))
+                    if diff == 0:   cerca = "  ← HOY 🎉"
+                    elif diff == 1: cerca = "  ← ¡Mañana!"
+                    elif diff <= 7: cerca = f"  ← en {diff} días"
+                    else:           cerca = ""
+                    lineas.append(f"{emo} {dia} {fd.day} {mes} {fd.year}{cerca}")
+                    lineas.append(f"   {nom} [{tipo}]")
+            else:
+                lineas.append("✅ No quedan feriados en el año actual.")
 
-        if fer_proximo:
-            fer_ps = sorted([f for f in fer_proximo if f.get("fecha")],
-                            key=lambda x: x["fecha"][:10])[:8]
-            lineas += ["", sep, f"📆 PRIMEROS FERIADOS {AHORA.year + 1}:"]
-            for f in fer_ps:
-                try:
-                    fd2 = __import__('datetime').date.fromisoformat(f["fecha"][:10])
-                    d2  = DIAS_ES.get(fd2.strftime("%A"), fd2.strftime("%A"))
-                    m2  = MESES_ES.get(fd2.month, str(fd2.month))
-                    n2  = f.get("nombre") or ""
-                    t2  = f.get("tipo") or ""
-                    e2  = TIPO_EMOJI.get(t2, "📌")
-                    lineas.append(f"{e2} {d2} {fd2.day} {m2} — {n2}")
-                except Exception:
-                    pass
+            # Año próximo
+            if fer_proxi:
+                fer_ps = sorted(
+                    [f for f in fer_proxi if f.get("fecha") or f.get("date")],
+                    key=lambda x: str(x.get("fecha","") or x.get("date",""))[:10]
+                )[:8]
+                lineas += ["", sep, f"📆 PRIMEROS FERIADOS {anio_proxi}:"]
+                for f in fer_ps:
+                    fecha_raw2 = str(f.get("fecha","") or f.get("date",""))[:10]
+                    try:
+                        from datetime import date as _date2
+                        fd2  = _date2.fromisoformat(fecha_raw2)
+                        d2   = DIAS_ES.get(fd2.strftime("%A"), fd2.strftime("%A"))
+                        m2   = MESES_ES.get(fd2.month, str(fd2.month))
+                        n2   = f.get("nombre") or f.get("title") or ""
+                        t2   = f.get("tipo")   or f.get("type")  or ""
+                        e2   = TIPO_EMO.get(t2, "📌")
+                        lineas.append(f"{e2} {d2} {fd2.day} {m2} — {n2}")
+                    except Exception:
+                        pass
 
-        lineas += [
-            "", sep,
-            f"📊 {AHORA.year}: {len(fer_actual)} feriados · {len(pasados)} pasados · {len(proximos)} por venir",
-            "🔵 Civil  ✝️ Religioso  🏦 Bancario  ⭐ Irrenunciable",
-            "Fuente: API Feriados · Gobierno de Chile"
-        ]
+            total_a = len(fer_base)
+            lineas += [
+                "", sep,
+                f"📊 {anio_base}: {total_a} feriados totales "
+                f"({len(pasados)} pasados · {len(proximos)} por venir)",
+                "🔵 Civil  ✝️ Religioso  🏦 Bancario  ⭐ Irrenunciable",
+                f"Fuente: {fuente_base}",
+                f"💡 Ver otro año: /feriados {anio_base + 1}",
+            ]
+
         await msg.edit_text("\n".join(lineas))
 
     except Exception as e:
