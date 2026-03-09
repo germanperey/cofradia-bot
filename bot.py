@@ -15722,6 +15722,83 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        motores = "DuckDuckGo"
+        if GOOGLE_CSE_KEY: motores += " + Google CSE"
+        if BRAVE_API_KEY:  motores += " + Brave"
+        motores += " + SearXNG"
+        await update.message.reply_text(
+            "Uso: /buscar_web [consulta]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_web noticias economia Chile hoy\n"
+            "  /buscar_web precio cobre bolsa\n"
+            "  /buscar_web requisitos visa trabajo Australia\n\n"
+            "Motores: " + motores + "\n"
+            "Resultados guardados en base de conocimientos automaticamente."
+        )
+        return
+
+    consulta = ' '.join(context.args)
+    user_id  = update.effective_user.id
+    msg      = await update.message.reply_text("Buscando en Internet...")
+    try:
+        import asyncio as _aw
+        web_result = await _aw.get_event_loop().run_in_executor(
+            None, lambda: buscar_en_web(consulta, extraer_contenido=True))
+
+        if not web_result or not web_result.get('resultados'):
+            await msg.edit_text("No encontre resultados para: " + consulta)
+            return
+
+        desde_cache = web_result.get('desde_cache', False)
+        motor       = web_result.get('fuente_motor', 'web')
+        resultados  = web_result.get('resultados', [])
+        badge       = "(desde cache)" if desde_cache else "(via " + motor + ")"
+
+        if ia_disponible:
+            await msg.edit_text("Sintetizando con IA...")
+            ctx = formatear_contexto_web(web_result)
+            prompt = (
+                "Eres el asistente IA de la Cofradia de Networking.\n"
+                "El usuario busco en Internet: \"" + consulta + "\"\n\n"
+                + ctx +
+                "\nSintetiza los resultados de forma clara en espanol chileno. "
+                "Cita fuentes por nombre. Maximo 400 palabras."
+            )
+            import asyncio as _aw2
+            def _ia():
+                r = llamar_groq(prompt, max_tokens=1000, temperature=0.4)
+                return r or llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.4)
+            resp_ia = await _aw2.get_event_loop().run_in_executor(None, _ia)
+        else:
+            resp_ia = None
+
+        await msg.delete()
+
+        if resp_ia:
+            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n" + resp_ia + "\n\n"
+            for i, it in enumerate(resultados[:3], 1):
+                t = it.get('titulo','')[:60]
+                u = it.get('url','')
+                if t: texto += str(i) + ". " + t + ("\n   " + u if u else "") + "\n"
+        else:
+            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n"
+            for i, it in enumerate(resultados, 1):
+                texto += str(i) + ". " + it.get('titulo','Sin titulo') + "\n"
+                if it.get('snippet'): texto += it['snippet'][:200] + "\n"
+                if it.get('url'):     texto += it['url'] + "\n"
+                texto += "\n"
+
+        await enviar_mensaje_largo(update, texto)
+        registrar_servicio_usado(user_id, 'buscar_web')
+        if not desde_cache and web_result.get('total', 0) > 0:
+            await update.message.reply_text("Resultados guardados. Proxima busqueda similar sera instantanea.")
+    except Exception as e:
+        logger.error("buscar_web_comando: " + str(e), exc_info=True)
+        await msg.edit_text("Error en busqueda web: " + str(e)[:100])
+
 # ==================== INDICADORES ECONÓMICOS CHILE v6.0 + IA ====================
 
 def obtener_indicadores_chile():
