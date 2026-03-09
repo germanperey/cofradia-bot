@@ -94,16 +94,11 @@ GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemin
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
 
-# ==================== CONFIGURACIÓN CMF (Comisión para el Mercado Financiero) ====================
-# API Key CMF — registrar en https://api.cmfchile.cl  (gratuita)
+# ── CMF (Comisión para el Mercado Financiero) ──────────────────────────────
+# API Key gratuita — registrar en https://api.cmfchile.cl con RUT chileno
+# Variable de entorno en Render: CMF_API_KEY
 CMF_API_KEY  = os.environ.get('CMF_API_KEY', 'SBIF9990SBIF44b7SBIF7f4c5a537d02358e1099')
 CMF_BASE_URL = 'https://api.cmfchile.cl/api-sbifv3/recursos_api'
-
-# ==================== CONFIGURACIÓN AFP (QueTalMiAFP) ====================
-AFP_API_KEY    = '5afad3802d3f2936c722fd41e9932eb34cef39468e'
-AFP_CUOTAS_URL = 'https://www.quetalmiafp.cl/api/Cuota/ObtenerCuotas'
-AFP_LISTA      = 'CAPITAL,CUPRUM,HABITAT,MODELO,PLANVITAL,PROVIDA,UNO'
-AFP_FONDOS     = 'A,B,C,D,E'
 
 # Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
@@ -5126,7 +5121,7 @@ function gauge(id,val,max,title,color){{
     title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
     detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
-    data:[{{value:{val},name:title}}]
+    data:[{{value:val,name:title}}]
   }}]}});
   window.addEventListener('resize',()=>c.resize());
 }}
@@ -14189,1616 +14184,6 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-async def ofrezco_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Registra un servicio ofrecido."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Publicar tu servicio:*\n\n"
-            "`/ofrezco [descripcion]`\n\n"
-            "Ejemplo:\n`/ofrezco Asesoria en derecho maritimo`",
-            parse_mode='Markdown'
-        )
-        return
-    descripcion = " ".join(context.args)[:300]
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"UPDATE servicios_cofrades SET activo=0 WHERE user_id={ph} AND tipo='ofrezco'", (user.id,))
-            c.execute(f"INSERT INTO servicios_cofrades (user_id, tipo, descripcion) VALUES ({ph},'ofrezco',{ph})", (user.id, descripcion))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Servicio publicado:\n_{descripcion}_\n\nLos cofrades te encontraran con `/busco`.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error ofrezco: {e}")
-        await update.message.reply_text("Error al registrar el servicio.")
-
-
-async def busco_servicio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Busca cofrades que ofrecen un servicio."""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Buscar servicio:*\n\n`/busco [lo que necesitas]`\n\nEjemplo:\n`/busco asesoria legal`",
-            parse_mode='Markdown'
-        )
-        return
-    busqueda = " ".join(context.args).lower()
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        if DATABASE_URL:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE %s
-                LIMIT 5""", (f"%{busqueda}%",))
-        else:
-            c.execute("""SELECT sc.descripcion, s.first_name, s.username
-                FROM servicios_cofrades sc
-                JOIN suscripciones s ON sc.user_id=s.user_id
-                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE ?
-                LIMIT 5""", (f"%{busqueda}%",))
-        resultados = c.fetchall()
-        conn.close()
-
-        if not resultados:
-            await update.message.reply_text(
-                f"Nadie ofrece *{busqueda}* por ahora.\n\n"
-                "Si tu lo ofreces, publicate con `/ofrezco [descripcion]`",
-                parse_mode='Markdown'
-            )
-            return
-
-        texto = f"*Cofrades que ofrecen '{busqueda}':*\n\n"
-        for desc, fname, uname in resultados:
-            contacto = f"@{uname}" if uname else fname
-            texto += f"*{fname}* ({contacto})\n_{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error busco_servicio: {e}")
-        await update.message.reply_text("Error al buscar.")
-
-
-async def mis_servicios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra servicios publicados por el usuario."""
-    user = update.effective_user
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("Error de conexion.")
-            return
-        c = conn.cursor()
-        ph = "%s" if DATABASE_URL else "?"
-        c.execute(f"SELECT tipo, descripcion FROM servicios_cofrades WHERE user_id={ph} AND activo=1", (user.id,))
-        servicios = c.fetchall()
-        conn.close()
-
-        if not servicios:
-            await update.message.reply_text(
-                "No tienes servicios publicados.\n\n"
-                "• `/ofrezco [descripcion]` — publica lo que ofreces\n"
-                "• `/busco [servicio]` — busca lo que necesitas"
-            )
-            return
-
-        texto = "*Tus servicios publicados:*\n\n"
-        for tipo, desc in servicios:
-            icono = "🟢" if tipo == "ofrezco" else "🔵"
-            texto += f"{icono} _{desc}_\n\n"
-        await update.message.reply_text(texto, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error mis_servicios: {e}")
-        await update.message.reply_text("Error al obtener servicios.")
-
-
-async def recordar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Crea recordatorio. Uso: /recordar 2h Llamar a Juan"""
-    user = update.effective_user
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "*Crear recordatorio:*\n\n"
-            "`/recordar [tiempo] [mensaje]`\n\n"
-            "*Ejemplos:*\n"
-            "`/recordar 30m Revisar propuesta`\n"
-            "`/recordar 2h Llamar al cliente`\n"
-            "`/recordar 1d Seguimiento reunion`",
-            parse_mode='Markdown'
-        )
-        return
-
-    tiempo_str = context.args[0].lower()
-    mensaje = " ".join(context.args[1:])
-    from datetime import datetime, timedelta
-    ahora = datetime.utcnow()
-    try:
-        if tiempo_str.endswith('m'):
-            delta = timedelta(minutes=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('h'):
-            delta = timedelta(hours=int(tiempo_str[:-1]))
-        elif tiempo_str.endswith('d'):
-            delta = timedelta(days=int(tiempo_str[:-1]))
-        else:
-            raise ValueError()
-        fecha_recordar = ahora + delta
-    except Exception:
-        await update.message.reply_text("Formato invalido. Usa: 30m, 2h, 1d")
-        return
-
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            ph = "%s" if DATABASE_URL else "?"
-            c.execute(f"INSERT INTO recordatorios (user_id, mensaje, fecha_recordar) VALUES ({ph},{ph},{ph})",
-                     (user.id, mensaje, fecha_recordar if DATABASE_URL else fecha_recordar.isoformat()))
-            conn.commit()
-            conn.close()
-        await update.message.reply_text(
-            f"Recordatorio creado:\n_{mensaje}_\n\nTe avisare en {tiempo_str}.",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error recordar: {e}")
-        await update.message.reply_text("Error al crear recordatorio.")
-
-
-async def verificar_recordatorios(context):
-    """Job: envía recordatorios pendientes cada minuto."""
-    from datetime import datetime
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        ahora = datetime.utcnow()
-        if DATABASE_URL:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= %s", (ahora,))
-        else:
-            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= ?", (ahora.isoformat(),))
-        pendientes = c.fetchall()
-        for row in pendientes:
-            try:
-                # Supabase devuelve dict, SQLite devuelve tuple
-                if DATABASE_URL:
-                    rec_id = row['id']
-                    uid    = row['user_id']
-                    msg    = row['mensaje']
-                else:
-                    rec_id, uid, msg = row[0], row[1], row[2]
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text="⏰ *Recordatorio Cofradía*\n\n" + str(msg),
-                    parse_mode='Markdown'
-                )
-                ph = "%s" if DATABASE_URL else "?"
-                c.execute(f"UPDATE recordatorios SET enviado=1 WHERE id={ph}", (rec_id,))
-                logger.info(f"✅ Recordatorio {rec_id} enviado a {uid}")
-            except Exception as e:
-                logger.warning(f"Error recordatorio {rec_id}: {e}")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Error verificando recordatorios: {e}")
-
-
-async def mantenimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: activa/desactiva modo mantenimiento."""
-    user = update.effective_user
-    if user.id != OWNER_ID:
-        await update.message.reply_text("Solo el administrador puede usar este comando.")
-        return
-    if not context.args:
-        estado = get_modo_mantenimiento()
-        txt = "ACTIVO" if estado["activo"] else "INACTIVO"
-        await update.message.reply_text(
-            f"Modo Mantenimiento: *{txt}*\n\n"
-            "`/mantenimiento on [mensaje]`\n`/mantenimiento off`",
-            parse_mode='Markdown'
-        )
-        return
-    accion = context.args[0].lower()
-    if accion == "on":
-        msg_c = " ".join(context.args[1:]) if len(context.args) > 1 else "El bot esta en mantenimiento. Volvemos pronto."
-        set_modo_mantenimiento(True, msg_c, user.id)
-        await update.message.reply_text(f"Modo mantenimiento ACTIVADO\n\n_{msg_c}_", parse_mode='Markdown')
-    elif accion == "off":
-        set_modo_mantenimiento(False, "", user.id)
-        await update.message.reply_text("Modo mantenimiento DESACTIVADO — Bot operativo.")
-    else:
-        await update.message.reply_text("Usa: `/mantenimiento on` o `/mantenimiento off`", parse_mode='Markdown')
-
-
-async def velocidad_voz_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ajusta velocidad de la voz del bot."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    actual = pref.get("velocidad", "normal")
-    emojis = {"lento": "🐢", "normal": "▶️", "rapido": "🐇"}
-    await update.message.reply_text(
-        f"Velocidad de voz actual: {emojis.get(actual,'')} *{actual.upper()}*\n\nSelecciona tu preferencia:",
-        parse_mode='Markdown'
-    )
-
-
-async def resumen_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activa/desactiva resumen diario personalizado por audio."""
-    user = update.effective_user
-    pref = get_preferencia_voz(user.id)
-    activo = pref.get("resumen_diario", 0)
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            nuevo = 0 if activo else 1
-            if DATABASE_URL:
-                c.execute("""INSERT INTO preferencias_usuario (user_id, resumen_diario)
-                    VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET resumen_diario=EXCLUDED.resumen_diario""",
-                    (user.id, nuevo))
-            else:
-                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, resumen_diario) VALUES (?, ?)", (user.id, nuevo))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Error resumen_diario: {e}")
-
-    if activo:
-        await update.message.reply_text("Resumen diario *desactivado*.", parse_mode='Markdown')
-    else:
-        await update.message.reply_text(
-            "Resumen diario *activado*\n\n"
-            "Recibiras un audio cada manana a las 9:00 AM Chile\n"
-            "con novedades relevantes para ti.\n\n"
-            "Para desactivar, usa `/resumen_diario` de nuevo.",
-            parse_mode='Markdown'
-        )
-
-
-async def enviar_resumenes_diarios(context):
-    """Job matutino: envia resumen personalizado por audio."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        c.execute("""SELECT p.user_id, s.first_name FROM preferencias_usuario p
-            JOIN suscripciones s ON p.user_id=s.user_id
-            WHERE p.resumen_diario=1 AND s.estado='activo'""")
-        usuarios = c.fetchall()
-        conn.close()
-        for uid, nombre in usuarios:
-            try:
-                prompt = (
-                    f"Crea un resumen ejecutivo breve (4 oraciones maximas) para {nombre}, "
-                    "miembro de Cofradia de Networking. Incluye: novedades networking profesional, "
-                    "mercado laboral chileno, y algo motivador. Sin listas ni emojis."
-                )
-                resumen = llamar_groq(prompt, max_tokens=200, temperature=0.7)
-                if not resumen:
-                    resumen = llamar_gemini_texto(prompt, max_tokens=200, temperature=0.7)
-                if resumen:
-                    audio_file = await generar_audio_con_velocidad(resumen, uid, f"/tmp/resumen_{uid}.mp3")
-                    if audio_file:
-                        import os
-                        with open(audio_file, 'rb') as f:
-                            await context.bot.send_voice(
-                                chat_id=uid, voice=f,
-                                caption=f"Buenos dias, {nombre}! Tu resumen diario de la Cofradia."
-                            )
-                        try:
-                            os.remove(audio_file)
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"Error resumen a {uid}: {e}")
-    except Exception as e:
-        logger.warning(f"Error resumenes diarios: {e}")
-
-
-# ==================== ANÁLISIS DE USUARIOS ====================
-
-async def analizar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analiza mensajes recientes de un cofrade. Uso: /analizar @username"""
-    user = update.effective_user
-    if not context.args:
-        await update.message.reply_text(
-            "*Analizar a un cofrade:*\n\n"
-            "`/analizar @username` o `/analizar Nombre`\n\n"
-            "Busca sus mensajes recientes y genera un análisis de su expertise, "
-            "temas de interes y aportes destacados.",
-            parse_mode="Markdown"
-        )
-        return
-
-    busqueda = " ".join(context.args).replace("@", "").strip()
-    msg = await update.message.reply_text(f"Analizando mensajes recientes de *{busqueda}*...", parse_mode="Markdown")
-
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await msg.edit_text("Error de conexion.")
-            return
-        c = conn.cursor()
-
-        if DATABASE_URL:
-            c.execute("""SELECT user_id, first_name, username FROM suscripciones
-                WHERE LOWER(username) = %s OR LOWER(first_name) LIKE %s LIMIT 1""",
-                (busqueda.lower(), f"%{busqueda.lower()}%"))
-        else:
-            c.execute("""SELECT user_id, first_name, username FROM suscripciones
-                WHERE LOWER(username) = ? OR LOWER(first_name) LIKE ? LIMIT 1""",
-                (busqueda.lower(), f"%{busqueda.lower()}%"))
-        cofrade = c.fetchone()
-
-        if not cofrade:
-            await msg.edit_text(f"No encontre a *{busqueda}* en la Cofradia.", parse_mode="Markdown")
-            conn.close()
-            return
-
-        if DATABASE_URL:
-            uid_c = cofrade["user_id"]
-            nombre_c = cofrade["first_name"]
-            uname_c = cofrade.get("username", "") or ""
-        else:
-            uid_c, nombre_c, uname_c = cofrade[0], cofrade[1], (cofrade[2] or "")
-
-        if DATABASE_URL:
-            c.execute("""SELECT contenido FROM mensajes
-                WHERE user_id = %s AND contenido IS NOT NULL
-                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
-        else:
-            c.execute("""SELECT contenido FROM mensajes
-                WHERE user_id = ? AND contenido IS NOT NULL
-                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
-        rows = c.fetchall()
-        conn.close()
-
-        if not rows:
-            await msg.edit_text(
-                f"*{nombre_c}* no tiene mensajes recientes en el sistema.",
-                parse_mode="Markdown"
-            )
-            return
-
-        textos = [r["contenido"] if DATABASE_URL else r[0] for r in rows if (r["contenido"] if DATABASE_URL else r[0])]
-        mensajes_str = "\n---\n".join(textos[:20])
-
-        prompt = (
-            f"Eres un analista experto en networking profesional chileno.\n"
-            f"Analiza los mensajes recientes de {nombre_c} en la Cofradia de Networking:\n\n"
-            f"MENSAJES:\n{mensajes_str}\n\n"
-            f"Genera un analisis con:\n"
-            f"1. Temas de interes y expertise demostrado\n"
-            f"2. Recomendaciones o insights destacados que ha compartido\n"
-            f"3. Perfil profesional inferido\n"
-            f"4. Tu evaluacion y que agregas al respecto\n\n"
-            f"Se especifico y menciona ejemplos concretos. Maximo 200 palabras."
-        )
-
-        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.7)
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
-        if not respuesta:
-            await msg.edit_text("No pude generar el analisis ahora. Intenta en un momento.")
-            return
-
-        contacto = f"@{uname_c}" if uname_c else nombre_c
-        texto_final = (
-            f"Analisis de *{nombre_c}* ({contacto})\n"
-            f"Basado en {len(textos)} mensajes recientes\n\n"
-            f"{respuesta}"
-        )
-        await msg.edit_text(texto_final, parse_mode="Markdown")
-
-        # Audio del analisis
-        try:
-            audio_file = await generar_audio_con_velocidad(respuesta, user.id, f"/tmp/analisis_{uid_c}.mp3")
-            if audio_file:
-                import os as _os
-                with open(audio_file, "rb") as af:
-                    await update.message.reply_voice(
-                        voice=af,
-                        caption=f"Analisis de {nombre_c}"
-                    )
-                try: _os.remove(audio_file)
-                except: pass
-        except Exception as e:
-            logger.warning(f"Error audio analisis: {e}")
-
-    except Exception as e:
-        logger.error(f"Error analizar_usuario: {e}")
-        await msg.edit_text("Error al analizar. Intenta de nuevo.")
-
-
-# ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
-
-async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agente IA que analiza el perfil del usuario y genera un plan de networking personalizado"""
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Esta función requiere suscripción activa. Escribe /start")
-        return
-    
-    msg = await update.message.reply_text("🤖 Agente de Networking activado...\n🔍 Analizando tu perfil y la comunidad...")
-    
-    try:
-        # Obtener perfil del usuario
-        conn = get_db_connection()
-        tarjeta = None
-        miembro_data = None
-        agenda_items = []
-        tareas_pend = []
-        
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
-                tarjeta = c.fetchone()
-                c.execute("SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = %s LIMIT 1", (user_id,))
-                miembro_data = c.fetchone()
-                c.execute("""SELECT titulo, fecha_evento, tipo FROM agenda_personal 
-                             WHERE user_id = %s AND completada = FALSE AND fecha_evento >= NOW() 
-                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
-                agenda_items = c.fetchall()
-                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
-                             WHERE user_id = %s AND completada = FALSE 
-                             ORDER BY fecha_creacion DESC LIMIT 5""", (user_id,))
-                tareas_pend = c.fetchall()
-            else:
-                c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
-                tarjeta = c.fetchone()
-                c.execute("SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = ? LIMIT 1", (user_id,))
-                miembro_data = c.fetchone()
-                c.execute("""SELECT titulo, fecha_evento, tipo FROM agenda_personal 
-                             WHERE user_id = ? AND completada = 0 AND fecha_evento >= datetime('now') 
-                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
-                agenda_items = c.fetchall()
-                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
-                             WHERE user_id = ? AND completada = 0 
-                             ORDER BY fecha_creacion DESC LIMIT 5""", (user_id,))
-                tareas_pend = c.fetchall()
-            conn.close()
-        
-        # Construir info del perfil
-        perfil_str = ""
-        if tarjeta:
-            if DATABASE_URL:
-                perfil_str = (f"Nombre: {tarjeta['nombre_completo']}\nProfesión: {tarjeta['profesion']}\n"
-                             f"Empresa: {tarjeta['empresa']}\nCiudad: {tarjeta['ciudad']}\n"
-                             f"Servicios: {tarjeta['servicios']}")
-            else:
-                perfil_str = f"Nombre: {tarjeta[1]}\nProfesión: {tarjeta[2]}\nEmpresa: {tarjeta[3]}\nCiudad: {tarjeta[7]}\nServicios: {tarjeta[4]}"
-        elif miembro_data:
-            if DATABASE_URL:
-                perfil_str = f"Nombre: {miembro_data['nombre']} {miembro_data['apellido']}\nGeneración: {miembro_data['generacion']}"
-            else:
-                perfil_str = f"Nombre: {miembro_data[0]} {miembro_data[1]}\nGeneración: {miembro_data[2]}"
-        else:
-            perfil_str = f"Usuario: {user.first_name} {user.last_name or ''}"
-        
-        agenda_str = ""
-        if agenda_items:
-            lines = []
-            for item in agenda_items:
-                if DATABASE_URL:
-                    lines.append(f"• {item['titulo']} ({str(item['fecha_evento'])[:10]})")
-                else:
-                    lines.append(f"• {item[0]} ({str(item[1])[:10]})")
-            agenda_str = "Próximos eventos agendados:\n" + "\n".join(lines)
-        
-        tareas_str = ""
-        if tareas_pend:
-            lines = []
-            for t in tareas_pend:
-                if DATABASE_URL:
-                    lines.append(f"• [{t['prioridad'].upper()}] {t['tarea']} ({t['categoria']})")
-                else:
-                    lines.append(f"• [{t[1].upper()}] {t[0]} ({t[2]})")
-            tareas_str = "Tareas pendientes:\n" + "\n".join(lines)
-        
-        # Búsqueda de contexto comunitario
-        resultados_com = busqueda_unificada(
-            f"{user.first_name} networking profesional oportunidades", 
-            limit_historial=10, limit_rag=20
-        )
-        contexto_com = formatear_contexto_unificado(resultados_com, "networking")
-        
-        argumento = " ".join(context.args) if context.args else ""
-        
-        prompt = f"""Eres el AGENTE DE NETWORKING de la Cofradía, un asistente IA proactivo y estratégico especializado en desarrollo profesional y networking para oficiales navales.
-
-PERFIL DEL COFRADE:
-{perfil_str}
-{agenda_str}
-{tareas_str}
-
-CONTEXTO DE LA COMUNIDAD:
-{contexto_com[:2000]}
-
-SOLICITUD DEL USUARIO: {argumento if argumento else 'Análisis general y plan de acción'}
-
-GENERA UN PLAN DE NETWORKING PERSONALIZADO que incluya:
-1. 🎯 **Diagnóstico** (2-3 líneas sobre su posición actual en la red)
-2. 🤝 **Top 3 acciones de networking** para esta semana (específicas y accionables)
-3. 📢 **Oportunidades detectadas** en la comunidad relevantes para su perfil
-4. 📅 **Sugerencia de agenda**: qué actividad programar esta semana
-5. 💡 **Tip estratégico** de networking para su sector/perfil
-6. 🛠️ **Comandos útiles** del bot que debería usar
-
-Sé específico, motivador y con lenguaje profesional pero cercano. Tutéalo como camarada naval."""
-        
-        await msg.edit_text("🤖 Generando plan estratégico personalizado...")
-        respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.6)
-        
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.6)
-        
-        if respuesta:
-            header = f"🤖 *AGENTE DE NETWORKING - Plan para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n\n{respuesta}")
-        else:
-            await msg.edit_text("❌ No pude generar el plan en este momento. Intenta de nuevo.")
-        
-        registrar_servicio_usado(user_id, 'agente_networking')
-        
-    except Exception as e:
-        logger.error(f"Error en agente networking: {e}")
-        import traceback; logger.error(traceback.format_exc())
-        await msg.edit_text(f"❌ Error en el agente: {str(e)[:100]}")
-
-
-async def agendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agenda una actividad/reunión con recordatorio automático.
-    Uso: /agendar FECHA HORA Título | Descripción | Lugar | Participantes
-    Ejemplo: /agendar 2026-03-15 10:00 Reunión con Juan | Explorar alianza comercial | Cafe Caribe | @juan_cofrade
-    """
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
-        return
-    
-    if not context.args or len(context.args) < 3:
-        await update.message.reply_text(
-            "📅 *Agenda una actividad con recordatorio automático*\n\n"
-            "*Uso:* `/agendar FECHA HORA Título`\n"
-            "*Ejemplo:* `/agendar 2026-03-15 10:00 Reunión de networking con ex-cofrades`\n\n"
-            "*Formato completo:* `/agendar FECHA HORA Título | Descripción | Lugar | Participantes`\n\n"
-            "💡 El bot te enviará un recordatorio automático 1 hora antes.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        # Parsear fecha y hora
-        fecha_str = context.args[0]
-        hora_str = context.args[1]
-        resto = " ".join(context.args[2:])
-        
-        partes = [p.strip() for p in resto.split("|")]
-        titulo = partes[0] if partes else "Actividad de Networking"
-        descripcion = partes[1] if len(partes) > 1 else ""
-        lugar = partes[2] if len(partes) > 2 else ""
-        participantes = partes[3] if len(partes) > 3 else ""
-        
-        # Parsear datetime
-        try:
-            fecha_evento = datetime.strptime(f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Formato de fecha/hora incorrecto.\n"
-                "Usa: `AAAA-MM-DD HH:MM`\nEjemplo: `2026-03-15 10:00`",
-                parse_mode='Markdown'
-            )
-            return
-        
-        if fecha_evento < datetime.now():
-            await update.message.reply_text("⚠️ La fecha ya pasó. Ingresa una fecha futura.")
-            return
-        
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Error de conexión a la base de datos.")
-            return
-        
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("""INSERT INTO agenda_personal 
-                        (user_id, titulo, descripcion, fecha_evento, lugar, tipo, participantes)
-                        VALUES (%s, %s, %s, %s, %s, 'reunion', %s) RETURNING id""",
-                     (user_id, titulo, descripcion, fecha_evento, lugar, participantes))
-            agenda_id = c.fetchone()['id']
-        else:
-            c.execute("""INSERT INTO agenda_personal 
-                        (user_id, titulo, descripcion, fecha_evento, lugar, tipo, participantes)
-                        VALUES (?,?,?,?,?,'reunion',?)""",
-                     (user_id, titulo, descripcion, fecha_evento.strftime('%Y-%m-%d %H:%M:%S'), lugar, participantes))
-            agenda_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        
-        # Generar resumen con IA
-        prompt_resumen = f"""El cofrade {user.first_name} agendó esta actividad de networking:
-Título: {titulo}
-Descripción: {descripcion}
-Lugar: {lugar}
-Participantes: {participantes}
-Fecha: {fecha_evento.strftime('%d/%m/%Y a las %H:%M')}
-
-En 2-3 oraciones: (1) Confirma el agendamiento con entusiasmo, (2) Da 1 consejo práctico para prepararse para esta reunión/actividad, (3) Sugiere qué llevar o cómo sacar máximo provecho del networking."""
-        
-        consejo = llamar_groq(prompt_resumen, max_tokens=300, temperature=0.7) or ""
-        
-        respuesta = (
-            f"✅ *¡Actividad agendada exitosamente!* (ID: #{agenda_id})\n\n"
-            f"📌 *{titulo}*\n"
-            f"📅 {fecha_evento.strftime('%A %d/%m/%Y a las %H:%M')}\n"
-        )
-        if lugar:
-            respuesta += f"📍 {lugar}\n"
-        if participantes:
-            respuesta += f"👥 {participantes}\n"
-        if descripcion:
-            respuesta += f"📝 {descripcion}\n"
-        respuesta += f"\n🔔 _Recibirás un recordatorio automático 1 hora antes._\n"
-        if consejo:
-            respuesta += f"\n💡 {consejo}"
-        respuesta += f"\n\n📋 Ver agenda: /mi_agenda | ✅ Marcar completa: /completar_{agenda_id}"
-        
-        try:
-            await update.message.reply_text(respuesta, parse_mode='Markdown')
-        except Exception:
-            await update.message.reply_text(respuesta.replace('*', '').replace('_', ''))
-        
-        registrar_servicio_usado(user_id, 'agendar')
-        
-    except Exception as e:
-        logger.error(f"Error en /agendar: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def mi_agenda_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra la agenda personal del usuario con próximas actividades"""
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
-        return
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Error de conexión.")
-            return
-        
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("""SELECT id, titulo, fecha_evento, lugar, tipo, participantes, descripcion, completada 
-                        FROM agenda_personal WHERE user_id = %s 
-                        ORDER BY completada ASC, fecha_evento ASC LIMIT 20""", (user_id,))
-        else:
-            c.execute("""SELECT id, titulo, fecha_evento, lugar, tipo, participantes, descripcion, completada 
-                        FROM agenda_personal WHERE user_id = ? 
-                        ORDER BY completada ASC, fecha_evento ASC LIMIT 20""", (user_id,))
-        items = c.fetchall()
-        conn.close()
-        
-        if not items:
-            await update.message.reply_text(
-                "📅 *Tu agenda está vacía*\n\n"
-                "Agenda tu primera actividad con:\n"
-                "`/agendar AAAA-MM-DD HH:MM Título | Descripción | Lugar`",
-                parse_mode='Markdown'
-            )
-            return
-        
-        ahora = datetime.now()
-        proximas = []
-        pasadas = []
-        completadas = []
-        
-        for item in items:
-            if DATABASE_URL:
-                item_id, titulo, fecha, lugar, tipo, partic, desc, comp = (
-                    item['id'], item['titulo'], item['fecha_evento'], 
-                    item['lugar'], item['tipo'], item['participantes'],
-                    item['descripcion'], item['completada']
-                )
-            else:
-                item_id, titulo, fecha, lugar, tipo, partic, desc, comp = item
-            
-            fecha_dt = fecha if hasattr(fecha, 'strftime') else datetime.strptime(str(fecha)[:19], '%Y-%m-%d %H:%M:%S')
-            
-            if comp:
-                completadas.append((item_id, titulo, fecha_dt, lugar))
-            elif fecha_dt >= ahora:
-                proximas.append((item_id, titulo, fecha_dt, lugar, partic))
-            else:
-                pasadas.append((item_id, titulo, fecha_dt, lugar))
-        
-        texto = f"📅 *AGENDA DE {user.first_name.upper()}*\n{'━'*30}\n\n"
-        
-        if proximas:
-            texto += "🔜 *PRÓXIMAS ACTIVIDADES:*\n"
-            for item_id, titulo, fecha_dt, lugar, partic in proximas:
-                dias_resto = (fecha_dt - ahora).days
-                urgencia = "🔴" if dias_resto <= 1 else "🟡" if dias_resto <= 7 else "🟢"
-                texto += f"{urgencia} *#{item_id}* {titulo}\n"
-                texto += f"   📅 {fecha_dt.strftime('%d/%m/%Y %H:%M')}"
-                if lugar:
-                    texto += f" | 📍 {lugar}"
-                if partic:
-                    texto += f"\n   👥 {partic}"
-                texto += f"\n   ✅ `/completar_{item_id}`\n\n"
-        
-        if pasadas:
-            texto += "⏰ *PENDIENTES (fecha pasada):*\n"
-            for item_id, titulo, fecha_dt, lugar in pasadas[:5]:
-                texto += f"⚠️ *#{item_id}* {titulo} ({fecha_dt.strftime('%d/%m')})\n"
-                texto += f"   ✅ `/completar_{item_id}` | 🗑 `/eliminar_agenda_{item_id}`\n"
-            texto += "\n"
-        
-        if completadas:
-            texto += f"✅ *COMPLETADAS:* {len(completadas)} actividades\n\n"
-        
-        texto += "➕ *Nueva:* `/agendar FECHA HORA Título`"
-        
-        try:
-            await update.message.reply_text(texto, parse_mode='Markdown')
-        except Exception:
-            await update.message.reply_text(texto.replace('*', '').replace('_', ''))
-        
-    except Exception as e:
-        logger.error(f"Error en /mi_agenda: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def nueva_tarea_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agrega una tarea de networking pendiente.
-    Uso: /tarea [alta|media|baja] categoria texto
-    Ejemplo: /tarea alta contacto Llamar a Pedro García sobre proyecto logística
-    """
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "📋 *Agregar tarea de networking*\n\n"
-            "*Uso:* `/tarea [prioridad] texto`\n\n"
-            "*Ejemplos:*\n"
-            "`/tarea alta Llamar a Pedro sobre proyecto logística`\n"
-            "`/tarea media Actualizar perfil LinkedIn con nuevo cargo`\n"
-            "`/tarea baja Revisar ofertas de empleo sector marítimo`\n\n"
-            "📋 Ver tareas: /mis_tareas",
-            parse_mode='Markdown'
-        )
-        return
-    
-    args_texto = " ".join(context.args)
-    prioridad = 'normal'
-    
-    if context.args[0].lower() in ['alta', 'urgente', 'high']:
-        prioridad = 'alta'
-        args_texto = " ".join(context.args[1:])
-    elif context.args[0].lower() in ['media', 'medium', 'normal']:
-        prioridad = 'media'
-        args_texto = " ".join(context.args[1:])
-    elif context.args[0].lower() in ['baja', 'low']:
-        prioridad = 'baja'
-        args_texto = " ".join(context.args[1:])
-    
-    if not args_texto.strip():
-        await update.message.reply_text("❌ Escribe el texto de la tarea después de la prioridad.")
-        return
-    
-    # Detectar categoría automáticamente con IA
-    categoria = 'general'
-    cats_map = {
-        'contacto': ['llamar', 'contactar', 'escribir', 'mensaje', 'email', 'correo'],
-        'perfil': ['linkedin', 'cv', 'perfil', 'actualizar', 'bio'],
-        'evento': ['asistir', 'evento', 'reunión', 'reunion', 'conferencia', 'seminario'],
-        'empleo': ['oferta', 'empleo', 'trabajo', 'postular', 'aplicar', 'entrevista'],
-        'negocio': ['proyecto', 'propuesta', 'contrato', 'alianza', 'socio', 'negocio'],
-        'seguimiento': ['seguimiento', 'follow', 'recordar', 'confirmar', 'responder'],
-    }
-    texto_lower = args_texto.lower()
-    for cat, palabras in cats_map.items():
-        if any(p in texto_lower for p in palabras):
-            categoria = cat
-            break
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Error de conexión.")
-            return
-        
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("""INSERT INTO tareas_networking (user_id, tarea, prioridad, categoria)
-                        VALUES (%s, %s, %s, %s) RETURNING id""",
-                     (user_id, args_texto, prioridad, categoria))
-            tarea_id = c.fetchone()['id']
-        else:
-            c.execute("""INSERT INTO tareas_networking (user_id, tarea, prioridad, categoria)
-                        VALUES (?,?,?,?)""",
-                     (user_id, args_texto, prioridad, categoria))
-            tarea_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        
-        emoji_prior = {'alta': '🔴', 'media': '🟡', 'baja': '🟢', 'normal': '⚪'}.get(prioridad, '⚪')
-        
-        await update.message.reply_text(
-            f"✅ *Tarea #{tarea_id} guardada*\n\n"
-            f"{emoji_prior} [{prioridad.upper()}] {args_texto}\n"
-            f"🏷️ Categoría: {categoria}\n\n"
-            f"📋 Ver todas: /mis_tareas\n"
-            f"✅ Completar: `/ok_{tarea_id}`",
-            parse_mode='Markdown'
-        )
-        registrar_servicio_usado(user_id, 'tarea')
-        
-    except Exception as e:
-        logger.error(f"Error en /tarea: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def mis_tareas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra las tareas de networking pendientes"""
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción.")
-        return
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("""SELECT id, tarea, prioridad, categoria, completada, fecha_creacion 
-                        FROM tareas_networking WHERE user_id = %s 
-                        ORDER BY completada ASC, 
-                            CASE prioridad WHEN 'alta' THEN 1 WHEN 'media' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
-                            fecha_creacion DESC LIMIT 25""", (user_id,))
-        else:
-            c.execute("""SELECT id, tarea, prioridad, categoria, completada, fecha_creacion 
-                        FROM tareas_networking WHERE user_id = ? 
-                        ORDER BY completada ASC, 
-                            CASE prioridad WHEN 'alta' THEN 1 WHEN 'media' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
-                            fecha_creacion DESC LIMIT 25""", (user_id,))
-        tareas = c.fetchall()
-        conn.close()
-        
-        if not tareas:
-            await update.message.reply_text(
-                "📋 *No tienes tareas pendientes*\n\n"
-                "Agrega una:\n`/tarea alta Llamar a Juan García sobre proyecto`",
-                parse_mode='Markdown'
-            )
-            return
-        
-        pendientes = []
-        completadas_list = []
-        
-        for t in tareas:
-            if DATABASE_URL:
-                tid, texto, prior, cat, comp, fecha = t['id'], t['tarea'], t['prioridad'], t['categoria'], t['completada'], t['fecha_creacion']
-            else:
-                tid, texto, prior, cat, comp, fecha = t
-            
-            if comp:
-                completadas_list.append((tid, texto, prior))
-            else:
-                pendientes.append((tid, texto, prior, cat))
-        
-        emoji_p = {'alta': '🔴', 'media': '🟡', 'baja': '🟢', 'normal': '⚪'}
-        
-        texto_resp = f"📋 *TAREAS DE NETWORKING - {user.first_name}*\n{'━'*30}\n\n"
-        
-        if pendientes:
-            texto_resp += "⏳ *PENDIENTES:*\n"
-            for tid, texto, prior, cat in pendientes:
-                ep = emoji_p.get(prior, '⚪')
-                texto_resp += f"{ep} *#{tid}* {texto[:80]}\n"
-                texto_resp += f"   🏷️ {cat} | ✅ `/ok_{tid}`\n\n"
-        
-        if completadas_list:
-            texto_resp += f"✅ *Completadas:* {len(completadas_list)}\n\n"
-        
-        texto_resp += "➕ *Nueva:* `/tarea [alta|media|baja] texto`"
-        
-        try:
-            await update.message.reply_text(texto_resp, parse_mode='Markdown')
-        except Exception:
-            await update.message.reply_text(texto_resp.replace('*', '').replace('_', ''))
-        
-    except Exception as e:
-        logger.error(f"Error en /mis_tareas: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def match_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agente IA que encuentra los cofrades más compatibles para networking según tu perfil"""
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
-        return
-    
-    msg = await update.message.reply_text("🔍 Analizando perfiles de la Cofradía para encontrar tus mejores conexiones...")
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await msg.edit_text("❌ Error de conexión.")
-            return
-        
-        c = conn.cursor()
-        
-        # Obtener perfil propio
-        if DATABASE_URL:
-            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
-            mi_tarjeta = c.fetchone()
-            # Obtener otros cofrades con tarjeta
-            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, ciudad, servicios 
-                        FROM tarjetas_profesional WHERE user_id != %s LIMIT 40""", (user_id,))
-            otros = c.fetchall()
-        else:
-            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
-            mi_tarjeta = c.fetchone()
-            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, ciudad, servicios 
-                        FROM tarjetas_profesional WHERE user_id != ? LIMIT 40""", (user_id,))
-            otros = c.fetchall()
-        conn.close()
-        
-        if not mi_tarjeta:
-            await msg.edit_text(
-                "⚠️ No tienes tarjeta profesional creada.\n\n"
-                "Crea tu perfil con /mi_tarjeta para que el agente pueda hacer match inteligente."
-            )
-            return
-        
-        if DATABASE_URL:
-            mi_perfil = f"{mi_tarjeta['nombre_completo']} | {mi_tarjeta['profesion']} | {mi_tarjeta['empresa']} | {mi_tarjeta['ciudad']} | {mi_tarjeta['servicios']}"
-        else:
-            mi_perfil = f"{mi_tarjeta[1]} | {mi_tarjeta[2]} | {mi_tarjeta[3]} | {mi_tarjeta[7]} | {mi_tarjeta[4]}"
-        
-        if not otros:
-            await msg.edit_text(
-                "ℹ️ Aún no hay suficientes perfiles en el directorio para hacer match.\n\n"
-                "Invita a otros cofrades a crear su tarjeta con /mi_tarjeta"
-            )
-            return
-        
-        otros_str = "\n".join([
-            f"- {(o['nombre_completo'] if DATABASE_URL else o[1])} | {(o['profesion'] if DATABASE_URL else o[2])} | {(o['empresa'] if DATABASE_URL else o[3])} | {(o['ciudad'] if DATABASE_URL else o[4])}"
-            for o in otros[:30]
-        ])
-        
-        busqueda_extra = " ".join(context.args) if context.args else ""
-        
-        prompt = f"""Eres el Motor de Match de Networking de la Cofradía. Analiza el perfil del cofrade y encuentra las mejores conexiones estratégicas.
-
-MI PERFIL:
-{mi_perfil}
-{f"Búsqueda específica: {busqueda_extra}" if busqueda_extra else ""}
-
-COFRADES DISPONIBLES EN EL DIRECTORIO:
-{otros_str}
-
-TAREA: Identifica los TOP 5 cofrades más valiosos para hacer networking con {user.first_name}, y para cada uno:
-1. Nombre y por qué es una conexión estratégica
-2. Qué tienen en común o qué sinergias existen
-3. Una propuesta de primer mensaje o tema de conversación concreto
-4. Potencial de colaboración (escala 1-10 con razón)
-
-Sé específico y estratégico. Piensa en sinergias de negocio, intercambio de expertise, oportunidades laborales mutuas."""
-        
-        await msg.edit_text("🤝 Calculando compatibilidades y sinergias...")
-        respuesta = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
-        
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
-        
-        if respuesta:
-            header = f"🤝 *MATCH DE NETWORKING para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤝 MATCH para {user.first_name}\n\n{respuesta}")
-        else:
-            await msg.edit_text("❌ No pude generar el análisis. Intenta de nuevo.")
-        
-        registrar_servicio_usado(user_id, 'match_networking')
-        
-    except Exception as e:
-        logger.error(f"Error en match_networking: {e}")
-        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def briefing_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera un briefing diario de networking: agenda, tareas, oportunidades de la comunidad"""
-    user = update.effective_user
-    user_id = user.id
-    es_owner = (user_id == OWNER_ID)
-    
-    if not es_owner and not verificar_suscripcion_activa(user_id):
-        await update.message.reply_text("🔒 Requiere suscripción.")
-        return
-    
-    msg = await update.message.reply_text("☀️ Preparando tu briefing diario de networking...")
-    
-    try:
-        ahora = datetime.now()
-        hoy_str = ahora.strftime("%A %d/%m/%Y")
-        
-        conn = get_db_connection()
-        agenda_hoy = []
-        tareas_alta = []
-        proximos_7 = []
-        
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
-                             WHERE user_id = %s AND completada = FALSE 
-                             AND fecha_evento::date = CURRENT_DATE
-                             ORDER BY fecha_evento ASC""", (user_id,))
-                agenda_hoy = c.fetchall()
-                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
-                             WHERE user_id = %s AND completada = FALSE AND prioridad = 'alta'
-                             ORDER BY fecha_creacion ASC LIMIT 5""", (user_id,))
-                tareas_alta = c.fetchall()
-                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
-                             WHERE user_id = %s AND completada = FALSE 
-                             AND fecha_evento > CURRENT_TIMESTAMP
-                             AND fecha_evento <= CURRENT_TIMESTAMP + INTERVAL '7 days'
-                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
-                proximos_7 = c.fetchall()
-            else:
-                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
-                             WHERE user_id = ? AND completada = 0 
-                             AND date(fecha_evento) = date('now')
-                             ORDER BY fecha_evento ASC""", (user_id,))
-                agenda_hoy = c.fetchall()
-                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
-                             WHERE user_id = ? AND completada = 0 AND prioridad = 'alta'
-                             ORDER BY fecha_creacion ASC LIMIT 5""", (user_id,))
-                tareas_alta = c.fetchall()
-                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
-                             WHERE user_id = ? AND completada = 0 
-                             AND fecha_evento > datetime('now')
-                             AND fecha_evento <= datetime('now', '+7 days')
-                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
-                proximos_7 = c.fetchall()
-            conn.close()
-        
-        # Actividad reciente de la comunidad
-        resultados_com = busqueda_unificada("networking empleo oportunidades noticias", limit_historial=10, limit_rag=15)
-        contexto_com = formatear_contexto_unificado(resultados_com, "networking hoy")
-        
-        agenda_hoy_str = ""
-        if agenda_hoy:
-            lines = []
-            for item in agenda_hoy:
-                if DATABASE_URL:
-                    hora = str(item['fecha_evento'])[11:16]
-                    lines.append(f"⏰ {hora} - {item['titulo']}" + (f" (📍 {item['lugar']})" if item['lugar'] else ""))
-                else:
-                    hora = str(item[1])[11:16]
-                    lines.append(f"⏰ {hora} - {item[0]}" + (f" (📍 {item[2]})" if item[2] else ""))
-            agenda_hoy_str = "HOY EN TU AGENDA:\n" + "\n".join(lines)
-        
-        tareas_str = ""
-        if tareas_alta:
-            lines = []
-            for t in tareas_alta:
-                if DATABASE_URL:
-                    lines.append(f"🔴 {t['tarea']}")
-                else:
-                    lines.append(f"🔴 {t[0]}")
-            tareas_str = "TAREAS URGENTES:\n" + "\n".join(lines)
-        
-        proximos_str = ""
-        if proximos_7:
-            lines = []
-            for item in proximos_7:
-                if DATABASE_URL:
-                    fecha_d = str(item['fecha_evento'])[:10]
-                    lines.append(f"• {fecha_d}: {item['titulo']}")
-                else:
-                    lines.append(f"• {str(item[1])[:10]}: {item[0]}")
-            proximos_str = "PRÓXIMOS 7 DÍAS:\n" + "\n".join(lines)
-        
-        prompt = f"""Eres el asistente de networking de la Cofradía. Genera un BRIEFING DIARIO motivador y estratégico para {user.first_name}.
-
-FECHA: {hoy_str}
-{agenda_hoy_str}
-{tareas_str}
-{proximos_str}
-
-ACTIVIDAD RECIENTE EN LA COMUNIDAD:
-{contexto_com[:1500]}
-
-GENERA UN BRIEFING DIARIO que incluya:
-🌅 **Buenos días** con frase motivadora naval/profesional
-📅 **Agenda de hoy** (si hay items, destácalos; si no, sugiere qué hacer)
-🔴 **Urgente** (tareas prioritarias de hoy)  
-📡 **Radar de oportunidades** (1-2 oportunidades detectadas en la comunidad hoy)
-🎯 **Acción estrella del día** (la 1 cosa más importante que debería hacer hoy para su networking)
-💬 **Mensaje para compartir** (algo breve e inspirador para el grupo)
-
-Sé conciso pero impactante. Tono energético, profesional y de camaradería."""
-        
-        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
-        
-        if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
-        
-        if respuesta:
-            try:
-                await msg.edit_text(f"☀️ *BRIEFING {hoy_str.upper()}*\n{'━'*30}\n\n{respuesta}", parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"☀️ BRIEFING {hoy_str}\n\n{respuesta}")
-        else:
-            await msg.edit_text("❌ No pude generar el briefing. Intenta de nuevo.")
-        
-        registrar_servicio_usado(user_id, 'briefing_diario')
-        
-    except Exception as e:
-        logger.error(f"Error en briefing_diario: {e}")
-        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
-
-
-async def completar_item_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja /completar_ID y /ok_ID para marcar agenda/tareas como completadas"""
-    user = update.effective_user
-    user_id = user.id
-    
-    comando_texto = update.message.text.split()[0].lstrip('/')
-    
-    tipo = None
-    item_id = None
-    
-    if comando_texto.startswith('completar_'):
-        tipo = 'agenda'
-        try:
-            item_id = int(comando_texto.replace('completar_', ''))
-        except ValueError:
-            pass
-    elif comando_texto.startswith('ok_'):
-        tipo = 'tarea'
-        try:
-            item_id = int(comando_texto.replace('ok_', ''))
-        except ValueError:
-            pass
-    elif comando_texto.startswith('eliminar_agenda_'):
-        try:
-            item_id = int(comando_texto.replace('eliminar_agenda_', ''))
-            tipo = 'eliminar_agenda'
-        except ValueError:
-            pass
-    
-    if not item_id or not tipo:
-        await update.message.reply_text("❌ ID no válido.")
-        return
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        
-        if tipo == 'agenda':
-            if DATABASE_URL:
-                c.execute("UPDATE agenda_personal SET completada = TRUE WHERE id = %s AND user_id = %s", (item_id, user_id))
-            else:
-                c.execute("UPDATE agenda_personal SET completada = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
-            conn.commit()
-            conn.close()
-            await update.message.reply_text(f"✅ Actividad #{item_id} marcada como completada. ¡Bien hecho! 💪")
-        elif tipo == 'tarea':
-            if DATABASE_URL:
-                c.execute("UPDATE tareas_networking SET completada = TRUE WHERE id = %s AND user_id = %s", (item_id, user_id))
-            else:
-                c.execute("UPDATE tareas_networking SET completada = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
-            conn.commit()
-            conn.close()
-            await update.message.reply_text(f"✅ Tarea #{item_id} completada. ¡Excelente! 🎯")
-        elif tipo == 'eliminar_agenda':
-            if DATABASE_URL:
-                c.execute("DELETE FROM agenda_personal WHERE id = %s AND user_id = %s", (item_id, user_id))
-            else:
-                c.execute("DELETE FROM agenda_personal WHERE id = ? AND user_id = ?", (item_id, user_id))
-            conn.commit()
-            conn.close()
-            await update.message.reply_text(f"🗑️ Actividad #{item_id} eliminada de tu agenda.")
-    except Exception as e:
-        logger.error(f"Error completando item: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:50]}")
-
-
-async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job que envía recordatorios 1 hora antes de actividades agendadas"""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        
-        if DATABASE_URL:
-            c.execute("""SELECT a.id, a.user_id, a.titulo, a.fecha_evento, a.lugar, a.participantes
-                        FROM agenda_personal a
-                        WHERE a.completada = FALSE 
-                        AND a.recordatorio_enviado = FALSE
-                        AND a.fecha_evento BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'""")
-        else:
-            c.execute("""SELECT id, user_id, titulo, fecha_evento, lugar, participantes
-                        FROM agenda_personal
-                        WHERE completada = 0 AND recordatorio_enviado = 0
-                        AND fecha_evento BETWEEN datetime('now', '+55 minutes') AND datetime('now', '+65 minutes')""")
-        
-        items = c.fetchall()
-        
-        for item in items:
-            if DATABASE_URL:
-                item_id = item['id']
-                uid = item['user_id']
-                titulo = item['titulo']
-                fecha = item['fecha_evento']
-                lugar = item['lugar'] or ''
-                partic = item['participantes'] or ''
-            else:
-                item_id, uid, titulo, fecha, lugar, partic = item
-                lugar = lugar or ''
-                partic = partic or ''
-            
-            try:
-                hora_str = str(fecha)[11:16] if fecha else '??:??'
-                mensaje = (
-                    f"🔔 *RECORDATORIO - ¡En 1 hora!*\n\n"
-                    f"📌 *{titulo}*\n"
-                    f"⏰ {hora_str}\n"
-                )
-                if lugar:
-                    mensaje += f"📍 {lugar}\n"
-                if partic:
-                    mensaje += f"👥 {partic}\n"
-                mensaje += f"\n¡Prepárate para tu actividad de networking! 💼\n"
-                mensaje += f"✅ `/completar_{item_id}`"
-                
-                await context.bot.send_message(chat_id=uid, text=mensaje, parse_mode='Markdown')
-                
-                # Marcar recordatorio como enviado
-                if DATABASE_URL:
-                    c.execute("UPDATE agenda_personal SET recordatorio_enviado = TRUE WHERE id = %s", (item_id,))
-                else:
-                    c.execute("UPDATE agenda_personal SET recordatorio_enviado = 1 WHERE id = ?", (item_id,))
-                conn.commit()
-                
-            except Exception as e_msg:
-                logger.debug(f"No se pudo enviar recordatorio a {uid}: {e_msg}")
-        
-        conn.close()
-        
-    except Exception as e:
-        logger.debug(f"Error en job recordatorio_agenda: {e}")
-
-
-
-# ==================== FERIADOS CHILE ====================
-
-@requiere_suscripcion
-async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /feriados [año] - Lista feriados legales de Chile con coincidencias de eventos"""
-    import re as _re
-
-    # Determinar año consultado
-    anio_actual = datetime.now().year
-    if context.args:
-        try:
-            anio = int(context.args[0])
-            if anio < 2020 or anio > 2035:
-                await update.message.reply_text("❌ Indica un año entre 2020 y 2035.\nEjemplo: /feriados 2025")
-                return
-        except ValueError:
-            await update.message.reply_text("❌ Formato: /feriados 2025")
-            return
-    else:
-        anio = anio_actual
-
-    msg = await update.message.reply_text("🗓 Consultando feriados legales de Chile " + str(anio) + "...")
-
-    feriados_data = []
-
-    # ── Fuente 1: API feriados.cl (JSON oficial) ──
-    try:
-        import asyncio as _afer
-        def _fetch_feriados_api():
-            url = "https://apis.digital.gob.cl/fl/feriados/" + str(anio)
-            r = requests.get(url, timeout=15, headers={'Accept': 'application/json'})
-            if r.status_code == 200:
-                return r.json()
-            return []
-        raw = await _afer.get_event_loop().run_in_executor(None, _fetch_feriados_api)
-        if raw and isinstance(raw, list):
-            for item in raw:
-                fecha_str = item.get('fecha', '')
-                nombre    = item.get('nombre', '')
-                tipo      = item.get('tipo', 'Legal')
-                if fecha_str and nombre:
-                    try:
-                        fecha_dt = datetime.strptime(fecha_str, '%Y-%m-%d')
-                        feriados_data.append({
-                            'fecha': fecha_dt,
-                            'nombre': nombre,
-                            'tipo': tipo
-                        })
-                    except:
-                        pass
-    except Exception as _e1:
-        logger.debug("Feriados API digital.gob.cl: " + str(_e1))
-
-    # ── Fuente 2: Web scraping si la API falla ──
-    if not feriados_data:
-        try:
-            import asyncio as _afer2
-            def _scrape_feriados():
-                return buscar_en_web(
-                    "feriados legales Chile " + str(anio) + " lista completa",
-                    extraer_contenido=True)
-            wr = await _afer2.get_event_loop().run_in_executor(None, _scrape_feriados)
-            if wr.get('resultados') or wr.get('contenido'):
-                ctx_web = formatear_contexto_web(wr)
-                prompt = (
-                    "Extrae TODOS los feriados legales de Chile para el año " + str(anio) + ".\n"
-                    "Contexto web:\n" + ctx_web[:3000] + "\n\n"
-                    "Responde SOLO con una lista JSON, sin texto adicional, formato:\n"
-                    '[{"fecha":"YYYY-MM-DD","nombre":"Nombre del feriado","tipo":"Legal"}]\n'
-                    "Incluye TODOS los feriados nacionales de Chile."
-                )
-                resp_json = llamar_groq(prompt, max_tokens=1200, temperature=0.1)
-                if resp_json:
-                    import json as _json2
-                    clean = resp_json.strip()
-                    # Extract JSON array
-                    m = _re.search(r'\[.*\]', clean, _re.DOTALL)
-                    if m:
-                        clean = m.group(0)
-                    items = _json2.loads(clean)
-                    for item in items:
-                        try:
-                            fd = datetime.strptime(item['fecha'], '%Y-%m-%d')
-                            feriados_data.append({'fecha': fd, 'nombre': item['nombre'], 'tipo': item.get('tipo', 'Legal')})
-                        except:
-                            pass
-        except Exception as _e2:
-            logger.debug("Feriados web scraping: " + str(_e2))
-
-    # ── Fuente 3: Hardcoded fallback para años conocidos ──
-    if not feriados_data:
-        FERIADOS_FIJOS = {
-            '01-01': 'Año Nuevo',
-            '05-01': 'Día del Trabajo',
-            '05-21': 'Día de las Glorias Navales',
-            '06-20': 'Día Nacional de los Pueblos Indígenas',
-            '06-29': 'San Pedro y San Pablo',
-            '07-16': 'Día de la Virgen del Carmen',
-            '08-15': 'Asunción de la Virgen',
-            '09-18': 'Independencia Nacional',
-            '09-19': 'Día de las Glorias del Ejército',
-            '10-12': 'Encuentro de Dos Mundos',
-            '10-31': 'Día de las Iglesias Evangélicas',
-            '11-01': 'Día de Todos los Santos',
-            '12-08': 'Inmaculada Concepción',
-            '12-25': 'Navidad',
-        }
-        for dd_mm, nombre in FERIADOS_FIJOS.items():
-            try:
-                fd = datetime.strptime(str(anio) + '-' + dd_mm, '%Y-%m-%d')
-                feriados_data.append({'fecha': fd, 'nombre': nombre, 'tipo': 'Legal'})
-            except:
-                pass
-
-    if not feriados_data:
-        await msg.edit_text("❌ No se pudo obtener los feriados de " + str(anio) + ". Intenta más tarde.")
-        return
-
-    # Ordenar por fecha
-    feriados_data.sort(key=lambda x: x['fecha'])
-
-    # ── Obtener eventos de la Cofradía para comparar ──
-    eventos_cofradia = {}
-    try:
-        conn_ev = get_db_connection()
-        if conn_ev:
-            c_ev = conn_ev.cursor()
-            if DATABASE_URL:
-                c_ev.execute(
-                    "SELECT fecha, titulo FROM eventos WHERE EXTRACT(YEAR FROM fecha) = %s",
-                    (anio,))
-            else:
-                c_ev.execute(
-                    "SELECT fecha, titulo FROM eventos WHERE strftime('%Y', fecha) = ?",
-                    (str(anio),))
-            for row in c_ev.fetchall():
-                fd = row['fecha'] if DATABASE_URL else row[0]
-                tit = row['titulo'] if DATABASE_URL else row[1]
-                if fd:
-                    try:
-                        if isinstance(fd, str):
-                            fd = datetime.strptime(fd[:10], '%Y-%m-%d')
-                        key = fd.strftime('%Y-%m-%d')
-                        eventos_cofradia[key] = tit
-                    except:
-                        pass
-            conn_ev.close()
-    except Exception as _ev:
-        logger.debug("Feriados: eventos query: " + str(_ev))
-
-    # ── Construir respuesta ──
-    DIAS_ES = {0: 'Lunes', 1: 'Martes', 2: 'Miércoles', 3: 'Jueves',
-               4: 'Viernes', 5: 'Sábado', 6: 'Domingo'}
-    MESES_ES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril',
-                5: 'Mayo', 6: 'Junio', 7: 'Julio', 8: 'Agosto',
-                9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
-
-    lineas = [
-        "*🗓 FERIADOS LEGALES DE CHILE — " + str(anio) + "*",
-        "━" * 32,
-        "_Fuente: Gobierno Digital de Chile_",
-        "",
-    ]
-
-    mes_actual = 0
-    for f in feriados_data:
-        fd = f['fecha']
-        if fd.month != mes_actual:
-            mes_actual = fd.month
-            lineas.append("")
-            lineas.append("*📅 " + MESES_ES[fd.month].upper() + "*")
-        dia_str   = fd.strftime('%d') + " de " + MESES_ES[fd.month]
-        dia_sem   = DIAS_ES[fd.weekday()]
-        nombre_f  = f['nombre']
-        tipo_f    = f.get('tipo', 'Legal')
-        clave_ev  = fd.strftime('%Y-%m-%d')
-        evento_tag = ""
-        if clave_ev in eventos_cofradia:
-            evento_tag = "  🎯 _Evento Cofradía: " + eventos_cofradia[clave_ev] + "_"
-        icono = "🔴" if tipo_f == 'Legal' else "🟡"
-        lineas.append(icono + " *" + dia_str + "* (" + dia_sem + ") — " + nombre_f + evento_tag)
-
-    lineas.append("")
-    lineas.append("━" * 32)
-    lineas.append("*Total:* " + str(len(feriados_data)) + " feriados  •  🔴 Legal  🟡 Otros")
-    if eventos_cofradia:
-        lineas.append("🎯 *Eventos Cofradía que coinciden con feriados:* " + str(sum(1 for k in eventos_cofradia if any(f['fecha'].strftime('%Y-%m-%d') == k for f in feriados_data))))
-
-    texto_final = "\n".join(lineas)
-
-    # Telegram tiene límite de 4096 chars — dividir si necesario
-    if len(texto_final) <= 4096:
-        await msg.edit_text(texto_final, parse_mode='Markdown')
-    else:
-        await msg.edit_text(texto_final[:4090] + "...", parse_mode='Markdown')
-
-    registrar_servicio_usado(update.effective_user.id, 'feriados')
-
-
-
-
-
-
-
-async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        motores = "DuckDuckGo"
-        if GOOGLE_CSE_KEY: motores += " + Google CSE"
-        if BRAVE_API_KEY:  motores += " + Brave"
-        motores += " + SearXNG"
-        await update.message.reply_text(
-            "Uso: /buscar_web [consulta]\n\n"
-            "Ejemplos:\n"
-            "  /buscar_web noticias economia Chile hoy\n"
-            "  /buscar_web precio cobre bolsa\n"
-            "  /buscar_web requisitos visa trabajo Australia\n\n"
-            "Motores: " + motores + "\n"
-            "Resultados guardados en base de conocimientos automaticamente."
-        )
-        return
-
-    consulta = ' '.join(context.args)
-    user_id  = update.effective_user.id
-    msg      = await update.message.reply_text("Buscando en Internet...")
-    try:
-        import asyncio as _aw
-        web_result = await _aw.get_event_loop().run_in_executor(
-            None, lambda: buscar_en_web(consulta, extraer_contenido=True))
-
-        if not web_result or not web_result.get('resultados'):
-            await msg.edit_text("No encontre resultados para: " + consulta)
-            return
-
-        desde_cache = web_result.get('desde_cache', False)
-        motor       = web_result.get('fuente_motor', 'web')
-        resultados  = web_result.get('resultados', [])
-        badge       = "(desde cache)" if desde_cache else "(via " + motor + ")"
-
-        if ia_disponible:
-            await msg.edit_text("Sintetizando con IA...")
-            ctx = formatear_contexto_web(web_result)
-            prompt = (
-                "Eres el asistente IA de la Cofradia de Networking.\n"
-                "El usuario busco en Internet: \"" + consulta + "\"\n\n"
-                + ctx +
-                "\nSintetiza los resultados de forma clara en espanol chileno. "
-                "Cita fuentes por nombre. Maximo 400 palabras."
-            )
-            import asyncio as _aw2
-            def _ia():
-                r = llamar_groq(prompt, max_tokens=1000, temperature=0.4)
-                return r or llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.4)
-            resp_ia = await _aw2.get_event_loop().run_in_executor(None, _ia)
-        else:
-            resp_ia = None
-
-        await msg.delete()
-
-        if resp_ia:
-            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n" + resp_ia + "\n\n"
-            for i, it in enumerate(resultados[:3], 1):
-                t = it.get('titulo','')[:60]
-                u = it.get('url','')
-                if t: texto += str(i) + ". " + t + ("\n   " + u if u else "") + "\n"
-        else:
-            texto = "BUSQUEDA WEB: " + consulta + "\n" + badge + "\n" + "-"*28 + "\n\n"
-            for i, it in enumerate(resultados, 1):
-                texto += str(i) + ". " + it.get('titulo','Sin titulo') + "\n"
-                if it.get('snippet'): texto += it['snippet'][:200] + "\n"
-                if it.get('url'):     texto += it['url'] + "\n"
-                texto += "\n"
-
-        await enviar_mensaje_largo(update, texto)
-        registrar_servicio_usado(user_id, 'buscar_web')
-        if not desde_cache and web_result.get('total', 0) > 0:
-            await update.message.reply_text("Resultados guardados. Proxima busqueda similar sera instantanea.")
-    except Exception as e:
-        logger.error("buscar_web_comando: " + str(e), exc_info=True)
-        await msg.edit_text("Error en busqueda web: " + str(e)[:100])
-
 # ==================== INDICADORES ECONÓMICOS CHILE v6.0 + IA ====================
 
 def obtener_indicadores_chile():
@@ -15965,25 +14350,16 @@ def obtener_indicadores_chile():
 
 def obtener_indicadores_cmf():
     """
-    Obtiene 3 indicadores de la CMF (Comisión para el Mercado Financiero):
-      - TMC: Tasa de Interés Máxima Convencional, filtrada para 3 plazos representativos
-      - TAB UF: Tasa Activa Bancaria en UF a 360 días (publicada diariamente por CMF)
-      - TAB Nominal: Tasa Activa Bancaria nominal (endpoint extendido si disponible)
-    API: https://api.cmfchile.cl/api-sbifv3/recursos_api/
+    Obtiene tasas de la CMF (Comisión para el Mercado Financiero):
+      - TMC: Tasa Máxima Convencional por plazo (90 / 180 / 360 días)
+      - TAB UF: Tasa Activa Bancaria en UF a 360 días
+    API pública: https://api.cmfchile.cl/api-sbifv3/recursos_api/
+    Retorna dict {'tmc': [...], 'tab_uf': [...], 'ok': bool}
     """
+    import re as _re
     AHORA   = datetime.now()
-    # Intentar mes actual; si falla (aún sin datos), retroceder al mes anterior
-    intentos = [(AHORA.year, AHORA.month)]
-    mes_ant = AHORA.month - 1 or 12
-    anio_ant = AHORA.year if AHORA.month > 1 else AHORA.year - 1
-    intentos.append((anio_ant, mes_ant))
-
-    resultado = {
-        'tmc':     [],
-        'tab_uf':  [],
-        'tab_nom': [],
-    }
-    HDR = {'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'}
+    HDR     = {'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'}
+    resultado = {'tmc': [], 'tab_uf': [], 'ok': False}
 
     def _get(url):
         try:
@@ -15991,239 +14367,96 @@ def obtener_indicadores_cmf():
             if r.status_code == 200:
                 return r.json()
         except Exception as _e:
-            logger.debug(f'CMF fetch: {_e}')
+            logger.debug(f'CMF fetch error: {_e}')
         return None
 
     def _val(s):
+        """Convierte string con coma decimal a float, o devuelve None."""
         try:
             return float(str(s).replace(',', '.').strip())
         except Exception:
             return None
 
-    # ── TMC: Tasa Máxima Convencional ─────────────────────────────────────────
-    for yr, mo in intentos:
-        url = f'{CMF_BASE_URL}/tmc/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
-        j = _get(url)
-        if not j:
-            continue
-        tmcs = j.get('TMCs', [])
-        if not tmcs:
-            continue
-
-        # Estrategia de filtrado por palabras clave en Titulo+SubTitulo
-        # Tres plazos representativos para el usuario:
-        GRUPOS = [
-            ('90 días',  ['menos de 90', 'inferior a 90', 'hasta 90']),
-            ('180 días', ['90 días o más', '90 d', 'sobre 90', 'mediano']),
-            ('360 días', ['un año o más', '360', 'reajustable', 'largo plazo']),
-        ]
-        encontrados = {}
-        for tmc in tmcs:
-            txt = (tmc.get('Titulo', '') + ' ' + tmc.get('SubTitulo', '')).lower()
-            v   = _val(tmc.get('Valor'))
-            if v is None or v <= 0:
-                continue
-            for plazo, kws in GRUPOS:
-                if plazo not in encontrados and any(kw in txt for kw in kws):
-                    encontrados[plazo] = {
-                        'plazo':  plazo,
-                        'titulo': tmc.get('Titulo', '')[:70],
-                        'valor':  v,
-                        'fecha':  tmc.get('Fecha', '')[:10],
-                    }
-        # Si no se detectaron los 3 plazos por palabras clave, tomar los primeros 3 únicos
-        if len(encontrados) < 3:
-            etiquetas = ['90 días', '180 días', '360 días']
-            vistos = set()
-            for tmc in tmcs:
-                titulo = tmc.get('Titulo', '')
-                if titulo in vistos:
-                    continue
-                v = _val(tmc.get('Valor'))
-                if v and v > 0 and len(encontrados) < 3:
-                    idx = len(encontrados)
-                    label = etiquetas[idx] if idx < 3 else f'Tipo {idx+1}'
-                    if label not in encontrados:
-                        encontrados[label] = {
-                            'plazo':  label,
-                            'titulo': titulo[:70],
-                            'valor':  v,
-                            'fecha':  tmc.get('Fecha', '')[:10],
-                        }
-                    vistos.add(titulo)
-
-        resultado['tmc'] = list(encontrados.values())[:3]
-        break  # datos obtenidos
-
-    # ── TAB UF (Tasa Activa Bancaria en UF a 360 días) ─────────────────────────
-    for yr, mo in intentos:
-        url = f'{CMF_BASE_URL}/tab/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
-        j = _get(url)
-        if not j:
-            continue
-        tabs = j.get('TABs', [])
-        if tabs:
-            tab = tabs[0]  # más reciente
-            v   = _val(tab.get('Valor'))
-            fecha = tab.get('Fecha', '')[:10]
-            # CMF publica TAB solo a 360 días en UF; 90 y 180 días no disponibles vía API
-            resultado['tab_uf'] = [
-                {'plazo': '90 días',  'valor': None, 'fecha': fecha,
-                 'nota': 'No disponible vía API'},
-                {'plazo': '180 días', 'valor': None, 'fecha': fecha,
-                 'nota': 'No disponible vía API'},
-                {'plazo': '360 días', 'valor': v,    'fecha': fecha,
-                 'nota': 'Dato oficial CMF'},
-            ]
-            break
-
-    # ── TAB Nominal (endpoint extendido; si no existe → N/D con fecha referencial) ──
-    tab_nom_val = None
-    tab_nom_fecha = ''
-    for yr, mo in intentos:
-        # Intentar endpoint alternativo tabnom
-        for endpoint in ['tabnom', 'tab_nom', 'tabnominal']:
-            url = f'{CMF_BASE_URL}/{endpoint}/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
-            j = _get(url)
-            if j:
-                for key in ['TABNoms', 'TABNominales', 'TABs']:
-                    items = j.get(key, [])
-                    if items:
-                        tab_nom_val   = _val(items[0].get('Valor'))
-                        tab_nom_fecha = items[0].get('Fecha', '')[:10]
-                        break
-            if tab_nom_val:
-                break
-        if tab_nom_val:
-            break
-    # Si el TAB UF está disponible, usar como referencia para TAB Nominal 360d
-    if tab_nom_val is None and resultado['tab_uf']:
-        tab_360 = next((x for x in resultado['tab_uf'] if x['plazo'] == '360 días'), None)
-        tab_nom_fecha = tab_360['fecha'] if tab_360 else AHORA.strftime('%Y-%m-%d')
-    resultado['tab_nom'] = [
-        {'plazo': '90 días',  'valor': None,          'fecha': tab_nom_fecha},
-        {'plazo': '180 días', 'valor': None,          'fecha': tab_nom_fecha},
-        {'plazo': '360 días', 'valor': tab_nom_val,   'fecha': tab_nom_fecha},
-    ]
-
-    return resultado
-
-
-def obtener_rentabilidad_afp():
-    """
-    Obtiene variación de rentabilidad de todas las AFPs en los últimos 6 meses.
-    API: https://www.quetalmiafp.cl/api/Cuota/ObtenerCuotas
-    Cabecera requerida: X-API-Key
-    Calcula (cuota_final / cuota_inicial - 1) * 100 por AFP y Fondo.
-    """
-    AHORA        = datetime.now()
-    fecha_fin    = AHORA.strftime('%d/%m/%Y')
-    # Inicio = 6 meses atrás (primer día de ese mes)
-    mes_ini  = AHORA.month - 6
-    anio_ini = AHORA.year
-    if mes_ini <= 0:
-        mes_ini  += 12
-        anio_ini -= 1
-    fecha_ini = f'01/{mes_ini:02d}/{anio_ini}'
-
-    resultado = {
-        'afps':     [],
-        'fondos':   [],
-        'tabla':    {},   # {afp: {fondo: {rent_pct, cuota_ini, cuota_fin, fecha_ini, fecha_fin}}}
-        'fecha_ini': fecha_ini,
-        'fecha_fin': fecha_fin,
-        'ok':        False,
+    # ── TMC: intentar mes actual, retroceder al anterior si sin datos ──────
+    TMC_PATTERNS = {
+        '90':  [r'hasta\s*90', r'0\s*a\s*90', r'menor.*90', r'^90\s*d'],
+        '180': [r'91\s*a\s*180', r'90\s*a\s*180', r'^180\s*d'],
+        '360': [r'181\s*a\s*360', r'mayor.*180', r'superior.*180',
+                r'^360\s*d', r'más\s*de\s*180'],
     }
+    raw_tmc = None
+    for delta in (0, 1):
+        m = AHORA.month - delta or 12
+        a = AHORA.year if (AHORA.month - delta) >= 1 else AHORA.year - 1
+        j = _get(f'{CMF_BASE_URL}/tmc/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json')
+        if not j:
+            continue
+        items = j.get('TMCs') or j.get('tmc') or j.get('Tmc') or []
+        if items:
+            raw_tmc = items
+            break
 
-    try:
-        params = {
-            'listaAFPs':    AFP_LISTA,
-            'listaFondos':  AFP_FONDOS,
-            'fechaInicial': fecha_ini,
-            'fechaFinal':   fecha_fin,
-        }
-        hdrs = {
-            'X-API-Key': AFP_API_KEY,
-            'Accept':    'application/json',
-        }
-        r = requests.get(AFP_CUOTAS_URL, params=params, headers=hdrs, timeout=30)
-        if r.status_code != 200:
-            logger.warning(f'AFP API status: {r.status_code}')
-            return resultado
+    if raw_tmc:
+        encontrados = {}
+        for item in raw_tmc:
+            plazo_txt = str(
+                item.get('Plazo') or item.get('plazo') or
+                item.get('TipoDeudor') or ''
+            ).lower().strip()
+            for key, patterns in TMC_PATTERNS.items():
+                if key in encontrados:
+                    continue
+                for pat in patterns:
+                    if _re.search(pat, plazo_txt):
+                        v = _val(item.get('ValorTMC') or item.get('Valor') or item.get('valor'))
+                        f = str(item.get('Fecha') or item.get('fecha') or '')[:10]
+                        encontrados[key] = {'plazo': key + ' días', 'valor': v, 'fecha': f}
+                        break
+        # Si no pudo clasificar plazos, usar primer valor como referencia
+        if not encontrados and raw_tmc:
+            v = _val(raw_tmc[0].get('ValorTMC') or raw_tmc[0].get('Valor') or raw_tmc[0].get('valor'))
+            f = str(raw_tmc[0].get('Fecha') or raw_tmc[0].get('fecha') or '')[:10]
+            encontrados['360'] = {'plazo': '360 días', 'valor': v, 'fecha': f}
+        resultado['tmc'] = [
+            encontrados.get('90',  {'plazo': '90 días',  'valor': None, 'fecha': ''}),
+            encontrados.get('180', {'plazo': '180 días', 'valor': None, 'fecha': ''}),
+            encontrados.get('360', {'plazo': '360 días', 'valor': None, 'fecha': ''}),
+        ]
+        resultado['ok'] = True
+    else:
+        resultado['tmc'] = [
+            {'plazo': '90 días',  'valor': None, 'fecha': ''},
+            {'plazo': '180 días', 'valor': None, 'fecha': ''},
+            {'plazo': '360 días', 'valor': None, 'fecha': ''},
+        ]
 
-        data = r.json()
-        if not isinstance(data, list) or not data:
-            logger.warning('AFP API: respuesta vacía o inesperada')
-            return resultado
+    # ── TAB UF: Tasa Activa Bancaria en UF ────────────────────────────────
+    for delta in (0, 1):
+        m = AHORA.month - delta or 12
+        a = AHORA.year if (AHORA.month - delta) >= 1 else AHORA.year - 1
+        j2 = _get(f'{CMF_BASE_URL}/tab/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json')
+        if not j2:
+            continue
+        items2 = j2.get('TABs') or j2.get('tab') or j2.get('Tab') or []
+        if not items2:
+            continue
+        # Buscar plazo 360 días
+        tab360 = None
+        for it in items2:
+            pt = str(it.get('Plazo') or it.get('plazo') or '').lower()
+            if '360' in pt or 'mayor' in pt or 'superior' in pt:
+                tab360 = it
+                break
+        if not tab360:
+            tab360 = items2[-1]  # último disponible
+        v2 = _val(tab360.get('ValorTAB') or tab360.get('Valor') or tab360.get('valor'))
+        f2 = str(tab360.get('Fecha') or tab360.get('fecha') or '')[:10]
+        resultado['tab_uf'] = [{'plazo': '360 días', 'valor': v2, 'fecha': f2}]
+        resultado['ok'] = True
+        break
 
-        # Detectar nombres de campos dinámicamente
-        sample = data[0]
-        keys_lower = {k.lower(): k for k in sample.keys()}
-
-        def _campo(*candidatos):
-            for c in candidatos:
-                if c in keys_lower:
-                    return keys_lower[c]
-            return None
-
-        campo_afp   = _campo('afp', 'nombreafp', 'nombre_afp', 'administradora')
-        campo_fondo = _campo('fondo', 'tipofondo', 'tipo_fondo', 'letra', 'nombrefondo')
-        campo_fecha = _campo('fecha', 'fechacuota', 'fecha_cuota', 'date')
-        campo_valor = _campo('valorcuota', 'valor_cuota', 'cuota', 'valor', 'value')
-
-        if not all([campo_afp, campo_fondo, campo_fecha, campo_valor]):
-            logger.warning(f'AFP API campos no mapeados. Keys: {list(sample.keys())}')
-            return resultado
-
-        # Agrupar serie por (AFP, Fondo)
-        series = {}
-        for item in data:
-            afp   = str(item.get(campo_afp,   '')).upper().strip()
-            fondo = str(item.get(campo_fondo, '')).upper().strip()
-            fecha = str(item.get(campo_fecha, ''))
-            try:
-                val = float(str(item.get(campo_valor, '0')).replace(',', '.'))
-            except Exception:
-                continue
-            key = (afp, fondo)
-            if key not in series:
-                series[key] = []
-            series[key].append((fecha, val))
-
-        tabla     = {}
-        afps_set  = set()
-        fondos_set = set()
-
-        for (afp, fondo), serie in series.items():
-            if len(serie) < 2:
-                continue
-            serie_s   = sorted(serie, key=lambda x: x[0])
-            cuota_ini = serie_s[0][1]
-            cuota_fin = serie_s[-1][1]
-            if cuota_ini and cuota_ini != 0:
-                rent_pct = round(((cuota_fin / cuota_ini) - 1) * 100, 2)
-            else:
-                rent_pct = 0.0
-            if afp not in tabla:
-                tabla[afp] = {}
-            tabla[afp][fondo] = {
-                'rent_pct':  rent_pct,
-                'cuota_ini': round(cuota_ini, 4),
-                'cuota_fin': round(cuota_fin, 4),
-                'fecha_ini': serie_s[0][0],
-                'fecha_fin': serie_s[-1][0],
-            }
-            afps_set.add(afp)
-            fondos_set.add(fondo)
-
-        ORDEN_FONDOS = ['A', 'B', 'C', 'D', 'E']
-        resultado['afps']   = sorted(afps_set)
-        resultado['fondos'] = [f for f in ORDEN_FONDOS if f in fondos_set]
-        resultado['tabla']  = tabla
-        resultado['ok']     = bool(tabla)
-
-    except Exception as e:
-        logger.warning(f'AFP API error: {e}')
+    if not resultado['tab_uf']:
+        resultado['tab_uf'] = [{'plazo': '360 días', 'valor': None, 'fecha': ''}]
 
     return resultado
 
@@ -16317,18 +14550,24 @@ def generar_explicacion_indicador(codigo, datos, contexto_bcch, fragmento_rag):
 
 def generar_html_indicadores(all_data, explicaciones):
     """
-    Dashboard ECharts COMPLETO — fusión versión v2 + análisis IA:
+    Dashboard ECharts COMPLETO — v6.0 + CMF:
       Sección 1  — 11 Cards actuales con sparkline 30 días
-      Sección 2  — Análisis IA: por qué varió cada indicador (con Groq + RAG)
-      Sección 3  — Dólar vs Euro últimos 6 meses (línea doble)
-      Sección 4  — Series históricas últimos 10 años (grid 9 gráficos de área)
+      Sección 2  — Tasas CMF: TMC (3 plazos) + TAB UF 360 días
+      Sección 3  — Análisis IA por indicador (Groq + RAG + BCCH)
+      Sección 4  — Dólar vs Euro últimos 6 meses (línea doble)
+      Sección 5  — Histórico 10 años (9 gráficos de área)
     """
     import json as _j
 
-    datos    = all_data.get('datos_actuales', {})
-    hist_6m  = all_data.get('hist_6m', {})
-    hist_10a = all_data.get('hist_10a', {})
-    gen      = all_data.get('generado', '')
+    # Helper None-safe para concatenaciones: None → ''
+    def _s(v):
+        return str(v) if v is not None else ''
+
+    datos     = all_data.get('datos_actuales', {})
+    hist_6m   = all_data.get('hist_6m', {})
+    hist_10a  = all_data.get('hist_10a', {})
+    gen       = all_data.get('generado', '')
+    datos_cmf = all_data.get('datos_cmf') or {}
 
     PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
     HIST_ORDER  = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tasa_desempleo',
@@ -16343,15 +14582,16 @@ def generar_html_indicadores(all_data, explicaciones):
 
     def variacion_html(serie):
         if len(serie) < 2: return ''
-        v0 = serie[0].get('valor', 0)
-        v1 = serie[1].get('valor', 1)
+        v0 = serie[0].get('valor') or 0
+        v1 = serie[1].get('valor') or 1
         if not v1: return ''
         pct = ((v0 - v1) / v1) * 100
         sig = '▲' if pct >= 0 else '▼'
         col = '#2ecc71' if pct >= 0 else '#e74c3c'
-        return '<span style="color:' + col + ';font-size:.68em">' + sig + ' {:.3f}%</span>'.format(abs(pct))
+        return ('<span style="color:' + col + ';font-size:.68em">'
+                + sig + ' {:.3f}%</span>'.format(abs(pct)))
 
-    # ── Cards + sparklines ────────────────────────────────────────────────
+    # ── Sección 1: Cards actuales + sparklines ────────────────────────────
     ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
              'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
     cards_html = ''
@@ -16359,19 +14599,19 @@ def generar_html_indicadores(all_data, explicaciones):
     for cod in ORDER:
         d = datos.get(cod)
         if not d: continue
-        col     = d['color']
-        vals30  = [s.get('valor', 0) for s in reversed(d['serie30'])]
+        col     = _s(d.get('color') or '#3478c3')
+        vals30  = [s.get('valor') or 0 for s in reversed(d.get('serie30', []))]
         spark_d = _j.dumps([round(v, 2) for v in vals30])
         xd      = _j.dumps(list(range(len(vals30))))
-        var_h   = variacion_html(d['serie30'])
-        val_fmt = fmt(d['valor'], cod)
+        var_h   = variacion_html(d.get('serie30', []))
+        val_fmt = fmt(d.get('valor'), cod)
         cards_html += (
             '<div class="card">'
-            '<div class="cn">' + d['nombre'] + '</div>'
+            '<div class="cn">' + _s(d.get('nombre')) + '</div>'
             '<div class="cv">' + val_fmt + ' ' + var_h + '</div>'
-            '<div class="cd">' + d['descripcion'] + '</div>'
+            '<div class="cd">' + _s(d.get('descripcion')) + '</div>'
             '<div id="sp_' + cod + '" class="spark"></div>'
-            '<div class="cf">Actualizado: ' + d['fecha'] + '</div>'
+            '<div class="cf">Actualizado: ' + _s(d.get('fecha')) + '</div>'
             '</div>'
         )
         spark_js += (
@@ -16389,7 +14629,50 @@ def generar_html_indicadores(all_data, explicaciones):
             '})();'
         )
 
-    # ── Cards de análisis IA ─────────────────────────────────────────────
+    # ── Sección 2: Tasas CMF ──────────────────────────────────────────────
+    def _cmf_card(titulo, emoji, items):
+        filas = ''
+        ultima_fecha = ''
+        for it in items:
+            plazo = _s(it.get('plazo') or '')
+            v     = it.get('valor')
+            ultima_fecha = _s(it.get('fecha') or '') or ultima_fecha
+            val_str = '{:.2f}%'.format(v) if v is not None else 'N/D'
+            val_cls = 'cmf-val' if v is not None else 'cmf-val nd'
+            filas += (
+                '<div class="cmf-row data">'
+                '<span class="cmf-plazo">' + plazo + '</span>'
+                '<span class="' + val_cls + '">' + val_str + '</span>'
+                '</div>'
+            )
+        if not filas:
+            filas = ('<div class="cmf-row data">'
+                     '<span class="cmf-plazo">Sin datos</span>'
+                     '<span class="cmf-val nd">N/D</span></div>')
+        fecha_txt = ('Actualizado: ' + ultima_fecha) if ultima_fecha else ''
+        return (
+            '<div class="cmf-card">'
+            '<div class="cmf-nm">' + emoji + ' ' + titulo + '</div>'
+            '<div class="cmf-row header"><span>Plazo</span><span>Tasa anual</span></div>'
+            + filas +
+            '<div class="cmf-fecha">' + fecha_txt + '</div>'
+            '</div>'
+        )
+
+    cmf_html = _cmf_card(
+        'Tasa Máxima Convencional (TMC)', '🏦',
+        datos_cmf.get('tmc') or [
+            {'plazo': '90 días',  'valor': None, 'fecha': ''},
+            {'plazo': '180 días', 'valor': None, 'fecha': ''},
+            {'plazo': '360 días', 'valor': None, 'fecha': ''},
+        ]
+    )
+    cmf_html += _cmf_card(
+        'Tasa Activa Bancaria UF (TAB)', '💹',
+        datos_cmf.get('tab_uf') or [{'plazo': '360 días', 'valor': None, 'fecha': ''}]
+    )
+
+    # ── Sección 3: Análisis IA ────────────────────────────────────────────
     exp_cards_html = ''
     EXP_ORDER = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
                  'tasa_desempleo', 'imacec', 'libra_cobre']
@@ -16398,23 +14681,21 @@ def generar_html_indicadores(all_data, explicaciones):
         exp = explicaciones.get(cod, '')
         if not d or not exp: continue
         serie = d.get('serie30', [])
-        v0 = serie[0].get('valor', 0) if serie else 0
-        v1 = serie[1].get('valor', v0) if len(serie) >= 2 else v0
-        if v1 and v1 != 0:
-            pct = ((v0 - v1) / v1) * 100
-        else:
-            pct = 0.0
-        flecha = '▲' if pct >= 0 else '▼'
+        v0 = (serie[0].get('valor') or 0) if serie else 0
+        v1 = (serie[1].get('valor') or v0) if len(serie) >= 2 else v0
+        pct = ((v0 - v1) / v1) * 100 if (v1 and v1 != 0) else 0.0
+        flecha    = '▲' if pct >= 0 else '▼'
         col_borde = '#2ecc71' if pct >= 0 else '#e74c3c'
         val_fmt     = fmt(v0, cod)
         val_ant_fmt = fmt(v1, cod)
         exp_cards_html += (
             '<div class="exp-card" style="border-left:4px solid ' + col_borde + '">'
             '<div class="exp-hdr">'
-            '<span class="exp-nm">' + d['nombre'] + '</span>'
-            '<span class="exp-badge" style="background:' + col_borde + '22;color:' + col_borde + ';border:1px solid ' + col_borde + '55">'
-            + flecha + ' {:.3f}%</span>'.format(abs(pct)) +
-            '</div>'
+            '<span class="exp-nm">' + _s(d.get('nombre')) + '</span>'
+            '<span class="exp-badge" style="background:' + col_borde + '22;color:' + col_borde
+            + ';border:1px solid ' + col_borde + '55">'
+            + flecha + ' {:.3f}%</span>'.format(abs(pct))
+            + '</div>'
             '<div class="exp-vals">'
             '<span class="lbl">Actual:</span>'
             '<span style="font-weight:700;color:' + col_borde + '">' + val_fmt + '</span>'
@@ -16423,30 +14704,33 @@ def generar_html_indicadores(all_data, explicaciones):
             '<span style="color:#8899aa">' + val_ant_fmt + '</span>'
             '</div>'
             '<div class="exp-why">&#129302; ¿POR QUÉ?</div>'
-            '<div class="exp-txt">' + exp.replace('<', '&lt;').replace('>', '&gt;') + '</div>'
-            '<div class="exp-src">Fuentes: Banco Central de Chile &middot; mindicador.cl &middot; RAG Biblioteca Financiera &middot; Groq IA</div>'
+            '<div class="exp-txt">'
+            + _s(exp).replace('<', '&lt;').replace('>', '&gt;') +
+            '</div>'
+            '<div class="exp-src">Fuentes: Banco Central de Chile &middot; CMF'
+            ' &middot; RAG Biblioteca Financiera &middot; Groq IA</div>'
             '</div>'
         )
 
-    # ── Dólar vs Euro 6 meses ─────────────────────────────────────────────
+    # ── Sección 4: Dólar vs Euro 6 meses ─────────────────────────────────
     labels_6m = _j.dumps(hist_6m.get('labels', []))
     dolar_6m  = _j.dumps(hist_6m.get('dolar', []))
     euro_6m   = _j.dumps(hist_6m.get('euro', []))
 
-    # ── Histórico 10 años ─────────────────────────────────────────────────
-    hist_charts_js   = ''
-    hist_cards_html  = ''
+    # ── Sección 5: Histórico 10 años ──────────────────────────────────────
+    hist_charts_js  = ''
+    hist_cards_html = ''
     for cod in HIST_ORDER:
         d = hist_10a.get(cod)
         if not d: continue
-        col     = d['color']
-        anios_j = _j.dumps([str(a) for a in d['anios']])
-        vals_j  = _j.dumps([v if v is not None else None for v in d['valores']])
+        col     = _s(d.get('color') or '#3478c3')
+        anios_j = _j.dumps([str(a) for a in d.get('anios', [])])
+        vals_j  = _j.dumps([v if v is not None else None for v in d.get('valores', [])])
         is_pct  = 'true' if cod in PORCENTAJES else 'false'
         cid     = 'hist_' + cod
         hist_cards_html += (
             '<div class="hcard">'
-            '<div class="htitle">' + d['nombre'] + ' — Últimos 10 años</div>'
+            '<div class="htitle">' + _s(d.get('nombre')) + ' — Últimos 10 años</div>'
             '<div id="' + cid + '" class="hchart"></div>'
             '</div>'
         )
@@ -16456,296 +14740,71 @@ def generar_html_indicadores(all_data, explicaciones):
             'var isPct=' + is_pct + ';'
             'c.setOption({'
             'backgroundColor:"transparent",'
-            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",borderColor:"' + col + '",'
-            'textStyle:{color:"#c0c8d4"},'
+            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
+            'borderColor:"' + col + '",textStyle:{color:"#c0c8d4"},'
             'formatter:function(p){'
             'var v=p[0].value;if(v===null)return p[0].name+": N/D";'
             'return p[0].name+": "+(isPct?v.toFixed(2)+"%":"$"+v.toLocaleString("es-CL"));'
             '}},'
             'grid:{left:"12%",right:"5%",bottom:"18%",top:"8%"},'
-            'xAxis:{type:"category",data:' + anios_j + ',axisLabel:{color:"#8899aa",fontSize:10,rotate:30},axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+            'xAxis:{type:"category",data:' + anios_j + ','
+            'axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
+            'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
             'yAxis:{type:"value",axisLabel:{color:"#8899aa",fontSize:10,'
             'formatter:function(v){return isPct?v+"%":"$"+v.toLocaleString("es-CL");}},'
             'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
-            'series:[{type:"line",data:' + vals_j + ',smooth:true,symbol:"circle",symbolSize:5,'
-            'connectNulls:true,'
+            'series:[{type:"line",data:' + vals_j + ','
+            'smooth:true,symbol:"circle",symbolSize:5,connectNulls:true,'
             'lineStyle:{color:"' + col + '",width:2.5},'
             'itemStyle:{color:"' + col + '"},'
             'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
             'colorStops:[{offset:0,color:"' + col + '44"},{offset:1,color:"transparent"}]}},'
-            'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",shadowBlur:8,shadowColor:"' + col + '"}}'
+            'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",'
+            'shadowBlur:8,shadowColor:"' + col + '"}}'
             '}]});'
             '})();'
         )
 
+    hist_ids_js = ','.join(['"hist_' + cod + '"'
+                            for cod in HIST_ORDER if hist_10a.get(cod)])
+
     # ── HTML completo ──────────────────────────────────────────────────────
-    hist_ids_js = ','.join(['"hist_' + cod + '"' for cod in HIST_ORDER if hist_10a.get(cod)])
-
-    # ── CMF: cards HTML ────────────────────────────────────────────────────
-    datos_cmf = all_data.get('datos_cmf', {})
-    cmf_html  = ''
-
-    def _cmf_card(titulo, emoji, items):
-        """Genera una card CMF con tabla de plazos."""
-        filas = ''
-        ultima_fecha = ''
-        for it in items:
-            plazo = it.get('plazo', '')
-            v     = it.get('valor')
-            ultima_fecha = it.get('fecha', '') or ultima_fecha
-            if v is not None:
-                val_str = f'{v:.2f}%'
-                val_cls = 'cmf-val'
-            else:
-                val_str = 'N/D'
-                val_cls = 'cmf-val nd'
-            filas += (
-                f'<div class="cmf-row data">'
-                f'<span class="cmf-plazo">{plazo}</span>'
-                f'<span class="{val_cls}">{val_str}</span>'
-                f'</div>'
-            )
-        if not filas:
-            filas = '<div class="cmf-row data"><span class="cmf-plazo">Sin datos</span><span class="cmf-val nd">N/D</span></div>'
-        fecha_txt = f'Actualizado: {ultima_fecha}' if ultima_fecha else ''
-        return (
-            f'<div class="cmf-card">'
-            f'<div class="cmf-nm">{emoji} {titulo}</div>'
-            f'<div class="cmf-row header"><span>Plazo</span><span>Tasa anual</span></div>'
-            f'{filas}'
-            f'<div class="cmf-fecha">{fecha_txt}</div>'
-            f'</div>'
-        )
-
-    cmf_html += _cmf_card(
-        'Tasa Máxima Convencional (TMC)', '🏦',
-        datos_cmf.get('tmc', []) or [
-            {'plazo': '90 días',  'valor': None, 'fecha': ''},
-            {'plazo': '180 días', 'valor': None, 'fecha': ''},
-            {'plazo': '360 días', 'valor': None, 'fecha': ''},
-        ]
-    )
-    cmf_html += _cmf_card(
-        'Tasa TAB Nominal', '📋',
-        datos_cmf.get('tab_nom', []) or [
-            {'plazo': '90 días',  'valor': None, 'fecha': ''},
-            {'plazo': '180 días', 'valor': None, 'fecha': ''},
-            {'plazo': '360 días', 'valor': None, 'fecha': ''},
-        ]
-    )
-    cmf_html += _cmf_card(
-        'Tasa TAB UF', '💹',
-        datos_cmf.get('tab_uf', []) or [
-            {'plazo': '90 días',  'valor': None, 'fecha': ''},
-            {'plazo': '180 días', 'valor': None, 'fecha': ''},
-            {'plazo': '360 días', 'valor': None, 'fecha': ''},
-        ]
-    )
-
-    # ── AFP: tabla de rentabilidad + gráfico ECharts ───────────────────────
-    import json as _jafp
-    datos_afp   = all_data.get('datos_afp', {})
-    afp_lista   = datos_afp.get('afps',   [])
-    fondos_list = datos_afp.get('fondos', [])
-    tabla_afp   = datos_afp.get('tabla',  {})
-    afp_fecha_ini = datos_afp.get('fecha_ini', '')
-    afp_fecha_fin = datos_afp.get('fecha_fin', '')
-    afp_ok      = datos_afp.get('ok', False)
-
-    # Colores por fondo
-    FONDO_COLOR = {
-        'A': '#e74c3c', 'B': '#e67e22', 'C': '#f39c12',
-        'D': '#2ecc71', 'E': '#3478c3',
-    }
-    FONDO_DESC = {
-        'A': 'Renta Variable', 'B': 'Mixto+',
-        'C': 'Mixto',          'D': 'Mixto-',
-        'E': 'Renta Fija',
-    }
-
-    if afp_ok and afp_lista and fondos_list:
-        # Cabecera tabla
-        thead_ths = '<th class="afp-nm">AFP</th>'
-        for f in fondos_list:
-            desc = FONDO_DESC.get(f, '')
-            col  = FONDO_COLOR.get(f, '#8899aa')
-            thead_ths += (
-                f'<th style="color:{col}">Fondo {f}'
-                f'<br/><span style="font-size:.65em;font-weight:400;color:#8899aa">{desc}</span>'
-                f'</th>'
-            )
-        afp_rows = ''
-        for afp in afp_lista:
-            row = f'<tr><td class="afp-nm">{afp}</td>'
-            for f in fondos_list:
-                cell = tabla_afp.get(afp, {}).get(f)
-                if cell is None:
-                    row += '<td class="nd">N/D</td>'
-                else:
-                    rp  = cell['rent_pct']
-                    sig = '+' if rp >= 0 else ''
-                    cls = 'pos' if rp >= 0 else 'neg'
-                    row += f'<td class="{cls}">{sig}{rp:.2f}%</td>'
-            row += '</tr>'
-            afp_rows += row
-
-        afp_html = (
-            f'<div class="afp-wrap">'
-            f'<table class="afp-tabla">'
-            f'<thead><tr>{thead_ths}</tr></thead>'
-            f'<tbody>{afp_rows}</tbody>'
-            f'</table>'
-            f'</div>'
-            f'<div id="chart_afp"></div>'
-            f'<div class="afp-meta">Período: {afp_fecha_ini} al {afp_fecha_fin} · '
-            f'Rentabilidad = variación del valor cuota · Fuente: AFP</div>'
-        )
-
-        # Datos para gráfico de barras agrupadas ECharts (una serie por Fondo)
-        afp_chart_series = []
-        for f in fondos_list:
-            col  = FONDO_COLOR.get(f, '#8899aa')
-            vals = []
-            for afp in afp_lista:
-                cell = tabla_afp.get(afp, {}).get(f)
-                vals.append(round(cell['rent_pct'], 2) if cell else None)
-            afp_chart_series.append({
-                'name':      f'Fondo {f}',
-                'type':      'bar',
-                'data':      vals,
-                'itemStyle': {'color': col},
-                'label':     {
-                    'show': True, 'position': 'top',
-                    'fontSize': 9, 'color': col,
-                    'formatter': 'function(p){return p.value===null?"":((p.value>=0?"+":"")+p.value.toFixed(1)+"%")}',
-                },
-            })
-        afp_names_js  = _jafp.dumps(afp_lista)
-        afp_series_raw = _jafp.dumps(afp_chart_series)
-        # El formatter de label necesita ser función JS, no string; reemplazar aquí
-        afp_series_js = afp_series_raw.replace(
-            '"formatter": "function(p){return p.value===null?\\"\\":'
-            '((p.value>=0?\\"+\\":\\"\\")+p.value.toFixed(1)+\\"%\\")}"',
-            '"formatter": function(p){return p.value===null?"":'
-            '((p.value>=0?"+":"")+p.value.toFixed(1)+"%")}'
-        )
-        afp_chart_js = (
-            '(function(){'
-            'var ca=echarts.init(document.getElementById("chart_afp"));'
-            'ca.setOption({'
-            'backgroundColor:"transparent",'
-            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
-            'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
-            'formatter:function(p){'
-            'var s=p[0].name+"<br/>";'
-            'p.forEach(function(i){'
-            'if(i.value!==null)s+=\'<span style="color:\'+i.color+\'">●</span> \''
-            '+i.seriesName+": "+(i.value>=0?"+":"")+i.value.toFixed(2)+"%<br/>";'
-            '});return s;}},'
-            'legend:{textStyle:{color:"#8899aa"},top:4},'
-            'grid:{left:"10%",right:"3%",bottom:"15%",top:"14%"},'
-            'xAxis:{type:"category",data:' + _jafp.dumps(afp_lista) + ','
-            'axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
-            'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
-            'yAxis:{type:"value",'
-            'axisLabel:{color:"#8899aa",formatter:function(v){return (v>=0?"+":"")+v+"%";}},'
-            'splitLine:{lineStyle:{color:"rgba(52,120,195,.1)"}},'
-            'axisLine:{show:true,lineStyle:{color:"#445566"}}},'
-            'series:[' +
-            ','.join([
-                '{'
-                'name:"Fondo ' + f + '",'
-                'type:"bar",'
-                'data:' + _jafp.dumps([
-                    round(tabla_afp.get(afp, {}).get(f, {}).get('rent_pct', 0) or 0, 2)
-                    if tabla_afp.get(afp, {}).get(f) else None
-                    for afp in afp_lista
-                ]) + ','
-                'itemStyle:{color:"' + FONDO_COLOR.get(f, '#8899aa') + '"},'
-                'label:{show:true,position:"top",fontSize:9,color:"' + FONDO_COLOR.get(f, '#8899aa') + '",'
-                'formatter:function(p){return p.value===null?"":(p.value>=0?"+":"")+p.value.toFixed(1)+"%";}}'
-                '}'
-                for f in fondos_list
-            ]) +
-            ']});'
-            'window.addEventListener("resize",function(){ca.resize();});'
-            '})();'
-        )
-    else:
-        afp_html = (
-            '<div style="background:rgba(15,47,89,.5);border-radius:10px;padding:20px;'
-            'text-align:center;color:#445566;font-size:.85em">'
-            '&#128274; Datos de AFP no disponibles en este momento. '
-            'Verifique conexión con la API QueTalMiAFP.</div>'
-        )
-        afp_chart_js = ''
-
-
     html = (
         '<!DOCTYPE html><html lang="es"><head>'
-        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta charset="UTF-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>Indicadores Económicos Chile — Cofradía de Networking</title>'
-        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
+        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js">'
+        '</script>'
         '<style>'
         '*{margin:0;padding:0;box-sizing:border-box}'
         'body{font-family:"Segoe UI",system-ui,sans-serif;'
         'background:linear-gradient(160deg,#06101e 0%,#0a1628 40%,#0f2f59 100%);'
         'color:#e0e6ed;padding:20px 16px 40px;min-height:100vh}'
-
         'header{text-align:center;padding:28px 0 18px;'
         'border-bottom:2px solid rgba(195,165,90,.35);margin-bottom:28px}'
         'header h1{font-size:1.9em;color:#c3a55a;letter-spacing:3px;'
         'text-shadow:0 2px 14px rgba(195,165,90,.35)}'
         'header .sub{color:#667788;font-size:.83em;margin-top:5px}'
-        'header a{color:#3478c3;text-decoration:none}'
-
         '.section{margin-bottom:36px}'
         '.section-title{font-size:1.15em;font-weight:700;color:#c3a55a;'
-        'border-left:4px solid #c3a55a;padding-left:12px;margin-bottom:16px;letter-spacing:.5px}'
+        'border-left:4px solid #c3a55a;padding-left:12px;'
+        'margin-bottom:16px;letter-spacing:.5px}'
         '.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px}'
         '.card{background:rgba(15,47,89,.65);border:1px solid rgba(195,165,90,.18);'
         'border-radius:11px;padding:14px;transition:transform .2s,box-shadow .2s}'
         '.card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.4)}'
-        '.cn{font-size:.7em;color:#8899aa;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:4px}'
+        '.cn{font-size:.7em;color:#8899aa;text-transform:uppercase;'
+        'letter-spacing:1.2px;margin-bottom:4px}'
         '.cv{font-size:1.45em;font-weight:800;color:#c3a55a;margin-bottom:2px}'
         '.cd{font-size:.68em;color:#445566;margin-bottom:5px;line-height:1.3}'
         '.spark{width:100%;height:38px;margin:5px 0}'
         '.cf{font-size:.6em;color:#334455}'
-        '.exp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}'
-        '.exp-card{background:rgba(13,27,48,.85);border-radius:11px;padding:15px;'
-        'box-shadow:0 4px 16px rgba(0,0,0,.3);transition:transform .2s}'
-        '.exp-card:hover{transform:translateY(-2px)}'
-        '.exp-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}'
-        '.exp-nm{font-size:.95em;font-weight:700;color:#e0e6ed}'
-        '.exp-badge{font-size:.75em;font-weight:700;padding:3px 9px;border-radius:18px;white-space:nowrap}'
-        '.exp-vals{display:flex;align-items:center;gap:7px;font-size:.8em;margin-bottom:10px;'
-        'padding:6px 9px;background:rgba(255,255,255,.04);border-radius:7px;flex-wrap:wrap}'
-        '.lbl{color:#8899aa}.sep{color:#445566}'
-        '.exp-why{font-size:.7em;color:#f39c12;font-weight:800;letter-spacing:1.5px;margin-bottom:6px}'
-        '.exp-txt{font-size:.88em;color:#aed6f1;line-height:1.65;margin-bottom:9px}'
-        '.exp-src{font-size:.63em;color:#445566;border-top:1px solid rgba(52,120,195,.12);padding-top:7px}'
-        '.chart-wide{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.2);'
-        'border-radius:12px;padding:16px}'
-        '.chart-wide .ctitle{font-size:1em;color:#c3a55a;margin-bottom:10px;font-weight:600}'
-        '#chart6m{width:100%;height:340px}'
-        '.hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}'
-        '.hcard{background:rgba(15,47,89,.65);border:1px solid rgba(52,120,195,.18);'
-        'border-radius:12px;padding:14px}'
-        '.htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;'
-        'padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}'
-        '.hchart{width:100%;height:220px}'
-
-        'footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;'
-        'padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}'
-        'footer a{color:#3478c3;text-decoration:none}'
-
-        '@media(max-width:600px){'
-        '.cards,.exp-grid,.hist-grid{grid-template-columns:1fr}'
-        '}'
-
-        '.cmf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}'
-        '.cmf-card{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);'
-        'border-radius:12px;padding:16px}'
+        # CMF styles
+        '.cmf-grid{display:grid;'
+        'grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}'
+        '.cmf-card{background:rgba(13,27,48,.85);'
+        'border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:16px}'
         '.cmf-nm{font-size:.75em;color:#c3a55a;font-weight:800;letter-spacing:1px;'
         'text-transform:uppercase;margin-bottom:10px;padding-bottom:7px;'
         'border-bottom:1px solid rgba(195,165,90,.2)}'
@@ -16758,70 +14817,89 @@ def generar_html_indicadores(all_data, explicaciones):
         '.cmf-val{font-size:1.05em;font-weight:800;color:#c3a55a}'
         '.cmf-val.nd{color:#445566;font-size:.82em}'
         '.cmf-fecha{font-size:.6em;color:#334455;margin-top:8px;text-align:right}'
-
-        '.afp-section{margin-bottom:36px}'
-        '.afp-wrap{overflow-x:auto}'
-        '.afp-tabla{width:100%;border-collapse:collapse;font-size:.82em}'
-        '.afp-tabla th{background:rgba(52,120,195,.2);color:#c3a55a;padding:9px 12px;'
-        'text-align:center;font-weight:700;letter-spacing:.5px;border:1px solid rgba(52,120,195,.15)}'
-        '.afp-tabla th.afp-nm{text-align:left}'
-        '.afp-tabla td{padding:8px 12px;text-align:center;border:1px solid rgba(52,120,195,.1);'
-        'color:#e0e6ed;transition:background .2s}'
-        '.afp-tabla td.afp-nm{text-align:left;font-weight:700;color:#c3a55a;'
-        'background:rgba(15,47,89,.5)}'
-        '.afp-tabla .pos{color:#2ecc71;font-weight:700}'
-        '.afp-tabla .neg{color:#e74c3c;font-weight:700}'
-        '.afp-tabla .nd{color:#445566}'
-        '.afp-tabla tr:hover td{background:rgba(52,120,195,.08)}'
-        '#chart_afp{width:100%;height:320px;margin-top:18px}'
-        '.afp-meta{font-size:.7em;color:#445566;margin-top:8px}'
-
+        # IA styles
+        '.exp-grid{display:grid;'
+        'grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}'
+        '.exp-card{background:rgba(13,27,48,.85);border-radius:11px;padding:15px;'
+        'box-shadow:0 4px 16px rgba(0,0,0,.3);transition:transform .2s}'
+        '.exp-card:hover{transform:translateY(-2px)}'
+        '.exp-hdr{display:flex;align-items:center;justify-content:space-between;'
+        'margin-bottom:9px}'
+        '.exp-nm{font-size:.95em;font-weight:700;color:#e0e6ed}'
+        '.exp-badge{font-size:.75em;font-weight:700;padding:3px 9px;'
+        'border-radius:18px;white-space:nowrap}'
+        '.exp-vals{display:flex;align-items:center;gap:7px;font-size:.8em;'
+        'margin-bottom:10px;padding:6px 9px;background:rgba(255,255,255,.04);'
+        'border-radius:7px;flex-wrap:wrap}'
+        '.lbl{color:#8899aa}.sep{color:#445566}'
+        '.exp-why{font-size:.7em;color:#f39c12;font-weight:800;'
+        'letter-spacing:1.5px;margin-bottom:6px}'
+        '.exp-txt{font-size:.88em;color:#aed6f1;line-height:1.65;margin-bottom:9px}'
+        '.exp-src{font-size:.63em;color:#445566;'
+        'border-top:1px solid rgba(52,120,195,.12);padding-top:7px}'
+        # Chart styles
+        '.chart-wide{background:rgba(15,47,89,.65);'
+        'border:1px solid rgba(52,120,195,.2);border-radius:12px;padding:16px}'
+        '#chart6m{width:100%;height:340px}'
+        '.hist-grid{display:grid;'
+        'grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}'
+        '.hcard{background:rgba(15,47,89,.65);'
+        'border:1px solid rgba(52,120,195,.18);border-radius:12px;padding:14px}'
+        '.htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;'
+        'padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}'
+        '.hchart{width:100%;height:220px}'
+        'footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;'
+        'padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}'
+        '@media(max-width:600px){'
+        '.cards,.cmf-grid,.exp-grid,.hist-grid{grid-template-columns:1fr}'
+        '}'
         '</style></head><body>'
 
         '<header>'
         '<h1>&#9875; INDICADORES ECONÓMICOS DE CHILE</h1>'
-        '<div class="sub">Datos en tiempo real · Análisis IA · '
-        'Banco Central de Chile · CMF · AFP · ' + gen + '</div>'
+        '<div class="sub">Datos en tiempo real &middot; Análisis IA'
+        ' &middot; Banco Central de Chile &middot; CMF &middot; '
+        + _s(gen) +
+        '</div>'
         '</header>'
 
-        # Sección 1: Cards actuales (11 indicadores)
         '<div class="section">'
-        '<div class="section-title">&#128202; Indicadores del Día — 11 Indicadores con Tendencia 30 días</div>'
+        '<div class="section-title">'
+        '&#128202; Indicadores del Día — 11 Indicadores con Tendencia 30 días'
+        '</div>'
         '<div class="cards">' + cards_html + '</div>'
         '</div>'
 
-        # Sección 2: Indicadores CMF (3 indicadores: TMC, TAB UF, TAB Nominal)
         '<div class="section">'
-        '<div class="section-title">&#127970; Tasas CMF — Comisión para el Mercado Financiero</div>'
+        '<div class="section-title">'
+        '&#127970; Tasas CMF — Comisión para el Mercado Financiero'
+        '</div>'
         '<div class="cmf-grid">' + cmf_html + '</div>'
         '</div>'
 
-        # Sección 3: Análisis IA
         '<div class="section">'
-        '<div class="section-title">&#129302; Análisis IA — ¿Por qué varió cada indicador?</div>'
+        '<div class="section-title">'
+        '&#129302; Análisis IA — ¿Por qué varió cada indicador?'
+        '</div>'
         '<div class="exp-grid">' + exp_cards_html + '</div>'
         '</div>'
 
-        # Sección 4: Dólar vs Euro 6 meses
         '<div class="section">'
-        '<div class="section-title">&#128178; Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)</div>'
+        '<div class="section-title">'
+        '&#128178; Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)'
+        '</div>'
         '<div class="chart-wide"><div id="chart6m"></div></div>'
         '</div>'
 
-        # Sección 5: Histórico 10 años
         '<div class="section">'
-        '<div class="section-title">&#128197; Series Históricas — Últimos 10 Años</div>'
+        '<div class="section-title">'
+        '&#128197; Series Históricas — Últimos 10 Años'
+        '</div>'
         '<div class="hist-grid">' + hist_cards_html + '</div>'
         '</div>'
 
-        # Sección 6: Rentabilidad AFP
-        '<div class="section afp-section">'
-        '<div class="section-title">&#127963; Rentabilidad AFP — Últimos 6 Meses</div>'
-        + afp_html +
-        '</div>'
-
         '<footer>'
-        'Banco Central de Chile &nbsp;&middot;&nbsp; CMF &nbsp;&middot;&nbsp; AFP'
+        'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Análisis IA + RAG Biblioteca de Finanzas'
         ' &nbsp;&middot;&nbsp; Cofradía de Networking Bot v6.0'
         '</footer>'
@@ -16837,34 +14915,41 @@ def generar_html_indicadores(all_data, explicaciones):
         'formatter:function(p){'
         'var s=p[0].name+"<br/>";'
         'p.forEach(function(i){'
-        's+=\'<span style="color:\'+i.color+\'">●</span> \'+i.seriesName+\': \';'
+        's+=\'<span style="color:\'+i.color+\'">●</span> \''
+        '+i.seriesName+\': \';'
         'if(i.value===null)s+="N/D";'
         'else s+="$"+i.value.toLocaleString("es-CL");'
         's+="<br/>";});return s;'
         '}},'
-        'legend:{data:["Dólar USD","Euro EUR"],textStyle:{color:"#8899aa"},top:4,right:10},'
+        'legend:{data:["Dólar USD","Euro EUR"],'
+        'textStyle:{color:"#8899aa"},top:4,right:10},'
         'grid:{left:"10%",right:"5%",bottom:"12%",top:"14%"},'
         'xAxis:{type:"category",data:' + labels_6m + ','
         'axisLabel:{color:"#8899aa",fontSize:12},'
         'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
         'yAxis:{type:"value",'
-        'axisLabel:{color:"#8899aa",formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
+        'axisLabel:{color:"#8899aa",'
+        'formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
         'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
         'series:['
         '{name:"Dólar USD",type:"line",data:' + dolar_6m + ','
         'smooth:true,symbol:"circle",symbolSize:7,'
         'lineStyle:{color:"#3478c3",width:3},itemStyle:{color:"#3478c3"},'
         'label:{show:true,position:"top",color:"#3478c3",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'formatter:function(p){'
+        'return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
         'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-        'colorStops:[{offset:0,color:"#3478c344"},{offset:1,color:"transparent"}]}}},'
+        'colorStops:[{offset:0,color:"#3478c344"},'
+        '{offset:1,color:"transparent"}]}}},'
         '{name:"Euro EUR",type:"line",data:' + euro_6m + ','
         'smooth:true,symbol:"circle",symbolSize:7,'
         'lineStyle:{color:"#2ecc71",width:3},itemStyle:{color:"#2ecc71"},'
         'label:{show:true,position:"bottom",color:"#2ecc71",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
+        'formatter:function(p){'
+        'return p.value?("$"+p.value.toLocaleString("es-CL")):"N/D";}},'
         'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-        'colorStops:[{offset:0,color:"#2ecc7133"},{offset:1,color:"transparent"}]}}}]'
+        'colorStops:[{offset:0,color:"#2ecc7133"},'
+        '{offset:1,color:"transparent"}]}}}]'
         '});'
 
         + hist_charts_js +
@@ -16876,8 +14961,6 @@ def generar_html_indicadores(all_data, explicaciones):
         'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
         '});});'
 
-        + afp_chart_js +
-
         '</script>'
         '</body></html>'
     )
@@ -16887,14 +14970,12 @@ def generar_html_indicadores(all_data, explicaciones):
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico completo de Chile:
-      • 11 indicadores del día con sparkline 30 días (Banco Central)
-      • 3 tasas CMF: TMC · TAB Nominal · TAB UF (90/180/360 días)
-      • Análisis IA del por qué varió cada indicador (Groq + RAG + BCCH)
+    /indicadores — Dashboard económico completo de Chile con análisis IA:
+      • 11 indicadores del día con sparkline 30 días
+      • Tasas CMF: TMC (90/180/360 días) + TAB UF 360 días
+      • Análisis IA por indicador (Groq + RAG + BCCH)
       • Dólar vs Euro últimos 6 meses
       • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
-      • Rentabilidad AFP últimos 6 meses (todos los fondos)
-    Fuentes: Banco Central · CMF · AFP · RAG Biblioteca Finanzas
     """
     msg = await update.message.reply_text(
         "📈 Consultando indicadores económicos...\n"
@@ -16903,50 +14984,46 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         loop = asyncio.get_running_loop()
 
-        # 1. Datos completos (histórico + actuales) — fetch paralelo ~80 peticiones
+        # 1. Indicadores Banco Central (~80 peticiones en paralelo)
         all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
         datos = all_data.get('datos_actuales', {})
         if not datos:
-            await msg.edit_text("❌ Sin datos de indicadores. Intenta en unos minutos.")
+            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
             return
 
         await msg.edit_text(
             f"✅ {len(datos)} indicadores obtenidos.\n"
-            "🔍 Web scraping del Banco Central...\n"
-            "📚 Consultando biblioteca financiera RAG...\n"
-            "🏦 Consultando tasas CMF..."
+            "🏦 Consultando tasas CMF...\n"
+            "🔍 Web scraping Banco Central..."
         )
 
-        # 2. Web scraping BCCH
+        # 2. Tasas CMF (sin necesidad de variable de entorno adicional)
+        datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+        all_data['datos_cmf'] = datos_cmf or {}
+
+        # 3. Web scraping BCCH
         noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
         contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
 
-        # 2b. Indicadores CMF (TMC, TAB UF, TAB Nominal)
-        datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
-        all_data['datos_cmf'] = datos_cmf
-
-        # 2c. Rentabilidad AFP (últimos 6 meses)
         await msg.edit_text(
             f"✅ Indicadores + CMF obtenidos.\n"
-            "🏛️ Consultando rentabilidad AFP...\n"
-            "📚 Analizando con IA..."
+            "📚 Consultando biblioteca RAG...\n"
+            "🤖 Generando análisis IA..."
         )
-        datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
-        all_data['datos_afp'] = datos_afp
 
-        # 3. RAG por indicador
+        # 4. RAG por indicador
         queries_rag = {
-            'uf':            'unidad de fomento inflacion reajuste Chile',
-            'dolar':         'tipo de cambio dolar peso chileno politica cambiaria',
-            'euro':          'tipo de cambio euro moneda extranjera',
-            'utm':           'unidad tributaria mensual impuestos Chile',
-            'ipc':           'indice de precios al consumidor inflacion causas efectos',
-            'tpm':           'tasa de politica monetaria banco central tasas de interes',
-            'bitcoin':       'bitcoin criptomoneda volatilidad mercado digital',
-            'tasa_desempleo':'desempleo mercado laboral Chile causas empleo',
-            'imacec':        'IMACEC actividad economica Chile indicador mensual PIB',
-            'libra_cobre':   'precio cobre Chile exportaciones materias primas',
-            'ivp':           'indice valor promedio creditos hipotecarios Chile',
+            'uf':             'unidad de fomento inflacion reajuste Chile',
+            'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
+            'euro':           'tipo de cambio euro moneda extranjera',
+            'utm':            'unidad tributaria mensual impuestos Chile',
+            'ipc':            'indice de precios al consumidor inflacion causas efectos',
+            'tpm':            'tasa de politica monetaria banco central tasas de interes',
+            'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
+            'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
+            'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
+            'libra_cobre':    'precio cobre Chile exportaciones materias primas',
+            'ivp':            'indice valor promedio creditos hipotecarios Chile',
         }
         fragmentos_rag = {}
         for cod in datos:
@@ -16954,7 +15031,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
             fragmentos_rag[cod] = frag
 
-        # 4. Explicaciones IA
+        # 5. Explicaciones IA
         await msg.edit_text(
             f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
             "📊 Construyendo dashboard interactivo..."
@@ -16967,7 +15044,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             explicaciones[cod] = exp
 
-        # 5. Mensaje de texto resumido en Telegram
+        # 6. Mensaje de texto resumido
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
@@ -16975,14 +15052,17 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
-            "Fuente: Banco Central de Chile · CMF · AFP",
+            "Fuente: Banco Central de Chile · CMF",
             "",
         ]
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
-            v = d['valor']
-            if cod in PORCENTAJES:
+            v = d.get('valor')
+            # Guard None valor antes de formatear
+            if v is None:
+                vf = "N/D"
+            elif cod in PORCENTAJES:
                 vf = "{:.2f}%".format(v)
             elif cod == 'bitcoin':
                 vf = "${:,.0f} CLP".format(v).replace(',', '.')
@@ -16993,12 +15073,29 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             serie = d.get('serie30', [])
             tend  = ''
             if len(serie) >= 2:
-                v0 = serie[0].get('valor', 0)
-                v1 = serie[1].get('valor', 1)
+                v0 = serie[0].get('valor') or 0
+                v1 = serie[1].get('valor') or 1
                 if v1:
                     pct  = ((v0 - v1) / v1) * 100
                     tend = '  ' + ('▲' if pct >= 0 else '▼') + ' {:.3f}%'.format(abs(pct))
-            lineas.append(d['nombre'] + ": " + vf + tend + "  (" + d['fecha'] + ")")
+            nombre = d.get('nombre') or cod
+            fecha  = d.get('fecha') or ''
+            sufijo = '  (' + fecha + ')' if fecha else ''
+            lineas.append(nombre + ": " + vf + tend + sufijo)
+
+        # Tasas CMF en mensaje
+        tmc_items = (datos_cmf or {}).get('tmc', [])
+        tab_uf    = (datos_cmf or {}).get('tab_uf', [])
+        if tmc_items or tab_uf:
+            lineas += ["", sep, "🏦 Tasas CMF:", ""]
+            for item in tmc_items:
+                v  = item.get('valor')
+                vf = "{:.2f}%".format(v) if v is not None else "N/D"
+                lineas.append("  TMC " + (item.get('plazo') or '') + ": " + vf)
+            if tab_uf:
+                v  = tab_uf[0].get('valor')
+                vf = "{:.2f}%".format(v) if v is not None else "N/D"
+                lineas.append("  TAB UF 360 días: " + vf)
 
         hist_6m = all_data.get('hist_6m', {})
         d6l = hist_6m.get('dolar', [])
@@ -17008,37 +15105,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             for label, vd, ve in zip(hist_6m.get('labels', []), d6l, e6l):
                 vds = "${:,.0f}".format(vd).replace(',', '.') if vd else 'N/D'
                 ves = "${:,.0f}".format(ve).replace(',', '.') if ve else 'N/D'
-                lineas.append("  " + label + " — USD " + vds + "  |  EUR " + ves)
+                lineas.append("  " + str(label) + " — USD " + vds + "  |  EUR " + ves)
 
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
-
-        # Agregar resumen CMF al mensaje de texto
-        tmc_list = datos_cmf.get('tmc', [])
-        if tmc_list:
-            lineas += ["", sep, "🏦 Tasas CMF (Comisión para el Mercado Financiero):"]
-            for item in tmc_list:
-                v = item.get('valor')
-                vf = f"{v:.2f}%" if v is not None else "N/D"
-                lineas.append(f"  TMC {item.get('plazo','')}: {vf}")
-        tab_uf_360 = next((x for x in datos_cmf.get('tab_uf', []) if x.get('plazo') == '360 días' and x.get('valor')), None)
-        if tab_uf_360:
-            lineas.append(f"  TAB UF 360 días: {tab_uf_360['valor']:.2f}%")
-
-        # Agregar resumen AFP al mensaje de texto
-        if datos_afp.get('ok') and datos_afp.get('tabla'):
-            lineas += ["", sep, f"🏛️ Rentabilidad AFP — últimos 6 meses ({datos_afp.get('fecha_ini','')}):",  ""]
-            for afp in datos_afp.get('afps', []):
-                row_txt = f"  {afp}:"
-                for f in datos_afp.get('fondos', []):
-                    cell = datos_afp['tabla'].get(afp, {}).get(f)
-                    if cell:
-                        rp = cell['rent_pct']
-                        row_txt += f"  F{f}: {'+'if rp>=0 else ''}{rp:.1f}%"
-                lineas.append(row_txt)
-
         await update.message.reply_text("\n".join(lineas))
 
-        # 6. Generar y enviar HTML
+        # 7. Generar y enviar HTML
         await msg.edit_text("📊 Generando dashboard HTML interactivo...")
         html_content = await loop.run_in_executor(
             None, generar_html_indicadores, all_data, explicaciones
@@ -17053,12 +15125,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 caption=(
                     "📊 Dashboard Indicadores Económicos Chile\n\n"
                     "• 11 indicadores del día con sparklines 30 días\n"
-                    "• 🏦 Tasas CMF: TMC · TAB UF · TAB Nominal (90/180/360 días)\n"
+                    "• 🏦 Tasas CMF: TMC (90/180/360 días) · TAB UF\n"
                     "• 🤖 Análisis IA del por qué de cada variación\n"
+                    "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
                     "• 💱 Dólar vs Euro últimos 6 meses\n"
                     "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
-                    "       Desempleo · IMACEC · Cobre · Bitcoin\n"
-                    "• 🏛️ Rentabilidad AFP últimos 6 meses (Fondos A–E)\n\n"
+                    "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
                 )
             )
@@ -17077,46 +15149,6 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
-
-
-
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Captura TODOS los errores no manejados del bot y los loguea correctamente."""
-    import traceback as _tb
-
-    error = context.error
-    tb_str = ''.join(_tb.format_exception(type(error), error, error.__traceback__))
-
-    # Errores esperados que no necesitan alerta (red, Telegram timeouts)
-    ignorar = (
-        'Message is not modified',
-        'Query is too old',
-        'Bad Gateway',
-        'Timed out',
-        'Connection reset',
-        'Network',
-        'httpx',
-        'ReadTimeout',
-        'ConnectTimeout',
-        'RetryAfter',
-    )
-    for patron in ignorar:
-        if patron.lower() in str(error).lower():
-            logger.debug(f"Error esperado ignorado: {error}")
-            return
-
-    logger.error(f"Exception no manejada:\n{tb_str}")
-
-    # Intentar notificar al usuario si hay update activo
-    if update:
-        try:
-            mensaje_error = "❌ Ocurrió un error inesperado. Por favor intenta de nuevo."
-            if hasattr(update, 'effective_message') and update.effective_message:
-                await update.effective_message.reply_text(mensaje_error)
-            elif hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.answer(mensaje_error, show_alert=True)
-        except Exception:
-            pass  # No propagar errores desde el error handler
 
 
 def main():
@@ -17278,17 +15310,6 @@ def main():
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
-    # ── Comandos v6.0 ──
-    application.add_handler(CommandHandler("analizar", analizar_usuario_comando))
-    application.add_handler(CommandHandler("ofrezco", ofrezco_comando))
-    application.add_handler(CommandHandler("busco_servicio", busco_servicio_comando))
-    application.add_handler(CommandHandler("mis_servicios", mis_servicios_comando))
-    application.add_handler(CommandHandler("recordar", recordar_comando))
-    application.add_handler(CommandHandler("mantenimiento", mantenimiento_comando))
-    application.add_handler(CommandHandler("velocidad_voz", velocidad_voz_comando))
-    application.add_handler(CommandHandler("resumen_diario", resumen_diario_comando))
-    application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
-    application.add_handler(CommandHandler("feriados", feriados_comando))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
     application.add_handler(CommandHandler("renovar", renovar_comando))
