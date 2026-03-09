@@ -14190,37 +14190,37 @@ def obtener_indicadores_chile():
     """
     Obtiene indicadores desde mindicador.cl (API REST gratuita del Banco Central).
     Retorna dict con:
-      - datos_actuales: 11 cards con sparkline 30 días + variación
-      - hist_6m: Dólar vs Euro últimos 6 meses (valor inicio de cada mes)
-      - hist_10a: series anuales últimos 10 años por indicador
-    Usa ThreadPoolExecutor para paralelizar ~80 llamadas históricas.
+      - datos_actuales: 12 cards con sparkline 30 dias + variacion (incluye IPSA)
+      - hist_12m: Dolar vs Euro ultimos 12 meses (valor inicio de cada mes)
+      - hist_10a: series anuales ultimos 10 anos por indicador
+    Usa ThreadPoolExecutor para paralelizar ~100 llamadas historicas.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     BASE   = 'https://mindicador.cl/api'
     AHORA  = datetime.now()
     ANIO_A = AHORA.year
 
-    # ── Indicadores para cards actuales ──────────────────────────────────
+    # ── Indicadores para cards actuales (12) ──────────────────────────────
     CARDS_CFG = [
-        ('uf',             'UF',              'Unidad de Fomento',                   '#c3a55a'),
-        ('dolar',          'Dólar USD',       'Tipo de cambio USD/CLP',              '#3478c3'),
-        ('euro',           'Euro EUR',        'Tipo de cambio EUR/CLP',              '#2980b9'),
-        ('utm',            'UTM',             'Unidad Tributaria Mensual',           '#e67e22'),
-        ('ipc',            'IPC',             'Índice de Precios al Consumidor',     '#2ecc71'),
-        ('tpm',            'TPM',             'Tasa Política Monetaria (%)',         '#27ae60'),
-        ('bitcoin',        'Bitcoin',         'Bitcoin en CLP',                      '#9b59b6'),
-        ('tasa_desempleo', 'Desempleo',       'Tasa de Desempleo (%)',               '#e74c3c'),
-        ('imacec',         'IMACEC',          'Indicador Mensual Actividad Eco. (%)', '#f39c12'),
-        ('libra_cobre',    'Cobre (lb)',      'Precio Libra de Cobre USD',           '#cd7f32'),
-        ('ivp',            'IVP',             'Índice Valor Promedio',               '#1abc9c'),
+        ('uf',             'UF',              'Unidad de Fomento',                     '#c3a55a'),
+        ('dolar',          'Dolar USD',       'Tipo de cambio USD/CLP',                '#3478c3'),
+        ('euro',           'Euro EUR',        'Tipo de cambio EUR/CLP',                '#2980b9'),
+        ('utm',            'UTM',             'Unidad Tributaria Mensual',             '#e67e22'),
+        ('ipc',            'IPC',             'Indice de Precios al Consumidor',       '#2ecc71'),
+        ('tpm',            'TPM',             'Tasa Politica Monetaria (%)',           '#27ae60'),
+        ('bitcoin',        'Bitcoin',         'Bitcoin en CLP',                        '#9b59b6'),
+        ('tasa_desempleo', 'Desempleo',       'Tasa de Desempleo (%)',                 '#e74c3c'),
+        ('imacec',         'IMACEC',          'Indicador Mensual Actividad Eco. (%)',  '#f39c12'),
+        ('libra_cobre',    'Cobre (lb)',      'Precio Libra de Cobre USD',             '#cd7f32'),
+        ('ivp',            'IVP',             'Indice Valor Promedio',                 '#1abc9c'),
+        ('ipsa',           'IPSA',            'Indice Precio Selectivo de Acciones',  '#ff6b35'),
     ]
-    # Deduplicar
     seen = set()
     CARDS_CFG_UNIQ = [t for t in CARDS_CFG if t[0] not in seen and not seen.add(t[0])]
 
-    # ── Indicadores para histórico 10 años ────────────────────────────────
+    # ── Indicadores para historico 10 anos ────────────────────────────────
     HIST_CFG = [
-        ('dolar',          'Dólar USD',       '#3478c3'),
+        ('dolar',          'Dolar USD',       '#3478c3'),
         ('euro',           'Euro EUR',        '#2980b9'),
         ('uf',             'UF',              '#c3a55a'),
         ('utm',            'UTM',             '#e67e22'),
@@ -14231,7 +14231,7 @@ def obtener_indicadores_chile():
         ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
     ]
 
-    def fetch(url, timeout=12):
+    def fetch(url, timeout=14):
         try:
             r = requests.get(url, timeout=timeout,
                              headers={'Accept': 'application/json'})
@@ -14241,10 +14241,10 @@ def obtener_indicadores_chile():
             logger.debug('mindicador fetch: ' + str(_e))
         return None
 
-    # ── 1. Cards: serie últimos 30 días ───────────────────────────────────
+    # ── 1. Cards: serie ultimos 30 dias ───────────────────────────────────
     datos_actuales = {}
     card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
-    with ThreadPoolExecutor(max_workers=12) as ex:
+    with ThreadPoolExecutor(max_workers=14) as ex:
         fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
@@ -14263,7 +14263,7 @@ def obtener_indicadores_chile():
                         'serie30':     serie[:30],
                     }
 
-    # ── 2. Dólar vs Euro últimos 6 meses (inicio de cada mes) ────────────
+    # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
     def primer_valor_mes(serie, anio, mes):
         for s in reversed(serie):
             f = s.get('fecha', '')[:7]
@@ -14271,22 +14271,24 @@ def obtener_indicadores_chile():
                 return s.get('valor', None)
         return None
 
-    hist_6m = {}
-    meses_labels   = []
-    meses_targets  = []
-    for i in range(5, -1, -1):
+    hist_12m = {}
+    meses_labels  = []
+    meses_targets = []
+    MESES_ES = ['Ene','Feb','Mar','Abr','May','Jun',
+                'Jul','Ago','Sep','Oct','Nov','Dic']
+    for i in range(11, -1, -1):
         mes_offset = AHORA.month - i
         yr_offset  = ANIO_A
-        if mes_offset <= 0:
+        while mes_offset <= 0:
             mes_offset += 12
             yr_offset  -= 1
         meses_targets.append((yr_offset, mes_offset))
-        meses_labels.append('%02d/%d' % (mes_offset, yr_offset))
+        meses_labels.append(MESES_ES[mes_offset - 1] + ' ' + str(yr_offset)[-2:])
 
     anios_necesarios = list(set(yr for yr, _ in meses_targets))
     serie_dol = {}
     serie_eur = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {}
         for yr in anios_necesarios:
             futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
@@ -14298,16 +14300,16 @@ def obtener_indicadores_chile():
             if cod == 'dolar': serie_dol[yr] = serie
             else:              serie_eur[yr] = serie
 
-    hist_6m['labels'] = meses_labels
-    hist_6m['dolar']  = []
-    hist_6m['euro']   = []
+    hist_12m['labels'] = meses_labels
+    hist_12m['dolar']  = []
+    hist_12m['euro']   = []
     for yr, mes in meses_targets:
         vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
         ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
-        hist_6m['dolar'].append(round(vd, 2) if vd else None)
-        hist_6m['euro'].append(round(ve, 2) if ve else None)
+        hist_12m['dolar'].append(round(vd, 2) if vd else None)
+        hist_12m['euro'].append(round(ve, 2) if ve else None)
 
-    # ── 3. Histórico 10 años (valor representativo por año) ───────────────
+    # ── 3. Historico 10 anos (valor representativo por ano) ───────────────
     ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
     hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_10, 'valores': []}
                 for cod, nom, col in HIST_CFG}
@@ -14315,16 +14317,17 @@ def obtener_indicadores_chile():
     tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_10]
     raw_hist   = {}
 
+    PORCENTAJES_H = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+
     def fetch_year(cod_yr):
         cod, yr = cod_yr
-        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=14)
+        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=15)
         return (cod, yr, j.get('serie', []) if j else [])
 
     with ThreadPoolExecutor(max_workers=30) as ex:
         for cod, yr, serie in ex.map(fetch_year, tasks_hist):
             raw_hist[(cod, yr)] = serie
 
-    PORCENTAJES = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
     for cod, nom, col in HIST_CFG:
         valores = []
         for yr in ANIOS_10:
@@ -14332,7 +14335,7 @@ def obtener_indicadores_chile():
             if not serie:
                 valores.append(None)
                 continue
-            if cod in PORCENTAJES:
+            if cod in PORCENTAJES_H:
                 vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
                 v = round(sum(vals) / len(vals), 3) if vals else None
             else:
@@ -14342,7 +14345,7 @@ def obtener_indicadores_chile():
 
     return {
         'datos_actuales': datos_actuales,
-        'hist_6m':        hist_6m,
+        'hist_12m':       hist_12m,
         'hist_10a':       hist_10a,
         'generado':       AHORA.strftime('%d/%m/%Y %H:%M'),
     }
@@ -14350,15 +14353,28 @@ def obtener_indicadores_chile():
 
 def obtener_indicadores_cmf():
     """
-    Obtiene tasas de la CMF (Comision para el Mercado Financiero):
-      - TMC: Tasa Maxima Convencional — muestra las categorias reales de la API.
-      - TAB UF: Tasa Activa Bancaria UF 360 dias — valor diario mas reciente.
+    Obtiene tasas TMC de la CMF (Comision para el Mercado Financiero).
+    - TMC: Tasa Maxima Convencional — usa campo Tipo (1-6) para labels unicos.
+    - TAB UF: eliminado. El card 2 ahora muestra contexto financiero calculado.
     Campos reales del JSON CMF:
       TMC: TMCs[{Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo}]
-      TAB: TABs[{Fecha, Valor}]
     """
     AHORA = datetime.now()
-    HDR = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
+    HDR   = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
+
+    # Labels unicos por Tipo (codigo numerico garantizado por CMF, nunca cambia)
+    # Fuente: https://api.cmfchile.cl/documentacion/TMC.html
+    TMC_TIPO_LABEL = {
+        "1": "No reaj. < 90d \u2264 200 UF",
+        "2": "No reaj. \u226590d \u2264 200 UF",
+        "3": "No reaj. \u226590d 200-5.000 UF",
+        "4": "Reajust. \u2264 2.000 UF",
+        "5": "No reaj. > 5.000 UF",
+        "6": "Reajust. > 2.000 UF",
+        "7": "No reaj. < 90d >200-5K UF",
+        "8": "Operaciones en ME",
+        "9": "Credito Hipotecario",
+    }
 
     def _get(url):
         try:
@@ -14375,9 +14391,7 @@ def obtener_indicadores_cmf():
         except Exception:
             return None
 
-    # -- TMC: Tasa Maxima Convencional ----------------------------------------
-    # La API retorna multiples categorias en el campo "Titulo".
-    # Intentar mes actual; si vacio, retroceder al mes anterior.
+    # -- TMC: intentar mes actual; retroceder al mes anterior si sin datos --
     tmc_items = []
     for delta in (0, 1):
         m = AHORA.month - delta or 12
@@ -14385,74 +14399,73 @@ def obtener_indicadores_cmf():
         j = _get(f"{CMF_BASE_URL}/tmc/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json")
         if not j:
             continue
-        # Clave real del JSON: "TMCs"
         raw = j.get("TMCs") or j.get("tmc") or j.get("Tmc") or []
         if not raw:
             continue
+        seen_tipos = set()
         for it in raw:
-            # Campos reales: Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo
-            titulo = str(it.get("Titulo") or it.get("titulo") or "").strip()
-            sub    = str(it.get("SubTitulo") or it.get("subtitulo") or "").strip()
+            titulo = str(it.get("Titulo") or "").strip()
+            sub    = str(it.get("SubTitulo") or "").strip()
             v      = _val(it.get("Valor") or it.get("valor"))
-            fecha  = str(it.get("Hasta") or it.get("Fecha") or
-                         it.get("hasta") or it.get("fecha") or "")[:10]
-            tipo   = str(it.get("Tipo") or it.get("tipo") or "")
-            t_low  = titulo.lower()
+            fecha  = str(it.get("Hasta") or it.get("Fecha") or "")[:10]
+            tipo   = str(it.get("Tipo") or "").strip()
 
-            # Construir etiqueta compacta
-            if "menos de 90" in t_low:
-                label = "No reajust. < 90 dias"
-            elif "90 d" in t_low and "reajust" not in t_low:
-                label = "No reajust. >= 90 dias"
-            elif "reajust" in t_low:
-                label = "Reajustable (UF)"
-            elif titulo:
-                label = (titulo[:36] + "...") if len(titulo) > 36 else titulo
+            # Evitar duplicados por Tipo
+            if tipo in seen_tipos:
+                continue
+            seen_tipos.add(tipo)
+
+            # Label unico basado en Tipo numerico
+            if tipo in TMC_TIPO_LABEL:
+                label = TMC_TIPO_LABEL[tipo]
             else:
-                label = "Tipo " + tipo if tipo else "TMC"
+                # Fallback: construir desde Titulo + Sub para tipos desconocidos
+                t_low = titulo.lower()
+                s_low = sub.lower()
+                if "menos de 90" in t_low or "< 90" in t_low:
+                    base = "No reaj. < 90d"
+                elif "reajust" in t_low:
+                    base = "Reajust."
+                else:
+                    base = "No reaj. >=90d"
+                # Extraer rango UF del SubTitulo
+                if "200 unidades" in s_low and "5.000" not in s_low and "2.000" not in s_low:
+                    uf = " <=200 UF"
+                elif "5.000 unidades" in s_low and "superior" not in s_low:
+                    uf = " 200-5K UF"
+                elif "5.000 unidades" in s_low and "superior" in s_low:
+                    uf = " >5.000 UF"
+                elif "2.000 unidades" in s_low and "superior" not in s_low:
+                    uf = " <=2K UF"
+                elif "2.000 unidades" in s_low and "superior" in s_low:
+                    uf = " >2K UF"
+                else:
+                    uf = ""
+                label = (base + uf + (" T" + tipo if tipo else "")).strip()
 
             if v is not None:
                 tmc_items.append({
-                    "label": label, "valor": v, "fecha": fecha,
-                    "titulo": titulo, "subtitulo": sub
+                    "label":     label,
+                    "valor":     v,
+                    "fecha":     fecha,
+                    "titulo":    titulo,
+                    "subtitulo": sub,
+                    "tipo":      tipo,
                 })
         if tmc_items:
             break
 
-    # Ordenar: < 90 dias, >= 90 dias, reajustables
-    def _tmc_sort(x):
-        t = x["titulo"].lower()
-        if "menos de 90" in t:
-            return 0
-        if "90" in t and "reajust" not in t:
-            return 1
-        return 2
-    tmc_items.sort(key=_tmc_sort)
-
-    # -- TAB UF: Tasa Activa Bancaria UF 360 dias -----------------------------
-    # Cada registro: {Fecha, Valor}. Tomamos el mas reciente del mes.
-    # La CMF solo publica TAB UF 360 dias — no hay variantes de 90/180 dias.
-    tab_uf = {"valor": None, "fecha": ""}
-    for delta in (0, 1):
-        m = AHORA.month - delta or 12
-        a = AHORA.year if (AHORA.month - delta) >= 1 else AHORA.year - 1
-        j2 = _get(f"{CMF_BASE_URL}/tab/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json")
-        if not j2:
-            continue
-        raw2 = j2.get("TABs") or j2.get("tab") or j2.get("Tab") or []
-        if not raw2:
-            continue
-        ultimo = raw2[-1] if isinstance(raw2, list) else {}
-        v2 = _val(ultimo.get("Valor") or ultimo.get("valor"))
-        f2 = str(ultimo.get("Fecha") or ultimo.get("fecha") or "")[:10]
-        if v2 is not None:
-            tab_uf = {"valor": v2, "fecha": f2}
-            break
+    # Ordenar por Tipo numerico (1,2,3... luego desconocidos)
+    def _tipo_sort(x):
+        try:
+            return int(x["tipo"])
+        except Exception:
+            return 99
+    tmc_items.sort(key=_tipo_sort)
 
     return {
         "tmc": tmc_items,
-        "tab_uf": tab_uf,
-        "ok": bool(tmc_items or tab_uf["valor"])
+        "ok":  bool(tmc_items),
     }
 
 
@@ -14653,13 +14666,20 @@ def generar_explicacion_indicador(codigo, datos, contexto_bcch, fragmento_rag):
 
 def generar_html_indicadores(all_data, explicaciones):
     """
-    Dashboard ECharts COMPLETO v6.0 + CMF + AFP:
-      Seccion 1  — 11 Cards actuales con sparkline 30 dias
-      Seccion 2  — Tasas CMF (TMC categorias reales + TAB UF 360 dias)
-      Seccion 3  — Analisis IA por indicador
-      Seccion 4  — Dolar vs Euro 6 meses
-      Seccion 5  — Historico 10 anios
-      Seccion 6  — Rentabilidad AFP ultimos 6 meses (heatmap + barras)
+    Dashboard ECharts COMPLETO v6.1 — 6 secciones:
+      1. 12 Cards actuales + sparklines 30 dias (con IPSA)
+      2. Tasas CMF: TMC (labels unicos por Tipo) + Contexto Financiero
+      3. Analisis IA por indicador
+      4. Dolar vs Euro ULTIMOS 12 MESES
+      5. Series Historicas 10 anos (formatter K/M para numeros grandes)
+      6. Rentabilidad AFP 6 meses (heatmap + barras)
+    FIXES:
+      - Sparklines: requestAnimationFrame + c.resize() + registro resize global
+      - Hist 10a: formatter abreviado (K/M) + left:"16%" para no desbordar
+      - 12 meses Dolar/Euro (antes 6)
+      - Card CMF 2: Contexto Financiero (TPM, IPC, IPSA, Spread)
+      - TMC labels unicos por Tipo numerico
+      - IPSA en cards
     """
     import json as _j
 
@@ -14667,7 +14687,7 @@ def generar_html_indicadores(all_data, explicaciones):
         return str(v) if v is not None else ""
 
     datos      = all_data.get("datos_actuales", {})
-    hist_6m    = all_data.get("hist_6m", {})
+    hist_12m   = all_data.get("hist_12m", {})
     hist_10a   = all_data.get("hist_10a", {})
     gen        = all_data.get("generado", "")
     datos_cmf  = all_data.get("datos_cmf") or {}
@@ -14682,6 +14702,7 @@ def generar_html_indicadores(all_data, explicaciones):
         if cod in PORCENTAJES: return "{:.2f}%".format(v)
         if cod == "bitcoin":   return "${:,.0f}".format(v).replace(",", ".")
         if cod == "libra_cobre": return "USD {:.4f}".format(v)
+        if cod == "ipsa":      return "{:,.0f} pts".format(v).replace(",", ".")
         return "${:,.2f}".format(v).replace(",", "X").replace(".", ",").replace("X", ".")
 
     def variacion_html(serie):
@@ -14695,17 +14716,23 @@ def generar_html_indicadores(all_data, explicaciones):
         return ('<span style="color:' + col + ';font-size:.68em">'
                 + sig + " {:.3f}%</span>".format(abs(pct)))
 
-    # === SECCION 1: Cards actuales + sparklines ===
+    # =========================================================================
+    # SECCION 1: 12 Cards actuales + sparklines (con IPSA)
+    # FIX: sparklines usan requestAnimationFrame + resize + array global
+    # =========================================================================
     ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
-             "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp"]
-    cards_html = ""
-    spark_js   = ""
+             "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp", "ipsa"]
+    cards_html  = ""
+    spark_inits = ""   # array _sparkCfg para init diferido
+    spark_cfg_items = []
+
     for cod in ORDER:
         d = datos.get(cod)
         if not d: continue
         col    = _s(d.get("color") or "#3478c3")
         vals30 = [s.get("valor") or 0 for s in reversed(d.get("serie30", []))]
-        spk_d  = _j.dumps([round(v, 2) for v in vals30])
+        # Normalizar para sparkline (evita escala rota con valores 0 consecutivos)
+        spk_d  = _j.dumps([round(float(v), 4) for v in vals30])
         xd     = _j.dumps(list(range(len(vals30))))
         var_h  = variacion_html(d.get("serie30", []))
         vfmt   = fmt(d.get("valor"), cod)
@@ -14718,26 +14745,51 @@ def generar_html_indicadores(all_data, explicaciones):
             '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + '</div>'
             '</div>'
         )
-        spark_js += (
-            '(function(){'
-            'var c=echarts.init(document.getElementById("sp_' + cod + '"));'
-            'c.setOption({'
-            'grid:{top:0,bottom:0,left:0,right:0},'
-            'xAxis:{type:"category",show:false,data:' + xd + '},'
-            'yAxis:{type:"value",show:false},'
-            'series:[{type:"line",data:' + spk_d + ',smooth:true,symbol:"none",'
-            'lineStyle:{color:"' + col + '",width:2},'
-            'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
-            'colorStops:[{offset:0,color:"' + col + '55"},{offset:1,color:"transparent"}]}}'
-            '}]});'
-            '})();'
+        # Acumular config de sparkline para init diferido (JSON safe)
+        spark_cfg_items.append(
+            '{"id":"sp_' + cod + '","col":"' + col + '",'
+            '"dat":' + spk_d + ',"xd":' + xd + '}'
         )
 
-    # === SECCION 2: Tasas CMF ===
-    tmc_list = datos_cmf.get("tmc") or []
-    tab_uf   = datos_cmf.get("tab_uf") or {"valor": None, "fecha": ""}
+    # JS: init todos los sparklines en requestAnimationFrame para que CSS grid
+    # haya finalizado dimensiones (FIX principal de sparklines invisibles)
+    spark_js = (
+        'var _sparks=[];'
+        'var _sparkCfg=[' + ','.join(spark_cfg_items) + '];'
+        'function _initSparks(){'
+        '_sparkCfg.forEach(function(s){'
+        'var el=document.getElementById(s.id);'
+        'if(!el)return;'
+        'var ch=echarts.init(el,null,{renderer:"canvas"});'
+        'ch.setOption({'
+        'animation:false,'
+        'grid:{top:2,bottom:2,left:2,right:2},'
+        'xAxis:{type:"category",show:false,data:s.xd,'
+        'boundaryGap:false},'
+        'yAxis:{type:"value",show:false,scale:true},'
+        'series:[{type:"line",data:s.dat,smooth:true,symbol:"none",'
+        'sampling:"average",'
+        'lineStyle:{color:s.col,width:2.5},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:s.col+"77"},{offset:1,color:"transparent"}]}}'
+        '}]});'
+        'ch.resize();'
+        '_sparks.push(ch);'
+        '});}'
+        # Doble RAF para garantizar que el grid haya pintado
+        'requestAnimationFrame(function(){'
+        'requestAnimationFrame(_initSparks);'
+        '});'
+    )
 
-    # Card TMC
+    # =========================================================================
+    # SECCION 2: Tasas CMF
+    # Card 1: TMC con labels unicos por Tipo
+    # Card 2: Contexto Financiero (TPM, IPC, IPSA, Spread) desde datos_actuales
+    # =========================================================================
+    tmc_list = datos_cmf.get("tmc") or []
+
+    # --- Card 1: TMC ---
     tmc_filas = ""
     for it in tmc_list:
         lbl = _s(it.get("label") or "")
@@ -14745,7 +14797,8 @@ def generar_html_indicadores(all_data, explicaciones):
         vf  = "{:.2f}%".format(v) if v is not None else "N/D"
         cls = "cmf-val" if v is not None else "cmf-val nd"
         sub = _s(it.get("subtitulo") or "").replace('"', "'")
-        tt  = (' title="' + sub + '"') if sub else ""
+        # Tooltip con titulo completo al pasar mouse
+        tt  = (' title="' + sub[:120] + '"') if sub else ""
         tmc_filas += (
             '<div class="cmf-row data"' + tt + '>'
             '<span class="cmf-plazo">' + lbl + '</span>'
@@ -14754,40 +14807,72 @@ def generar_html_indicadores(all_data, explicaciones):
         )
     if not tmc_filas:
         tmc_filas = ('<div class="cmf-row data">'
-                     '<span class="cmf-plazo">Sin datos CMF</span>'
+                     '<span class="cmf-plazo">Sin datos disponibles</span>'
                      '<span class="cmf-val nd">N/D</span></div>')
     tmc_fecha = _s((tmc_list[0].get("fecha") or "") if tmc_list else "")
 
     cmf_html = (
         '<div class="cmf-card">'
         '<div class="cmf-nm">&#127970; Tasa Maxima Convencional (TMC)</div>'
-        '<div class="cmf-row header"><span>Categoria</span><span>Tasa anual</span></div>'
+        '<div class="cmf-row header">'
+        '<span>Segmento / Plazo / Monto</span><span>Tasa anual</span>'
+        '</div>'
         + tmc_filas +
         '<div class="cmf-fecha">Vigente hasta: ' + tmc_fecha + '</div>'
         '</div>'
     )
 
-    # Card TAB UF
-    tab_v   = tab_uf.get("valor")
-    tab_vf  = "{:.2f}%".format(tab_v) if tab_v is not None else "N/D"
-    tab_cls = "cmf-val" if tab_v is not None else "cmf-val nd"
-    tab_fec = _s(tab_uf.get("fecha") or "")
+    # --- Card 2: Contexto Financiero (calculado desde datos_actuales) ---
+    def _vd(cod):
+        return (datos.get(cod) or {}).get("valor")
+
+    tpm_v    = _vd("tpm")
+    ipc_v    = _vd("ipc")
+    ipsa_v   = _vd("ipsa")
+    tmc_max  = max((it["valor"] for it in tmc_list if it.get("valor") is not None), default=None)
+    spread_v = round(tmc_max - tpm_v, 2) if (tmc_max is not None and tpm_v is not None) else None
+    tpm_real = round(tpm_v - ipc_v, 2) if (tpm_v is not None and ipc_v is not None) else None
+    desl_v   = _vd("dolar")
+
+    def _pf(v):  # pct format
+        return "{:.2f}%".format(v) if v is not None else "N/D"
+    def _nf(v, dec=0):  # number format
+        return "{:,.{d}f}".format(v, d=dec).replace(",", ".") if v is not None else "N/D"
+
+    ctx_rows = [
+        ("&#127919; TPM (Banco Central)",      _pf(tpm_v),    "#27ae60", "Tasa Politica Monetaria vigente"),
+        ("&#128200; IPC (Inflacion mensual)",   _pf(ipc_v),    "#2ecc71", "Indice Precios al Consumidor"),
+        ("&#128181; Dolar observado",           "$ " + _nf(desl_v, 0) if desl_v else "N/D", "#3478c3", "Tipo de cambio USD/CLP"),
+        ("&#9660;&#9650; IPSA (Bolsa Santiago)", _nf(ipsa_v, 0) + " pts" if ipsa_v else "N/D", "#ff6b35", "Indice Precio Selectivo de Acciones"),
+        ("&#127757; Spread TMC - TPM",          _pf(spread_v), "#e67e22", "Costo extra del credito sobre politica monetaria"),
+        ("&#128293; TPM Real (TPM - IPC)",      _pf(tpm_real), "#9b59b6", "Tasa real de politica monetaria"),
+    ]
+    ctx_filas = ""
+    for emoji_lbl, val, col, tooltip in ctx_rows:
+        ctx_filas += (
+            '<div class="cmf-row data" title="' + tooltip + '">'
+            '<span class="cmf-plazo">' + emoji_lbl + '</span>'
+            '<span class="cmf-val" style="color:' + col + '">' + val + '</span>'
+            '</div>'
+        )
+
     cmf_html += (
         '<div class="cmf-card">'
-        '<div class="cmf-nm">&#128200; Tasa Activa Bancaria UF (TAB)</div>'
-        '<div class="cmf-row header"><span>Instrumento</span><span>Tasa anual</span></div>'
-        '<div class="cmf-row data">'
-        '<span class="cmf-plazo">TAB UF 360 dias</span>'
-        '<span class="' + tab_cls + '">' + tab_vf + '</span>'
+        '<div class="cmf-nm">&#128640; Contexto Financiero Clave</div>'
+        '<div class="cmf-row header">'
+        '<span>Indicador</span><span>Valor actual</span>'
         '</div>'
-        '<div class="cmf-fecha">Fecha: ' + tab_fec + '</div>'
+        + ctx_filas +
+        '<div class="cmf-fecha">Fuentes: BCCh &middot; CMF &middot; mindicador.cl</div>'
         '</div>'
     )
 
-    # === SECCION 3: Analisis IA ===
+    # =========================================================================
+    # SECCION 3: Analisis IA
+    # =========================================================================
     exp_cards_html = ""
     EXP_ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
-                 "tasa_desempleo", "imacec", "libra_cobre"]
+                 "tasa_desempleo", "imacec", "libra_cobre", "ipsa"]
     for cod in EXP_ORDER:
         d   = datos.get(cod)
         exp = explicaciones.get(cod, "")
@@ -14813,21 +14898,25 @@ def generar_html_indicadores(all_data, explicaciones):
             '<span class="lbl">Anterior:</span>'
             '<span style="color:#8899aa">' + fmt(v1, cod) + '</span>'
             '</div>'
-            '<div class="exp-why">&#129302; POR QUE?</div>'
+            '<div class="exp-why">&#129302; POR QUE VARIO?</div>'
             '<div class="exp-txt">'
             + _s(exp).replace("<", "&lt;").replace(">", "&gt;") +
             '</div>'
-            '<div class="exp-src">Fuentes: Banco Central de Chile &middot; CMF'
-            ' &middot; RAG Biblioteca Financiera &middot; Groq IA</div>'
+            '<div class="exp-src">Fuentes: BCCh &middot; CMF &middot; RAG Biblioteca Financiera &middot; Groq IA</div>'
             '</div>'
         )
 
-    # === SECCION 4: Dolar vs Euro 6 meses ===
-    labels_6m = _j.dumps(hist_6m.get("labels", []))
-    dolar_6m  = _j.dumps(hist_6m.get("dolar", []))
-    euro_6m   = _j.dumps(hist_6m.get("euro", []))
+    # =========================================================================
+    # SECCION 4: Dolar vs Euro — ULTIMOS 12 MESES (antes era 6)
+    # =========================================================================
+    labels_12m = _j.dumps(hist_12m.get("labels", []))
+    dolar_12m  = _j.dumps(hist_12m.get("dolar", []))
+    euro_12m   = _j.dumps(hist_12m.get("euro", []))
 
-    # === SECCION 5: Historico 10 anios ===
+    # =========================================================================
+    # SECCION 5: Historico 10 anos
+    # FIX: yAxis formatter abreviado (K/M) + left:"16%" para numeros grandes
+    # =========================================================================
     hist_js   = ""
     hist_html = ""
     for cod in HIST_ORDER:
@@ -14840,27 +14929,43 @@ def generar_html_indicadores(all_data, explicaciones):
         cid   = "hist_" + cod
         hist_html += (
             '<div class="hcard">'
-            '<div class="htitle">' + _s(d.get("nombre")) + " \u2014 Ultimos 10 anos</div>"
+            '<div class="htitle">' + _s(d.get("nombre")) + ' \u2014 Ultimos 10 anos</div>'
             '<div id="' + cid + '" class="hchart"></div>'
             '</div>'
         )
+        # FIX: formatter inteligente para yAxis (evita desborde con Bitcoin/UF/UTM)
+        # Se usa funcion fmtY que abrevia: M = millones, K = miles
         hist_js += (
             '(function(){'
             'var c=echarts.init(document.getElementById("' + cid + '"));'
             'var isPct=' + isp + ';'
+            'function fmtY(v){'
+            'if(isPct)return v.toFixed(1)+"%";'
+            'var a=Math.abs(v);'
+            'if(a>=1e6)return "$"+(v/1e6).toFixed(1)+"M";'
+            'if(a>=1e3)return "$"+(v/1e3).toFixed(0)+"K";'
+            'return "$"+v.toFixed(2);}'
+            'function fmtTip(v){'
+            'if(v===null||v===undefined)return "N/D";'
+            'if(isPct)return v.toFixed(2)+"%";'
+            'return "$"+v.toLocaleString("es-CL");}'
             'c.setOption({'
+            'animation:true,'
             'backgroundColor:"transparent",'
             'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
             'borderColor:"' + col + '",textStyle:{color:"#c0c8d4"},'
             'formatter:function(p){'
-            'var v=p[0].value;if(v===null)return p[0].name+": N/D";'
-            'return p[0].name+": "+(isPct?v.toFixed(2)+"%":"$"+v.toLocaleString("es-CL"));}},'
-            'grid:{left:"12%",right:"5%",bottom:"18%",top:"8%"},'
+            'var v=p[0].value;'
+            'return p[0].name+": "+fmtTip(v);}},'
+            # FIX: left:"16%" evita desborde de etiquetas largas en yAxis
+            'grid:{left:"16%",right:"5%",bottom:"20%",top:"10%",containLabel:false},'
             'xAxis:{type:"category",data:' + anios + ','
-            'axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
+            'axisLabel:{color:"#8899aa",fontSize:10,rotate:35,interval:0},'
             'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
-            'yAxis:{type:"value",axisLabel:{color:"#8899aa",fontSize:10,'
-            'formatter:function(v){return isPct?v+"%":"$"+v.toLocaleString("es-CL");}},'
+            'yAxis:{type:"value",'
+            # FIX: usa fmtY (abreviado) en lugar de toLocaleString
+            'axisLabel:{color:"#8899aa",fontSize:10,formatter:fmtY,'
+            'margin:8},'
             'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
             'series:[{type:"line",data:' + vals + ','
             'smooth:true,symbol:"circle",symbolSize:5,connectNulls:true,'
@@ -14871,11 +14976,14 @@ def generar_html_indicadores(all_data, explicaciones):
             'emphasis:{itemStyle:{borderWidth:3,borderColor:"#fff",'
             'shadowBlur:8,shadowColor:"' + col + '"}}'
             '}]});'
+            'c.resize();'
             '})();'
         )
     hist_ids = ",".join(['"hist_' + c + '"' for c in HIST_ORDER if hist_10a.get(c)])
 
-    # === SECCION 6: Rentabilidad AFP ===
+    # =========================================================================
+    # SECCION 6: Rentabilidad AFP
+    # =========================================================================
     afp_html   = ""
     afp_js     = ""
     afp_tabla  = datos_afp.get("tabla") or {}
@@ -14885,7 +14993,6 @@ def generar_html_indicadores(all_data, explicaciones):
     afp_ff     = _s(datos_afp.get("fecha_fin") or "")
 
     if afp_tabla and afp_list:
-        # Heatmap table
         th = "<th></th>"
         for fo in fondo_list:
             th += "<th>Fondo " + fo + "</th>"
@@ -14907,10 +15014,8 @@ def generar_html_indicadores(all_data, explicaciones):
                         bg = "rgba(231,76,60,{:.2f})".format(0.15 + intens * 0.40)
                         tc = "#e74c3c"
                     sig = "+" if rent >= 0 else ""
-                    tip = ("Cuota ini: " +
-                           str(round(celda.get("ini", 0), 2)) +
-                           " → fin: " +
-                           str(round(celda.get("fin", 0), 2)))
+                    tip = ("Cuota ini: " + str(round(celda.get("ini", 0), 2))
+                           + " \u2192 fin: " + str(round(celda.get("fin", 0), 2)))
                     fila += (
                         '<td class="afp-cell" style="background:' + bg
                         + ';color:' + tc + '" title="' + tip + '">'
@@ -14928,7 +15033,6 @@ def generar_html_indicadores(all_data, explicaciones):
             '</div>'
         )
 
-        # Grafico barras: Fondo A, comparar AFPs
         fo_graf    = "A"
         afp_vals_g = []
         afp_names_g = []
@@ -14952,21 +15056,22 @@ def generar_html_indicadores(all_data, explicaciones):
             'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
             'textStyle:{color:"#c0c8d4"},'
             'formatter:function(p){'
-            'return p[0].name+": "+(p[0].value>=0?"+":"")+p[0].value.toFixed(2)+"%;}},'
+            'return p[0].name+": "+(p[0].value>=0?"+":"")+p[0].value.toFixed(2)+"%";}},'
             'grid:{left:"8%",right:"5%",bottom:"14%",top:"10%"},'
             'xAxis:{type:"category",data:' + _j.dumps(afp_names_g) + ','
             'axisLabel:{color:"#8899aa",fontSize:11},'
             'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
             'yAxis:{type:"value",'
             'axisLabel:{color:"#8899aa",'
-            'formatter:function(v){return (v>=0?"+":"")+v.toFixed(1)+"%;}},'
+            'formatter:function(v){return (v>=0?"+":"")+v.toFixed(1)+"%";}},'
             'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
             'series:[{type:"bar",name:"Fondo A",'
             'data:' + bar_data + ','
             'barMaxWidth:60,'
             'label:{show:true,position:"top",color:"#c0c8d4",fontSize:11,'
-            'formatter:function(p){return (p.value>=0?"+":"")+p.value.toFixed(2)+"%;"}}}]'
+            'formatter:function(p){return (p.value>=0?"+":"")+p.value.toFixed(2)+"%";}}}]'
             '});'
+            'ca.resize();'
             'window.addEventListener("resize",function(){ca.resize();});'
             '})();'
         )
@@ -14985,7 +15090,9 @@ def generar_html_indicadores(all_data, explicaciones):
             '</div>'
         )
 
-    # === CSS ===
+    # =========================================================================
+    # CSS
+    # =========================================================================
     css = (
         "*{margin:0;padding:0;box-sizing:border-box}"
         'body{font-family:"Segoe UI",system-ui,sans-serif;'
@@ -15000,6 +15107,7 @@ def generar_html_indicadores(all_data, explicaciones):
         ".section-title{font-size:1.15em;font-weight:700;color:#c3a55a;"
         "border-left:4px solid #c3a55a;padding-left:12px;"
         "margin-bottom:16px;letter-spacing:.5px}"
+        # ── Cards + sparklines ──
         ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px}"
         ".card{background:rgba(15,47,89,.65);border:1px solid rgba(195,165,90,.18);"
         "border-radius:11px;padding:14px;transition:transform .2s,box-shadow .2s}"
@@ -15008,9 +15116,11 @@ def generar_html_indicadores(all_data, explicaciones):
         "letter-spacing:1.2px;margin-bottom:4px}"
         ".cv{font-size:1.45em;font-weight:800;color:#c3a55a;margin-bottom:2px}"
         ".cd{font-size:.68em;color:#445566;margin-bottom:5px;line-height:1.3}"
-        ".spark{width:100%;height:38px;margin:5px 0}"
+        # FIX: spark necesita width+height explicitos y overflow:hidden para ECharts
+        ".spark{width:100%;height:40px;margin:5px 0;overflow:hidden;display:block}"
         ".cf{font-size:.6em;color:#334455}"
-        ".cmf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px}"
+        # ── CMF ──
+        ".cmf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}"
         ".cmf-card{background:rgba(13,27,48,.85);"
         "border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:16px}"
         ".cmf-nm{font-size:.78em;color:#c3a55a;font-weight:800;letter-spacing:1px;"
@@ -15021,10 +15131,12 @@ def generar_html_indicadores(all_data, explicaciones):
         ".cmf-row.header{background:rgba(52,120,195,.12);font-size:.7em;"
         "color:#8899aa;font-weight:700;text-transform:uppercase;letter-spacing:.8px}"
         ".cmf-row.data{background:rgba(15,47,89,.5);cursor:default}"
-        ".cmf-plazo{font-size:.82em;color:#aed6f1;font-weight:600;max-width:62%}"
-        ".cmf-val{font-size:1.08em;font-weight:800;color:#c3a55a}"
+        ".cmf-row.data:hover{background:rgba(15,47,89,.8)}"
+        ".cmf-plazo{font-size:.79em;color:#aed6f1;font-weight:600;max-width:66%;line-height:1.3}"
+        ".cmf-val{font-size:1.08em;font-weight:800;color:#c3a55a;white-space:nowrap}"
         ".cmf-val.nd{color:#445566;font-size:.82em;font-weight:400}"
         ".cmf-fecha{font-size:.6em;color:#334455;margin-top:8px;text-align:right}"
+        # ── IA ──
         ".exp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}"
         ".exp-card{background:rgba(13,27,48,.85);border-radius:11px;padding:15px;"
         "box-shadow:0 4px 16px rgba(0,0,0,.3);transition:transform .2s}"
@@ -15036,20 +15148,23 @@ def generar_html_indicadores(all_data, explicaciones):
         ".exp-vals{display:flex;align-items:center;gap:7px;font-size:.8em;margin-bottom:10px;"
         "padding:6px 9px;background:rgba(255,255,255,.04);border-radius:7px;flex-wrap:wrap}"
         ".lbl{color:#8899aa}.sep{color:#445566}"
-        ".exp-why{font-size:.7em;color:#f39c12;font-weight:800;"
-        "letter-spacing:1.5px;margin-bottom:6px}"
+        ".exp-why{font-size:.7em;color:#f39c12;font-weight:800;letter-spacing:1.5px;margin-bottom:6px}"
         ".exp-txt{font-size:.88em;color:#aed6f1;line-height:1.65;margin-bottom:9px}"
         ".exp-src{font-size:.63em;color:#445566;"
         "border-top:1px solid rgba(52,120,195,.12);padding-top:7px}"
+        # ── Chart 12m ──
         ".chart-wide{background:rgba(15,47,89,.65);"
         "border:1px solid rgba(52,120,195,.2);border-radius:12px;padding:16px}"
-        "#chart6m{width:100%;height:340px}"
-        ".hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}"
+        "#chart12m{width:100%;height:360px}"
+        # ── Hist 10a ──
+        # FIX: minmax 400px para que el 16% de grid left no aplaste la serie
+        ".hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px}"
         ".hcard{background:rgba(15,47,89,.65);"
         "border:1px solid rgba(52,120,195,.18);border-radius:12px;padding:14px}"
         ".htitle{font-size:.88em;color:#c3a55a;font-weight:700;margin-bottom:8px;"
         "padding-bottom:6px;border-bottom:1px solid rgba(195,165,90,.15)}"
-        ".hchart{width:100%;height:220px}"
+        ".hchart{width:100%;height:230px}"
+        # ── AFP ──
         ".afp-hdr{display:flex;justify-content:flex-end;margin-bottom:12px}"
         ".afp-periodo{font-size:.78em;color:#8899aa;font-style:italic}"
         ".afp-table-wrap{overflow-x:auto;margin-bottom:20px;"
@@ -15074,12 +15189,16 @@ def generar_html_indicadores(all_data, explicaciones):
         "padding:24px;text-align:center;color:#667788;font-size:.9em}"
         "footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;"
         "padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}"
-        "@media(max-width:600px){"
-        ".cards,.cmf-grid,.exp-grid,.hist-grid{grid-template-columns:1fr}"
+        "@media(max-width:640px){"
+        ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
+        ".hist-grid{grid-template-columns:1fr}"
         ".afp-table{font-size:.75em}"
         "}"
     )
 
+    # =========================================================================
+    # HTML FINAL
+    # =========================================================================
     html = (
         '<!DOCTYPE html><html lang="es"><head>'
         '<meta charset="UTF-8">'
@@ -15097,7 +15216,7 @@ def generar_html_indicadores(all_data, explicaciones):
 
         '<div class="section">'
         '<div class="section-title">&#128202; Indicadores del Dia \u2014'
-        ' 11 Indicadores con Tendencia 30 dias</div>'
+        ' 12 Indicadores con Tendencia 30 dias (incl. IPSA)</div>'
         '<div class="cards">' + cards_html + '</div>'
         '</div>'
 
@@ -15114,8 +15233,8 @@ def generar_html_indicadores(all_data, explicaciones):
         '</div>'
 
         '<div class="section">'
-        '<div class="section-title">&#128178; Dolar vs Euro \u2014 Ultimos 6 Meses</div>'
-        '<div class="chart-wide"><div id="chart6m"></div></div>'
+        '<div class="section-title">&#128178; Dolar USD vs Euro EUR \u2014 Ultimos 12 Meses</div>'
+        '<div class="chart-wide"><div id="chart12m"></div></div>'
         '</div>'
 
         '<div class="section">'
@@ -15131,16 +15250,19 @@ def generar_html_indicadores(all_data, explicaciones):
 
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
+        ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
         ' &nbsp;&middot;&nbsp; quetalmiafp.cl'
-        ' &nbsp;&middot;&nbsp; Analisis IA + RAG Biblioteca de Finanzas'
-        ' &nbsp;&middot;&nbsp; Cofradia de Networking Bot v6.0'
+        ' &nbsp;&middot;&nbsp; Analisis IA + RAG &nbsp;&middot;&nbsp;'
+        ' Cofradia de Networking Bot v6.0'
         '</footer>'
 
         '<script>'
+        # FIX sparklines: doble RAF + resize + array global _sparks
         + spark_js +
 
-        'var c6m=echarts.init(document.getElementById("chart6m"));'
-        'c6m.setOption({'
+        # Chart 12 meses — Dolar vs Euro
+        'var c12m=echarts.init(document.getElementById("chart12m"));'
+        'c12m.setOption({'
         'backgroundColor:"transparent",'
         'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
         'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
@@ -15148,38 +15270,39 @@ def generar_html_indicadores(all_data, explicaciones):
         'var s=p[0].name+"<br/>";p.forEach(function(i){'
         's+=\'<span style="color:\'+i.color+\'">&#9679;</span> \''
         '+i.seriesName+": ";'
-        'if(i.value===null)s+="N/D";else s+="$"+i.value.toLocaleString("es-CL");'
+        'if(i.value===null||i.value===undefined)s+="N/D";'
+        'else s+="$"+i.value.toLocaleString("es-CL");'
         's+="<br/>"});return s;}},'
         'legend:{data:["Dolar USD","Euro EUR"],textStyle:{color:"#8899aa"},top:4,right:10},'
-        'grid:{left:"10%",right:"5%",bottom:"12%",top:"14%"},'
-        'xAxis:{type:"category",data:' + labels_6m + ','
-        'axisLabel:{color:"#8899aa",fontSize:12},'
+        'grid:{left:"10%",right:"5%",bottom:"15%",top:"14%"},'
+        'xAxis:{type:"category",data:' + labels_12m + ','
+        # 12 meses → rotar etiquetas para que no se amontonen
+        'axisLabel:{color:"#8899aa",fontSize:11,rotate:30,interval:0},'
         'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
         'yAxis:{type:"value",'
         'axisLabel:{color:"#8899aa",'
         'formatter:function(v){return "$"+v.toLocaleString("es-CL");}},'
         'splitLine:{lineStyle:{color:"rgba(52,120,195,.12)"}}},'
         'series:['
-        '{name:"Dolar USD",type:"line",data:' + dolar_6m + ','
-        'smooth:true,symbol:"circle",symbolSize:7,'
+        '{name:"Dolar USD",type:"line",data:' + dolar_12m + ','
+        'smooth:true,symbol:"circle",symbolSize:6,'
         'lineStyle:{color:"#3478c3",width:3},itemStyle:{color:"#3478c3"},'
-        'label:{show:true,position:"top",color:"#3478c3",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):null;}},'
         'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
         'colorStops:[{offset:0,color:"#3478c344"},{offset:1,color:"transparent"}]}}},'
-        '{name:"Euro EUR",type:"line",data:' + euro_6m + ','
-        'smooth:true,symbol:"circle",symbolSize:7,'
+        '{name:"Euro EUR",type:"line",data:' + euro_12m + ','
+        'smooth:true,symbol:"circle",symbolSize:6,'
         'lineStyle:{color:"#2ecc71",width:3},itemStyle:{color:"#2ecc71"},'
-        'label:{show:true,position:"bottom",color:"#2ecc71",fontSize:11,'
-        'formatter:function(p){return p.value?("$"+p.value.toLocaleString("es-CL")):null;}},'
         'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
         'colorStops:[{offset:0,color:"#2ecc7133"},{offset:1,color:"transparent"}]}}}]'
         '});'
+        'c12m.resize();'
 
         + hist_js + afp_js +
 
+        # Resize global: sparklines + hist + c12m
         'window.addEventListener("resize",function(){'
-        'if(c6m)c6m.resize();'
+        'if(c12m)c12m.resize();'
+        '_sparks.forEach(function(ch){ch.resize();});'
         '[' + hist_ids + '].forEach(function(id){'
         'var el=document.getElementById(id);'
         'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
@@ -15196,7 +15319,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     /indicadores — Dashboard económico completo de Chile con análisis IA:
       • 11 indicadores del día con sparkline 30 días
-      • Tasas CMF: TMC (categorias reales) + TAB UF 360 dias
+      • Tasas CMF: TMC (labels unicos Tipo 1-6) + Contexto Financiero
       • Análisis IA por indicador (Groq + RAG + BCCH)
       • Dólar vs Euro últimos 6 meses
       • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
@@ -15313,16 +15436,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Tasas CMF en mensaje
         tmc_items = (datos_cmf or {}).get('tmc', [])
-        tab_uf    = (datos_cmf or {}).get('tab_uf', {})  # dict: {valor, fecha}
-        if tmc_items or (tab_uf and tab_uf.get('valor') is not None):
-            lineas += ["", sep, "🏦 Tasas CMF:", ""]
+        if tmc_items:
+            lineas += ["", sep, "🏦 Tasas CMF (TMC):", ""]
             for item in tmc_items:
                 v  = item.get('valor')
                 vf = "{:.2f}%".format(v) if v is not None else "N/D"
-                lineas.append("  TMC " + (item.get('label') or '') + ": " + vf)
-            v_tab = tab_uf.get('valor') if isinstance(tab_uf, dict) else None
-            vf_tab = "{:.2f}%".format(v_tab) if v_tab is not None else "N/D"
-            lineas.append("  TAB UF 360 dias: " + vf_tab)
+                lineas.append("  " + (item.get('label') or '') + ": " + vf)
 
         # AFP rentabilidad en mensaje (solo fondo A para resumir)
         afp_tabla = (datos_afp or {}).get('tabla', {})
@@ -15335,12 +15454,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 rf = ("{:+.2f}%".format(r)) if r is not None else "N/D"
                 lineas.append("  " + afp.capitalize() + ": " + rf)
 
-        hist_6m = all_data.get('hist_6m', {})
-        d6l = hist_6m.get('dolar', [])
-        e6l = hist_6m.get('euro',  [])
-        if d6l and e6l:
-            lineas += ["", sep, "Dólar vs Euro — últimos 6 meses:", ""]
-            for label, vd, ve in zip(hist_6m.get('labels', []), d6l, e6l):
+        hist_12m = all_data.get('hist_12m', {})
+        d12l = hist_12m.get('dolar', [])
+        e12l = hist_12m.get('euro',  [])
+        if d12l and e12l:
+            lineas += ["", sep, "Dólar vs Euro — últimos 12 meses:", ""]
+            for label, vd, ve in zip(hist_12m.get('labels', []), d12l, e12l):
                 vds = "${:,.0f}".format(vd).replace(',', '.') if vd else 'N/D'
                 ves = "${:,.0f}".format(ve).replace(',', '.') if ve else 'N/D'
                 lineas.append("  " + str(label) + " — USD " + vds + "  |  EUR " + ves)
@@ -15363,7 +15482,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 caption=(
                     "📊 Dashboard Indicadores Económicos Chile\n\n"
                     "• 11 indicadores del día con sparklines 30 días\n"
-                    "• 🏦 Tasas CMF: TMC · TAB UF 360 dias\n"
+                    "• 🏦 Tasas CMF: TMC (Tipo 1-6) + Contexto Financiero\n"
                     "• 🐔 Rentabilidad AFP: 7 fondos x 5 fondos (6 meses)\n"
                     "• 🤖 Análisis IA del por qué de cada variación\n"
                     "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
