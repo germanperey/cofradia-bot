@@ -2630,6 +2630,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Búsqueda con IA
+/buscar_web [consulta] - Búsqueda en Internet 🌐
 /rag_consulta [pregunta] - Buscar en documentos
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
@@ -2650,9 +2651,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /responder [ID] [resp] - Responder consulta
 /encuesta pregunta | opc1 | opc2 - Crear encuesta
 
-📅 EVENTOS
+📅 EVENTOS Y CALENDARIO
 /eventos - Ver próximos eventos
 /asistir [ID] - Confirmar asistencia
+/feriados - Feriados legales de Chile 📅
 
 🔔 ALERTAS
 /alertas - Ver/gestionar alertas
@@ -2716,6 +2718,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ver_solicitudes - Ver solicitudes pendientes
 /generar_codigo - Generar código de activación
 /nuevo_evento fecha | título | lugar | desc - Crear evento
+/dotacion - Ver dotación completa de miembros
+
+🕵️ HEADHUNTERS (Reclutamiento)
+/perfiles_hh [filtro] - Panel con todos los perfiles profesionales
+/match_hh [cargo] - IA encuentra los mejores candidatos para un cargo
+/buscar_profesional [área] - Buscar por área profesional
+/directorio [búsqueda] - Directorio completo de la Cofradía
 
 🧠 RAG (Base de conocimiento)
 /rag_status - Estado del sistema RAG
@@ -14343,6 +14352,113 @@ def obtener_indicadores_chile():
             valores.append(v)
         hist_10a[cod]['valores'] = valores
 
+    # ── 4. Extras: IPSA, Solana, Ethereum (findic.cl + fallbacks) ───────────
+    EXTRAS_CFG = [
+        ('ipsa',     'IPSA',     'Ind. Precio Selectivo de Acciones', '#ff6b35'),
+        ('solana',   'Solana',   'Solana en CLP',                     '#9945FF'),
+        ('ethereum', 'Ethereum', 'Ethereum en CLP',                   '#627EEA'),
+    ]
+
+    def fetch_findic(codigo, timeout=12):
+        try:
+            url = 'https://findic.cl/api/' + codigo
+            r = requests.get(url, timeout=timeout,
+                             headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'})
+            if r.status_code == 200:
+                return r.json()
+        except Exception as _fe:
+            logger.debug('findic fetch ' + codigo + ': ' + str(_fe))
+        return None
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        fut_ex = {ex.submit(fetch_findic, cod): cod for cod, *_ in EXTRAS_CFG}
+        for fut in as_completed(fut_ex):
+            cod = fut_ex[fut]
+            j   = fut.result()
+            if j:
+                serie = j.get('serie', [])
+                if serie:
+                    cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                    datos_actuales[cod] = {
+                        'nombre':      cfg[1] if cfg else cod,
+                        'descripcion': cfg[2] if cfg else '',
+                        'color':       cfg[3] if cfg else '#3478c3',
+                        'valor':       serie[0].get('valor', 0),
+                        'fecha':       str(serie[0].get('fecha', ''))[:10],
+                        'unidad':      j.get('unidad_medida', 'CLP'),
+                        'serie30':     serie[:30],
+                    }
+
+    # Fallback IPSA: Yahoo Finance si findic.cl no lo entrego
+    if 'ipsa' not in datos_actuales:
+        try:
+            r_yf = requests.get(
+                'https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
+                params={'interval': '1d', 'range': '30d'},
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/6.0)'},
+                timeout=14
+            )
+            if r_yf.status_code == 200:
+                jyf = r_yf.json()
+                res = (jyf.get('chart') or {}).get('result') or []
+                if res:
+                    closes     = (res[0].get('indicators') or {}).get('quote', [{}])[0].get('close', [])
+                    timestamps = res[0].get('timestamp', [])
+                    serie_yf   = []
+                    for ts, cl in zip(timestamps, closes):
+                        if cl is not None:
+                            serie_yf.append({
+                                'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
+                                'valor': round(float(cl), 2),
+                            })
+                    if serie_yf:
+                        serie_yf.sort(key=lambda x: x['fecha'], reverse=True)
+                        datos_actuales['ipsa'] = {
+                            'nombre':      'IPSA',
+                            'descripcion': 'Ind. Precio Selectivo de Acciones',
+                            'color':       '#ff6b35',
+                            'valor':       serie_yf[0]['valor'],
+                            'fecha':       serie_yf[0]['fecha'][:10],
+                            'unidad':      'Puntos',
+                            'serie30':     serie_yf[:30],
+                        }
+        except Exception as _ye:
+            logger.debug('IPSA Yahoo fallback: ' + str(_ye))
+
+    # Fallback SOL/ETH: CoinGecko si findic.cl no los entrego
+    missing_crypto = [cod for cod in ('solana', 'ethereum') if cod not in datos_actuales]
+    if missing_crypto:
+        try:
+            r_cg = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={
+                    'ids':               ','.join(missing_crypto),
+                    'vs_currencies':     'clp',
+                    'include_24hr_change': 'true',
+                },
+                headers={'User-Agent': 'CofrBot/6.0'},
+                timeout=12
+            )
+            if r_cg.status_code == 200:
+                jcg = r_cg.json()
+                for cod in missing_crypto:
+                    dat = jcg.get(cod) or {}
+                    val = dat.get('clp')
+                    if val:
+                        cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                        datos_actuales[cod] = {
+                            'nombre':      cfg[1] if cfg else cod.capitalize(),
+                            'descripcion': cfg[2] if cfg else cod,
+                            'color':       cfg[3] if cfg else '#9945FF',
+                            'valor':       val,
+                            'fecha':       AHORA.strftime('%Y-%m-%d'),
+                            'unidad':      'CLP',
+                            'serie30':     [{'valor': val,
+                                             'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                        }
+        except Exception as _cge:
+            logger.debug('CoinGecko fallback: ' + str(_cge))
+
     return {
         'datos_actuales': datos_actuales,
         'hist_12m':       hist_12m,
@@ -14703,6 +14819,7 @@ def generar_html_indicadores(all_data, explicaciones):
         if cod == "bitcoin":   return "${:,.0f}".format(v).replace(",", ".")
         if cod == "libra_cobre": return "USD {:.4f}".format(v)
         if cod == "ipsa":      return "{:,.0f} pts".format(v).replace(",", ".")
+        if cod in ("solana", "ethereum"): return "${:,.0f} CLP".format(v).replace(",", ".")
         return "${:,.2f}".format(v).replace(",", "X").replace(".", ",").replace("X", ".")
 
     def variacion_html(serie):
@@ -14721,7 +14838,8 @@ def generar_html_indicadores(all_data, explicaciones):
     # FIX: sparklines usan requestAnimationFrame + resize + array global
     # =========================================================================
     ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
-             "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp", "ipsa"]
+             "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp",
+             "ipsa", "solana", "ethereum"]
     cards_html  = ""
     spark_inits = ""   # array _sparkCfg para init diferido
     spark_cfg_items = []
@@ -14872,7 +14990,7 @@ def generar_html_indicadores(all_data, explicaciones):
     # =========================================================================
     exp_cards_html = ""
     EXP_ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
-                 "tasa_desempleo", "imacec", "libra_cobre", "ipsa"]
+                 "tasa_desempleo", "imacec", "libra_cobre", "ipsa", "solana", "ethereum"]
     for cod in EXP_ORDER:
         d   = datos.get(cod)
         exp = explicaciones.get(cod, "")
@@ -15216,7 +15334,7 @@ def generar_html_indicadores(all_data, explicaciones):
 
         '<div class="section">'
         '<div class="section-title">&#128202; Indicadores del Dia \u2014'
-        ' 12 Indicadores con Tendencia 30 dias (incl. IPSA)</div>'
+        ' 14 Indicadores con Tendencia 30 dias (incl. IPSA, SOL, ETH)</div>'
         '<div class="cards">' + cards_html + '</div>'
         '</div>'
 
@@ -15375,6 +15493,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
             'libra_cobre':    'precio cobre Chile exportaciones materias primas',
             'ivp':            'indice valor promedio creditos hipotecarios Chile',
+            'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
+            'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
+            'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
         }
         fragmentos_rag = {}
         for cod in datos:
@@ -15399,7 +15520,8 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
-                     'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp']
+                     'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp',
+                     'ipsa', 'solana', 'ethereum']
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
@@ -15419,6 +15541,10 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 vf = "${:,.0f} CLP".format(v).replace(',', '.')
             elif cod == 'libra_cobre':
                 vf = "USD {:.4f}".format(v)
+            elif cod == 'ipsa':
+                vf = "{:,.0f} pts".format(v).replace(',', '.')
+            elif cod in ('solana', 'ethereum'):
+                vf = "${:,.0f} CLP".format(v).replace(',', '.')
             else:
                 vf = "${:,.2f} CLP".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
             serie = d.get('serie30', [])
@@ -15481,12 +15607,13 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
                 caption=(
                     "📊 Dashboard Indicadores Económicos Chile\n\n"
-                    "• 11 indicadores del día con sparklines 30 días\n"
+                    "• 14 indicadores del día con sparklines 30 días\n"
+                    "  (incl. IPSA Bolsa · Ethereum · Solana)\n"
                     "• 🏦 Tasas CMF: TMC (Tipo 1-6) + Contexto Financiero\n"
-                    "• 🐔 Rentabilidad AFP: 7 fondos x 5 fondos (6 meses)\n"
-                    "• 🤖 Análisis IA del por qué de cada variación\n"
+                    "• 🐔 Rentabilidad AFP: 7 AFPs x 5 fondos (6 meses)\n"
+                    "• 🤖 Análisis IA por indicador\n"
                     "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
-                    "• 💱 Dólar vs Euro últimos 6 meses\n"
+                    "• 💱 Dólar vs Euro últimos 12 meses\n"
                     "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
                     "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
@@ -15507,6 +15634,417 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMANDO /feriados - Feriados de Chile (API oficial del Gobierno de Chile)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+
+
+@requiere_suscripcion
+async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /feriados - Feriados legales de Chile (año actual y próximo)"""
+    msg = await update.message.reply_text("📅 Consultando feriados legales de Chile...")
+    try:
+        loop  = asyncio.get_running_loop()
+        AHORA = datetime.now()
+        MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",
+                    5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",
+                    9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
+        DIAS_ES = {"Monday":"Lunes","Tuesday":"Martes","Wednesday":"Miercoles",
+                   "Thursday":"Jueves","Friday":"Viernes","Saturday":"Sabado","Sunday":"Domingo"}
+        TIPO_EMOJI = {"Civil":"🔵","Religioso":"✝️","Bancario":"🏦","Irrenunciable":"⭐"}
+
+        def _fetch_feriados(anio):
+            try:
+                r = requests.get(
+                    f"https://apis.digital.gob.cl/fl/feriados/{anio}",
+                    headers={"Accept":"application/json","User-Agent":"CofrBot/6.0"},
+                    timeout=12
+                )
+                if r.status_code == 200:
+                    return r.json()
+            except Exception as _e:
+                logger.debug(f"feriados API {anio}: {_e}")
+            return []
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _afc
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fa = ex.submit(_fetch_feriados, AHORA.year)
+            fb = ex.submit(_fetch_feriados, AHORA.year + 1)
+            fer_actual  = fa.result() or []
+            fer_proximo = fb.result() or []
+
+        if not fer_actual:
+            await msg.edit_text(
+                "❌ No se pudieron obtener los feriados.\n"
+                "La API del Gobierno puede estar temporalmente inaccesible."
+            )
+            return
+
+        hoy      = AHORA.date()
+        proximos = []
+        pasados  = []
+        for f in fer_actual:
+            try:
+                fd = __import__('datetime').date.fromisoformat(f["fecha"][:10])
+                f["_date"] = fd
+                (proximos if fd >= hoy else pasados).append(f)
+            except Exception:
+                pass
+        proximos.sort(key=lambda x: x["_date"])
+        pasados.sort(key=lambda x: x["_date"], reverse=True)
+
+        sep   = "━" * 32
+        lineas = [
+            "📅 FERIADOS LEGALES DE CHILE",
+            sep,
+            f"Año {AHORA.year}",
+            "",
+        ]
+
+        if proximos:
+            lineas.append("🔜 PRÓXIMOS FERIADOS:")
+            for f in proximos[:8]:
+                fd   = f["_date"]
+                diff = (fd - hoy).days
+                nom  = f.get("nombre") or ""
+                tipo = f.get("tipo") or ""
+                emo  = TIPO_EMOJI.get(tipo, "📌")
+                dia  = DIAS_ES.get(fd.strftime("%A"), fd.strftime("%A"))
+                mes  = MESES_ES.get(fd.month, str(fd.month))
+                if diff == 0:   cerca = "  ← HOY 🎉"
+                elif diff == 1: cerca = "  ← ¡Mañana!"
+                elif diff <= 7: cerca = f"  ← en {diff} días"
+                else:           cerca = ""
+                lineas.append(f"{emo} {dia} {fd.day} {mes} {fd.year}{cerca}")
+                lineas.append(f"   {nom} [{tipo}]")
+        else:
+            lineas.append("✅ No quedan feriados en el año actual.")
+
+        if fer_proximo:
+            fer_ps = sorted([f for f in fer_proximo if f.get("fecha")],
+                            key=lambda x: x["fecha"][:10])[:8]
+            lineas += ["", sep, f"📆 PRIMEROS FERIADOS {AHORA.year + 1}:"]
+            for f in fer_ps:
+                try:
+                    fd2 = __import__('datetime').date.fromisoformat(f["fecha"][:10])
+                    d2  = DIAS_ES.get(fd2.strftime("%A"), fd2.strftime("%A"))
+                    m2  = MESES_ES.get(fd2.month, str(fd2.month))
+                    n2  = f.get("nombre") or ""
+                    t2  = f.get("tipo") or ""
+                    e2  = TIPO_EMOJI.get(t2, "📌")
+                    lineas.append(f"{e2} {d2} {fd2.day} {m2} — {n2}")
+                except Exception:
+                    pass
+
+        lineas += [
+            "", sep,
+            f"📊 {AHORA.year}: {len(fer_actual)} feriados · {len(pasados)} pasados · {len(proximos)} por venir",
+            "🔵 Civil  ✝️ Religioso  🏦 Bancario  ⭐ Irrenunciable",
+            "Fuente: API Feriados · Gobierno de Chile"
+        ]
+        await msg.edit_text("\n".join(lineas))
+
+    except Exception as e:
+        import traceback as _tb
+        logger.error("feriados_comando: " + str(e) + "\n" + _tb.format_exc())
+        try:
+            await msg.edit_text("❌ Error al consultar feriados: " + str(e)[:100])
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMANDO /buscar_web - Búsqueda web vía DuckDuckGo (sin API key)
+# ═══════════════════════════════════════════════════════════════════════════════
+@requiere_suscripcion
+async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /buscar_web [consulta] - Búsqueda web con DuckDuckGo + resumen IA"""
+    if not context.args:
+        await update.message.reply_text(
+            "🌐 Uso: /buscar_web [tu consulta]\n\n"
+            "Ejemplos:\n"
+            "  /buscar_web noticias economicas Chile hoy\n"
+            "  /buscar_web requisitos MBA Universidad de Chile\n"
+            "  /buscar_web salario promedio ingeniero naval Chile"
+        )
+        return
+
+    query = " ".join(context.args)
+    msg   = await update.message.reply_text(f"🌐 Buscando: {query[:60]}...")
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _search_ddg(q):
+            resultados = []
+            try:
+                r = requests.get(
+                    "https://api.duckduckgo.com/",
+                    params={"q": q, "format": "json", "no_html": "1",
+                            "skip_disambig": "1", "kl": "cl-es"},
+                    headers={"User-Agent": "CofrBot/6.0"},
+                    timeout=12
+                )
+                if r.status_code == 200:
+                    j = r.json()
+                    resumen = (j.get("AbstractText") or "").strip()
+                    fuente  = (j.get("AbstractSource") or "").strip()
+                    url     = (j.get("AbstractURL") or "").strip()
+                    if resumen:
+                        resultados.append({"titulo": fuente or "Respuesta directa",
+                                           "snippet": resumen[:600], "url": url})
+                    for topic in (j.get("RelatedTopics") or [])[:6]:
+                        text = (topic.get("Text") or "").strip()
+                        href = (topic.get("FirstURL") or "").strip()
+                        if text and len(text) > 25:
+                            resultados.append({"titulo": text[:80], "snippet": text[:300], "url": href})
+            except Exception as _e:
+                logger.debug(f"DDG search: {_e}")
+            return resultados
+
+        resultados = await loop.run_in_executor(None, _search_ddg, query)
+
+        if not resultados:
+            await msg.edit_text(
+                f"🌐 Sin resultados para: {query}\n\n"
+                "💡 Prueba con términos más específicos o usa /buscar_ia para buscar en el historial del grupo."
+            )
+            return
+
+        def _ia_summary(q, res):
+            if not GROQ_API_KEY:
+                return None
+            ctx = "\n\n".join([f"Fuente: {r['titulo']}\n{r['snippet']}" for r in res[:4]])
+            try:
+                rg = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                             "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "max_tokens": 400,
+                        "messages": [
+                            {"role": "system",
+                             "content": ("Eres un asistente de búsqueda web para una comunidad de profesionales navales chilenos. "
+                                        "Resume en español (máx 250 palabras) lo más relevante de los resultados. "
+                                        "Sé directo y útil.")},
+                            {"role": "user",
+                             "content": f"Consulta: {q}\n\nResultados:\n{ctx}\n\nResumen:"}
+                        ]
+                    },
+                    timeout=15
+                )
+                if rg.status_code == 200:
+                    return rg.json()["choices"][0]["message"]["content"].strip()
+            except Exception as _ge:
+                logger.debug(f"Groq web summary: {_ge}")
+            return None
+
+        ia_res = await loop.run_in_executor(None, _ia_summary, query, resultados)
+        sep    = "━" * 30
+        lines  = [f"🌐 BÚSQUEDA WEB: {query}", sep, ""]
+        if ia_res:
+            lines += ["🤖 ANÁLISIS IA:", ia_res, "", sep, "📋 FUENTES:"]
+        else:
+            lines += [sep, "📋 RESULTADOS:"]
+        for i, r in enumerate(resultados[:5], 1):
+            tit  = (r.get("titulo") or "")[:70]
+            snip = (r.get("snippet") or "")
+            url  = (r.get("url") or "")[:80]
+            lines.append(f"\n{i}. {tit}")
+            if snip and snip[:80] != tit[:80]:
+                lines.append(f"   {snip[:180]}...")
+            if url:
+                lines.append(f"   🔗 {url}")
+        lines += ["", sep, "Fuente: DuckDuckGo · Groq IA | Cofradía de Networking"]
+        await msg.edit_text("\n".join(lines))
+
+    except Exception as e:
+        import traceback as _tb
+        logger.error("buscar_web_comando: " + str(e) + "\n" + _tb.format_exc())
+        try:
+            await msg.edit_text("❌ Error búsqueda web: " + str(e)[:100])
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMANDOS HEADHUNTER (Admin) — Panel de reclutamiento profesional
+# ═══════════════════════════════════════════════════════════════════════════════
+async def perfiles_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /perfiles_hh [filtro] - Panel Headhunter: todos los perfiles profesionales (Admin)"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    filtro = " ".join(context.args).strip().lower() if context.args else ""
+    msg    = await update.message.reply_text("🕵️ Cargando perfiles profesionales...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Sin conexión a la base de datos.")
+            return
+        c = conn.cursor()
+        c.execute("""
+            SELECT t.user_id, t.nombre_completo, t.profesion, t.empresa,
+                   t.servicios, t.email, t.telefono, t.ciudad, t.linkedin,
+                   s.estado
+            FROM   tarjetas_profesional t
+            LEFT JOIN suscripciones s ON t.user_id = s.user_id
+            ORDER BY t.nombre_completo
+        """)
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            await msg.edit_text("📭 No hay tarjetas profesionales registradas aún.")
+            return
+        def _col(row, cn, ci):
+            return str(row[cn] if DATABASE_URL else row[ci] or "").strip()
+        if filtro:
+            rows = [r for r in rows if
+                    filtro in (_col(r,'profesion',2)).lower() or
+                    filtro in (_col(r,'servicios',4)).lower() or
+                    filtro in (_col(r,'nombre_completo',1)).lower() or
+                    filtro in (_col(r,'empresa',3)).lower()]
+        total = len(rows)
+        sep   = "━" * 32
+        header = (
+            f"🕵️ PANEL HEADHUNTER — {total} perfil{'es' if total!=1 else ''}"
+            + (f' (filtro: "{filtro}")' if filtro else "") + "\n" + sep
+        )
+        await msg.edit_text(header)
+        chunk_size = 6
+        for idx, chunk in enumerate([rows[i:i+chunk_size] for i in range(0, total, chunk_size)]):
+            block = []
+            for row in chunk:
+                n  = _col(row,'nombre_completo',1) or "Sin nombre"
+                p  = _col(row,'profesion',2) or "—"
+                e  = _col(row,'empresa',3) or "—"
+                sv = _col(row,'servicios',4) or "—"
+                em = _col(row,'email',5) or "—"
+                t  = _col(row,'telefono',6) or "—"
+                ci = _col(row,'ciudad',7) or "—"
+                li = _col(row,'linkedin',8) or ""
+                st = _col(row,'estado',9) or "activo"
+                sb = "✅" if st == "activo" else "⚠️"
+                block.append(
+                    f"\n{sb} {n}\n   💼 {p} · {e}\n   🏙️ {ci} | 📧 {em}\n   📱 {t}"
+                    + (f"\n   🔗 {li}" if li else "")
+                    + f"\n   🛠️ {sv[:80]}{'...' if len(sv)>80 else ''}"
+                )
+            if block:
+                await update.message.reply_text(
+                    f"Perfiles {idx*chunk_size+1}-{min((idx+1)*chunk_size,total)} de {total}:\n"
+                    + "\n".join(block)
+                )
+        await update.message.reply_text(
+            f"\n{sep}\n"
+            f"💡 /perfiles_hh [filtro] — ej: /perfiles_hh ingeniero\n"
+            f"💡 /match_hh [cargo] — para match IA de un cargo específico\n"
+            f"💡 /buscar_profesional [nombre] — ver tarjeta completa"
+        )
+    except Exception as e:
+        import traceback as _tb
+        logger.error("perfiles_hh_comando: " + str(e) + "\n" + _tb.format_exc())
+        try:
+            await msg.edit_text("❌ Error panel HH: " + str(e)[:100])
+        except Exception:
+            pass
+
+
+async def match_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /match_hh [cargo] - Headhunter: match IA de miembros para un cargo (Admin)"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "🎯 Uso: /match_hh [descripción del cargo]\n\n"
+            "Ejemplos:\n"
+            "  /match_hh Capitán de Puerto con experiencia en gestión portuaria\n"
+            "  /match_hh Gerente de Operaciones sector marítimo\n"
+            "  /match_hh Oficial de Seguridad ISO 9001 certificado"
+        )
+        return
+    cargo = " ".join(context.args)
+    msg   = await update.message.reply_text(f"🎯 Analizando perfiles para: {cargo[:60]}...")
+    try:
+        loop = asyncio.get_running_loop()
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Sin conexión a base de datos.")
+            return
+        c = conn.cursor()
+        c.execute("""
+            SELECT t.nombre_completo, t.profesion, t.empresa, t.servicios, t.ciudad
+            FROM tarjetas_profesional t
+            JOIN suscripciones s ON t.user_id = s.user_id
+            WHERE s.estado = 'activo'
+            ORDER BY t.nombre_completo
+        """)
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            await msg.edit_text("📭 No hay perfiles activos disponibles.")
+            return
+        def _col(row, cn, ci):
+            return str(row[cn] if DATABASE_URL else row[ci] or "").strip()
+        perfiles_ctx = "\n".join([
+            f"- {_col(r,'nombre_completo',0)}: {_col(r,'profesion',1)} en {_col(r,'empresa',2)}. "
+            f"Servicios: {_col(r,'servicios',3)[:80]}. Ciudad: {_col(r,'ciudad',4)}"
+            for r in rows[:25]
+        ])
+        def _groq_match(cargo_req, ctx):
+            if not GROQ_API_KEY:
+                return None
+            try:
+                rg = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                             "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "max_tokens": 600,
+                        "messages": [
+                            {"role": "system",
+                             "content": ("Eres headhunter experto en ex-oficiales navales chilenos. "
+                                        "Analiza perfiles y recomienda los 3-5 mejores candidatos para el cargo. "
+                                        "Fundamenta brevemente cada recomendación. Responde en español de Chile.")},
+                            {"role": "user",
+                             "content": f"Cargo: {cargo_req}\n\nPerfiles disponibles:\n{ctx}\n\nMejores candidatos:"}
+                        ]
+                    },
+                    timeout=20
+                )
+                if rg.status_code == 200:
+                    return rg.json()["choices"][0]["message"]["content"].strip()
+            except Exception as _ge:
+                logger.debug(f"Groq match_hh: {_ge}")
+            return None
+        ia_match = await loop.run_in_executor(None, _groq_match, cargo, perfiles_ctx)
+        sep   = "━" * 32
+        lineas = [
+            "🎯 HEADHUNTER MATCH — ANÁLISIS IA", sep,
+            f"Cargo: {cargo}", f"Perfiles analizados: {len(rows)}", "",
+        ]
+        if ia_match:
+            lineas += ["🤖 RECOMENDACIONES:", ia_match]
+        else:
+            lineas.append("⚠️ IA no disponible — usa /perfiles_hh para revisión manual.")
+        lineas += ["", sep, "Para ver tarjeta: /buscar_profesional [nombre]"]
+        await msg.edit_text("\n".join(lineas))
+    except Exception as e:
+        import traceback as _tb
+        logger.error("match_hh_comando: " + str(e) + "\n" + _tb.format_exc())
+        try:
+            await msg.edit_text("❌ Error match HH: " + str(e)[:100])
+        except Exception:
+            pass
 
 
 def main():
@@ -15734,6 +16272,8 @@ def main():
     application.add_handler(CommandHandler("cumpleanos_mes", cumpleanos_mes_comando))
     application.add_handler(CommandHandler("encuesta", encuesta_comando))
     application.add_handler(CommandHandler("nuevo_evento", nuevo_evento_comando))
+    application.add_handler(CommandHandler("feriados", feriados_comando))
+    application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
     application.add_handler(CommandHandler("eventos", eventos_comando))
     application.add_handler(CommandHandler("asistir", asistir_comando))
     application.add_handler(CommandHandler("recomendar", recomendar_comando))
@@ -15748,6 +16288,8 @@ def main():
     application.add_handler(CommandHandler("editar_usuario", editar_usuario_comando))
     application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
     application.add_handler(CommandHandler("buscar_usuario", buscar_usuario_comando))
+    application.add_handler(CommandHandler("perfiles_hh", perfiles_hh_comando))
+    application.add_handler(CommandHandler("match_hh", match_hh_comando))
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
