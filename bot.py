@@ -14189,6 +14189,1539 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+async def ofrezco_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registra un servicio ofrecido."""
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text(
+            "*Publicar tu servicio:*\n\n"
+            "`/ofrezco [descripcion]`\n\n"
+            "Ejemplo:\n`/ofrezco Asesoria en derecho maritimo`",
+            parse_mode='Markdown'
+        )
+        return
+    descripcion = " ".join(context.args)[:300]
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            ph = "%s" if DATABASE_URL else "?"
+            c.execute(f"UPDATE servicios_cofrades SET activo=0 WHERE user_id={ph} AND tipo='ofrezco'", (user.id,))
+            c.execute(f"INSERT INTO servicios_cofrades (user_id, tipo, descripcion) VALUES ({ph},'ofrezco',{ph})", (user.id, descripcion))
+            conn.commit()
+            conn.close()
+        await update.message.reply_text(
+            f"Servicio publicado:\n_{descripcion}_\n\nLos cofrades te encontraran con `/busco`.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error ofrezco: {e}")
+        await update.message.reply_text("Error al registrar el servicio.")
+
+
+async def busco_servicio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Busca cofrades que ofrecen un servicio."""
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text(
+            "*Buscar servicio:*\n\n`/busco [lo que necesitas]`\n\nEjemplo:\n`/busco asesoria legal`",
+            parse_mode='Markdown'
+        )
+        return
+    busqueda = " ".join(context.args).lower()
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("Error de conexion.")
+            return
+        c = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        if DATABASE_URL:
+            c.execute("""SELECT sc.descripcion, s.first_name, s.username
+                FROM servicios_cofrades sc
+                JOIN suscripciones s ON sc.user_id=s.user_id
+                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE %s
+                LIMIT 5""", (f"%{busqueda}%",))
+        else:
+            c.execute("""SELECT sc.descripcion, s.first_name, s.username
+                FROM servicios_cofrades sc
+                JOIN suscripciones s ON sc.user_id=s.user_id
+                WHERE sc.tipo='ofrezco' AND sc.activo=1 AND LOWER(sc.descripcion) LIKE ?
+                LIMIT 5""", (f"%{busqueda}%",))
+        resultados = c.fetchall()
+        conn.close()
+
+        if not resultados:
+            await update.message.reply_text(
+                f"Nadie ofrece *{busqueda}* por ahora.\n\n"
+                "Si tu lo ofreces, publicate con `/ofrezco [descripcion]`",
+                parse_mode='Markdown'
+            )
+            return
+
+        texto = f"*Cofrades que ofrecen '{busqueda}':*\n\n"
+        for desc, fname, uname in resultados:
+            contacto = f"@{uname}" if uname else fname
+            texto += f"*{fname}* ({contacto})\n_{desc}_\n\n"
+        await update.message.reply_text(texto, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Error busco_servicio: {e}")
+        await update.message.reply_text("Error al buscar.")
+
+
+async def mis_servicios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra servicios publicados por el usuario."""
+    user = update.effective_user
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("Error de conexion.")
+            return
+        c = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        c.execute(f"SELECT tipo, descripcion FROM servicios_cofrades WHERE user_id={ph} AND activo=1", (user.id,))
+        servicios = c.fetchall()
+        conn.close()
+
+        if not servicios:
+            await update.message.reply_text(
+                "No tienes servicios publicados.\n\n"
+                "• `/ofrezco [descripcion]` — publica lo que ofreces\n"
+                "• `/busco [servicio]` — busca lo que necesitas"
+            )
+            return
+
+        texto = "*Tus servicios publicados:*\n\n"
+        for tipo, desc in servicios:
+            icono = "🟢" if tipo == "ofrezco" else "🔵"
+            texto += f"{icono} _{desc}_\n\n"
+        await update.message.reply_text(texto, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error mis_servicios: {e}")
+        await update.message.reply_text("Error al obtener servicios.")
+
+
+async def recordar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Crea recordatorio. Uso: /recordar 2h Llamar a Juan"""
+    user = update.effective_user
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "*Crear recordatorio:*\n\n"
+            "`/recordar [tiempo] [mensaje]`\n\n"
+            "*Ejemplos:*\n"
+            "`/recordar 30m Revisar propuesta`\n"
+            "`/recordar 2h Llamar al cliente`\n"
+            "`/recordar 1d Seguimiento reunion`",
+            parse_mode='Markdown'
+        )
+        return
+
+    tiempo_str = context.args[0].lower()
+    mensaje = " ".join(context.args[1:])
+    from datetime import datetime, timedelta
+    ahora = datetime.utcnow()
+    try:
+        if tiempo_str.endswith('m'):
+            delta = timedelta(minutes=int(tiempo_str[:-1]))
+        elif tiempo_str.endswith('h'):
+            delta = timedelta(hours=int(tiempo_str[:-1]))
+        elif tiempo_str.endswith('d'):
+            delta = timedelta(days=int(tiempo_str[:-1]))
+        else:
+            raise ValueError()
+        fecha_recordar = ahora + delta
+    except Exception:
+        await update.message.reply_text("Formato invalido. Usa: 30m, 2h, 1d")
+        return
+
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            ph = "%s" if DATABASE_URL else "?"
+            c.execute(f"INSERT INTO recordatorios (user_id, mensaje, fecha_recordar) VALUES ({ph},{ph},{ph})",
+                     (user.id, mensaje, fecha_recordar if DATABASE_URL else fecha_recordar.isoformat()))
+            conn.commit()
+            conn.close()
+        await update.message.reply_text(
+            f"Recordatorio creado:\n_{mensaje}_\n\nTe avisare en {tiempo_str}.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error recordar: {e}")
+        await update.message.reply_text("Error al crear recordatorio.")
+
+
+async def verificar_recordatorios(context):
+    """Job: envía recordatorios pendientes cada minuto."""
+    from datetime import datetime
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        ahora = datetime.utcnow()
+        if DATABASE_URL:
+            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= %s", (ahora,))
+        else:
+            c.execute("SELECT id, user_id, mensaje FROM recordatorios WHERE enviado=0 AND fecha_recordar <= ?", (ahora.isoformat(),))
+        pendientes = c.fetchall()
+        for row in pendientes:
+            try:
+                # Supabase devuelve dict, SQLite devuelve tuple
+                if DATABASE_URL:
+                    rec_id = row['id']
+                    uid    = row['user_id']
+                    msg    = row['mensaje']
+                else:
+                    rec_id, uid, msg = row[0], row[1], row[2]
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text="⏰ *Recordatorio Cofradía*\n\n" + str(msg),
+                    parse_mode='Markdown'
+                )
+                ph = "%s" if DATABASE_URL else "?"
+                c.execute(f"UPDATE recordatorios SET enviado=1 WHERE id={ph}", (rec_id,))
+                logger.info(f"✅ Recordatorio {rec_id} enviado a {uid}")
+            except Exception as e:
+                logger.warning(f"Error recordatorio {rec_id}: {e}")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error verificando recordatorios: {e}")
+
+
+async def mantenimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: activa/desactiva modo mantenimiento."""
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("Solo el administrador puede usar este comando.")
+        return
+    if not context.args:
+        estado = get_modo_mantenimiento()
+        txt = "ACTIVO" if estado["activo"] else "INACTIVO"
+        await update.message.reply_text(
+            f"Modo Mantenimiento: *{txt}*\n\n"
+            "`/mantenimiento on [mensaje]`\n`/mantenimiento off`",
+            parse_mode='Markdown'
+        )
+        return
+    accion = context.args[0].lower()
+    if accion == "on":
+        msg_c = " ".join(context.args[1:]) if len(context.args) > 1 else "El bot esta en mantenimiento. Volvemos pronto."
+        set_modo_mantenimiento(True, msg_c, user.id)
+        await update.message.reply_text(f"Modo mantenimiento ACTIVADO\n\n_{msg_c}_", parse_mode='Markdown')
+    elif accion == "off":
+        set_modo_mantenimiento(False, "", user.id)
+        await update.message.reply_text("Modo mantenimiento DESACTIVADO — Bot operativo.")
+    else:
+        await update.message.reply_text("Usa: `/mantenimiento on` o `/mantenimiento off`", parse_mode='Markdown')
+
+
+async def velocidad_voz_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ajusta velocidad de la voz del bot."""
+    user = update.effective_user
+    pref = get_preferencia_voz(user.id)
+    actual = pref.get("velocidad", "normal")
+    emojis = {"lento": "🐢", "normal": "▶️", "rapido": "🐇"}
+    await update.message.reply_text(
+        f"Velocidad de voz actual: {emojis.get(actual,'')} *{actual.upper()}*\n\nSelecciona tu preferencia:",
+        parse_mode='Markdown'
+    )
+
+
+async def resumen_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Activa/desactiva resumen diario personalizado por audio."""
+    user = update.effective_user
+    pref = get_preferencia_voz(user.id)
+    activo = pref.get("resumen_diario", 0)
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            nuevo = 0 if activo else 1
+            if DATABASE_URL:
+                c.execute("""INSERT INTO preferencias_usuario (user_id, resumen_diario)
+                    VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET resumen_diario=EXCLUDED.resumen_diario""",
+                    (user.id, nuevo))
+            else:
+                c.execute("INSERT OR REPLACE INTO preferencias_usuario (user_id, resumen_diario) VALUES (?, ?)", (user.id, nuevo))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Error resumen_diario: {e}")
+
+    if activo:
+        await update.message.reply_text("Resumen diario *desactivado*.", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(
+            "Resumen diario *activado*\n\n"
+            "Recibiras un audio cada manana a las 9:00 AM Chile\n"
+            "con novedades relevantes para ti.\n\n"
+            "Para desactivar, usa `/resumen_diario` de nuevo.",
+            parse_mode='Markdown'
+        )
+
+
+async def enviar_resumenes_diarios(context):
+    """Job matutino: envia resumen personalizado por audio."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        c.execute("""SELECT p.user_id, s.first_name FROM preferencias_usuario p
+            JOIN suscripciones s ON p.user_id=s.user_id
+            WHERE p.resumen_diario=1 AND s.estado='activo'""")
+        usuarios = c.fetchall()
+        conn.close()
+        for uid, nombre in usuarios:
+            try:
+                prompt = (
+                    f"Crea un resumen ejecutivo breve (4 oraciones maximas) para {nombre}, "
+                    "miembro de Cofradia de Networking. Incluye: novedades networking profesional, "
+                    "mercado laboral chileno, y algo motivador. Sin listas ni emojis."
+                )
+                resumen = llamar_groq(prompt, max_tokens=200, temperature=0.7)
+                if not resumen:
+                    resumen = llamar_gemini_texto(prompt, max_tokens=200, temperature=0.7)
+                if resumen:
+                    audio_file = await generar_audio_con_velocidad(resumen, uid, f"/tmp/resumen_{uid}.mp3")
+                    if audio_file:
+                        import os
+                        with open(audio_file, 'rb') as f:
+                            await context.bot.send_voice(
+                                chat_id=uid, voice=f,
+                                caption=f"Buenos dias, {nombre}! Tu resumen diario de la Cofradia."
+                            )
+                        try:
+                            os.remove(audio_file)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"Error resumen a {uid}: {e}")
+    except Exception as e:
+        logger.warning(f"Error resumenes diarios: {e}")
+
+
+# ==================== ANÁLISIS DE USUARIOS ====================
+
+async def analizar_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analiza mensajes recientes de un cofrade. Uso: /analizar @username"""
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text(
+            "*Analizar a un cofrade:*\n\n"
+            "`/analizar @username` o `/analizar Nombre`\n\n"
+            "Busca sus mensajes recientes y genera un análisis de su expertise, "
+            "temas de interes y aportes destacados.",
+            parse_mode="Markdown"
+        )
+        return
+
+    busqueda = " ".join(context.args).replace("@", "").strip()
+    msg = await update.message.reply_text(f"Analizando mensajes recientes de *{busqueda}*...", parse_mode="Markdown")
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("Error de conexion.")
+            return
+        c = conn.cursor()
+
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, username FROM suscripciones
+                WHERE LOWER(username) = %s OR LOWER(first_name) LIKE %s LIMIT 1""",
+                (busqueda.lower(), f"%{busqueda.lower()}%"))
+        else:
+            c.execute("""SELECT user_id, first_name, username FROM suscripciones
+                WHERE LOWER(username) = ? OR LOWER(first_name) LIKE ? LIMIT 1""",
+                (busqueda.lower(), f"%{busqueda.lower()}%"))
+        cofrade = c.fetchone()
+
+        if not cofrade:
+            await msg.edit_text(f"No encontre a *{busqueda}* en la Cofradia.", parse_mode="Markdown")
+            conn.close()
+            return
+
+        if DATABASE_URL:
+            uid_c = cofrade["user_id"]
+            nombre_c = cofrade["first_name"]
+            uname_c = cofrade.get("username", "") or ""
+        else:
+            uid_c, nombre_c, uname_c = cofrade[0], cofrade[1], (cofrade[2] or "")
+
+        if DATABASE_URL:
+            c.execute("""SELECT contenido FROM mensajes
+                WHERE user_id = %s AND contenido IS NOT NULL
+                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
+        else:
+            c.execute("""SELECT contenido FROM mensajes
+                WHERE user_id = ? AND contenido IS NOT NULL
+                ORDER BY fecha_mensaje DESC LIMIT 30""", (uid_c,))
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await msg.edit_text(
+                f"*{nombre_c}* no tiene mensajes recientes en el sistema.",
+                parse_mode="Markdown"
+            )
+            return
+
+        textos = [r["contenido"] if DATABASE_URL else r[0] for r in rows if (r["contenido"] if DATABASE_URL else r[0])]
+        mensajes_str = "\n---\n".join(textos[:20])
+
+        prompt = (
+            f"Eres un analista experto en networking profesional chileno.\n"
+            f"Analiza los mensajes recientes de {nombre_c} en la Cofradia de Networking:\n\n"
+            f"MENSAJES:\n{mensajes_str}\n\n"
+            f"Genera un analisis con:\n"
+            f"1. Temas de interes y expertise demostrado\n"
+            f"2. Recomendaciones o insights destacados que ha compartido\n"
+            f"3. Perfil profesional inferido\n"
+            f"4. Tu evaluacion y que agregas al respecto\n\n"
+            f"Se especifico y menciona ejemplos concretos. Maximo 200 palabras."
+        )
+
+        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.7)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
+        if not respuesta:
+            await msg.edit_text("No pude generar el analisis ahora. Intenta en un momento.")
+            return
+
+        contacto = f"@{uname_c}" if uname_c else nombre_c
+        texto_final = (
+            f"Analisis de *{nombre_c}* ({contacto})\n"
+            f"Basado en {len(textos)} mensajes recientes\n\n"
+            f"{respuesta}"
+        )
+        await msg.edit_text(texto_final, parse_mode="Markdown")
+
+        # Audio del analisis
+        try:
+            audio_file = await generar_audio_con_velocidad(respuesta, user.id, f"/tmp/analisis_{uid_c}.mp3")
+            if audio_file:
+                import os as _os
+                with open(audio_file, "rb") as af:
+                    await update.message.reply_voice(
+                        voice=af,
+                        caption=f"Analisis de {nombre_c}"
+                    )
+                try: _os.remove(audio_file)
+                except: pass
+        except Exception as e:
+            logger.warning(f"Error audio analisis: {e}")
+
+    except Exception as e:
+        logger.error(f"Error analizar_usuario: {e}")
+        await msg.edit_text("Error al analizar. Intenta de nuevo.")
+
+
+# ==================== AGENTE INTELIGENTE DE NETWORKING (v5.0) ====================
+
+async def agente_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agente IA que analiza el perfil del usuario y genera un plan de networking personalizado"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Esta función requiere suscripción activa. Escribe /start")
+        return
+    
+    msg = await update.message.reply_text("🤖 Agente de Networking activado...\n🔍 Analizando tu perfil y la comunidad...")
+    
+    try:
+        # Obtener perfil del usuario
+        conn = get_db_connection()
+        tarjeta = None
+        miembro_data = None
+        agenda_items = []
+        tareas_pend = []
+        
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+                tarjeta = c.fetchone()
+                c.execute("SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = %s LIMIT 1", (user_id,))
+                miembro_data = c.fetchone()
+                c.execute("""SELECT titulo, fecha_evento, tipo FROM agenda_personal 
+                             WHERE user_id = %s AND completada = FALSE AND fecha_evento >= NOW() 
+                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
+                agenda_items = c.fetchall()
+                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
+                             WHERE user_id = %s AND completada = FALSE 
+                             ORDER BY fecha_creacion DESC LIMIT 5""", (user_id,))
+                tareas_pend = c.fetchall()
+            else:
+                c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+                tarjeta = c.fetchone()
+                c.execute("SELECT nombre, apellido, generacion FROM nuevos_miembros WHERE user_id = ? LIMIT 1", (user_id,))
+                miembro_data = c.fetchone()
+                c.execute("""SELECT titulo, fecha_evento, tipo FROM agenda_personal 
+                             WHERE user_id = ? AND completada = 0 AND fecha_evento >= datetime('now') 
+                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
+                agenda_items = c.fetchall()
+                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
+                             WHERE user_id = ? AND completada = 0 
+                             ORDER BY fecha_creacion DESC LIMIT 5""", (user_id,))
+                tareas_pend = c.fetchall()
+            conn.close()
+        
+        # Construir info del perfil
+        perfil_str = ""
+        if tarjeta:
+            if DATABASE_URL:
+                perfil_str = (f"Nombre: {tarjeta['nombre_completo']}\nProfesión: {tarjeta['profesion']}\n"
+                             f"Empresa: {tarjeta['empresa']}\nCiudad: {tarjeta['ciudad']}\n"
+                             f"Servicios: {tarjeta['servicios']}")
+            else:
+                perfil_str = f"Nombre: {tarjeta[1]}\nProfesión: {tarjeta[2]}\nEmpresa: {tarjeta[3]}\nCiudad: {tarjeta[7]}\nServicios: {tarjeta[4]}"
+        elif miembro_data:
+            if DATABASE_URL:
+                perfil_str = f"Nombre: {miembro_data['nombre']} {miembro_data['apellido']}\nGeneración: {miembro_data['generacion']}"
+            else:
+                perfil_str = f"Nombre: {miembro_data[0]} {miembro_data[1]}\nGeneración: {miembro_data[2]}"
+        else:
+            perfil_str = f"Usuario: {user.first_name} {user.last_name or ''}"
+        
+        agenda_str = ""
+        if agenda_items:
+            lines = []
+            for item in agenda_items:
+                if DATABASE_URL:
+                    lines.append(f"• {item['titulo']} ({str(item['fecha_evento'])[:10]})")
+                else:
+                    lines.append(f"• {item[0]} ({str(item[1])[:10]})")
+            agenda_str = "Próximos eventos agendados:\n" + "\n".join(lines)
+        
+        tareas_str = ""
+        if tareas_pend:
+            lines = []
+            for t in tareas_pend:
+                if DATABASE_URL:
+                    lines.append(f"• [{t['prioridad'].upper()}] {t['tarea']} ({t['categoria']})")
+                else:
+                    lines.append(f"• [{t[1].upper()}] {t[0]} ({t[2]})")
+            tareas_str = "Tareas pendientes:\n" + "\n".join(lines)
+        
+        # Búsqueda de contexto comunitario
+        resultados_com = busqueda_unificada(
+            f"{user.first_name} networking profesional oportunidades", 
+            limit_historial=10, limit_rag=20
+        )
+        contexto_com = formatear_contexto_unificado(resultados_com, "networking")
+        
+        argumento = " ".join(context.args) if context.args else ""
+        
+        prompt = f"""Eres el AGENTE DE NETWORKING de la Cofradía, un asistente IA proactivo y estratégico especializado en desarrollo profesional y networking para oficiales navales.
+
+PERFIL DEL COFRADE:
+{perfil_str}
+{agenda_str}
+{tareas_str}
+
+CONTEXTO DE LA COMUNIDAD:
+{contexto_com[:2000]}
+
+SOLICITUD DEL USUARIO: {argumento if argumento else 'Análisis general y plan de acción'}
+
+GENERA UN PLAN DE NETWORKING PERSONALIZADO que incluya:
+1. 🎯 **Diagnóstico** (2-3 líneas sobre su posición actual en la red)
+2. 🤝 **Top 3 acciones de networking** para esta semana (específicas y accionables)
+3. 📢 **Oportunidades detectadas** en la comunidad relevantes para su perfil
+4. 📅 **Sugerencia de agenda**: qué actividad programar esta semana
+5. 💡 **Tip estratégico** de networking para su sector/perfil
+6. 🛠️ **Comandos útiles** del bot que debería usar
+
+Sé específico, motivador y con lenguaje profesional pero cercano. Tutéalo como camarada naval."""
+        
+        await msg.edit_text("🤖 Generando plan estratégico personalizado...")
+        respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.6)
+        
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.6)
+        
+        if respuesta:
+            header = f"🤖 *AGENTE DE NETWORKING - Plan para {user.first_name}*\n{'━'*35}\n\n"
+            try:
+                await msg.edit_text(header + respuesta, parse_mode='Markdown')
+            except Exception:
+                await msg.edit_text(f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n\n{respuesta}")
+        else:
+            await msg.edit_text("❌ No pude generar el plan en este momento. Intenta de nuevo.")
+        
+        registrar_servicio_usado(user_id, 'agente_networking')
+        
+    except Exception as e:
+        logger.error(f"Error en agente networking: {e}")
+        import traceback; logger.error(traceback.format_exc())
+        await msg.edit_text(f"❌ Error en el agente: {str(e)[:100]}")
+
+
+async def agendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agenda una actividad/reunión con recordatorio automático.
+    Uso: /agendar FECHA HORA Título | Descripción | Lugar | Participantes
+    Ejemplo: /agendar 2026-03-15 10:00 Reunión con Juan | Explorar alianza comercial | Cafe Caribe | @juan_cofrade
+    """
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
+        return
+    
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "📅 *Agenda una actividad con recordatorio automático*\n\n"
+            "*Uso:* `/agendar FECHA HORA Título`\n"
+            "*Ejemplo:* `/agendar 2026-03-15 10:00 Reunión de networking con ex-cofrades`\n\n"
+            "*Formato completo:* `/agendar FECHA HORA Título | Descripción | Lugar | Participantes`\n\n"
+            "💡 El bot te enviará un recordatorio automático 1 hora antes.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        # Parsear fecha y hora
+        fecha_str = context.args[0]
+        hora_str = context.args[1]
+        resto = " ".join(context.args[2:])
+        
+        partes = [p.strip() for p in resto.split("|")]
+        titulo = partes[0] if partes else "Actividad de Networking"
+        descripcion = partes[1] if len(partes) > 1 else ""
+        lugar = partes[2] if len(partes) > 2 else ""
+        participantes = partes[3] if len(partes) > 3 else ""
+        
+        # Parsear datetime
+        try:
+            fecha_evento = datetime.strptime(f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Formato de fecha/hora incorrecto.\n"
+                "Usa: `AAAA-MM-DD HH:MM`\nEjemplo: `2026-03-15 10:00`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        if fecha_evento < datetime.now():
+            await update.message.reply_text("⚠️ La fecha ya pasó. Ingresa una fecha futura.")
+            return
+        
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión a la base de datos.")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""INSERT INTO agenda_personal 
+                        (user_id, titulo, descripcion, fecha_evento, lugar, tipo, participantes)
+                        VALUES (%s, %s, %s, %s, %s, 'reunion', %s) RETURNING id""",
+                     (user_id, titulo, descripcion, fecha_evento, lugar, participantes))
+            agenda_id = c.fetchone()['id']
+        else:
+            c.execute("""INSERT INTO agenda_personal 
+                        (user_id, titulo, descripcion, fecha_evento, lugar, tipo, participantes)
+                        VALUES (?,?,?,?,?,'reunion',?)""",
+                     (user_id, titulo, descripcion, fecha_evento.strftime('%Y-%m-%d %H:%M:%S'), lugar, participantes))
+            agenda_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        
+        # Generar resumen con IA
+        prompt_resumen = f"""El cofrade {user.first_name} agendó esta actividad de networking:
+Título: {titulo}
+Descripción: {descripcion}
+Lugar: {lugar}
+Participantes: {participantes}
+Fecha: {fecha_evento.strftime('%d/%m/%Y a las %H:%M')}
+
+En 2-3 oraciones: (1) Confirma el agendamiento con entusiasmo, (2) Da 1 consejo práctico para prepararse para esta reunión/actividad, (3) Sugiere qué llevar o cómo sacar máximo provecho del networking."""
+        
+        consejo = llamar_groq(prompt_resumen, max_tokens=300, temperature=0.7) or ""
+        
+        respuesta = (
+            f"✅ *¡Actividad agendada exitosamente!* (ID: #{agenda_id})\n\n"
+            f"📌 *{titulo}*\n"
+            f"📅 {fecha_evento.strftime('%A %d/%m/%Y a las %H:%M')}\n"
+        )
+        if lugar:
+            respuesta += f"📍 {lugar}\n"
+        if participantes:
+            respuesta += f"👥 {participantes}\n"
+        if descripcion:
+            respuesta += f"📝 {descripcion}\n"
+        respuesta += f"\n🔔 _Recibirás un recordatorio automático 1 hora antes._\n"
+        if consejo:
+            respuesta += f"\n💡 {consejo}"
+        respuesta += f"\n\n📋 Ver agenda: /mi_agenda | ✅ Marcar completa: /completar_{agenda_id}"
+        
+        try:
+            await update.message.reply_text(respuesta, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(respuesta.replace('*', '').replace('_', ''))
+        
+        registrar_servicio_usado(user_id, 'agendar')
+        
+    except Exception as e:
+        logger.error(f"Error en /agendar: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def mi_agenda_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra la agenda personal del usuario con próximas actividades"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión.")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT id, titulo, fecha_evento, lugar, tipo, participantes, descripcion, completada 
+                        FROM agenda_personal WHERE user_id = %s 
+                        ORDER BY completada ASC, fecha_evento ASC LIMIT 20""", (user_id,))
+        else:
+            c.execute("""SELECT id, titulo, fecha_evento, lugar, tipo, participantes, descripcion, completada 
+                        FROM agenda_personal WHERE user_id = ? 
+                        ORDER BY completada ASC, fecha_evento ASC LIMIT 20""", (user_id,))
+        items = c.fetchall()
+        conn.close()
+        
+        if not items:
+            await update.message.reply_text(
+                "📅 *Tu agenda está vacía*\n\n"
+                "Agenda tu primera actividad con:\n"
+                "`/agendar AAAA-MM-DD HH:MM Título | Descripción | Lugar`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        ahora = datetime.now()
+        proximas = []
+        pasadas = []
+        completadas = []
+        
+        for item in items:
+            if DATABASE_URL:
+                item_id, titulo, fecha, lugar, tipo, partic, desc, comp = (
+                    item['id'], item['titulo'], item['fecha_evento'], 
+                    item['lugar'], item['tipo'], item['participantes'],
+                    item['descripcion'], item['completada']
+                )
+            else:
+                item_id, titulo, fecha, lugar, tipo, partic, desc, comp = item
+            
+            fecha_dt = fecha if hasattr(fecha, 'strftime') else datetime.strptime(str(fecha)[:19], '%Y-%m-%d %H:%M:%S')
+            
+            if comp:
+                completadas.append((item_id, titulo, fecha_dt, lugar))
+            elif fecha_dt >= ahora:
+                proximas.append((item_id, titulo, fecha_dt, lugar, partic))
+            else:
+                pasadas.append((item_id, titulo, fecha_dt, lugar))
+        
+        texto = f"📅 *AGENDA DE {user.first_name.upper()}*\n{'━'*30}\n\n"
+        
+        if proximas:
+            texto += "🔜 *PRÓXIMAS ACTIVIDADES:*\n"
+            for item_id, titulo, fecha_dt, lugar, partic in proximas:
+                dias_resto = (fecha_dt - ahora).days
+                urgencia = "🔴" if dias_resto <= 1 else "🟡" if dias_resto <= 7 else "🟢"
+                texto += f"{urgencia} *#{item_id}* {titulo}\n"
+                texto += f"   📅 {fecha_dt.strftime('%d/%m/%Y %H:%M')}"
+                if lugar:
+                    texto += f" | 📍 {lugar}"
+                if partic:
+                    texto += f"\n   👥 {partic}"
+                texto += f"\n   ✅ `/completar_{item_id}`\n\n"
+        
+        if pasadas:
+            texto += "⏰ *PENDIENTES (fecha pasada):*\n"
+            for item_id, titulo, fecha_dt, lugar in pasadas[:5]:
+                texto += f"⚠️ *#{item_id}* {titulo} ({fecha_dt.strftime('%d/%m')})\n"
+                texto += f"   ✅ `/completar_{item_id}` | 🗑 `/eliminar_agenda_{item_id}`\n"
+            texto += "\n"
+        
+        if completadas:
+            texto += f"✅ *COMPLETADAS:* {len(completadas)} actividades\n\n"
+        
+        texto += "➕ *Nueva:* `/agendar FECHA HORA Título`"
+        
+        try:
+            await update.message.reply_text(texto, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(texto.replace('*', '').replace('_', ''))
+        
+    except Exception as e:
+        logger.error(f"Error en /mi_agenda: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def nueva_tarea_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agrega una tarea de networking pendiente.
+    Uso: /tarea [alta|media|baja] categoria texto
+    Ejemplo: /tarea alta contacto Llamar a Pedro García sobre proyecto logística
+    """
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📋 *Agregar tarea de networking*\n\n"
+            "*Uso:* `/tarea [prioridad] texto`\n\n"
+            "*Ejemplos:*\n"
+            "`/tarea alta Llamar a Pedro sobre proyecto logística`\n"
+            "`/tarea media Actualizar perfil LinkedIn con nuevo cargo`\n"
+            "`/tarea baja Revisar ofertas de empleo sector marítimo`\n\n"
+            "📋 Ver tareas: /mis_tareas",
+            parse_mode='Markdown'
+        )
+        return
+    
+    args_texto = " ".join(context.args)
+    prioridad = 'normal'
+    
+    if context.args[0].lower() in ['alta', 'urgente', 'high']:
+        prioridad = 'alta'
+        args_texto = " ".join(context.args[1:])
+    elif context.args[0].lower() in ['media', 'medium', 'normal']:
+        prioridad = 'media'
+        args_texto = " ".join(context.args[1:])
+    elif context.args[0].lower() in ['baja', 'low']:
+        prioridad = 'baja'
+        args_texto = " ".join(context.args[1:])
+    
+    if not args_texto.strip():
+        await update.message.reply_text("❌ Escribe el texto de la tarea después de la prioridad.")
+        return
+    
+    # Detectar categoría automáticamente con IA
+    categoria = 'general'
+    cats_map = {
+        'contacto': ['llamar', 'contactar', 'escribir', 'mensaje', 'email', 'correo'],
+        'perfil': ['linkedin', 'cv', 'perfil', 'actualizar', 'bio'],
+        'evento': ['asistir', 'evento', 'reunión', 'reunion', 'conferencia', 'seminario'],
+        'empleo': ['oferta', 'empleo', 'trabajo', 'postular', 'aplicar', 'entrevista'],
+        'negocio': ['proyecto', 'propuesta', 'contrato', 'alianza', 'socio', 'negocio'],
+        'seguimiento': ['seguimiento', 'follow', 'recordar', 'confirmar', 'responder'],
+    }
+    texto_lower = args_texto.lower()
+    for cat, palabras in cats_map.items():
+        if any(p in texto_lower for p in palabras):
+            categoria = cat
+            break
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexión.")
+            return
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""INSERT INTO tareas_networking (user_id, tarea, prioridad, categoria)
+                        VALUES (%s, %s, %s, %s) RETURNING id""",
+                     (user_id, args_texto, prioridad, categoria))
+            tarea_id = c.fetchone()['id']
+        else:
+            c.execute("""INSERT INTO tareas_networking (user_id, tarea, prioridad, categoria)
+                        VALUES (?,?,?,?)""",
+                     (user_id, args_texto, prioridad, categoria))
+            tarea_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        
+        emoji_prior = {'alta': '🔴', 'media': '🟡', 'baja': '🟢', 'normal': '⚪'}.get(prioridad, '⚪')
+        
+        await update.message.reply_text(
+            f"✅ *Tarea #{tarea_id} guardada*\n\n"
+            f"{emoji_prior} [{prioridad.upper()}] {args_texto}\n"
+            f"🏷️ Categoría: {categoria}\n\n"
+            f"📋 Ver todas: /mis_tareas\n"
+            f"✅ Completar: `/ok_{tarea_id}`",
+            parse_mode='Markdown'
+        )
+        registrar_servicio_usado(user_id, 'tarea')
+        
+    except Exception as e:
+        logger.error(f"Error en /tarea: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def mis_tareas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra las tareas de networking pendientes"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""SELECT id, tarea, prioridad, categoria, completada, fecha_creacion 
+                        FROM tareas_networking WHERE user_id = %s 
+                        ORDER BY completada ASC, 
+                            CASE prioridad WHEN 'alta' THEN 1 WHEN 'media' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
+                            fecha_creacion DESC LIMIT 25""", (user_id,))
+        else:
+            c.execute("""SELECT id, tarea, prioridad, categoria, completada, fecha_creacion 
+                        FROM tareas_networking WHERE user_id = ? 
+                        ORDER BY completada ASC, 
+                            CASE prioridad WHEN 'alta' THEN 1 WHEN 'media' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
+                            fecha_creacion DESC LIMIT 25""", (user_id,))
+        tareas = c.fetchall()
+        conn.close()
+        
+        if not tareas:
+            await update.message.reply_text(
+                "📋 *No tienes tareas pendientes*\n\n"
+                "Agrega una:\n`/tarea alta Llamar a Juan García sobre proyecto`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        pendientes = []
+        completadas_list = []
+        
+        for t in tareas:
+            if DATABASE_URL:
+                tid, texto, prior, cat, comp, fecha = t['id'], t['tarea'], t['prioridad'], t['categoria'], t['completada'], t['fecha_creacion']
+            else:
+                tid, texto, prior, cat, comp, fecha = t
+            
+            if comp:
+                completadas_list.append((tid, texto, prior))
+            else:
+                pendientes.append((tid, texto, prior, cat))
+        
+        emoji_p = {'alta': '🔴', 'media': '🟡', 'baja': '🟢', 'normal': '⚪'}
+        
+        texto_resp = f"📋 *TAREAS DE NETWORKING - {user.first_name}*\n{'━'*30}\n\n"
+        
+        if pendientes:
+            texto_resp += "⏳ *PENDIENTES:*\n"
+            for tid, texto, prior, cat in pendientes:
+                ep = emoji_p.get(prior, '⚪')
+                texto_resp += f"{ep} *#{tid}* {texto[:80]}\n"
+                texto_resp += f"   🏷️ {cat} | ✅ `/ok_{tid}`\n\n"
+        
+        if completadas_list:
+            texto_resp += f"✅ *Completadas:* {len(completadas_list)}\n\n"
+        
+        texto_resp += "➕ *Nueva:* `/tarea [alta|media|baja] texto`"
+        
+        try:
+            await update.message.reply_text(texto_resp, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(texto_resp.replace('*', '').replace('_', ''))
+        
+    except Exception as e:
+        logger.error(f"Error en /mis_tareas: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def match_networking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agente IA que encuentra los cofrades más compatibles para networking según tu perfil"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción. Escribe /start")
+        return
+    
+    msg = await update.message.reply_text("🔍 Analizando perfiles de la Cofradía para encontrar tus mejores conexiones...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión.")
+            return
+        
+        c = conn.cursor()
+        
+        # Obtener perfil propio
+        if DATABASE_URL:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+            mi_tarjeta = c.fetchone()
+            # Obtener otros cofrades con tarjeta
+            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, ciudad, servicios 
+                        FROM tarjetas_profesional WHERE user_id != %s LIMIT 40""", (user_id,))
+            otros = c.fetchall()
+        else:
+            c.execute("SELECT * FROM tarjetas_profesional WHERE user_id = ?", (user_id,))
+            mi_tarjeta = c.fetchone()
+            c.execute("""SELECT user_id, nombre_completo, profesion, empresa, ciudad, servicios 
+                        FROM tarjetas_profesional WHERE user_id != ? LIMIT 40""", (user_id,))
+            otros = c.fetchall()
+        conn.close()
+        
+        if not mi_tarjeta:
+            await msg.edit_text(
+                "⚠️ No tienes tarjeta profesional creada.\n\n"
+                "Crea tu perfil con /mi_tarjeta para que el agente pueda hacer match inteligente."
+            )
+            return
+        
+        if DATABASE_URL:
+            mi_perfil = f"{mi_tarjeta['nombre_completo']} | {mi_tarjeta['profesion']} | {mi_tarjeta['empresa']} | {mi_tarjeta['ciudad']} | {mi_tarjeta['servicios']}"
+        else:
+            mi_perfil = f"{mi_tarjeta[1]} | {mi_tarjeta[2]} | {mi_tarjeta[3]} | {mi_tarjeta[7]} | {mi_tarjeta[4]}"
+        
+        if not otros:
+            await msg.edit_text(
+                "ℹ️ Aún no hay suficientes perfiles en el directorio para hacer match.\n\n"
+                "Invita a otros cofrades a crear su tarjeta con /mi_tarjeta"
+            )
+            return
+        
+        otros_str = "\n".join([
+            f"- {(o['nombre_completo'] if DATABASE_URL else o[1])} | {(o['profesion'] if DATABASE_URL else o[2])} | {(o['empresa'] if DATABASE_URL else o[3])} | {(o['ciudad'] if DATABASE_URL else o[4])}"
+            for o in otros[:30]
+        ])
+        
+        busqueda_extra = " ".join(context.args) if context.args else ""
+        
+        prompt = f"""Eres el Motor de Match de Networking de la Cofradía. Analiza el perfil del cofrade y encuentra las mejores conexiones estratégicas.
+
+MI PERFIL:
+{mi_perfil}
+{f"Búsqueda específica: {busqueda_extra}" if busqueda_extra else ""}
+
+COFRADES DISPONIBLES EN EL DIRECTORIO:
+{otros_str}
+
+TAREA: Identifica los TOP 5 cofrades más valiosos para hacer networking con {user.first_name}, y para cada uno:
+1. Nombre y por qué es una conexión estratégica
+2. Qué tienen en común o qué sinergias existen
+3. Una propuesta de primer mensaje o tema de conversación concreto
+4. Potencial de colaboración (escala 1-10 con razón)
+
+Sé específico y estratégico. Piensa en sinergias de negocio, intercambio de expertise, oportunidades laborales mutuas."""
+        
+        await msg.edit_text("🤝 Calculando compatibilidades y sinergias...")
+        respuesta = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
+        
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
+        
+        if respuesta:
+            header = f"🤝 *MATCH DE NETWORKING para {user.first_name}*\n{'━'*35}\n\n"
+            try:
+                await msg.edit_text(header + respuesta, parse_mode='Markdown')
+            except Exception:
+                await msg.edit_text(f"🤝 MATCH para {user.first_name}\n\n{respuesta}")
+        else:
+            await msg.edit_text("❌ No pude generar el análisis. Intenta de nuevo.")
+        
+        registrar_servicio_usado(user_id, 'match_networking')
+        
+    except Exception as e:
+        logger.error(f"Error en match_networking: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def briefing_diario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Genera un briefing diario de networking: agenda, tareas, oportunidades de la comunidad"""
+    user = update.effective_user
+    user_id = user.id
+    es_owner = (user_id == OWNER_ID)
+    
+    if not es_owner and not verificar_suscripcion_activa(user_id):
+        await update.message.reply_text("🔒 Requiere suscripción.")
+        return
+    
+    msg = await update.message.reply_text("☀️ Preparando tu briefing diario de networking...")
+    
+    try:
+        ahora = datetime.now()
+        hoy_str = ahora.strftime("%A %d/%m/%Y")
+        
+        conn = get_db_connection()
+        agenda_hoy = []
+        tareas_alta = []
+        proximos_7 = []
+        
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
+                             WHERE user_id = %s AND completada = FALSE 
+                             AND fecha_evento::date = CURRENT_DATE
+                             ORDER BY fecha_evento ASC""", (user_id,))
+                agenda_hoy = c.fetchall()
+                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
+                             WHERE user_id = %s AND completada = FALSE AND prioridad = 'alta'
+                             ORDER BY fecha_creacion ASC LIMIT 5""", (user_id,))
+                tareas_alta = c.fetchall()
+                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
+                             WHERE user_id = %s AND completada = FALSE 
+                             AND fecha_evento > CURRENT_TIMESTAMP
+                             AND fecha_evento <= CURRENT_TIMESTAMP + INTERVAL '7 days'
+                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
+                proximos_7 = c.fetchall()
+            else:
+                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
+                             WHERE user_id = ? AND completada = 0 
+                             AND date(fecha_evento) = date('now')
+                             ORDER BY fecha_evento ASC""", (user_id,))
+                agenda_hoy = c.fetchall()
+                c.execute("""SELECT tarea, prioridad, categoria FROM tareas_networking 
+                             WHERE user_id = ? AND completada = 0 AND prioridad = 'alta'
+                             ORDER BY fecha_creacion ASC LIMIT 5""", (user_id,))
+                tareas_alta = c.fetchall()
+                c.execute("""SELECT titulo, fecha_evento, lugar FROM agenda_personal 
+                             WHERE user_id = ? AND completada = 0 
+                             AND fecha_evento > datetime('now')
+                             AND fecha_evento <= datetime('now', '+7 days')
+                             ORDER BY fecha_evento ASC LIMIT 5""", (user_id,))
+                proximos_7 = c.fetchall()
+            conn.close()
+        
+        # Actividad reciente de la comunidad
+        resultados_com = busqueda_unificada("networking empleo oportunidades noticias", limit_historial=10, limit_rag=15)
+        contexto_com = formatear_contexto_unificado(resultados_com, "networking hoy")
+        
+        agenda_hoy_str = ""
+        if agenda_hoy:
+            lines = []
+            for item in agenda_hoy:
+                if DATABASE_URL:
+                    hora = str(item['fecha_evento'])[11:16]
+                    lines.append(f"⏰ {hora} - {item['titulo']}" + (f" (📍 {item['lugar']})" if item['lugar'] else ""))
+                else:
+                    hora = str(item[1])[11:16]
+                    lines.append(f"⏰ {hora} - {item[0]}" + (f" (📍 {item[2]})" if item[2] else ""))
+            agenda_hoy_str = "HOY EN TU AGENDA:\n" + "\n".join(lines)
+        
+        tareas_str = ""
+        if tareas_alta:
+            lines = []
+            for t in tareas_alta:
+                if DATABASE_URL:
+                    lines.append(f"🔴 {t['tarea']}")
+                else:
+                    lines.append(f"🔴 {t[0]}")
+            tareas_str = "TAREAS URGENTES:\n" + "\n".join(lines)
+        
+        proximos_str = ""
+        if proximos_7:
+            lines = []
+            for item in proximos_7:
+                if DATABASE_URL:
+                    fecha_d = str(item['fecha_evento'])[:10]
+                    lines.append(f"• {fecha_d}: {item['titulo']}")
+                else:
+                    lines.append(f"• {str(item[1])[:10]}: {item[0]}")
+            proximos_str = "PRÓXIMOS 7 DÍAS:\n" + "\n".join(lines)
+        
+        prompt = f"""Eres el asistente de networking de la Cofradía. Genera un BRIEFING DIARIO motivador y estratégico para {user.first_name}.
+
+FECHA: {hoy_str}
+{agenda_hoy_str}
+{tareas_str}
+{proximos_str}
+
+ACTIVIDAD RECIENTE EN LA COMUNIDAD:
+{contexto_com[:1500]}
+
+GENERA UN BRIEFING DIARIO que incluya:
+🌅 **Buenos días** con frase motivadora naval/profesional
+📅 **Agenda de hoy** (si hay items, destácalos; si no, sugiere qué hacer)
+🔴 **Urgente** (tareas prioritarias de hoy)  
+📡 **Radar de oportunidades** (1-2 oportunidades detectadas en la comunidad hoy)
+🎯 **Acción estrella del día** (la 1 cosa más importante que debería hacer hoy para su networking)
+💬 **Mensaje para compartir** (algo breve e inspirador para el grupo)
+
+Sé conciso pero impactante. Tono energético, profesional y de camaradería."""
+        
+        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.7)
+        
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
+        
+        if respuesta:
+            try:
+                await msg.edit_text(f"☀️ *BRIEFING {hoy_str.upper()}*\n{'━'*30}\n\n{respuesta}", parse_mode='Markdown')
+            except Exception:
+                await msg.edit_text(f"☀️ BRIEFING {hoy_str}\n\n{respuesta}")
+        else:
+            await msg.edit_text("❌ No pude generar el briefing. Intenta de nuevo.")
+        
+        registrar_servicio_usado(user_id, 'briefing_diario')
+        
+    except Exception as e:
+        logger.error(f"Error en briefing_diario: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def completar_item_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja /completar_ID y /ok_ID para marcar agenda/tareas como completadas"""
+    user = update.effective_user
+    user_id = user.id
+    
+    comando_texto = update.message.text.split()[0].lstrip('/')
+    
+    tipo = None
+    item_id = None
+    
+    if comando_texto.startswith('completar_'):
+        tipo = 'agenda'
+        try:
+            item_id = int(comando_texto.replace('completar_', ''))
+        except ValueError:
+            pass
+    elif comando_texto.startswith('ok_'):
+        tipo = 'tarea'
+        try:
+            item_id = int(comando_texto.replace('ok_', ''))
+        except ValueError:
+            pass
+    elif comando_texto.startswith('eliminar_agenda_'):
+        try:
+            item_id = int(comando_texto.replace('eliminar_agenda_', ''))
+            tipo = 'eliminar_agenda'
+        except ValueError:
+            pass
+    
+    if not item_id or not tipo:
+        await update.message.reply_text("❌ ID no válido.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        
+        if tipo == 'agenda':
+            if DATABASE_URL:
+                c.execute("UPDATE agenda_personal SET completada = TRUE WHERE id = %s AND user_id = %s", (item_id, user_id))
+            else:
+                c.execute("UPDATE agenda_personal SET completada = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Actividad #{item_id} marcada como completada. ¡Bien hecho! 💪")
+        elif tipo == 'tarea':
+            if DATABASE_URL:
+                c.execute("UPDATE tareas_networking SET completada = TRUE WHERE id = %s AND user_id = %s", (item_id, user_id))
+            else:
+                c.execute("UPDATE tareas_networking SET completada = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Tarea #{item_id} completada. ¡Excelente! 🎯")
+        elif tipo == 'eliminar_agenda':
+            if DATABASE_URL:
+                c.execute("DELETE FROM agenda_personal WHERE id = %s AND user_id = %s", (item_id, user_id))
+            else:
+                c.execute("DELETE FROM agenda_personal WHERE id = ? AND user_id = ?", (item_id, user_id))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"🗑️ Actividad #{item_id} eliminada de tu agenda.")
+    except Exception as e:
+        logger.error(f"Error completando item: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:50]}")
+
+
+async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job que envía recordatorios 1 hora antes de actividades agendadas"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            c.execute("""SELECT a.id, a.user_id, a.titulo, a.fecha_evento, a.lugar, a.participantes
+                        FROM agenda_personal a
+                        WHERE a.completada = FALSE 
+                        AND a.recordatorio_enviado = FALSE
+                        AND a.fecha_evento BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'""")
+        else:
+            c.execute("""SELECT id, user_id, titulo, fecha_evento, lugar, participantes
+                        FROM agenda_personal
+                        WHERE completada = 0 AND recordatorio_enviado = 0
+                        AND fecha_evento BETWEEN datetime('now', '+55 minutes') AND datetime('now', '+65 minutes')""")
+        
+        items = c.fetchall()
+        
+        for item in items:
+            if DATABASE_URL:
+                item_id = item['id']
+                uid = item['user_id']
+                titulo = item['titulo']
+                fecha = item['fecha_evento']
+                lugar = item['lugar'] or ''
+                partic = item['participantes'] or ''
+            else:
+                item_id, uid, titulo, fecha, lugar, partic = item
+                lugar = lugar or ''
+                partic = partic or ''
+            
+            try:
+                hora_str = str(fecha)[11:16] if fecha else '??:??'
+                mensaje = (
+                    f"🔔 *RECORDATORIO - ¡En 1 hora!*\n\n"
+                    f"📌 *{titulo}*\n"
+                    f"⏰ {hora_str}\n"
+                )
+                if lugar:
+                    mensaje += f"📍 {lugar}\n"
+                if partic:
+                    mensaje += f"👥 {partic}\n"
+                mensaje += f"\n¡Prepárate para tu actividad de networking! 💼\n"
+                mensaje += f"✅ `/completar_{item_id}`"
+                
+                await context.bot.send_message(chat_id=uid, text=mensaje, parse_mode='Markdown')
+                
+                # Marcar recordatorio como enviado
+                if DATABASE_URL:
+                    c.execute("UPDATE agenda_personal SET recordatorio_enviado = TRUE WHERE id = %s", (item_id,))
+                else:
+                    c.execute("UPDATE agenda_personal SET recordatorio_enviado = 1 WHERE id = ?", (item_id,))
+                conn.commit()
+                
+            except Exception as e_msg:
+                logger.debug(f"No se pudo enviar recordatorio a {uid}: {e_msg}")
+        
+        conn.close()
+        
+    except Exception as e:
+        logger.debug(f"Error en job recordatorio_agenda: {e}")
+
+
+
+# ==================== FERIADOS CHILE ====================
+
+@requiere_suscripcion
+async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /feriados [año] - Lista feriados legales de Chile con coincidencias de eventos"""
+    import re as _re
+
+    # Determinar año consultado
+    anio_actual = datetime.now().year
+    if context.args:
+        try:
+            anio = int(context.args[0])
+            if anio < 2020 or anio > 2035:
+                await update.message.reply_text("❌ Indica un año entre 2020 y 2035.\nEjemplo: /feriados 2025")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Formato: /feriados 2025")
+            return
+    else:
+        anio = anio_actual
+
+    msg = await update.message.reply_text("🗓 Consultando feriados legales de Chile " + str(anio) + "...")
+
+    feriados_data = []
+
+    # ── Fuente 1: API feriados.cl (JSON oficial) ──
+    try:
+        import asyncio as _afer
+        def _fetch_feriados_api():
+            url = "https://apis.digital.gob.cl/fl/feriados/" + str(anio)
+            r = requests.get(url, timeout=15, headers={'Accept': 'application/json'})
+            if r.status_code == 200:
+                return r.json()
+            return []
+        raw = await _afer.get_event_loop().run_in_executor(None, _fetch_feriados_api)
+        if raw and isinstance(raw, list):
+            for item in raw:
+                fecha_str = item.get('fecha', '')
+                nombre    = item.get('nombre', '')
+                tipo      = item.get('tipo', 'Legal')
+                if fecha_str and nombre:
+                    try:
+                        fecha_dt = datetime.strptime(fecha_str, '%Y-%m-%d')
+                        feriados_data.append({
+                            'fecha': fecha_dt,
+                            'nombre': nombre,
+                            'tipo': tipo
+                        })
+                    except:
+                        pass
+    except Exception as _e1:
+        logger.debug("Feriados API digital.gob.cl: " + str(_e1))
+
+    # ── Fuente 2: Web scraping si la API falla ──
+    if not feriados_data:
+        try:
+            import asyncio as _afer2
+            def _scrape_feriados():
+                return buscar_en_web(
+                    "feriados legales Chile " + str(anio) + " lista completa",
+                    extraer_contenido=True)
+            wr = await _afer2.get_event_loop().run_in_executor(None, _scrape_feriados)
+            if wr.get('resultados') or wr.get('contenido'):
+                ctx_web = formatear_contexto_web(wr)
+                prompt = (
+                    "Extrae TODOS los feriados legales de Chile para el año " + str(anio) + ".\n"
+                    "Contexto web:\n" + ctx_web[:3000] + "\n\n"
+                    "Responde SOLO con una lista JSON, sin texto adicional, formato:\n"
+                    '[{"fecha":"YYYY-MM-DD","nombre":"Nombre del feriado","tipo":"Legal"}]\n'
+                    "Incluye TODOS los feriados nacionales de Chile."
+                )
+                resp_json = llamar_groq(prompt, max_tokens=1200, temperature=0.1)
+                if resp_json:
+                    import json as _json2
+                    clean = resp_json.strip()
+                    # Extract JSON array
+                    m = _re.search(r'\[.*\]', clean, _re.DOTALL)
+                    if m:
+                        clean = m.group(0)
+                    items = _json2.loads(clean)
+                    for item in items:
+                        try:
+                            fd = datetime.strptime(item['fecha'], '%Y-%m-%d')
+                            feriados_data.append({'fecha': fd, 'nombre': item['nombre'], 'tipo': item.get('tipo', 'Legal')})
+                        except:
+                            pass
+        except Exception as _e2:
+            logger.debug("Feriados web scraping: " + str(_e2))
+
+    # ── Fuente 3: Hardcoded fallback para años conocidos ──
+    if not feriados_data:
+        FERIADOS_FIJOS = {
+            '01-01': 'Año Nuevo',
+            '05-01': 'Día del Trabajo',
+            '05-21': 'Día de las Glorias Navales',
+            '06-20': 'Día Nacional de los Pueblos Indígenas',
+            '06-29': 'San Pedro y San Pablo',
+            '07-16': 'Día de la Virgen del Carmen',
+            '08-15': 'Asunción de la Virgen',
+            '09-18': 'Independencia Nacional',
+            '09-19': 'Día de las Glorias del Ejército',
+            '10-12': 'Encuentro de Dos Mundos',
+            '10-31': 'Día de las Iglesias Evangélicas',
+            '11-01': 'Día de Todos los Santos',
+            '12-08': 'Inmaculada Concepción',
+            '12-25': 'Navidad',
+        }
+        for dd_mm, nombre in FERIADOS_FIJOS.items():
+            try:
+                fd = datetime.strptime(str(anio) + '-' + dd_mm, '%Y-%m-%d')
+                feriados_data.append({'fecha': fd, 'nombre': nombre, 'tipo': 'Legal'})
+            except:
+                pass
+
+    if not feriados_data:
+        await msg.edit_text("❌ No se pudo obtener los feriados de " + str(anio) + ". Intenta más tarde.")
+        return
+
+    # Ordenar por fecha
+    feriados_data.sort(key=lambda x: x['fecha'])
+
+    # ── Obtener eventos de la Cofradía para comparar ──
+    eventos_cofradia = {}
+    try:
+        conn_ev = get_db_connection()
+        if conn_ev:
+            c_ev = conn_ev.cursor()
+            if DATABASE_URL:
+                c_ev.execute(
+                    "SELECT fecha, titulo FROM eventos WHERE EXTRACT(YEAR FROM fecha) = %s",
+                    (anio,))
+            else:
+                c_ev.execute(
+                    "SELECT fecha, titulo FROM eventos WHERE strftime('%Y', fecha) = ?",
+                    (str(anio),))
+            for row in c_ev.fetchall():
+                fd = row['fecha'] if DATABASE_URL else row[0]
+                tit = row['titulo'] if DATABASE_URL else row[1]
+                if fd:
+                    try:
+                        if isinstance(fd, str):
+                            fd = datetime.strptime(fd[:10], '%Y-%m-%d')
+                        key = fd.strftime('%Y-%m-%d')
+                        eventos_cofradia[key] = tit
+                    except:
+                        pass
+            conn_ev.close()
+    except Exception as _ev:
+        logger.debug("Feriados: eventos query: " + str(_ev))
+
+    # ── Construir respuesta ──
+    DIAS_ES = {0: 'Lunes', 1: 'Martes', 2: 'Miércoles', 3: 'Jueves',
+               4: 'Viernes', 5: 'Sábado', 6: 'Domingo'}
+    MESES_ES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril',
+                5: 'Mayo', 6: 'Junio', 7: 'Julio', 8: 'Agosto',
+                9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+
+    lineas = [
+        "*🗓 FERIADOS LEGALES DE CHILE — " + str(anio) + "*",
+        "━" * 32,
+        "_Fuente: Gobierno Digital de Chile_",
+        "",
+    ]
+
+    mes_actual = 0
+    for f in feriados_data:
+        fd = f['fecha']
+        if fd.month != mes_actual:
+            mes_actual = fd.month
+            lineas.append("")
+            lineas.append("*📅 " + MESES_ES[fd.month].upper() + "*")
+        dia_str   = fd.strftime('%d') + " de " + MESES_ES[fd.month]
+        dia_sem   = DIAS_ES[fd.weekday()]
+        nombre_f  = f['nombre']
+        tipo_f    = f.get('tipo', 'Legal')
+        clave_ev  = fd.strftime('%Y-%m-%d')
+        evento_tag = ""
+        if clave_ev in eventos_cofradia:
+            evento_tag = "  🎯 _Evento Cofradía: " + eventos_cofradia[clave_ev] + "_"
+        icono = "🔴" if tipo_f == 'Legal' else "🟡"
+        lineas.append(icono + " *" + dia_str + "* (" + dia_sem + ") — " + nombre_f + evento_tag)
+
+    lineas.append("")
+    lineas.append("━" * 32)
+    lineas.append("*Total:* " + str(len(feriados_data)) + " feriados  •  🔴 Legal  🟡 Otros")
+    if eventos_cofradia:
+        lineas.append("🎯 *Eventos Cofradía que coinciden con feriados:* " + str(sum(1 for k in eventos_cofradia if any(f['fecha'].strftime('%Y-%m-%d') == k for f in feriados_data))))
+
+    texto_final = "\n".join(lineas)
+
+    # Telegram tiene límite de 4096 chars — dividir si necesario
+    if len(texto_final) <= 4096:
+        await msg.edit_text(texto_final, parse_mode='Markdown')
+    else:
+        await msg.edit_text(texto_final[:4090] + "...", parse_mode='Markdown')
+
+    registrar_servicio_usado(update.effective_user.id, 'feriados')
+
+
+
+
+
+
 # ==================== INDICADORES ECONÓMICOS CHILE v6.0 + IA ====================
 
 def obtener_indicadores_chile():
@@ -15468,6 +17001,47 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Captura TODOS los errores no manejados del bot y los loguea correctamente."""
+    import traceback as _tb
+
+    error = context.error
+    tb_str = ''.join(_tb.format_exception(type(error), error, error.__traceback__))
+
+    # Errores esperados que no necesitan alerta (red, Telegram timeouts)
+    ignorar = (
+        'Message is not modified',
+        'Query is too old',
+        'Bad Gateway',
+        'Timed out',
+        'Connection reset',
+        'Network',
+        'httpx',
+        'ReadTimeout',
+        'ConnectTimeout',
+        'RetryAfter',
+    )
+    for patron in ignorar:
+        if patron.lower() in str(error).lower():
+            logger.debug(f"Error esperado ignorado: {error}")
+            return
+
+    logger.error(f"Exception no manejada:\n{tb_str}")
+
+    # Intentar notificar al usuario si hay update activo
+    if update:
+        try:
+            mensaje_error = "❌ Ocurrió un error inesperado. Por favor intenta de nuevo."
+            if hasattr(update, 'effective_message') and update.effective_message:
+                await update.effective_message.reply_text(mensaje_error)
+            elif hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.answer(mensaje_error, show_alert=True)
+        except Exception:
+            pass  # No propagar errores desde el error handler
+
+
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
@@ -15627,6 +17201,17 @@ def main():
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
+    # ── Comandos v6.0 ──
+    application.add_handler(CommandHandler("analizar", analizar_usuario_comando))
+    application.add_handler(CommandHandler("ofrezco", ofrezco_comando))
+    application.add_handler(CommandHandler("busco_servicio", busco_servicio_comando))
+    application.add_handler(CommandHandler("mis_servicios", mis_servicios_comando))
+    application.add_handler(CommandHandler("recordar", recordar_comando))
+    application.add_handler(CommandHandler("mantenimiento", mantenimiento_comando))
+    application.add_handler(CommandHandler("velocidad_voz", velocidad_voz_comando))
+    application.add_handler(CommandHandler("resumen_diario", resumen_diario_comando))
+    application.add_handler(CommandHandler("buscar_web", buscar_web_comando))
+    application.add_handler(CommandHandler("feriados", feriados_comando))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
     application.add_handler(CommandHandler("mi_cuenta", mi_cuenta_comando))
     application.add_handler(CommandHandler("renovar", renovar_comando))
