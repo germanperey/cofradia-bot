@@ -106,6 +106,9 @@ gemini_disponible = False
 jsearch_disponible = False
 db_disponible = False
 
+# Cache diario de indicadores (evita re-consultar APIs el mismo día)
+_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
+
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
@@ -466,15 +469,6 @@ def init_db():
                 aceptada BOOLEAN DEFAULT NULL,
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
-            # Tabla cache de consultas para acelerar respuestas
-            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cache (
-                id SERIAL PRIMARY KEY,
-                clave TEXT UNIQUE,
-                tipo TEXT DEFAULT 'buscar_web',
-                resultado TEXT,
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                fecha_expiracion TIMESTAMP
-            )''')
             conn.commit()
             logger.info("✅ Tablas v5.0 (Agente Networking) inicializadas")
         else:
@@ -732,15 +726,6 @@ def init_db():
                 user_id_a INTEGER, user_id_b INTEGER, razon TEXT,
                 aceptada INTEGER DEFAULT NULL,
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
-            )''')
-            # Tabla cache de consultas
-            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                clave TEXT UNIQUE,
-                tipo TEXT DEFAULT 'buscar_web',
-                resultado TEXT,
-                fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
-                fecha_expiracion DATETIME
             )''')
             conn.commit()
             logger.info("✅ Tablas v5.0 SQLite (Agente) inicializadas")
@@ -2207,7 +2192,7 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales — texto plano con TODOS los campos
+            # Formatear empleos reales — TEXTO PLANO (sin Markdown que causa errores)
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
             resultado = f"🔎 EMPLEOS REALES ENCONTRADOS\n"
             resultado += f"📋 Búsqueda: {busqueda_texto}\n"
@@ -2227,22 +2212,41 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                 if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
                 ubicacion_job = ', '.join(partes_ub) if partes_ub else 'No especificada'
                 
-                # Sueldo estimado (siempre mostrar)
+                # Salario — buscar en MÚLTIPLES campos de JSearch
                 min_salary = empleo.get('job_min_salary')
                 max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                salary_cur = empleo.get('job_salary_currency', 'CLP')
-                periodos_es = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal', 'HOUR': '/hora'}
+                salary_currency = empleo.get('job_salary_currency', 'CLP')
+                periodos_es = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal', 'HOUR': '/hora', 'DAY': 'diario'}
+                
                 if min_salary and max_salary:
                     sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    sueldo += f" {salary_cur}"
-                    if salary_period: sueldo += f" ({periodos_es.get(salary_period, salary_period)})"
+                    sueldo += f" {salary_currency}"
+                    if salary_period:
+                        sueldo += f" ({periodos_es.get(salary_period, salary_period)})"
                 elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".") + f" {salary_cur}"
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".") + f" {salary_currency}"
                 elif max_salary:
-                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".") + f" {salary_cur}"
+                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".") + f" {salary_currency}"
                 else:
-                    sueldo = "No especificado (consultar en postulación)"
+                    # Buscar salario en campos alternativos de JSearch
+                    alt_salary = (empleo.get('job_salary') or 
+                                  empleo.get('estimated_salaries') or '')
+                    if isinstance(alt_salary, list) and alt_salary:
+                        s0 = alt_salary[0]
+                        mn = s0.get('min_salary', s0.get('median_salary', 0))
+                        mx = s0.get('max_salary', mn)
+                        if mn and mx:
+                            sueldo = f"~${int(mn):,} - ${int(mx):,}".replace(",", ".") + " (estimado)"
+                        else:
+                            sueldo = "No especificado"
+                    elif isinstance(alt_salary, str) and alt_salary:
+                        sueldo = alt_salary
+                    else:
+                        # Buscar en highlights → Benefits
+                        benefits = empleo.get('job_highlights', {}).get('Benefits', [])
+                        sal_found = [b for b in benefits if any(k in b.lower() for k in ['salar', 'sueldo', 'renta', '$', 'monthly', 'annual'])]
+                        sueldo = sal_found[0][:80] if sal_found else "No especificado (consultar)"
                 
                 # Modalidad
                 tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
@@ -2251,14 +2255,11 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                 es_remoto = empleo.get('job_is_remote', False)
                 modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
                 
-                # Descripción (siempre mostrar)
+                # Descripción
                 raw_desc = empleo.get('job_description', '')
-                highlights = empleo.get('job_highlights', {})
                 if not raw_desc:
-                    resp_list = highlights.get('Responsibilities', [])
-                    qual_list = highlights.get('Qualifications', [])
+                    resp_list = empleo.get('job_highlights', {}).get('Responsibilities', [])
                     if resp_list: raw_desc = '. '.join(resp_list[:3])
-                    elif qual_list: raw_desc = 'Requisitos: ' + '. '.join(qual_list[:3])
                 if raw_desc:
                     desc_limpia = re.sub(r'<[^>]+>', ' ', str(raw_desc))
                     desc_limpia = re.sub(r'\s+', ' ', desc_limpia).strip()[:300]
@@ -2266,7 +2267,7 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                     if punto > 100: desc_limpia = desc_limpia[:punto + 1]
                     elif len(desc_limpia) >= 300: desc_limpia += "..."
                 else:
-                    desc_limpia = "Ver detalles en el link de postulación"
+                    desc_limpia = "Ver detalles en el link"
                 
                 link = empleo.get('job_apply_link', '')
                 publisher = empleo.get('job_publisher', '')
@@ -2276,8 +2277,8 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                 fecha_str = ""
                 if posted:
                     try:
-                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        fp = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias = (datetime.now(fp.tzinfo) - fp).days
                         fecha_str = "Hoy" if dias == 0 else "Ayer" if dias == 1 else f"Hace {dias} días"
                     except: pass
                 
@@ -2294,8 +2295,7 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales.\n"
-            resultado += "👆 Copia el link para postular directamente."
+            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales."
             
             return resultado
     
@@ -2307,158 +2307,123 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
-        "\n🔗 Busca más ofertas en:\n"
-        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
-        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
-        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
-        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
-        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
+        "\n🔗 *Busca más ofertas en:*\n"
+        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
+        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
+        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
+        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
+        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
     )
 
     def _scrape_trabajando(q_encoded):
+        """Raspa Trabajando.cl — portal chileno con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(f"https://www.trabajando.cl/empleos?q={q_encoded}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
-            if r.status_code != 200: return []
-            soup = _BS(r.text, "html.parser"); items = []
-            cards = soup.select("article.job-card, div.job-offer, div.offer-item, article[class*='job'], div[class*='job-item'], div[class*='oferta'], li[class*='aviso']")
-            if not cards: cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:12]
-            for card in cards[:12]:
-                t_tag = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
-                titulo = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
-                e_tag = card.select_one(".company, .empresa, [class*='company'], [class*='empresa']")
+            r = requests.get(
+                f"https://www.trabajando.cl/empleos?q={q_encoded}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"},
+                timeout=15, allow_redirects=True,
+            )
+            if r.status_code != 200:
+                return []
+            soup  = _BS(r.text, "html.parser")
+            items = []
+            # Tarjetas de Trabajando.cl
+            cards = soup.select(
+                "article.job-card, div.job-offer, div.offer-item, "
+                "article[class*='job'], div[class*='job-item'], "
+                "div[class*='oferta'], li[class*='aviso']"
+            )
+            if not cards:
+                # Fallback: cualquier enlace con /empleo/ en la URL
+                cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:10]
+            for card in cards[:10]:
+                t_tag   = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
+                titulo  = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
+                e_tag   = card.select_one(".company, .empresa, [class*='company'], [class*='empresa'], [class*='razon']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag = card.select_one(".description, .desc, .snippet, [class*='descri']")
-                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
-                c_tag = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad']")
-                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
-                s_tag = card.select_one(".salary, .sueldo, [class*='salary'], [class*='sueldo']")
-                sueldo = s_tag.get_text(strip=True) if s_tag else ""
-                a_tag = card if card.name == "a" else card.select_one("a[href]")
-                href = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"): href = "https://www.trabajando.cl" + href
+                d_tag   = card.select_one(".description, .desc, .snippet, [class*='descri'], [class*='resumen']")
+                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
+                c_tag   = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad'], [class*='region']")
+                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                a_tag   = card if card.name == "a" else card.select_one("a[href]")
+                href    = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"):
+                    href = "https://www.trabajando.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Trabajando.cl"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa,
+                                  "desc": desc, "ciudad": ciudad,
+                                  "link": href, "portal": "Trabajando.cl"})
             return items
         except Exception as _e:
-            logger.debug(f"scrape trabajando: {_e}"); return []
+            logger.debug(f"scrape trabajando: {_e}")
+            return []
 
     def _scrape_computrabajo(q_plus):
+        """Raspa Computrabajo.cl — portal con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
-            if r.status_code != 200: return []
-            soup = _BS(r.text, "html.parser"); items = []
+            r = requests.get(
+                f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"},
+                timeout=15, allow_redirects=True,
+            )
+            if r.status_code != 200:
+                return []
+            soup  = _BS(r.text, "html.parser")
+            items = []
             cards = soup.select("article[data-id], div.box_offer, article.Item, div[class*='offer']")
-            for card in cards[:12]:
-                t_tag = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
-                titulo = t_tag.get_text(strip=True) if t_tag else ""
-                e_tag = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
+            for card in cards[:10]:
+                t_tag   = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
+                titulo  = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag   = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
-                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
-                c_tag = card.select_one(".location, .city, .ubic, [class*='locat']")
-                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
-                s_tag = card.select_one(".salary, [class*='salary'], [class*='sueldo']")
-                sueldo = s_tag.get_text(strip=True) if s_tag else ""
-                a_tag = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
-                href = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"): href = "https://www.computrabajo.cl" + href
+                d_tag   = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
+                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
+                c_tag   = card.select_one(".location, .city, .ubic, [class*='locat']")
+                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                a_tag   = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
+                href    = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"):
+                    href = "https://www.computrabajo.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Computrabajo"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa,
+                                  "desc": desc, "ciudad": ciudad,
+                                  "link": href, "portal": "Computrabajo"})
             return items
         except Exception as _ce:
-            logger.debug(f"scrape computrabajo: {_ce}"); return []
+            logger.debug(f"scrape computrabajo: {_ce}")
+            return []
 
-    def _scrape_indeed(q_enc):
-        try:
-            from bs4 import BeautifulSoup as _BS
-            r = requests.get(f"https://cl.indeed.com/jobs?q={q_enc}&l=Chile",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
-            if r.status_code != 200: return []
-            soup = _BS(r.text, "html.parser"); items = []
-            cards = soup.select("div.job_seen_beacon, div.cardOutline, td.resultContent, div[class*='result']")
-            for card in cards[:12]:
-                t_tag = card.select_one("h2 a span, h2 span, .jobTitle a, [class*='jobTitle']")
-                titulo = t_tag.get_text(strip=True) if t_tag else ""
-                e_tag = card.select_one(".companyName, [data-testid='company-name'], [class*='company']")
-                empresa = e_tag.get_text(strip=True) if e_tag else ""
-                c_tag = card.select_one(".companyLocation, [data-testid='text-location'], [class*='location']")
-                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
-                d_tag = card.select_one(".job-snippet, [class*='snippet']")
-                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
-                s_tag = card.select_one("[class*='salary'], .salary-snippet")
-                sueldo = s_tag.get_text(strip=True) if s_tag else ""
-                a_tag = card.select_one("h2 a, a[data-jk], a[href*='/rc/']")
-                href = ""
-                if a_tag:
-                    raw = a_tag.get("href", "")
-                    href = raw if raw.startswith("http") else ("https://cl.indeed.com" + raw if raw.startswith("/") else "")
-                if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Indeed Chile"})
-            return items
-        except Exception as _ie:
-            logger.debug(f"scrape indeed: {_ie}"); return []
-
-    def _scrape_linkedin(q_enc):
-        try:
-            from bs4 import BeautifulSoup as _BS
-            r = requests.get(f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={q_enc}&location=Chile&start=0",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"},
-                timeout=15, allow_redirects=True)
-            if r.status_code != 200: return []
-            soup = _BS(r.text, "html.parser"); items = []
-            cards = soup.select("li, div.base-card, div[class*='job-card']")
-            for card in cards[:12]:
-                t_tag = card.select_one("h3, .base-search-card__title, [class*='title']")
-                titulo = t_tag.get_text(strip=True) if t_tag else ""
-                e_tag = card.select_one("h4, .base-search-card__subtitle, [class*='company']")
-                empresa = e_tag.get_text(strip=True) if e_tag else ""
-                c_tag = card.select_one(".job-search-card__location, [class*='location']")
-                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
-                a_tag = card.select_one("a[href*='linkedin.com/jobs/'], a.base-card__full-link")
-                href = (a_tag.get("href", "") if a_tag else "").strip().split("?")[0]
-                if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": "", "ciudad": ciudad, "sueldo": "", "link": href, "portal": "LinkedIn"})
-            return items
-        except Exception as _le:
-            logger.debug(f"scrape linkedin: {_le}"); return []
-
-    # Ejecutar scraping en paralelo (4 fuentes)
+    # Ejecutar scraping en paralelo
     from concurrent.futures import ThreadPoolExecutor as _TPEX
     empleos_web = []
-    with _TPEX(max_workers=4) as _ex2:
+    with _TPEX(max_workers=2) as _ex2:
         _ft = _ex2.submit(_scrape_trabajando, q_enc)
         _fc = _ex2.submit(_scrape_computrabajo, q_plus)
-        _fi = _ex2.submit(_scrape_indeed, q_enc)
-        _fl = _ex2.submit(_scrape_linkedin, q_enc)
         empleos_web += (_ft.result() or [])
         empleos_web += (_fc.result() or [])
-        empleos_web += (_fi.result() or [])
-        empleos_web += (_fl.result() or [])
 
     if empleos_web:
         sep = "━" * 30
-        n_portales = len(set(e['portal'] for e in empleos_web))
-        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
-        resultado += f"📊 {len(empleos_web)} ofertas de {n_portales} portales\n"
+        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
+        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:12], 1):
-            resultado += f"{'─' * 28}\n"
-            resultado += f"{i}. {emp['titulo']}\n"
-            if emp.get('empresa'): resultado += f"   🏢 Empresa: {emp['empresa']}\n"
-            if emp.get('ciudad'): resultado += f"   📍 Ubicación: {emp['ciudad']}\n"
-            resultado += f"   💰 Salario: {emp.get('sueldo') or 'Consultar en portal'}\n"
-            resultado += f"   📰 Fuente: {emp['portal']}\n"
+        for i, emp in enumerate(empleos_web[:8], 1):
+            resultado += f"**{i}. {emp['titulo']}**\n"
+            if emp.get('empresa'):
+                resultado += f"🏢 {emp['empresa']}\n"
+            if emp.get('ciudad'):
+                resultado += f"📍 {emp['ciudad']}\n"
             if emp.get('desc'):
-                resultado += f"   📝 {emp['desc'][:220].strip()}\n"
+                desc_fmt = emp['desc'][:200].strip()
+                resultado += f"📝 _{desc_fmt}_\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"   🔗 {emp['link']}\n"
+                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -2487,18 +2452,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = f"🔎 ANÁLISIS MERCADO LABORAL — IA\n"
-                resultado += f"📋 Búsqueda: {consulta}\n"
+                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
+                resultado += f"📋 Búsqueda: _{consulta}_\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
+                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas actualizadas."
+    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -2637,89 +2602,6 @@ def registrar_servicio_usado(user_id, servicio):
         logger.error(f"Error registrando servicio: {e}")
         if conn:
             conn.close()
-
-
-# ==================== CACHE DE CONSULTAS + INDICADORES ====================
-
-# ── Cache en memoria para indicadores del día (evita re-consultar APIs) ──
-_indicadores_cache = {
-    'fecha': '',        # formato YYYY-MM-DD
-    'all_data': None,
-    'explicaciones': None,
-    'html_content': None,
-}
-
-def guardar_cache_consulta(clave: str, resultado: str, tipo: str = 'buscar_web', horas_ttl: int = 24):
-    """Guarda resultado de consulta en cache DB con expiración"""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        clave_norm = clave.strip().lower()[:200]
-        expira = (datetime.now() + timedelta(hours=horas_ttl)).strftime('%Y-%m-%d %H:%M:%S')
-        if DATABASE_URL:
-            c.execute("""INSERT INTO consultas_cache (clave, tipo, resultado, fecha_expiracion)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (clave) DO UPDATE SET
-                        resultado = EXCLUDED.resultado,
-                        fecha_creacion = CURRENT_TIMESTAMP,
-                        fecha_expiracion = EXCLUDED.fecha_expiracion""",
-                     (clave_norm, tipo, resultado[:15000], expira))
-        else:
-            c.execute("""INSERT OR REPLACE INTO consultas_cache (clave, tipo, resultado, fecha_expiracion)
-                        VALUES (?, ?, ?, ?)""",
-                     (clave_norm, tipo, resultado[:15000], expira))
-        conn.commit()
-        conn.close()
-        logger.debug(f"Cache guardado: {tipo}/{clave_norm[:40]}")
-    except Exception as e:
-        logger.debug(f"Error guardando cache: {e}")
-
-def obtener_cache_consulta(clave: str, tipo: str = 'buscar_web') -> str:
-    """Busca resultado en cache. Retorna texto o None si no existe/expirado"""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return None
-        c = conn.cursor()
-        clave_norm = clave.strip().lower()[:200]
-        if DATABASE_URL:
-            c.execute("""SELECT resultado FROM consultas_cache
-                        WHERE clave = %s AND tipo = %s
-                        AND fecha_expiracion > CURRENT_TIMESTAMP""",
-                     (clave_norm, tipo))
-        else:
-            c.execute("""SELECT resultado FROM consultas_cache
-                        WHERE clave = ? AND tipo = ?
-                        AND fecha_expiracion > datetime('now')""",
-                     (clave_norm, tipo))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            resultado = row['resultado'] if DATABASE_URL else row[0]
-            logger.info(f"✅ Cache hit: {tipo}/{clave_norm[:40]}")
-            return resultado
-        return None
-    except Exception as e:
-        logger.debug(f"Error leyendo cache: {e}")
-        return None
-
-def limpiar_cache_expirado():
-    """Limpia entradas de cache expiradas"""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("DELETE FROM consultas_cache WHERE fecha_expiracion < CURRENT_TIMESTAMP")
-        else:
-            c.execute("DELETE FROM consultas_cache WHERE fecha_expiracion < datetime('now')")
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
 
 
 # ==================== COMANDOS BÁSICOS ====================
@@ -3989,7 +3871,7 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Formato simple: /empleo Gerente Finanzas
             cargo = texto
     
-    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo en 4 portales...")
+    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo en múltiples portales...")
     
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
@@ -5286,7 +5168,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts (4 gauges + 8 stats)"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5311,16 +5193,6 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
-            # Nuevos indicadores
-            try:
-                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
-                total_eventos = c.fetchone()['total']
-            except: total_eventos = 0
-            try:
-                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
-                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
-                nuevos_7d = c.fetchone()['total']
-            except: nuevos_7d = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5337,22 +5209,13 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
-            try:
-                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
-                total_eventos = c.fetchone()[0]
-            except: total_eventos = 0
-            try:
-                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
-                nuevos_7d = c.fetchone()[0]
-            except: nuevos_7d = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
-        tasa_crecimiento = round(nuevos_7d / max(suscriptores, 1) * 100, 1) if suscriptores else 0
         
-        # Generar mini-dashboard HTML con 4 gauges + 8 stat boxes
+        # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5364,14 +5227,12 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
-.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
-.stat.highlight .val{{color:#2ecc71}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5381,7 +5242,6 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
-<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5391,14 +5251,12 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
-<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
 </div>
 
-<div class="foot">Bot Premium v6.0 ECharts · Cofradía de Networking</div>
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
+var gold='#c3a55a',blue='#3478c3';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5407,8 +5265,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5417,7 +5275,6 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
-gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5433,10 +5290,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n"
-            f"📅 Eventos activos: {total_eventos:,}\n"
-            f"🆕 Nuevos miembros (7d): {nuevos_7d:,}\n"
-            f"📊 Tasa crecimiento: {tasa_crecimiento}%/semana\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5445,7 +5299,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts interactivo — 4 gauges + 8 indicadores"
+                caption="📊 Dashboard ECharts interactivo con gauges"
             )
         
         try:
@@ -9888,6 +9742,22 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
+            # Obtener recomendaciones del perfil público
+            _prec = 0
+            try:
+                conn_pr = get_db_connection()
+                if conn_pr:
+                    cpr = conn_pr.cursor()
+                    if DATABASE_URL:
+                        cpr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
+                        _prec = cpr.fetchone()['t']
+                    else:
+                        cpr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
+                        _prec = cpr.fetchone()[0]
+                    conn_pr.close()
+            except Exception:
+                pass
+            
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9898,6 +9768,8 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+            if _prec > 0:
+                caption += f"\n⭐ <b>{_prec} recomendación{'es' if _prec != 1 else ''}</b> de la comunidad"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9999,6 +9871,22 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
+                        # Obtener conteo de recomendaciones
+                        _nrec = 0
+                        try:
+                            conn_rc = get_db_connection()
+                            if conn_rc:
+                                crc = conn_rc.cursor()
+                                if DATABASE_URL:
+                                    crc.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nrec = crc.fetchone()['t']
+                                else:
+                                    crc.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nrec = crc.fetchone()[0]
+                                conn_rc.close()
+                        except Exception:
+                            pass
+                        
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -10009,6 +9897,11 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+                        # Link a recomendaciones
+                        if _nrec > 0:
+                            caption += f"\n⭐ <b>{_nrec} recomendación{'es' if _nrec != 1 else ''}</b> — Ver: /mis_recomendaciones"
+                        else:
+                            caption += "\n⭐ Pide recomendaciones: /recomendar"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -10050,6 +9943,25 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
+                        # Recomendaciones
+                        _nr2 = 0
+                        try:
+                            conn_r2 = get_db_connection()
+                            if conn_r2:
+                                cr2 = conn_r2.cursor()
+                                if DATABASE_URL:
+                                    cr2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nr2 = cr2.fetchone()['t']
+                                else:
+                                    cr2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nr2 = cr2.fetchone()[0]
+                                conn_r2.close()
+                        except Exception:
+                            pass
+                        if _nr2 > 0:
+                            msg += f"\n⭐ {_nr2} recomendación{'es' if _nr2 != 1 else ''} — Ver: /mis_recomendaciones\n"
+                        else:
+                            msg += f"\n⭐ Pide recomendaciones: /recomendar\n"
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -15118,12 +15030,44 @@ def generar_html_indicadores(all_data, explicaciones):
                 + sig + " {:.3f}%</span>".format(abs(pct)))
 
     # =========================================================================
-    # SECCION 1: 12 Cards actuales + sparklines (con IPSA)
-    # FIX: sparklines usan requestAnimationFrame + resize + array global
+    # SECCION 1: 14 Cards actuales + sparklines
+    # Cards clicables → modal con definicion completa + semaforo
     # =========================================================================
     ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
              "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp",
              "ipsa", "solana", "ethereum"]
+
+    # Definiciones + rangos semáforo para cada indicador
+    DEFS = {
+        'uf':('Unidad de Fomento (UF)','Unidad reajustable segun inflacion. Se usa en creditos hipotecarios, arriendos y contratos a largo plazo.','Var. mensual &lt;0.3% — inflacion controlada','Var. mensual 0.3%-0.6% — monitorear','Var. mensual &gt;0.6% — creditos se encarecen'),
+        'dolar':('Dolar Observado (USD/CLP)','Tipo de cambio oficial publicado por el Banco Central. Impacta importaciones, combustibles y precios.','$780-$880 — rango equilibrado','$880-$950 o $700-$780 — volatilidad moderada','&gt;$950 o &lt;$700 — riesgo cambiario alto'),
+        'euro':('Euro (EUR/CLP)','Tipo de cambio euro/peso. Relevante para comercio con UE y viajes.','$850-$970 — equilibrado','$970-$1.050 o $780-$850 — atencion','&gt;$1.050 o &lt;$780 — desequilibrio'),
+        'utm':('Unidad Tributaria Mensual','Medida para fines tributarios. Se reajusta por IPC. Multas, impuestos, topes de beneficios.','Var. mensual &lt;0.4% — estable','Var. mensual 0.4%-0.8% — ajuste moderado','Var. mensual &gt;0.8% — impacto tributario'),
+        'ipc':('Indice de Precios al Consumidor','Variacion mensual de precios de canasta de consumo. Indicador oficial de inflacion (INE).','0.0%-0.3% — dentro de meta BCCh (3% anual)','0.3%-0.6% — sobre la meta, posible ajuste TPM','&gt;0.6% o negativo — inflacion descontrolada'),
+        'tpm':('Tasa de Politica Monetaria','Tasa de referencia del Banco Central. Determina costo del credito hipotecario, consumo, tarjetas.','3%-5% — politica neutra/expansiva','5%-8% — restrictiva moderada','&gt;8% o &lt;2% — situacion extrema'),
+        'bitcoin':('Bitcoin (BTC)','Criptomoneda de mayor capitalizacion. Altamente volatil, refleja sentimiento global de riesgo.','Var. diaria &lt;3% — estable','Var. diaria 3%-8% — volatilidad moderada','Var. diaria &gt;8% — riesgo elevado'),
+        'tasa_desempleo':('Tasa de Desempleo','% de fuerza laboral sin empleo. Publicada trimestralmente por INE.','&lt;7.5% — mercado laboral saludable','7.5%-9.5% — alerta moderada','&gt;9.5% — crisis laboral'),
+        'imacec':('IMACEC','Estimacion mensual del PIB. Mide crecimiento/contraccion de la economia.','&gt;2.5% — crecimiento saludable','0.5%-2.5% — crecimiento debil','&lt;0.5% o negativo — estancamiento/recesion'),
+        'libra_cobre':('Precio del Cobre (USD/lb)','Chile es mayor productor mundial. ~50% de exportaciones. Clave para ingresos fiscales.','&gt;USD 4.00 — bonanza para Chile','USD 3.00-4.00 — moderado','&lt;USD 3.00 — impacto fiscal negativo'),
+        'ivp':('Indice de Valor Promedio','Valor promedio de UF del mes anterior. Usado en operaciones de credito bancarias.','Variacion estable vs UF','Divergencia moderada','Divergencia significativa'),
+        'ipsa':('IPSA (Bolsa de Santiago)','Rendimiento de 30 acciones principales. Principal indicador bursatil chileno.','Tendencia alcista (&gt;5.500 pts)','Lateral (4.500-5.500 pts)','Bajista (&lt;4.500 pts)'),
+        'solana':('Solana (SOL)','Blockchain alta velocidad. DeFi y NFTs. Competidor de Ethereum.','Var. diaria &lt;5% — estable','Var. diaria 5%-10% — moderada','Var. diaria &gt;10% — extrema'),
+        'ethereum':('Ethereum (ETH)','2da cripto. Contratos inteligentes, DeFi y NFTs.','Var. diaria &lt;4% — estable','Var. diaria 4%-8% — moderada','Var. diaria &gt;8% — precaucion'),
+    }
+
+    # Serializar definiciones para JavaScript
+    defs_js_items = []
+    for _dc, _di in DEFS.items():
+        defs_js_items.append(
+            '"' + _dc + '":{' +
+            '"t":"' + _di[0].replace('"','\\"') + '",' +
+            '"d":"' + _di[1].replace('"','\\"') + '",' +
+            '"g":"' + _di[2].replace('"','\\"') + '",' +
+            '"y":"' + _di[3].replace('"','\\"') + '",' +
+            '"r":"' + _di[4].replace('"','\\"') + '"}'
+        )
+    defs_js = 'var _DEFS={' + ','.join(defs_js_items) + '};'
+
     cards_html  = ""
     spark_inits = ""   # array _sparkCfg para init diferido
     spark_cfg_items = []
@@ -15139,12 +15083,13 @@ def generar_html_indicadores(all_data, explicaciones):
         var_h  = variacion_html(d.get("serie30", []))
         vfmt   = fmt(d.get("valor"), cod)
         cards_html += (
-            '<div class="card">'
+            '<div class="card" onclick="_showDef(\'' + cod + '\')" style="cursor:pointer" '
+            'title="Toca para ver definicion y semaforo">'
             '<div class="cn">' + _s(d.get("nombre")) + '</div>'
             '<div class="cv">' + vfmt + ' ' + var_h + '</div>'
             '<div class="cd">' + _s(d.get("descripcion")) + '</div>'
             '<div id="sp_' + cod + '" class="spark"></div>'
-            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + '</div>'
+            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + ' &#128270;</div>'
             '</div>'
         )
         # Acumular config de sparkline para init diferido (JSON safe)
@@ -15591,6 +15536,28 @@ def generar_html_indicadores(all_data, explicaciones):
         "padding:24px;text-align:center;color:#667788;font-size:.9em}"
         "footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;"
         "padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}"
+        "#defModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;"
+        "background:rgba(6,16,30,.92);z-index:9999;overflow-y:auto;padding:20px;"
+        "animation:fadeIn .2s ease}"
+        "@keyframes fadeIn{from{opacity:0}to{opacity:1}}"
+        ".mbox{max-width:500px;margin:50px auto;background:rgba(13,27,48,.97);"
+        "border:1px solid rgba(195,165,90,.35);border-radius:14px;padding:22px;"
+        "box-shadow:0 10px 40px rgba(0,0,0,.6)}"
+        ".mclose{float:right;font-size:1.4em;color:#667;cursor:pointer;background:none;"
+        "border:none;padding:2px 8px}"
+        ".mclose:hover{color:#c3a55a}"
+        ".mtitle{font-size:1.15em;font-weight:800;color:#c3a55a;margin-bottom:12px;"
+        "padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2)}"
+        ".mdesc{font-size:.88em;color:#aed6f1;line-height:1.7;margin-bottom:16px}"
+        ".stitle{font-size:.78em;font-weight:700;color:#c3a55a;letter-spacing:1px;"
+        "margin-bottom:8px;text-transform:uppercase}"
+        ".srow{display:flex;align-items:flex-start;gap:9px;margin-bottom:8px;"
+        "padding:9px;border-radius:7px}"
+        ".srow.sg{background:rgba(46,204,113,.12);border-left:3px solid #2ecc71}"
+        ".srow.sy{background:rgba(241,196,15,.12);border-left:3px solid #f1c40f}"
+        ".srow.sr{background:rgba(231,76,60,.12);border-left:3px solid #e74c3c}"
+        ".sicon{font-size:1.2em;flex-shrink:0}"
+        ".stxt{font-size:.8em;color:#c0c8d4;line-height:1.4}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
         ".hist-grid{grid-template-columns:1fr}"
@@ -15650,6 +15617,18 @@ def generar_html_indicadores(all_data, explicaciones):
         + afp_html +
         '</div>'
 
+        # Modal popup para definiciones + semaforo
+        '<div id="defModal" onclick="if(event.target===this)_closeDef()">'
+        '<div class="mbox">'
+        '<button class="mclose" onclick="_closeDef()">&#10005;</button>'
+        '<div class="mtitle" id="dT"></div>'
+        '<div class="mdesc" id="dD"></div>'
+        '<div class="stitle">&#128678; Semaforo del Indicador</div>'
+        '<div class="srow sg"><span class="sicon">&#128994;</span><span class="stxt" id="dG"></span></div>'
+        '<div class="srow sy"><span class="sicon">&#128993;</span><span class="stxt" id="dY"></span></div>'
+        '<div class="srow sr"><span class="sicon">&#128308;</span><span class="stxt" id="dR"></span></div>'
+        '</div></div>'
+
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
@@ -15659,6 +15638,21 @@ def generar_html_indicadores(all_data, explicaciones):
         '</footer>'
 
         '<script>'
+        # Modal definiciones + semaforo
+        + defs_js +
+        'function _showDef(c){'
+        'var d=_DEFS[c];if(!d)return;'
+        'document.getElementById("dT").innerHTML=d.t;'
+        'document.getElementById("dD").innerHTML=d.d;'
+        'document.getElementById("dG").innerHTML=d.g;'
+        'document.getElementById("dY").innerHTML=d.y;'
+        'document.getElementById("dR").innerHTML=d.r;'
+        'document.getElementById("defModal").style.display="block";'
+        'document.body.style.overflow="hidden";}'
+        'function _closeDef(){'
+        'document.getElementById("defModal").style.display="none";'
+        'document.body.style.overflow="auto";}'
+        'document.addEventListener("keydown",function(e){if(e.key==="Escape")_closeDef();});'
         # FIX sparklines: doble RAF + resize + array global _sparks
         + spark_js +
 
@@ -15719,39 +15713,38 @@ def generar_html_indicadores(all_data, explicaciones):
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico con cache diario:
-      Primera consulta del día: descarga de APIs + análisis IA → cache
-      Consultas siguientes del mismo día: entrega datos cacheados (~2s)
+    /indicadores — Dashboard económico con cache diario.
+    Primera consulta del día: APIs + IA (~20s). Siguientes: cache (~2s).
     """
     hoy = datetime.now().strftime('%Y-%m-%d')
-    usando_cache = False
 
     msg = await update.message.reply_text(
         "📈 Consultando indicadores económicos...\n"
-        "⏳ Verificando cache del día..."
+        "⏳ Verificando datos del día..."
     )
     try:
         loop = asyncio.get_running_loop()
 
-        # ── Verificar cache del día ───────────────────────────────────────
+        # ── Variables siempre inicializadas (evita UnboundLocalError) ──
+        datos_cmf = {}
+        datos_afp = {}
+
+        # ── Verificar cache del día ──
         if (_indicadores_cache.get('fecha') == hoy
                 and _indicadores_cache.get('all_data')
                 and _indicadores_cache.get('html_content')):
-            # Cache válido del mismo día
-            usando_cache = True
             all_data = _indicadores_cache['all_data']
             explicaciones = _indicadores_cache['explicaciones'] or {}
             html_content = _indicadores_cache['html_content']
             datos = all_data.get('datos_actuales', {})
-            await msg.edit_text(
-                f"✅ {len(datos)} indicadores (cache del día)\n"
-                "📊 Generando respuesta..."
-            )
-            logger.info(f"📈 Indicadores: usando cache del día ({len(datos)} indicadores)")
+            datos_cmf = all_data.get('datos_cmf', {})
+            datos_afp = all_data.get('datos_afp', {})
+            await msg.edit_text(f"⚡ {len(datos)} indicadores (cache del día) — generando respuesta...")
+            logger.info(f"📈 Indicadores: cache hit ({len(datos)} indicadores)")
         else:
-            # Primera consulta del día — pipeline completo
+            # ── Primera consulta del día: pipeline completo ──
             await msg.edit_text(
-                "📈 Primera consulta del día — descargando datos frescos...\n"
+                "📈 Primera consulta del día — datos frescos...\n"
                 "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
             )
 
@@ -15764,16 +15757,23 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             await msg.edit_text(
                 f"✅ {len(datos)} indicadores obtenidos.\n"
-                "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
-                "🔍 Web scraping Banco Central..."
+                "🏦 Consultando tasas CMF + rentabilidad AFP..."
             )
 
             # 2. Tasas CMF
-            datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+            try:
+                datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+            except Exception as _e_cmf:
+                logger.warning(f"CMF falló: {_e_cmf}")
+                datos_cmf = {}
             all_data['datos_cmf'] = datos_cmf or {}
 
-            # 2b. Rentabilidad AFP
-            datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
+            # 2b. AFP
+            try:
+                datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
+            except Exception as _e_afp:
+                logger.warning(f"AFP falló: {_e_afp}")
+                datos_afp = {}
             all_data['datos_afp'] = datos_afp or {}
 
             # 3. Web scraping BCCH
@@ -15827,14 +15827,14 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 None, generar_html_indicadores, all_data, explicaciones
             )
 
-            # ── Guardar en cache del día ──────────────────────────────────
+            # ── Guardar cache del día ──
             _indicadores_cache['fecha'] = hoy
             _indicadores_cache['all_data'] = all_data
             _indicadores_cache['explicaciones'] = explicaciones
             _indicadores_cache['html_content'] = html_content
-            logger.info(f"📈 Indicadores: cache del día actualizado ({len(datos)} indicadores)")
+            logger.info(f"📈 Indicadores: cache diario guardado ({len(datos)} indicadores)")
 
-        # ── 6. Mensaje de texto resumido (siempre se genera) ─────────────
+        # 6. Mensaje de texto resumido
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
@@ -15911,29 +15911,26 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
         await update.message.reply_text("\n".join(lineas))
 
-        # 7. Generar y enviar HTML
-        await msg.edit_text("📊 Generando dashboard HTML interactivo...")
-        if not usando_cache:
-            # html_content ya fue generado arriba y cacheado
-            pass
+        # 7. Generar y enviar HTML (usa cache si disponible)
+        await msg.edit_text("📊 Preparando dashboard HTML...")
         html_path = f"/tmp/ind_{update.effective_user.id}.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(html_content)
         with open(html_path, 'rb') as fh:
-            cache_nota = "⚡ Datos del cache diario" if usando_cache else "🔄 Datos frescos de APIs"
             await update.message.reply_document(
                 document=fh,
                 filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
                 caption=(
-                    f"📊 Dashboard Indicadores Económicos Chile\n"
-                    f"{cache_nota}\n\n"
+                    "📊 Dashboard Indicadores Económicos Chile\n\n"
                     "• 14 indicadores del día con sparklines 30 días\n"
                     "  (incl. IPSA Bolsa · Ethereum · Solana)\n"
                     "• 🏦 Tasas CMF: TMC (Tipo 1-6) + Contexto Financiero\n"
                     "• 🐔 Rentabilidad AFP: 7 AFPs x 5 fondos (6 meses)\n"
                     "• 🤖 Análisis IA por indicador\n"
+                    "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
                     "• 💱 Dólar vs Euro últimos 12 meses\n"
-                    "• 📅 Histórico 10 años\n\n"
+                    "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
+                    "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
                 )
             )
@@ -16267,16 +16264,9 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     query = " ".join(context.args)
-    msg   = await update.message.reply_text(f"🌐 Buscando: {query[:60]}...")
+    msg   = await update.message.reply_text(f"🌐 Buscando en la web: {query[:60]}...")
     try:
         loop = asyncio.get_running_loop()
-
-        # ── Verificar cache local primero ──────────────────────────────────
-        cached = obtener_cache_consulta(query, 'buscar_web')
-        if cached:
-            await msg.edit_text(cached[:4090] + ("\n..." if len(cached) > 4090 else ""))
-            registrar_servicio_usado(update.effective_user.id, 'buscar_web')
-            return
 
         def _scrape_ddg(q):
             """Raspa html.duckduckgo.com — resultados reales sin API key."""
@@ -16412,10 +16402,7 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if url and url.startswith("http"):
                     lines.append(f"   🔗 {url[:200]}")
             lines += ["", sep, "Fuente: DuckDuckGo · Groq IA | Cofradía de Networking"]
-            texto_final = "\n".join(lines)
-            await msg.edit_text(texto_final[:4090])
-            # Guardar en cache (24h)
-            guardar_cache_consulta(query, texto_final, 'buscar_web', 24)
+            await msg.edit_text("\n".join(lines))
         else:
             # Scraping falló → Groq directo
             await msg.edit_text(f"🌐 Consultando IA sobre: {query[:50]}...")
@@ -16434,13 +16421,7 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "Intenta en unos minutos o usa /buscar_ia para buscar en el historial del grupo.",
                 ]
             lines += ["", sep, "Cofradía de Networking"]
-            texto_final = "\n".join(lines)
-            await msg.edit_text(texto_final[:4090])
-            # Guardar en cache (12h para respuestas IA)
-            if ia_dir:
-                guardar_cache_consulta(query, texto_final, 'buscar_web', 12)
-
-        registrar_servicio_usado(update.effective_user.id, 'buscar_web')
+            await msg.edit_text("\n".join(lines))
 
     except Exception as e:
         import traceback as _tb
