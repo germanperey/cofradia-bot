@@ -2189,123 +2189,103 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales con todos los campos solicitados
+            # Formatear empleos reales con TODOS los campos
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
             resultado = f"🔎 EMPLEOS REALES ENCONTRADOS\n"
             resultado += f"📋 Búsqueda: {busqueda_texto}\n"
             resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado += f"📊 Resultados: {len(empleos[:10])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
             
-            for i, empleo in enumerate(empleos[:8], 1):
+            for i, empleo in enumerate(empleos[:10], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
                 
-                # Ubicación completa: ciudad + estado + país
-                partes_ubic = []
-                if empleo.get('job_city'):
-                    partes_ubic.append(empleo['job_city'])
-                if empleo.get('job_state'):
-                    partes_ubic.append(empleo['job_state'])
-                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ubic):
-                    partes_ubic.append(empleo['job_country'])
-                ubicacion_job = ', '.join(partes_ubic) if partes_ubic else 'No especificada'
+                # Ubicación completa
+                partes_ub = []
+                if empleo.get('job_city'): partes_ub.append(empleo['job_city'])
+                if empleo.get('job_state') and empleo['job_state'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_state'])
+                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
+                ubicacion_job = ', '.join(partes_ub) if partes_ub else 'No especificada'
                 
-                # Sueldo estimado
+                # Sueldo estimado (siempre mostrar)
                 min_salary = empleo.get('job_min_salary')
                 max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                salary_currency = empleo.get('job_salary_currency', '')
+                salary_currency = empleo.get('job_salary_currency', 'CLP')
                 
                 if min_salary and max_salary:
                     sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    if salary_currency:
-                        sueldo += f" {salary_currency}"
+                    periodos = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal', 'HOUR': '/hora'}
                     if salary_period:
-                        periodo_es = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal',
-                                      'HOUR': 'por hora', 'DAY': 'diario'}.get(salary_period.upper(), salary_period)
-                        sueldo += f" ({periodo_es})"
+                        sueldo += f" {salary_currency} ({periodos.get(salary_period, salary_period)})"
                 elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".") + f" {salary_currency}"
                 elif max_salary:
-                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".")
+                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".") + f" {salary_currency}"
                 else:
-                    sueldo = "No especificado"
+                    sueldo = "No especificado (consultar en postulación)"
                 
-                # Modalidad: tipo de empleo + remoto/presencial
-                tipo = empleo.get('job_employment_type', '')
-                tipo_map = {
-                    'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
-                    'CONTRACTOR': 'Contrato/Freelance', 'INTERN': 'Práctica/Pasantía',
-                    'TEMPORARY': 'Temporal', 'VOLUNTEER': 'Voluntariado'
-                }
-                tipo_es = tipo_map.get(tipo, tipo or 'No especificado')
-                
+                # Modalidad
+                tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
+                            'CONTRACTOR': 'Contrato/Freelance', 'INTERN': 'Práctica',
+                            'TEMPORARY': 'Temporal'}
+                tipo = tipo_map.get(empleo.get('job_employment_type', ''), empleo.get('job_employment_type', 'No especificado'))
                 es_remoto = empleo.get('job_is_remote', False)
-                if es_remoto:
-                    modalidad = f"{tipo_es} · Remoto"
-                else:
-                    modalidad = f"{tipo_es} · Presencial"
+                modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
                 
-                # Descripción del cargo (más completa)
+                # Descripción (siempre mostrar)
                 raw_desc = empleo.get('job_description', '')
                 highlights = empleo.get('job_highlights', {})
-                if not raw_desc and highlights:
+                if not raw_desc:
                     resp_list = highlights.get('Responsibilities', [])
-                    if resp_list:
-                        raw_desc = '. '.join(resp_list[:3])
+                    qual_list = highlights.get('Qualifications', [])
+                    if resp_list: raw_desc = '. '.join(resp_list[:3])
+                    elif qual_list: raw_desc = 'Requisitos: ' + '. '.join(qual_list[:3])
                 
                 if raw_desc:
-                    # Limpiar HTML y caracteres especiales
-                    desc_limpia = re.sub(r'<[^>]+>', ' ', raw_desc)
+                    desc_limpia = re.sub(r'<[^>]+>', ' ', str(raw_desc))
                     desc_limpia = re.sub(r'\s+', ' ', desc_limpia).strip()
-                    desc_corta = desc_limpia[:350]
-                    ultimo_p = desc_corta.rfind(". ")
-                    if ultimo_p > 100:
-                        desc_corta = desc_corta[:ultimo_p + 1]
-                    elif len(desc_corta) == 350:
+                    desc_corta = desc_limpia[:300]
+                    punto = desc_corta.rfind(". ")
+                    if punto > 100:
+                        desc_corta = desc_corta[:punto + 1]
+                    elif len(desc_corta) >= 300:
                         desc_corta += "..."
                 else:
-                    desc_corta = "Sin descripción disponible"
+                    desc_corta = "Sin descripción disponible - ver detalles en el link"
                 
-                # Link de postulación
+                # Link y fuente
                 link = empleo.get('job_apply_link', '')
+                publisher = empleo.get('job_publisher', empleo.get('employer_website', ''))
                 
-                # Fecha de publicación
+                # Fecha publicación
                 posted = empleo.get('job_posted_at_datetime_utc', '')
+                fecha_str = ""
                 if posted:
                     try:
                         fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
-                        if dias_atras == 0:
-                            fecha_str = "Hoy"
-                        elif dias_atras == 1:
-                            fecha_str = "Ayer"
-                        else:
-                            fecha_str = f"Hace {dias_atras} días"
+                        dias = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        fecha_str = "Hoy" if dias == 0 else "Ayer" if dias == 1 else f"Hace {dias} días"
                     except:
-                        fecha_str = ""
-                else:
-                    fecha_str = ""
+                        pass
                 
-                # Construir bloque de cada empleo con TODOS los campos
                 resultado += f"{'─' * 28}\n"
-                resultado += f"{i}. CARGO: {titulo}\n"
-                resultado += f"🏢 Empresa: {empresa}\n"
-                resultado += f"📍 Ubicación: {ubicacion_job}\n"
-                resultado += f"💰 Salario: {sueldo}\n"
-                resultado += f"📋 Modalidad: {modalidad}\n"
-                if fecha_str:
-                    resultado += f"🕐 Publicado: {fecha_str}\n"
-                resultado += f"📝 Descripción: {desc_corta}\n"
-                if link:
-                    resultado += f"🔗 Link: {link}\n"
+                resultado += f"{i}. {titulo}\n"
+                resultado += f"   🏢 Empresa: {empresa}\n"
+                resultado += f"   📍 Ubicación: {ubicacion_job}\n"
+                resultado += f"   💰 Salario: {sueldo}\n"
+                resultado += f"   📋 Modalidad: {modalidad}\n"
+                if fecha_str: resultado += f"   🕐 Publicado: {fecha_str}\n"
+                if publisher: resultado += f"   📰 Fuente: {publisher}\n"
+                resultado += f"   📝 {desc_corta}\n"
+                if link: resultado += f"   🔗 {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
             resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales.\n"
-            resultado += "👆 Copia el link para postular directamente a la oferta."
+            resultado += "👆 Copia el link para postular directamente."
             
             return resultado
     
@@ -2318,7 +2298,7 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
         "\n🔗 Busca más ofertas en:\n"
-        f"• LinkedIn Jobs: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
+        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
         f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
         f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
         f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
@@ -2348,23 +2328,25 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             if not cards:
                 # Fallback: cualquier enlace con /empleo/ en la URL
-                cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:10]
-            for card in cards[:10]:
+                cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:12]
+            for card in cards[:12]:
                 t_tag   = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
                 titulo  = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
                 e_tag   = card.select_one(".company, .empresa, [class*='company'], [class*='empresa'], [class*='razon']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
                 d_tag   = card.select_one(".description, .desc, .snippet, [class*='descri'], [class*='resumen']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
+                desc    = d_tag.get_text(strip=True)[:250] if d_tag else ""
                 c_tag   = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad'], [class*='region']")
                 ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag   = card.select_one(".salary, .sueldo, [class*='salary'], [class*='sueldo'], [class*='renta']")
+                sueldo  = s_tag.get_text(strip=True) if s_tag else ""
                 a_tag   = card if card.name == "a" else card.select_one("a[href]")
                 href    = (a_tag.get("href", "") if a_tag else "").strip()
                 if href and not href.startswith("http"):
                     href = "https://www.trabajando.cl" + href
                 if titulo and len(titulo) > 4:
                     items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
+                                  "desc": desc, "ciudad": ciudad, "sueldo": sueldo,
                                   "link": href, "portal": "Trabajando.cl"})
             return items
         except Exception as _e:
@@ -2387,56 +2369,145 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             soup  = _BS(r.text, "html.parser")
             items = []
             cards = soup.select("article[data-id], div.box_offer, article.Item, div[class*='offer']")
-            for card in cards[:10]:
+            for card in cards[:12]:
                 t_tag   = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
                 titulo  = t_tag.get_text(strip=True) if t_tag else ""
                 e_tag   = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
                 d_tag   = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
+                desc    = d_tag.get_text(strip=True)[:250] if d_tag else ""
                 c_tag   = card.select_one(".location, .city, .ubic, [class*='locat']")
                 ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag   = card.select_one(".salary, [class*='salary'], [class*='sueldo']")
+                sueldo  = s_tag.get_text(strip=True) if s_tag else ""
                 a_tag   = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
                 href    = (a_tag.get("href", "") if a_tag else "").strip()
                 if href and not href.startswith("http"):
                     href = "https://www.computrabajo.cl" + href
                 if titulo and len(titulo) > 4:
                     items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
+                                  "desc": desc, "ciudad": ciudad, "sueldo": sueldo,
                                   "link": href, "portal": "Computrabajo"})
             return items
         except Exception as _ce:
             logger.debug(f"scrape computrabajo: {_ce}")
             return []
 
-    # Ejecutar scraping en paralelo
+    def _scrape_indeed(q_enc):
+        """Raspa Indeed Chile — empleos reales con links directos."""
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(
+                f"https://cl.indeed.com/jobs?q={q_enc}&l=Chile",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"},
+                timeout=15, allow_redirects=True,
+            )
+            if r.status_code != 200:
+                return []
+            soup = _BS(r.text, "html.parser")
+            items = []
+            cards = soup.select("div.job_seen_beacon, div.cardOutline, td.resultContent, div[class*='result']")
+            for card in cards[:12]:
+                t_tag   = card.select_one("h2 a span, h2 span, .jobTitle a, [class*='jobTitle']")
+                titulo  = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag   = card.select_one(".companyName, [data-testid='company-name'], [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag   = card.select_one(".companyLocation, [data-testid='text-location'], [class*='location']")
+                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                d_tag   = card.select_one(".job-snippet, [class*='snippet'], .underShelfFooter")
+                desc    = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                s_tag   = card.select_one("[class*='salary'], .salary-snippet, .metadata.salary-snippet-container")
+                sueldo  = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag   = card.select_one("h2 a, a[data-jk], a[href*='/rc/']")
+                href    = ""
+                if a_tag:
+                    raw = a_tag.get("href", "")
+                    if raw.startswith("http"):
+                        href = raw
+                    elif raw.startswith("/"):
+                        href = "https://cl.indeed.com" + raw
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa,
+                                  "desc": desc, "ciudad": ciudad, "sueldo": sueldo,
+                                  "link": href, "portal": "Indeed Chile"})
+            return items
+        except Exception as _ie:
+            logger.debug(f"scrape indeed: {_ie}")
+            return []
+
+    def _scrape_linkedin(q_enc):
+        """Raspa LinkedIn Jobs — empleos con links directos (público sin login)."""
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(
+                f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
+                f"keywords={q_enc}&location=Chile&start=0",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"},
+                timeout=15, allow_redirects=True,
+            )
+            if r.status_code != 200:
+                return []
+            soup = _BS(r.text, "html.parser")
+            items = []
+            cards = soup.select("li, div.base-card, div[class*='job-card']")
+            for card in cards[:12]:
+                t_tag   = card.select_one("h3, .base-search-card__title, [class*='title']")
+                titulo  = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag   = card.select_one("h4, .base-search-card__subtitle, [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag   = card.select_one(".job-search-card__location, [class*='location']")
+                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
+                a_tag   = card.select_one("a[href*='linkedin.com/jobs/'], a.base-card__full-link")
+                href    = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and "?" in href:
+                    href = href.split("?")[0]
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa,
+                                  "desc": "", "ciudad": ciudad, "sueldo": "",
+                                  "link": href, "portal": "LinkedIn"})
+            return items
+        except Exception as _le:
+            logger.debug(f"scrape linkedin: {_le}")
+            return []
+
+    # Ejecutar scraping en paralelo (4 fuentes)
     from concurrent.futures import ThreadPoolExecutor as _TPEX
     empleos_web = []
-    with _TPEX(max_workers=2) as _ex2:
+    with _TPEX(max_workers=4) as _ex2:
         _ft = _ex2.submit(_scrape_trabajando, q_enc)
         _fc = _ex2.submit(_scrape_computrabajo, q_plus)
+        _fi = _ex2.submit(_scrape_indeed, q_enc)
+        _fl = _ex2.submit(_scrape_linkedin, q_enc)
         empleos_web += (_ft.result() or [])
         empleos_web += (_fc.result() or [])
+        empleos_web += (_fi.result() or [])
+        empleos_web += (_fl.result() or [])
 
     if empleos_web:
         sep = "━" * 30
         resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
-        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
+        resultado += f"📊 {len(empleos_web)} ofertas de {len(set(e['portal'] for e in empleos_web))} portales\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:8], 1):
+        for i, emp in enumerate(empleos_web[:12], 1):
             resultado += f"{'─' * 28}\n"
-            resultado += f"{i}. CARGO: {emp['titulo']}\n"
+            resultado += f"{i}. {emp['titulo']}\n"
             if emp.get('empresa'):
-                resultado += f"🏢 Empresa: {emp['empresa']}\n"
+                resultado += f"   🏢 Empresa: {emp['empresa']}\n"
             if emp.get('ciudad'):
-                resultado += f"📍 Ubicación: {emp['ciudad']}\n"
-            resultado += f"💰 Salario: No especificado\n"
-            resultado += f"📋 Modalidad: Ver en portal\n"
+                resultado += f"   📍 Ubicación: {emp['ciudad']}\n"
+            if emp.get('sueldo'):
+                resultado += f"   💰 Salario: {emp['sueldo']}\n"
+            else:
+                resultado += f"   💰 Salario: Consultar en portal\n"
+            resultado += f"   📰 Fuente: {emp['portal']}\n"
             if emp.get('desc'):
-                desc_fmt = emp['desc'][:250].strip()
-                resultado += f"📝 Descripción: {desc_fmt}\n"
+                desc_fmt = emp['desc'][:220].strip()
+                resultado += f"   📝 {desc_fmt}\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"🔗 Link: {emp['link']}\n"
+                resultado += f"   🔗 {emp['link']}\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -3884,12 +3955,13 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Formato simple: /empleo Gerente Finanzas
             cargo = texto
     
-    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo...")
+    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo en 4 portales...")
     
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    # Enviar sin parse_mode para evitar errores con caracteres especiales en links/descripciones
+    # Enviar sin parse_mode — los links están en texto plano y Markdown causa errores
+    # con caracteres especiales en URLs y descripciones
     await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
@@ -5207,6 +5279,18 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
+            # Nuevos indicadores
+            try:
+                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
+                total_eventos = c.fetchone()['total']
+            except:
+                total_eventos = 0
+            try:
+                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
+                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
+                nuevos_7d = c.fetchone()['total']
+            except:
+                nuevos_7d = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5223,11 +5307,23 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
+            # Nuevos indicadores
+            try:
+                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
+                total_eventos = c.fetchone()[0]
+            except:
+                total_eventos = 0
+            try:
+                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
+                nuevos_7d = c.fetchone()[0]
+            except:
+                nuevos_7d = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
+        tasa_crecimiento = round(nuevos_7d / max(suscriptores, 1) * 100, 1) if suscriptores else 0
         
         # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
@@ -5241,12 +5337,14 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
+.stat.highlight .val{{color:#2ecc71}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5256,6 +5354,7 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
+<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5265,12 +5364,14 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
+<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
 </div>
 
-<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
+<div class="foot">Bot Premium v6.0 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3';
+var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5279,8 +5380,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5289,6 +5390,7 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5304,7 +5406,10 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n"
+            f"📅 Eventos activos: {total_eventos:,}\n"
+            f"🆕 Nuevos miembros (7d): {nuevos_7d:,}\n"
+            f"📊 Tasa crecimiento: {tasa_crecimiento}%/semana\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -9756,22 +9861,6 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
-            # Obtener conteo de recomendaciones del perfil público
-            _pub_rec = 0
-            try:
-                conn_pr = get_db_connection()
-                if conn_pr:
-                    c_pr = conn_pr.cursor()
-                    if DATABASE_URL:
-                        c_pr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
-                        _pub_rec = c_pr.fetchone()['t']
-                    else:
-                        c_pr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
-                        _pub_rec = c_pr.fetchone()[0]
-                    conn_pr.close()
-            except:
-                pass
-            
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9782,8 +9871,6 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-            if _pub_rec > 0:
-                caption += f"\n⭐ <b>{_pub_rec} recomendación{'es' if _pub_rec != 1 else ''}</b> de la comunidad\n"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9885,22 +9972,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
-                        # Obtener conteo de recomendaciones
-                        _rec_count = 0
-                        try:
-                            conn_rec = get_db_connection()
-                            if conn_rec:
-                                c_rec = conn_rec.cursor()
-                                if DATABASE_URL:
-                                    c_rec.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
-                                    _rec_count = c_rec.fetchone()['t']
-                                else:
-                                    c_rec.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
-                                    _rec_count = c_rec.fetchone()[0]
-                                conn_rec.close()
-                        except:
-                            pass
-                        
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -9911,11 +9982,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-                        # Link a recomendaciones recibidas
-                        if _rec_count > 0:
-                            caption += f"\n⭐ <b>{_rec_count} recomendación{'es' if _rec_count != 1 else ''}</b> — Ver: /mis_recomendaciones\n"
-                        else:
-                            caption += f"\n⭐ Pide recomendaciones con /recomendar\n"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -9957,25 +10023,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
-                        # Link a recomendaciones
-                        try:
-                            _rc2 = 0
-                            conn_rc2 = get_db_connection()
-                            if conn_rc2:
-                                c_rc2 = conn_rc2.cursor()
-                                if DATABASE_URL:
-                                    c_rc2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
-                                    _rc2 = c_rc2.fetchone()['t']
-                                else:
-                                    c_rc2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
-                                    _rc2 = c_rc2.fetchone()[0]
-                                conn_rc2.close()
-                            if _rc2 > 0:
-                                msg += f"\n⭐ {_rc2} recomendación{'es' if _rc2 != 1 else ''} — Ver: /mis_recomendaciones\n"
-                            else:
-                                msg += f"\n⭐ Pide recomendaciones con /recomendar\n"
-                        except:
-                            pass
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -10915,51 +10962,29 @@ async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
                 return
         else:
-            # Búsqueda por nombre — insensible a tildes y mayúsculas
-            import unicodedata as _ud_rec
-            def _normalizar_rec(s):
-                """Quita acentos y pasa a minúsculas para comparación flexible"""
-                return ''.join(ch for ch in _ud_rec.normalize('NFD', s.lower()) if _ud_rec.category(ch) != 'Mn')
-            
-            # Estrategia: probar con 3, 2 y 1 palabra(s) como nombre
-            # La primera combinación que encuentre resultados gana
-            all_args = list(context.args)
-            resultados = None
+            # Búsqueda por nombre
             busqueda_palabras = []
-            
-            for num_palabras in range(min(3, len(all_args)), 0, -1):
-                candidato_palabras = all_args[:num_palabras]
-                candidato_texto = ' '.join(all_args[num_palabras:])
-                # Si no queda texto de recomendación con esta división, saltar
-                if not candidato_texto.strip() and num_palabras < len(all_args):
-                    continue
-                nombre_buscar = _normalizar_rec(' '.join(candidato_palabras))
-                busqueda = f"%{nombre_buscar}%"
-                
-                # Buscar con nombre normalizado (sin tildes) en la BD
-                if DATABASE_URL:
-                    c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
-                               WHERE LOWER(translate(
-                                   first_name || ' ' || COALESCE(last_name,''),
-                                   'áéíóúÁÉÍÓÚàèìòùÀÈÌÒÙäëïöüÄËÏÖÜñÑ',
-                                   'aeiouAEIOUaeiouAEIOUaeiouAEIOUnN'
-                               )) LIKE %s 
-                               AND estado = 'activo' LIMIT 5""", (busqueda,))
+            for arg in context.args:
+                if len(busqueda_palabras) < 3 and len(arg) > 1 and arg[0].isupper():
+                    busqueda_palabras.append(arg)
                 else:
-                    c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
-                               WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ? 
-                               AND estado = 'activo' LIMIT 5""", (busqueda,))
-                res = c.fetchall()
-                if res:
-                    resultados = res
-                    busqueda_palabras = candidato_palabras
-                    texto_rec = candidato_texto
                     break
-            
-            if not busqueda_palabras:
+            if len(busqueda_palabras) < 1:
                 conn.close()
                 await update.message.reply_text("❌ Indica un @usuario o nombre.\n\nEjemplo: /recomendar @usuario Texto")
                 return
+            nombre_buscar = ' '.join(busqueda_palabras).lower()
+            texto_rec = ' '.join(context.args[len(busqueda_palabras):])
+            busqueda = f"%{nombre_buscar}%"
+            if DATABASE_URL:
+                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE %s 
+                           AND estado = 'activo' LIMIT 5""", (busqueda,))
+            else:
+                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ? 
+                           AND estado = 'activo' LIMIT 5""", (busqueda,))
+            resultados = c.fetchall()
             if not resultados:
                 conn.close()
                 await update.message.reply_text(f"❌ No se encontró a \"{' '.join(busqueda_palabras)}\" entre los miembros.")
@@ -14472,7 +14497,7 @@ def obtener_indicadores_chile():
         ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
     ]
 
-    def fetch(url, timeout=14):
+    def fetch(url, timeout=20):
         try:
             r = requests.get(url, timeout=timeout,
                              headers={'Accept': 'application/json'})
@@ -14480,6 +14505,17 @@ def obtener_indicadores_chile():
                 return r.json()
         except Exception as _e:
             logger.debug('mindicador fetch: ' + str(_e))
+        return None
+
+    def fetch_retry(url, timeout=25, retries=2):
+        """Fetch con reintentos para endpoints pesados (datos anuales)"""
+        for attempt in range(retries):
+            result = fetch(url, timeout=timeout)
+            if result:
+                return result
+            if attempt < retries - 1:
+                import time as _t
+                _t.sleep(1)
         return None
 
     # ── 1. Cards: serie ultimos 30 dias ───────────────────────────────────
@@ -14504,143 +14540,23 @@ def obtener_indicadores_chile():
                         'serie30':     serie[:30],
                     }
 
-    # ── Fallback CMF/SBIF para indicadores faltantes de mindicador.cl ──────
-    # Si mindicador.cl no entregó UF, Dolar, Euro o UTM, intentar con CMF API
-    CMF_FALLBACK_MAP = {
-        'uf':    ('uf',    'UF',        'Unidad de Fomento',             '#c3a55a'),
-        'dolar': ('dolar', 'Dolar USD', 'Tipo de cambio USD/CLP',       '#3478c3'),
-        'euro':  ('euro',  'Euro EUR',  'Tipo de cambio EUR/CLP',       '#2980b9'),
-        'utm':   ('utm',   'UTM',       'Unidad Tributaria Mensual',    '#e67e22'),
-    }
-    missing_cmf = [cod for cod in CMF_FALLBACK_MAP if cod not in datos_actuales]
-    if missing_cmf and CMF_API_KEY:
-        for cod in missing_cmf:
-            try:
-                cmf_endpoint = {
-                    'uf':    f"{CMF_BASE_URL}/uf?apikey={CMF_API_KEY}&formato=json",
-                    'dolar': f"{CMF_BASE_URL}/dolar?apikey={CMF_API_KEY}&formato=json",
-                    'euro':  f"{CMF_BASE_URL}/euro?apikey={CMF_API_KEY}&formato=json",
-                    'utm':   f"{CMF_BASE_URL}/utm?apikey={CMF_API_KEY}&formato=json",
-                }.get(cod)
-                if cmf_endpoint:
-                    r_cmf = requests.get(cmf_endpoint, timeout=12,
-                                         headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'})
-                    if r_cmf.status_code == 200:
-                        j_cmf = r_cmf.json()
-                        # CMF retorna: {"UFs": [{"Valor": "...", "Fecha": "..."}]} o similar
-                        key_map = {'uf': 'UFs', 'dolar': 'Dolares', 'euro': 'Euros', 'utm': 'UTMs'}
-                        items_cmf = j_cmf.get(key_map.get(cod, ''), [])
-                        if items_cmf and len(items_cmf) > 0:
-                            val_raw = items_cmf[0].get('Valor', '')
-                            fecha_raw = str(items_cmf[0].get('Fecha', ''))[:10]
-                            try:
-                                val_num = float(str(val_raw).replace('.', '').replace(',', '.'))
-                            except:
-                                val_num = None
-                            if val_num:
-                                cfg = CMF_FALLBACK_MAP[cod]
-                                datos_actuales[cod] = {
-                                    'nombre':      cfg[1],
-                                    'descripcion': cfg[2],
-                                    'color':       cfg[3],
-                                    'valor':       val_num,
-                                    'fecha':       fecha_raw,
-                                    'unidad':      'Pesos' if cod in ('dolar', 'euro') else cod.upper(),
-                                    'serie30':     [{'valor': val_num, 'fecha': fecha_raw + 'T00:00:00'}],
-                                }
-                                logger.info(f"✅ Fallback CMF para {cod}: {val_num}")
-            except Exception as _cmf_e:
-                logger.debug(f"CMF fallback {cod}: {_cmf_e}")
-
-    # Fallback Bitcoin desde CoinGecko si mindicador.cl falló
-    if 'bitcoin' not in datos_actuales:
-        try:
-            r_btc = requests.get(
-                'https://api.coingecko.com/api/v3/simple/price',
-                params={'ids': 'bitcoin', 'vs_currencies': 'usd', 'include_24hr_change': 'true'},
-                headers={'User-Agent': 'CofrBot/6.0'}, timeout=12
-            )
-            if r_btc.status_code == 200:
-                j_btc = r_btc.json()
-                val_btc = j_btc.get('bitcoin', {}).get('usd')
-                if val_btc:
-                    datos_actuales['bitcoin'] = {
-                        'nombre': 'Bitcoin', 'descripcion': 'Bitcoin en USD',
-                        'color': '#9b59b6', 'valor': val_btc,
-                        'fecha': AHORA.strftime('%Y-%m-%d'), 'unidad': 'USD',
-                        'serie30': [{'valor': val_btc, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                    }
-                    logger.info(f"✅ Fallback CoinGecko para bitcoin: {val_btc}")
-        except Exception as _btc_e:
-            logger.debug(f"CoinGecko bitcoin fallback: {_btc_e}")
-
-    # Fallback web scraping para IPC, TPM, Desempleo, IMACEC, Cobre, IVP
-    WS_FALLBACK = {
-        'ipc':            ('IPC',             'Indice de Precios al Consumidor',       '#2ecc71'),
-        'tpm':            ('TPM',             'Tasa Politica Monetaria (%)',           '#27ae60'),
-        'tasa_desempleo': ('Desempleo',       'Tasa de Desempleo (%)',                 '#e74c3c'),
-        'imacec':         ('IMACEC',          'Indicador Mensual Actividad Eco. (%)',  '#f39c12'),
-        'libra_cobre':    ('Cobre (lb)',      'Precio Libra de Cobre USD',             '#cd7f32'),
-        'ivp':            ('IVP',             'Indice Valor Promedio',                 '#1abc9c'),
-    }
-    missing_ws = [cod for cod in WS_FALLBACK if cod not in datos_actuales]
-    if missing_ws and bs4_disponible:
-        try:
-            # Intentar scraping de bcentral.cl/areas/estadisticas
-            r_bc = requests.get(
-                'https://si3.bcentral.cl/indicadoressiete/secure/IndicadoresDiarios.aspx',
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/6.0)'},
-                timeout=15
-            )
-            if r_bc.status_code == 200:
-                soup_bc = BeautifulSoup(r_bc.text, 'html.parser')
-                # Extraer valores de la tabla de indicadores
-                for row in soup_bc.select('tr'):
-                    cells = row.select('td')
-                    if len(cells) >= 2:
-                        label = cells[0].get_text(strip=True).lower()
-                        val_text = cells[1].get_text(strip=True)
-                        try:
-                            val_clean = float(val_text.replace('.', '').replace(',', '.').replace('%', ''))
-                        except:
-                            continue
-                        
-                        # Mapear labels del BCCH a nuestros códigos
-                        matched_cod = None
-                        if 'ipc' in label and 'ipc' in missing_ws:
-                            matched_cod = 'ipc'
-                        elif 'tpm' in label or 'pol' in label and 'tpm' in missing_ws:
-                            matched_cod = 'tpm'
-                        elif 'desempleo' in label and 'tasa_desempleo' in missing_ws:
-                            matched_cod = 'tasa_desempleo'
-                        elif 'imacec' in label and 'imacec' in missing_ws:
-                            matched_cod = 'imacec'
-                        elif 'cobre' in label and 'libra_cobre' in missing_ws:
-                            matched_cod = 'libra_cobre'
-                        elif 'ivp' in label and 'ivp' in missing_ws:
-                            matched_cod = 'ivp'
-                        
-                        if matched_cod:
-                            cfg_ws = WS_FALLBACK[matched_cod]
-                            datos_actuales[matched_cod] = {
-                                'nombre': cfg_ws[0], 'descripcion': cfg_ws[1],
-                                'color': cfg_ws[2], 'valor': val_clean,
-                                'fecha': AHORA.strftime('%Y-%m-%d'),
-                                'unidad': '%' if matched_cod in ('ipc','tpm','tasa_desempleo','imacec') else 'CLP',
-                                'serie30': [{'valor': val_clean, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                            }
-                            missing_ws.remove(matched_cod)
-                            logger.info(f"✅ Fallback scraping BCCH para {matched_cod}: {val_clean}")
-        except Exception as _ws_e:
-            logger.debug(f"Web scraping BCCH fallback: {_ws_e}")
-
-    # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
-    def primer_valor_mes(serie, anio, mes):
-        for s in reversed(serie):
+    # ── 2. Dolar vs Euro ultimos 12 meses (cierre de cada mes) ──────────
+    def ultimo_valor_mes(serie, anio, mes):
+        """Obtiene el ÚLTIMO valor registrado del mes (cierre de mes)"""
+        mejor = None
+        for s in serie:
             f = s.get('fecha', '')[:7]
             if f == '%04d-%02d' % (anio, mes):
-                return s.get('valor', None)
-        return None
+                # Guardar el de fecha mas reciente dentro del mes
+                mejor = s.get('valor', None)
+        # Si reversed no encontró, probar en orden directo
+        if mejor is None:
+            for s in reversed(serie):
+                f = s.get('fecha', '')[:7]
+                if f == '%04d-%02d' % (anio, mes):
+                    mejor = s.get('valor', None)
+                    break
+        return mejor
 
     hist_12m = {}
     meses_labels  = []
@@ -14656,14 +14572,15 @@ def obtener_indicadores_chile():
         meses_targets.append((yr_offset, mes_offset))
         meses_labels.append(MESES_ES[mes_offset - 1] + ' ' + str(yr_offset)[-2:])
 
-    anios_necesarios = list(set(yr for yr, _ in meses_targets))
+    anios_necesarios = sorted(set(yr for yr, _ in meses_targets))
     serie_dol = {}
     serie_eur = {}
+    # Usar fetch_retry con timeout largo para datos anuales (miles de registros)
     with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {}
         for yr in anios_necesarios:
-            futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
-            futs[ex.submit(fetch, BASE + '/euro/'  + str(yr))] = ('euro',  yr)
+            futs[ex.submit(fetch_retry, BASE + '/dolar/' + str(yr), 30, 2)] = ('dolar', yr)
+            futs[ex.submit(fetch_retry, BASE + '/euro/'  + str(yr), 30, 2)] = ('euro',  yr)
         for fut in as_completed(futs):
             cod, yr = futs[fut]
             j = fut.result()
@@ -14675,10 +14592,31 @@ def obtener_indicadores_chile():
     hist_12m['dolar']  = []
     hist_12m['euro']   = []
     for yr, mes in meses_targets:
-        vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
-        ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
+        vd = ultimo_valor_mes(serie_dol.get(yr, []), yr, mes)
+        ve = ultimo_valor_mes(serie_eur.get(yr, []), yr, mes)
         hist_12m['dolar'].append(round(vd, 2) if vd else None)
         hist_12m['euro'].append(round(ve, 2) if ve else None)
+
+    # Fallback: si muchos meses están vacíos, intentar con datos_actuales
+    dol_nulls = sum(1 for v in hist_12m['dolar'] if v is None)
+    eur_nulls = sum(1 for v in hist_12m['euro'] if v is None)
+    if dol_nulls > 6 or eur_nulls > 6:
+        logger.warning(f"12m chart: demasiados nulos (dol={dol_nulls}, eur={eur_nulls}), rellenando con serie30")
+        # Rellenar meses recientes desde serie30 de datos_actuales
+        for cod_fb, serie_fb, target_list in [
+            ('dolar', serie_dol, hist_12m['dolar']),
+            ('euro', serie_eur, hist_12m['euro'])
+        ]:
+            d_fb = datos_actuales.get(cod_fb)
+            if d_fb and d_fb.get('serie30'):
+                s30 = d_fb['serie30']
+                for idx, (yr, mes) in enumerate(meses_targets):
+                    if target_list[idx] is None:
+                        # Buscar en serie30
+                        for s in s30:
+                            if s.get('fecha', '')[:7] == '%04d-%02d' % (yr, mes):
+                                target_list[idx] = round(s.get('valor', 0), 2)
+                                break
 
     # ── 3. Historico 10 anos (valor representativo por ano) ───────────────
     ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
@@ -14754,11 +14692,12 @@ def obtener_indicadores_chile():
     # Fallback IPSA: Yahoo Finance si findic.cl no lo entrego
     if 'ipsa' not in datos_actuales:
         try:
+            # Intentar Yahoo Finance con endpoint v8
             r_yf = requests.get(
                 'https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
                 params={'interval': '1d', 'range': '30d'},
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/6.0)'},
-                timeout=14
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                timeout=15
             )
             if r_yf.status_code == 200:
                 jyf = r_yf.json()
@@ -14784,42 +14723,97 @@ def obtener_indicadores_chile():
                             'unidad':      'Puntos',
                             'serie30':     serie_yf[:30],
                         }
+                        logger.info(f"✅ IPSA Yahoo Finance OK: {serie_yf[0]['valor']} pts")
         except Exception as _ye:
             logger.debug('IPSA Yahoo fallback: ' + str(_ye))
 
-    # Fallback SOL/ETH: CoinGecko si findic.cl no los entrego
+        # Fallback 2 IPSA: Investing.com scraping
+        if 'ipsa' not in datos_actuales and bs4_disponible:
+            try:
+                r_inv = requests.get(
+                    'https://www.google.com/finance/quote/IPSA:INDEXBVL',
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                    timeout=12
+                )
+                if r_inv.status_code == 200:
+                    soup_ipsa = BeautifulSoup(r_inv.text, 'html.parser')
+                    # Google Finance muestra el precio en un div específico
+                    price_el = soup_ipsa.select_one('[data-last-price]')
+                    if price_el:
+                        val_ipsa = float(price_el.get('data-last-price', '0'))
+                        if val_ipsa > 0:
+                            datos_actuales['ipsa'] = {
+                                'nombre': 'IPSA', 'descripcion': 'Ind. Precio Selectivo de Acciones',
+                                'color': '#ff6b35', 'valor': round(val_ipsa, 2),
+                                'fecha': AHORA.strftime('%Y-%m-%d'), 'unidad': 'Puntos',
+                                'serie30': [{'valor': round(val_ipsa, 2), 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                            }
+                            logger.info(f"✅ IPSA Google Finance scraping: {val_ipsa}")
+            except Exception as _ie:
+                logger.debug(f'IPSA Google Finance scraping fallback: {_ie}')
+
+    # Fallback SOL/ETH: CoinGecko con serie historica 30 dias
     missing_crypto = [cod for cod in ('solana', 'ethereum') if cod not in datos_actuales]
     if missing_crypto:
-        try:
-            r_cg = requests.get(
-                'https://api.coingecko.com/api/v3/simple/price',
-                params={
-                    'ids':               ','.join(missing_crypto),
-                    'vs_currencies':     'clp',
-                    'include_24hr_change': 'true',
-                },
-                headers={'User-Agent': 'CofrBot/6.0'},
-                timeout=12
-            )
-            if r_cg.status_code == 200:
-                jcg = r_cg.json()
-                for cod in missing_crypto:
-                    dat = jcg.get(cod) or {}
-                    val = dat.get('clp')
-                    if val:
-                        cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
-                        datos_actuales[cod] = {
-                            'nombre':      cfg[1] if cfg else cod.capitalize(),
-                            'descripcion': cfg[2] if cfg else cod,
-                            'color':       cfg[3] if cfg else '#9945FF',
-                            'valor':       val,
-                            'fecha':       AHORA.strftime('%Y-%m-%d'),
-                            'unidad':      'CLP',
-                            'serie30':     [{'valor': val,
-                                             'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                        }
-        except Exception as _cge:
-            logger.debug('CoinGecko fallback: ' + str(_cge))
+        CG_IDS = {'solana': 'solana', 'ethereum': 'ethereum'}
+        for cod in missing_crypto:
+            try:
+                cg_id = CG_IDS.get(cod, cod)
+                # market_chart da 30 dias de precios historicos
+                r_cg = requests.get(
+                    f'https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart',
+                    params={'vs_currency': 'usd', 'days': '30', 'interval': 'daily'},
+                    headers={'User-Agent': 'CofrBot/6.0', 'Accept': 'application/json'},
+                    timeout=15
+                )
+                if r_cg.status_code == 200:
+                    jcg = r_cg.json()
+                    prices = jcg.get('prices', [])
+                    if prices:
+                        # Construir serie30 desde datos historicos
+                        serie_cg = []
+                        for ts_ms, price in reversed(prices):
+                            fecha_dt = datetime.fromtimestamp(ts_ms / 1000)
+                            serie_cg.append({
+                                'valor': round(price, 2),
+                                'fecha': fecha_dt.strftime('%Y-%m-%dT00:00:00')
+                            })
+                        if serie_cg:
+                            cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                            datos_actuales[cod] = {
+                                'nombre':      cfg[1] if cfg else cod.capitalize(),
+                                'descripcion': cfg[2] if cfg else cod,
+                                'color':       cfg[3] if cfg else '#9945FF',
+                                'valor':       serie_cg[0]['valor'],
+                                'fecha':       AHORA.strftime('%Y-%m-%d'),
+                                'unidad':      'USD',
+                                'serie30':     serie_cg[:30],
+                            }
+                            logger.info(f"✅ CoinGecko 30d fallback {cod}: {serie_cg[0]['valor']} USD ({len(serie_cg)} puntos)")
+                else:
+                    # Fallback simple price si market_chart falla
+                    r_sp = requests.get(
+                        'https://api.coingecko.com/api/v3/simple/price',
+                        params={'ids': cg_id, 'vs_currencies': 'usd'},
+                        headers={'User-Agent': 'CofrBot/6.0'},
+                        timeout=12
+                    )
+                    if r_sp.status_code == 200:
+                        val = r_sp.json().get(cg_id, {}).get('usd')
+                        if val:
+                            cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                            datos_actuales[cod] = {
+                                'nombre':      cfg[1] if cfg else cod.capitalize(),
+                                'descripcion': cfg[2] if cfg else cod,
+                                'color':       cfg[3] if cfg else '#9945FF',
+                                'valor':       val,
+                                'fecha':       AHORA.strftime('%Y-%m-%d'),
+                                'unidad':      'USD',
+                                'serie30':     [{'valor': val, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                            }
+                            logger.info(f"✅ CoinGecko simple fallback {cod}: {val} USD")
+            except Exception as _cge:
+                logger.debug(f'CoinGecko fallback {cod}: {_cge}')
 
     return {
         'datos_actuales': datos_actuales,
@@ -15196,12 +15190,129 @@ def generar_html_indicadores(all_data, explicaciones):
                 + sig + " {:.3f}%</span>".format(abs(pct)))
 
     # =========================================================================
-    # SECCION 1: 12 Cards actuales + sparklines (con IPSA)
+    # SECCION 1: 14 Cards actuales + sparklines (con IPSA)
     # FIX: sparklines usan requestAnimationFrame + resize + array global
+    # NEW: cards son clicables → modal con definicion + semaforo
     # =========================================================================
     ORDER = ["uf", "dolar", "euro", "utm", "ipc", "tpm",
              "bitcoin", "tasa_desempleo", "imacec", "libra_cobre", "ivp",
              "ipsa", "solana", "ethereum"]
+
+    # Definiciones + rangos semaforo para cada indicador
+    DEFS = {
+        'uf': {
+            'titulo': 'Unidad de Fomento (UF)',
+            'desc': 'Unidad de cuenta reajustable segun la inflacion (IPC). Se usa masivamente en Chile para creditos hipotecarios, arriendos, seguros y contratos a largo plazo. Su valor sube cuando hay inflacion y baja en periodos deflacionarios.',
+            'verde': 'Variacion mensual &lt; 0.3% — inflacion controlada, creditos estables.',
+            'amarillo': 'Variacion mensual 0.3%–0.6% — inflacion moderada, monitorear.',
+            'rojo': 'Variacion mensual &gt; 0.6% — inflacion alta, encarecimiento de creditos.'
+        },
+        'dolar': {
+            'titulo': 'Dolar Observado (USD/CLP)',
+            'desc': 'Tipo de cambio oficial entre el dolar estadounidense y el peso chileno, publicado diariamente por el Banco Central. Impacta directamente en importaciones, exportaciones, combustibles y precios de bienes importados.',
+            'verde': '$780–$880 CLP — rango equilibrado para la economia chilena.',
+            'amarillo': '$880–$950 o $700–$780 — volatilidad moderada, atencion a mercados.',
+            'rojo': '&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario significativo.'
+        },
+        'euro': {
+            'titulo': 'Euro (EUR/CLP)',
+            'desc': 'Tipo de cambio entre el euro y el peso chileno. Relevante para comercio con la Union Europea, importacion de bienes europeos, viajes y transferencias internacionales.',
+            'verde': '$850–$970 CLP — rango equilibrado.',
+            'amarillo': '$970–$1.050 o $780–$850 — atencion a tendencias.',
+            'rojo': '&gt; $1.050 o &lt; $780 — desequilibrio importante.'
+        },
+        'utm': {
+            'titulo': 'Unidad Tributaria Mensual (UTM)',
+            'desc': 'Medida de cuenta utilizada en Chile para fines tributarios y legales. Se reajusta mensualmente segun el IPC. Se usa para calcular multas, impuestos, topes de beneficios sociales y tramos tributarios.',
+            'verde': 'Variacion mensual &lt; 0.4% — estabilidad tributaria.',
+            'amarillo': 'Variacion mensual 0.4%–0.8% — ajuste moderado.',
+            'rojo': 'Variacion mensual &gt; 0.8% — impacto en cargas tributarias.'
+        },
+        'ipc': {
+            'titulo': 'Indice de Precios al Consumidor (IPC)',
+            'desc': 'Mide la variacion porcentual mensual de precios de una canasta de bienes y servicios representativa del consumo. Es el indicador oficial de inflacion en Chile, publicado por el INE.',
+            'verde': '0.0%–0.3% mensual — inflacion dentro de meta del Banco Central (3% anual).',
+            'amarillo': '0.3%–0.6% mensual — inflacion sobre la meta, posible ajuste de TPM.',
+            'rojo': '&gt; 0.6% mensual o negativo — inflacion descontrolada o deflacion.'
+        },
+        'tpm': {
+            'titulo': 'Tasa de Politica Monetaria (TPM)',
+            'desc': 'Tasa de interes de referencia fijada por el Banco Central de Chile. Determina el costo del dinero para bancos y, en cascada, las tasas de creditos hipotecarios, consumo y tarjetas de credito.',
+            'verde': '3.0%–5.0% — politica monetaria neutra/expansiva.',
+            'amarillo': '5.0%–8.0% — politica restrictiva moderada.',
+            'rojo': '&gt; 8.0% o &lt; 2.0% — situacion extrema (crisis o sobrecalentamiento).'
+        },
+        'bitcoin': {
+            'titulo': 'Bitcoin (BTC)',
+            'desc': 'Criptomoneda descentralizada, la de mayor capitalizacion de mercado. Su precio refleja el sentimiento global de riesgo, adopcion institucional y politicas regulatorias. Altamente volatil.',
+            'verde': 'Variacion diaria &lt; 3% — mercado estable.',
+            'amarillo': 'Variacion diaria 3%–8% — volatilidad moderada.',
+            'rojo': 'Variacion diaria &gt; 8% — alta volatilidad, riesgo elevado.'
+        },
+        'tasa_desempleo': {
+            'titulo': 'Tasa de Desempleo',
+            'desc': 'Porcentaje de la fuerza laboral que busca activamente empleo sin encontrarlo. Publicada trimestralmente por el INE. Indicador clave de salud economica y bienestar social.',
+            'verde': '&lt; 7.5% — mercado laboral saludable.',
+            'amarillo': '7.5%–9.5% — desempleo moderado, alerta.',
+            'rojo': '&gt; 9.5% — crisis laboral, requiere politicas de empleo.'
+        },
+        'imacec': {
+            'titulo': 'IMACEC (Actividad Economica)',
+            'desc': 'Indicador Mensual de Actividad Economica. Estimacion mensual del PIB publicada por el Banco Central. Mide el crecimiento o contraccion de la economia chilena en todos los sectores.',
+            'verde': '&gt; 2.5% — crecimiento saludable.',
+            'amarillo': '0.5%–2.5% — crecimiento debil.',
+            'rojo': '&lt; 0.5% o negativo — estancamiento o recesion.'
+        },
+        'libra_cobre': {
+            'titulo': 'Precio del Cobre (USD/lb)',
+            'desc': 'Precio de la libra de cobre en mercados internacionales. Chile es el mayor productor mundial. El cobre representa ~50% de las exportaciones y es determinante para ingresos fiscales y tipo de cambio.',
+            'verde': '&gt; USD 4.00/lb — precios altos, bonanza para Chile.',
+            'amarillo': 'USD 3.00–4.00/lb — precios moderados.',
+            'rojo': '&lt; USD 3.00/lb — precios bajos, impacto fiscal negativo.'
+        },
+        'ivp': {
+            'titulo': 'Indice de Valor Promedio (IVP)',
+            'desc': 'Indice diario que mide el valor promedio de la UF del mes anterior. Se utiliza en operaciones de credito y financieras como alternativa a la UF para ciertas transacciones bancarias.',
+            'verde': 'Variacion estable respecto a la UF.',
+            'amarillo': 'Divergencia moderada con la UF.',
+            'rojo': 'Divergencia significativa — revisar condiciones de credito.'
+        },
+        'ipsa': {
+            'titulo': 'IPSA (Bolsa de Santiago)',
+            'desc': 'Indice de Precio Selectivo de Acciones. Mide el rendimiento de las 30 acciones con mayor presencia bursatil en la Bolsa de Santiago. Es el principal indicador del mercado accionario chileno.',
+            'verde': 'Tendencia alcista (&gt; 5.500 pts) — confianza inversora.',
+            'amarillo': 'Lateral (4.500–5.500 pts) — incertidumbre.',
+            'rojo': 'Tendencia bajista (&lt; 4.500 pts) — aversion al riesgo.'
+        },
+        'solana': {
+            'titulo': 'Solana (SOL)',
+            'desc': 'Criptomoneda y plataforma blockchain de alta velocidad (~65.000 TPS). Utilizada para DeFi, NFTs y aplicaciones descentralizadas. Competidor directo de Ethereum con menores costos de transaccion.',
+            'verde': 'Variacion diaria &lt; 5% — estabilidad relativa.',
+            'amarillo': 'Variacion diaria 5%–10% — volatilidad moderada.',
+            'rojo': 'Variacion diaria &gt; 10% — volatilidad extrema.'
+        },
+        'ethereum': {
+            'titulo': 'Ethereum (ETH)',
+            'desc': 'Segunda criptomoneda por capitalizacion. Plataforma lider en contratos inteligentes, DeFi y NFTs. Su precio refleja la adopcion de tecnologia blockchain y el ecosistema de finanzas descentralizadas.',
+            'verde': 'Variacion diaria &lt; 4% — mercado estable.',
+            'amarillo': 'Variacion diaria 4%–8% — volatilidad moderada.',
+            'rojo': 'Variacion diaria &gt; 8% — alta volatilidad, precaucion.'
+        },
+    }
+
+    # Serializar definiciones para JavaScript
+    defs_js_items = []
+    for cod_def, info_def in DEFS.items():
+        defs_js_items.append(
+            '"' + cod_def + '":{'
+            '"t":"' + info_def['titulo'].replace('"', '\\"') + '",'
+            '"d":"' + info_def['desc'].replace('"', '\\"') + '",'
+            '"g":"' + info_def['verde'].replace('"', '\\"') + '",'
+            '"y":"' + info_def['amarillo'].replace('"', '\\"') + '",'
+            '"r":"' + info_def['rojo'].replace('"', '\\"') + '"}'
+        )
+    defs_js = 'var _DEFS={' + ','.join(defs_js_items) + '};'
+
     cards_html  = ""
     spark_inits = ""   # array _sparkCfg para init diferido
     spark_cfg_items = []
@@ -15217,12 +15328,13 @@ def generar_html_indicadores(all_data, explicaciones):
         var_h  = variacion_html(d.get("serie30", []))
         vfmt   = fmt(d.get("valor"), cod)
         cards_html += (
-            '<div class="card">'
+            '<div class="card" onclick="_showDef(\'' + cod + '\')" style="cursor:pointer"'
+            ' title="Click para ver definicion y semaforo">'
             '<div class="cn">' + _s(d.get("nombre")) + '</div>'
             '<div class="cv">' + vfmt + ' ' + var_h + '</div>'
             '<div class="cd">' + _s(d.get("descripcion")) + '</div>'
             '<div id="sp_' + cod + '" class="spark"></div>'
-            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + '</div>'
+            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + ' &#128270;</div>'
             '</div>'
         )
         # Acumular config de sparkline para init diferido (JSON safe)
@@ -15669,6 +15781,30 @@ def generar_html_indicadores(all_data, explicaciones):
         "padding:24px;text-align:center;color:#667788;font-size:.9em}"
         "footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;"
         "padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}"
+        # ── Modal indicador ──
+        "#defModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;"
+        "background:rgba(6,16,30,.92);z-index:9999;overflow-y:auto;padding:20px;"
+        "animation:fadeIn .25s ease}"
+        "@keyframes fadeIn{from{opacity:0}to{opacity:1}}"
+        ".modal-box{max-width:520px;margin:60px auto;background:rgba(13,27,48,.97);"
+        "border:1px solid rgba(195,165,90,.35);border-radius:16px;padding:24px;"
+        "box-shadow:0 12px 48px rgba(0,0,0,.6)}"
+        ".modal-close{float:right;font-size:1.5em;color:#667788;cursor:pointer;"
+        "background:none;border:none;padding:4px 10px;line-height:1}"
+        ".modal-close:hover{color:#c3a55a}"
+        ".modal-title{font-size:1.2em;font-weight:800;color:#c3a55a;margin-bottom:14px;"
+        "padding-bottom:10px;border-bottom:1px solid rgba(195,165,90,.2)}"
+        ".modal-desc{font-size:.9em;color:#aed6f1;line-height:1.7;margin-bottom:18px}"
+        ".semaforo{margin-top:10px}"
+        ".semaforo-title{font-size:.82em;font-weight:700;color:#c3a55a;"
+        "letter-spacing:1px;margin-bottom:10px;text-transform:uppercase}"
+        ".sem-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;"
+        "padding:10px;border-radius:8px}"
+        ".sem-row.green{background:rgba(46,204,113,.12);border-left:4px solid #2ecc71}"
+        ".sem-row.yellow{background:rgba(241,196,15,.12);border-left:4px solid #f1c40f}"
+        ".sem-row.red{background:rgba(231,76,60,.12);border-left:4px solid #e74c3c}"
+        ".sem-icon{font-size:1.3em;flex-shrink:0;margin-top:1px}"
+        ".sem-text{font-size:.82em;color:#c0c8d4;line-height:1.5}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
         ".hist-grid{grid-template-columns:1fr}"
@@ -15728,6 +15864,22 @@ def generar_html_indicadores(all_data, explicaciones):
         + afp_html +
         '</div>'
 
+        # Modal para definiciones + semaforo
+        '<div id="defModal" onclick="if(event.target===this)_closeDef()">'
+        '<div class="modal-box">'
+        '<button class="modal-close" onclick="_closeDef()">&#10005;</button>'
+        '<div class="modal-title" id="defTitle"></div>'
+        '<div class="modal-desc" id="defDesc"></div>'
+        '<div class="semaforo">'
+        '<div class="semaforo-title">&#128678; Semaforo del Indicador</div>'
+        '<div class="sem-row green"><span class="sem-icon">&#128994;</span>'
+        '<span class="sem-text" id="defGreen"></span></div>'
+        '<div class="sem-row yellow"><span class="sem-icon">&#128993;</span>'
+        '<span class="sem-text" id="defYellow"></span></div>'
+        '<div class="sem-row red"><span class="sem-icon">&#128308;</span>'
+        '<span class="sem-text" id="defRed"></span></div>'
+        '</div></div></div>'
+
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
@@ -15737,6 +15889,25 @@ def generar_html_indicadores(all_data, explicaciones):
         '</footer>'
 
         '<script>'
+        # Definiciones + semaforo (generado desde Python)
+        + defs_js +
+        'function _showDef(cod){'
+        'var d=_DEFS[cod];if(!d)return;'
+        'document.getElementById("defTitle").innerHTML=d.t;'
+        'document.getElementById("defDesc").innerHTML=d.d;'
+        'document.getElementById("defGreen").innerHTML=d.g;'
+        'document.getElementById("defYellow").innerHTML=d.y;'
+        'document.getElementById("defRed").innerHTML=d.r;'
+        'document.getElementById("defModal").style.display="block";'
+        'document.body.style.overflow="hidden";'
+        '}'
+        'function _closeDef(){'
+        'document.getElementById("defModal").style.display="none";'
+        'document.body.style.overflow="auto";'
+        '}'
+        'document.addEventListener("keydown",function(e){'
+        'if(e.key==="Escape")_closeDef();'
+        '});'
         # FIX sparklines: doble RAF + resize + array global _sparks
         + spark_js +
 
@@ -15798,7 +15969,7 @@ def generar_html_indicadores(all_data, explicaciones):
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /indicadores — Dashboard económico completo de Chile con análisis IA:
-      • 14 indicadores del día con sparkline 30 días (con fallback multi-API)
+      • 11 indicadores del día con sparkline 30 días
       • Tasas CMF: TMC (labels unicos Tipo 1-6) + Contexto Financiero
       • Análisis IA por indicador (Groq + RAG + BCCH)
       • Dólar vs Euro últimos 6 meses
@@ -15819,7 +15990,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         await msg.edit_text(
-            f"✅ {len(datos)} de 14 indicadores obtenidos (con fallbacks multi-API).\n"
+            f"✅ {len(datos)} indicadores obtenidos.\n"
             "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
             "🔍 Web scraping Banco Central..."
         )
@@ -15886,9 +16057,8 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                      'ipsa', 'solana', 'ethereum']
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
-            f"📊 14 Indicadores del Día — Tendencia 30 días",
             sep,
-            "Fuente: Banco Central · CMF · CoinGecko · Yahoo Finance",
+            "Fuente: Banco Central de Chile · CMF",
             "",
         ]
         for cod in ORDER_MSG:
