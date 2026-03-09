@@ -2189,92 +2189,101 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales
+            # Formatear empleos reales — TEXTO PLANO con TODOS los campos
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
-            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
-            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado = f"🔎 EMPLEOS REALES ENCONTRADOS\n"
+            resultado += f"📋 Búsqueda: {busqueda_texto}\n"
+            resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado += f"📊 Resultados: {len(empleos[:10])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
             
-            for i, empleo in enumerate(empleos[:8], 1):
+            for i, empleo in enumerate(empleos[:10], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
-                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
                 
-                # Sueldo
+                # Ubicación completa
+                partes_ub = []
+                if empleo.get('job_city'): partes_ub.append(empleo['job_city'])
+                if empleo.get('job_state') and empleo['job_state'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_state'])
+                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
+                ubicacion_job = ', '.join(partes_ub) if partes_ub else 'No especificada'
+                
+                # Sueldo estimado — búsqueda en múltiples campos
                 min_salary = empleo.get('job_min_salary')
                 max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                
+                salary_cur = empleo.get('job_salary_currency', 'CLP')
+                periodos = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal', 'HOUR': '/hora'}
                 if min_salary and max_salary:
                     sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    if salary_period:
-                        sueldo += f" ({salary_period})"
+                    sueldo += f" {salary_cur}"
+                    if salary_period: sueldo += f" ({periodos.get(salary_period, salary_period)})"
                 elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                    sueldo = f"Desde ${int(min_salary):,} {salary_cur}".replace(",", ".")
+                elif max_salary:
+                    sueldo = f"Hasta ${int(max_salary):,} {salary_cur}".replace(",", ".")
                 else:
-                    sueldo = "No especificado"
+                    # Buscar en campos alternativos
+                    est = empleo.get('estimated_salaries') or []
+                    if isinstance(est, list) and est:
+                        s0 = est[0]
+                        mn = s0.get('min_salary', s0.get('median_salary', 0))
+                        mx = s0.get('max_salary', mn)
+                        sueldo = f"~${int(mn):,} - ${int(mx):,} (estimado)".replace(",", ".") if mn else "No especificado"
+                    else:
+                        benefits = empleo.get('job_highlights', {}).get('Benefits', [])
+                        sal_hint = [b for b in benefits if any(k in b.lower() for k in ['salar', 'sueldo', '$', 'renta'])]
+                        sueldo = sal_hint[0][:80] if sal_hint else "No especificado (consultar)"
                 
-                # Tipo de empleo
-                tipo = empleo.get('job_employment_type', 'No especificado')
-                if tipo == 'FULLTIME':
-                    tipo = 'Tiempo completo'
-                elif tipo == 'PARTTIME':
-                    tipo = 'Medio tiempo'
-                elif tipo == 'CONTRACTOR':
-                    tipo = 'Contrato'
+                # Modalidad
+                tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
+                            'CONTRACTOR': 'Contrato/Freelance', 'INTERN': 'Práctica', 'TEMPORARY': 'Temporal'}
+                tipo = tipo_map.get(empleo.get('job_employment_type', ''), empleo.get('job_employment_type', 'No especificado'))
+                es_remoto = empleo.get('job_is_remote', False)
+                modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
                 
-                # Link de postulación
+                # Descripción (siempre mostrar)
+                raw_desc = empleo.get('job_description', '')
+                if not raw_desc:
+                    hl = empleo.get('job_highlights', {})
+                    resp_list = hl.get('Responsibilities', [])
+                    if resp_list: raw_desc = '. '.join(resp_list[:3])
+                if raw_desc:
+                    desc_limpia = re.sub(r'<[^>]+>', ' ', str(raw_desc))
+                    desc_limpia = re.sub(r'\s+', ' ', desc_limpia).strip()[:300]
+                    punto = desc_limpia.rfind(". ")
+                    if punto > 100: desc_limpia = desc_limpia[:punto + 1]
+                    elif len(desc_limpia) >= 300: desc_limpia += "..."
+                else:
+                    desc_limpia = "Ver detalles en el link"
+                
                 link = empleo.get('job_apply_link', '')
+                publisher = empleo.get('job_publisher', '')
                 
-                # Fecha de publicación
                 posted = empleo.get('job_posted_at_datetime_utc', '')
+                fecha_str = ""
                 if posted:
                     try:
-                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
-                        if dias_atras == 0:
-                            fecha_str = "Hoy"
-                        elif dias_atras == 1:
-                            fecha_str = "Ayer"
-                        else:
-                            fecha_str = f"Hace {dias_atras} días"
-                    except:
-                        fecha_str = ""
-                else:
-                    fecha_str = ""
+                        fp = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias = (datetime.now(fp.tzinfo) - fp).days
+                        fecha_str = "Hoy" if dias == 0 else "Ayer" if dias == 1 else f"Hace {dias} días"
+                    except: pass
                 
-                # Descripción breve del cargo
-                raw_desc = (empleo.get('job_description') or
-                            empleo.get('job_highlights', {}).get('Responsibilities', [''])[0] or "")
-                if raw_desc:
-                    desc_corta = raw_desc[:280].replace("\n", " ").replace("  ", " ").strip()
-                    ultimo_p = desc_corta.rfind(". ")
-                    if ultimo_p > 80:
-                        desc_corta = desc_corta[:ultimo_p + 1]
-                else:
-                    desc_corta = ""
-
-                resultado += f"**{i}. {titulo}**\n"
-                resultado += f"🏢 {empresa}\n"
-                resultado += f"📍 {ubicacion_job}\n"
-                resultado += f"💰 {sueldo}\n"
-                resultado += f"📋 {tipo}"
-                if fecha_str:
-                    resultado += f" • {fecha_str}"
-                resultado += "\n"
-                if desc_corta:
-                    resultado += f"📝 _{desc_corta}_\n"
-                if link:
-                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
-                
+                resultado += f"{'─' * 28}\n"
+                resultado += f"{i}. {titulo}\n"
+                resultado += f"   🏢 Empresa: {empresa}\n"
+                resultado += f"   📍 Ubicación: {ubicacion_job}\n"
+                resultado += f"   💰 Salario: {sueldo}\n"
+                resultado += f"   📋 Modalidad: {modalidad}\n"
+                if fecha_str: resultado += f"   🕐 Publicado: {fecha_str}\n"
+                if publisher: resultado += f"   📰 Fuente: {publisher}\n"
+                resultado += f"   📝 {desc_limpia}\n"
+                if link: resultado += f"   🔗 {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
-            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales."
             
             return resultado
     
@@ -2284,131 +2293,166 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
     q_dash  = busqueda_texto.replace(" ", "-").lower()
     q_plus  = busqueda_texto.replace(" ", "+")
 
-    # Links de búsqueda masiva (siempre se incluyen al final)
+    # Links de búsqueda directa (texto plano)
     links_portales = (
-        "\n🔗 *Busca más ofertas en:*\n"
-        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
-        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
-        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
-        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
-        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
+        "\n🔗 Busca más ofertas en:\n"
+        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
+        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
+        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
+        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
+        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
     )
 
     def _scrape_trabajando(q_encoded):
-        """Raspa Trabajando.cl — portal chileno con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(
-                f"https://www.trabajando.cl/empleos?q={q_encoded}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"},
-                timeout=15, allow_redirects=True,
-            )
-            if r.status_code != 200:
-                return []
-            soup  = _BS(r.text, "html.parser")
-            items = []
-            # Tarjetas de Trabajando.cl
-            cards = soup.select(
-                "article.job-card, div.job-offer, div.offer-item, "
-                "article[class*='job'], div[class*='job-item'], "
-                "div[class*='oferta'], li[class*='aviso']"
-            )
-            if not cards:
-                # Fallback: cualquier enlace con /empleo/ en la URL
-                cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:10]
-            for card in cards[:10]:
-                t_tag   = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
-                titulo  = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
-                e_tag   = card.select_one(".company, .empresa, [class*='company'], [class*='empresa'], [class*='razon']")
+            r = requests.get(f"https://www.trabajando.cl/empleos?q={q_encoded}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("article.job-card, div.job-offer, div.offer-item, article[class*='job'], div[class*='job-item'], div[class*='oferta'], li[class*='aviso']")
+            if not cards: cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:12]
+            for card in cards[:12]:
+                t_tag = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
+                titulo = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
+                e_tag = card.select_one(".company, .empresa, [class*='company'], [class*='empresa']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag   = card.select_one(".description, .desc, .snippet, [class*='descri'], [class*='resumen']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
-                c_tag   = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad'], [class*='region']")
-                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
-                a_tag   = card if card.name == "a" else card.select_one("a[href]")
-                href    = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"):
-                    href = "https://www.trabajando.cl" + href
+                d_tag = card.select_one(".description, .desc, .snippet, [class*='descri']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                c_tag = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag = card.select_one(".salary, .sueldo, [class*='salary'], [class*='sueldo']")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card if card.name == "a" else card.select_one("a[href]")
+                href = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"): href = "https://www.trabajando.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
-                                  "link": href, "portal": "Trabajando.cl"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Trabajando.cl"})
             return items
         except Exception as _e:
-            logger.debug(f"scrape trabajando: {_e}")
-            return []
+            logger.debug(f"scrape trabajando: {_e}"); return []
 
     def _scrape_computrabajo(q_plus):
-        """Raspa Computrabajo.cl — portal con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(
-                f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"},
-                timeout=15, allow_redirects=True,
-            )
-            if r.status_code != 200:
-                return []
-            soup  = _BS(r.text, "html.parser")
-            items = []
+            r = requests.get(f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
             cards = soup.select("article[data-id], div.box_offer, article.Item, div[class*='offer']")
-            for card in cards[:10]:
-                t_tag   = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
-                titulo  = t_tag.get_text(strip=True) if t_tag else ""
-                e_tag   = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag   = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
-                c_tag   = card.select_one(".location, .city, .ubic, [class*='locat']")
-                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
-                a_tag   = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
-                href    = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"):
-                    href = "https://www.computrabajo.cl" + href
+                d_tag = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                c_tag = card.select_one(".location, .city, .ubic, [class*='locat']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag = card.select_one(".salary, [class*='salary'], [class*='sueldo']")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
+                href = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"): href = "https://www.computrabajo.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
-                                  "link": href, "portal": "Computrabajo"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Computrabajo"})
             return items
         except Exception as _ce:
-            logger.debug(f"scrape computrabajo: {_ce}")
-            return []
+            logger.debug(f"scrape computrabajo: {_ce}"); return []
 
-    # Ejecutar scraping en paralelo
+    def _scrape_indeed(q_enc_i):
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(f"https://cl.indeed.com/jobs?q={q_enc_i}&l=Chile",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("div.job_seen_beacon, div.cardOutline, td.resultContent, div[class*='result']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h2 a span, h2 span, .jobTitle a, [class*='jobTitle']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one(".companyName, [data-testid='company-name'], [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag = card.select_one(".companyLocation, [data-testid='text-location'], [class*='location']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                d_tag = card.select_one(".job-snippet, [class*='snippet']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                s_tag = card.select_one("[class*='salary'], .salary-snippet")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card.select_one("h2 a, a[data-jk]")
+                href = ""
+                if a_tag:
+                    raw = a_tag.get("href", "")
+                    href = raw if raw.startswith("http") else ("https://cl.indeed.com" + raw if raw.startswith("/") else "")
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Indeed Chile"})
+            return items
+        except Exception as _ie:
+            logger.debug(f"scrape indeed: {_ie}"); return []
+
+    def _scrape_linkedin(q_enc_l):
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={q_enc_l}&location=Chile&start=0",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"},
+                timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("li, div.base-card, div[class*='job-card']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h3, .base-search-card__title, [class*='title']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one("h4, .base-search-card__subtitle, [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag = card.select_one(".job-search-card__location, [class*='location']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                a_tag = card.select_one("a[href*='linkedin.com/jobs/'], a.base-card__full-link")
+                href = (a_tag.get("href", "") if a_tag else "").strip().split("?")[0]
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": "", "ciudad": ciudad, "sueldo": "", "link": href, "portal": "LinkedIn"})
+            return items
+        except Exception as _le:
+            logger.debug(f"scrape linkedin: {_le}"); return []
+
+    # Ejecutar scraping en paralelo — 4 portales
     from concurrent.futures import ThreadPoolExecutor as _TPEX
     empleos_web = []
-    with _TPEX(max_workers=2) as _ex2:
+    with _TPEX(max_workers=4) as _ex2:
         _ft = _ex2.submit(_scrape_trabajando, q_enc)
         _fc = _ex2.submit(_scrape_computrabajo, q_plus)
+        _fi = _ex2.submit(_scrape_indeed, q_enc)
+        _fl = _ex2.submit(_scrape_linkedin, q_enc)
         empleos_web += (_ft.result() or [])
         empleos_web += (_fc.result() or [])
+        empleos_web += (_fi.result() or [])
+        empleos_web += (_fl.result() or [])
 
     if empleos_web:
         sep = "━" * 30
-        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
-        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
+        n_portales = len(set(e['portal'] for e in empleos_web))
+        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
+        resultado += f"📊 {len(empleos_web)} ofertas de {n_portales} portales\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:8], 1):
-            resultado += f"**{i}. {emp['titulo']}**\n"
-            if emp.get('empresa'):
-                resultado += f"🏢 {emp['empresa']}\n"
-            if emp.get('ciudad'):
-                resultado += f"📍 {emp['ciudad']}\n"
+        for i, emp in enumerate(empleos_web[:12], 1):
+            resultado += f"{'─' * 28}\n"
+            resultado += f"{i}. {emp['titulo']}\n"
+            if emp.get('empresa'): resultado += f"   🏢 Empresa: {emp['empresa']}\n"
+            if emp.get('ciudad'): resultado += f"   📍 Ubicación: {emp['ciudad']}\n"
+            resultado += f"   💰 Salario: {emp.get('sueldo') or 'Consultar en portal'}\n"
+            resultado += f"   📰 Fuente: {emp['portal']}\n"
             if emp.get('desc'):
-                desc_fmt = emp['desc'][:200].strip()
-                resultado += f"📝 _{desc_fmt}_\n"
+                resultado += f"   📝 {emp['desc'][:220].strip()}\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
+                resultado += f"   🔗 {emp['link']}\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
         return resultado
 
-    # Sin scraping exitoso → IA genera análisis + links de búsqueda
+    # Sin scraping exitoso → IA genera análisis + links
     consulta = f"cargo: {cargo}" if cargo else "empleos generales"
     if ubicacion:
         consulta += f", ubicación: {ubicacion}"
@@ -2431,18 +2475,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
-                resultado += f"📋 Búsqueda: _{consulta}_\n"
+                resultado  = f"🔎 ANÁLISIS MERCADO LABORAL — IA\n"
+                resultado += f"📋 Búsqueda: {consulta}\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
+                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
+    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas actualizadas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -3850,12 +3894,12 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Formato simple: /empleo Gerente Finanzas
             cargo = texto
     
-    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo...")
+    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo en 4 portales...")
     
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
+    await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -5147,7 +5191,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - 4 gauges + 8 stat boxes (matching reference HTML)"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5172,15 +5216,6 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
-            try:
-                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
-                total_eventos = c.fetchone()['total']
-            except: total_eventos = 0
-            try:
-                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
-                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
-                nuevos_7d = c.fetchone()['total']
-            except: nuevos_7d = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5197,21 +5232,13 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
-            try:
-                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
-                total_eventos = c.fetchone()[0]
-            except: total_eventos = 0
-            try:
-                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
-                nuevos_7d = c.fetchone()[0]
-            except: nuevos_7d = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
         
-        # HTML matching reference: 4 gauges + 8 stat boxes
+        # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5223,14 +5250,12 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
-.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
-.stat.highlight .val{{color:#2ecc71}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5240,7 +5265,6 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
-<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5250,14 +5274,12 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
-<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
 </div>
 
-<div class="foot">Bot Premium v6.0 ECharts · Cofradía de Networking</div>
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
+var gold='#c3a55a',blue='#3478c3';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5266,8 +5288,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5276,7 +5298,6 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
-gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5292,9 +5313,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n"
-            f"📅 Eventos activos: {total_eventos:,}\n"
-            f"🆕 Nuevos miembros (7d): {nuevos_7d:,}\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5303,7 +5322,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts — 4 gauges + 8 indicadores"
+                caption="📊 Dashboard ECharts interactivo con gauges"
             )
         
         try:
@@ -9746,6 +9765,21 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
+            # Recomendaciones del perfil público
+            _prec = 0
+            try:
+                conn_pr = get_db_connection()
+                if conn_pr:
+                    cpr = conn_pr.cursor()
+                    if DATABASE_URL:
+                        cpr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
+                        _prec = cpr.fetchone()['t']
+                    else:
+                        cpr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
+                        _prec = cpr.fetchone()[0]
+                    conn_pr.close()
+            except Exception:
+                pass
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9756,6 +9790,8 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+            if _prec > 0:
+                caption += f"\n⭐ <b>{_prec} recomendación{'es' if _prec != 1 else ''}</b> de la comunidad"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9857,6 +9893,22 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
+                        # Obtener conteo de recomendaciones
+                        _nrec = 0
+                        try:
+                            conn_rc = get_db_connection()
+                            if conn_rc:
+                                crc = conn_rc.cursor()
+                                if DATABASE_URL:
+                                    crc.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nrec = crc.fetchone()['t']
+                                else:
+                                    crc.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nrec = crc.fetchone()[0]
+                                conn_rc.close()
+                        except Exception:
+                            pass
+                        
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -9867,6 +9919,10 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+                        if _nrec > 0:
+                            caption += f"\n⭐ <b>{_nrec} recomendación{'es' if _nrec != 1 else ''}</b> — Ver: /mis_recomendaciones"
+                        else:
+                            caption += "\n⭐ Pide recomendaciones: /recomendar"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -9908,6 +9964,24 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
+                        _nr2 = 0
+                        try:
+                            conn_r2 = get_db_connection()
+                            if conn_r2:
+                                cr2 = conn_r2.cursor()
+                                if DATABASE_URL:
+                                    cr2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nr2 = cr2.fetchone()['t']
+                                else:
+                                    cr2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nr2 = cr2.fetchone()[0]
+                                conn_r2.close()
+                        except Exception:
+                            pass
+                        if _nr2 > 0:
+                            msg += f"\n⭐ {_nr2} recomendación{'es' if _nr2 != 1 else ''} — Ver: /mis_recomendaciones\n"
+                        else:
+                            msg += f"\n⭐ Pide recomendaciones: /recomendar\n"
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -14997,13 +15071,12 @@ def generar_html_indicadores(all_data, explicaciones):
         var_h  = variacion_html(d.get("serie30", []))
         vfmt   = fmt(d.get("valor"), cod)
         cards_html += (
-            '<div class="card" onclick="_showDef(\'' + cod + '\')" style="cursor:pointer"'
-            ' title="Click para ver definicion y semaforo">'
+            '<div class="card">'
             '<div class="cn">' + _s(d.get("nombre")) + '</div>'
             '<div class="cv">' + vfmt + ' ' + var_h + '</div>'
             '<div class="cd">' + _s(d.get("descripcion")) + '</div>'
             '<div id="sp_' + cod + '" class="spark"></div>'
-            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + ' &#128270;</div>'
+            '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + '</div>'
             '</div>'
         )
         # Acumular config de sparkline para init diferido (JSON safe)
@@ -15450,30 +15523,6 @@ def generar_html_indicadores(all_data, explicaciones):
         "padding:24px;text-align:center;color:#667788;font-size:.9em}"
         "footer{text-align:center;color:#445566;font-size:.72em;margin-top:28px;"
         "padding-top:14px;border-top:1px solid rgba(195,165,90,.12)}"
-        # ── Modal indicador (definicion + semaforo) ──
-        "#defModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;"
-        "background:rgba(6,16,30,.92);z-index:9999;overflow-y:auto;padding:20px;"
-        "animation:fadeIn .25s ease}"
-        "@keyframes fadeIn{from{opacity:0}to{opacity:1}}"
-        ".modal-box{max-width:520px;margin:60px auto;background:rgba(13,27,48,.97);"
-        "border:1px solid rgba(195,165,90,.35);border-radius:16px;padding:24px;"
-        "box-shadow:0 12px 48px rgba(0,0,0,.6)}"
-        ".modal-close{float:right;font-size:1.5em;color:#667788;cursor:pointer;"
-        "background:none;border:none;padding:4px 10px;line-height:1}"
-        ".modal-close:hover{color:#c3a55a}"
-        ".modal-title{font-size:1.2em;font-weight:800;color:#c3a55a;margin-bottom:14px;"
-        "padding-bottom:10px;border-bottom:1px solid rgba(195,165,90,.2)}"
-        ".modal-desc{font-size:.9em;color:#aed6f1;line-height:1.7;margin-bottom:18px}"
-        ".semaforo{margin-top:10px}"
-        ".semaforo-title{font-size:.82em;font-weight:700;color:#c3a55a;"
-        "letter-spacing:1px;margin-bottom:10px;text-transform:uppercase}"
-        ".sem-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;"
-        "padding:10px;border-radius:8px}"
-        ".sem-row.green{background:rgba(46,204,113,.12);border-left:4px solid #2ecc71}"
-        ".sem-row.yellow{background:rgba(241,196,15,.12);border-left:4px solid #f1c40f}"
-        ".sem-row.red{background:rgba(231,76,60,.12);border-left:4px solid #e74c3c}"
-        ".sem-icon{font-size:1.3em;flex-shrink:0;margin-top:1px}"
-        ".sem-text{font-size:.82em;color:#c0c8d4;line-height:1.5}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
         ".hist-grid{grid-template-columns:1fr}"
@@ -15533,22 +15582,6 @@ def generar_html_indicadores(all_data, explicaciones):
         + afp_html +
         '</div>'
 
-        # Modal popup para definiciones + semáforo (clickeable desde cada card)
-        '<div id="defModal" onclick="if(event.target===this)_closeDef()">'
-        '<div class="modal-box">'
-        '<button class="modal-close" onclick="_closeDef()">&#10005;</button>'
-        '<div class="modal-title" id="defTitle"></div>'
-        '<div class="modal-desc" id="defDesc"></div>'
-        '<div class="semaforo">'
-        '<div class="semaforo-title">&#128678; Semaforo del Indicador</div>'
-        '<div class="sem-row green"><span class="sem-icon">&#128994;</span>'
-        '<span class="sem-text" id="defGreen"></span></div>'
-        '<div class="sem-row yellow"><span class="sem-icon">&#128993;</span>'
-        '<span class="sem-text" id="defYellow"></span></div>'
-        '<div class="sem-row red"><span class="sem-icon">&#128308;</span>'
-        '<span class="sem-text" id="defRed"></span></div>'
-        '</div></div></div>'
-
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
@@ -15558,35 +15591,6 @@ def generar_html_indicadores(all_data, explicaciones):
         '</footer>'
 
         '<script>'
-        # Definiciones + semáforo para cada indicador (14 completos)
-        'var _DEFS={'
-        '"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable segun la inflacion (IPC). Se usa masivamente en Chile para creditos hipotecarios, arriendos, seguros y contratos a largo plazo. Su valor sube cuando hay inflacion y baja en periodos deflacionarios.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, creditos estables.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, monitorear.","r":"Variacion mensual &gt; 0.6% — inflacion alta, encarecimiento de creditos."},'
-        '"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial entre el dolar estadounidense y el peso chileno, publicado diariamente por el Banco Central. Impacta directamente en importaciones, exportaciones, combustibles y precios de bienes importados.","g":"$780–$880 CLP — rango equilibrado para la economia chilena.","y":"$880–$950 o $700–$780 — volatilidad moderada, atencion a mercados.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario significativo."},'
-        '"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio entre el euro y el peso chileno. Relevante para comercio con la Union Europea, importacion de bienes europeos, viajes y transferencias internacionales.","g":"$850–$970 CLP — rango equilibrado.","y":"$970–$1.050 o $780–$850 — atencion a tendencias.","r":"&gt; $1.050 o &lt; $780 — desequilibrio importante."},'
-        '"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida de cuenta utilizada en Chile para fines tributarios y legales. Se reajusta mensualmente segun el IPC. Se usa para calcular multas, impuestos, topes de beneficios sociales y tramos tributarios.","g":"Variacion mensual &lt; 0.4% — estabilidad tributaria.","y":"Variacion mensual 0.4%–0.8% — ajuste moderado.","r":"Variacion mensual &gt; 0.8% — impacto en cargas tributarias."},'
-        '"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Mide la variacion porcentual mensual de precios de una canasta de bienes y servicios representativa del consumo. Es el indicador oficial de inflacion en Chile, publicado por el INE.","g":"0.0%–0.3% mensual — inflacion dentro de meta del Banco Central (3% anual).","y":"0.3%–0.6% mensual — inflacion sobre la meta, posible ajuste de TPM.","r":"&gt; 0.6% mensual o negativo — inflacion descontrolada o deflacion."},'
-        '"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de interes de referencia fijada por el Banco Central de Chile. Determina el costo del dinero para bancos y, en cascada, las tasas de creditos hipotecarios, consumo y tarjetas de credito.","g":"3.0%–5.0% — politica monetaria neutra/expansiva.","y":"5.0%–8.0% — politica restrictiva moderada.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema (crisis o sobrecalentamiento)."},'
-        '"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda descentralizada, la de mayor capitalizacion de mercado. Su precio refleja el sentimiento global de riesgo, adopcion institucional y politicas regulatorias. Altamente volatil.","g":"Variacion diaria &lt; 3% — mercado estable.","y":"Variacion diaria 3%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, riesgo elevado."},'
-        '"tasa_desempleo":{"t":"Tasa de Desempleo","d":"Porcentaje de la fuerza laboral que busca activamente empleo sin encontrarlo. Publicada trimestralmente por el INE. Indicador clave de salud economica y bienestar social.","g":"&lt; 7.5% — mercado laboral saludable.","y":"7.5%–9.5% — desempleo moderado, alerta.","r":"&gt; 9.5% — crisis laboral, requiere politicas de empleo."},'
-        '"imacec":{"t":"IMACEC (Actividad Economica)","d":"Indicador Mensual de Actividad Economica. Estimacion mensual del PIB publicada por el Banco Central. Mide el crecimiento o contraccion de la economia chilena en todos los sectores.","g":"&gt; 2.5% — crecimiento saludable.","y":"0.5%–2.5% — crecimiento debil.","r":"&lt; 0.5% o negativo — estancamiento o recesion."},'
-        '"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Precio de la libra de cobre en mercados internacionales. Chile es el mayor productor mundial. El cobre representa ~50% de las exportaciones y es determinante para ingresos fiscales y tipo de cambio.","g":"&gt; USD 4.00/lb — precios altos, bonanza para Chile.","y":"USD 3.00–4.00/lb — precios moderados.","r":"&lt; USD 3.00/lb — precios bajos, impacto fiscal negativo."},'
-        '"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Indice diario que mide el valor promedio de la UF del mes anterior. Se utiliza en operaciones de credito y financieras como alternativa a la UF para ciertas transacciones bancarias.","g":"Variacion estable respecto a la UF.","y":"Divergencia moderada con la UF.","r":"Divergencia significativa — revisar condiciones de credito."},'
-        '"ipsa":{"t":"IPSA (Bolsa de Santiago)","d":"Indice de Precio Selectivo de Acciones. Mide el rendimiento de las 30 acciones con mayor presencia bursatil en la Bolsa de Santiago. Es el principal indicador del mercado accionario chileno.","g":"Tendencia alcista (&gt; 5.500 pts) — confianza inversora.","y":"Lateral (4.500–5.500 pts) — incertidumbre.","r":"Tendencia bajista (&lt; 4.500 pts) — aversion al riesgo."},'
-        '"solana":{"t":"Solana (SOL)","d":"Criptomoneda y plataforma blockchain de alta velocidad (~65.000 TPS). Utilizada para DeFi, NFTs y aplicaciones descentralizadas. Competidor directo de Ethereum con menores costos de transaccion.","g":"Variacion diaria &lt; 5% — estabilidad relativa.","y":"Variacion diaria 5%–10% — volatilidad moderada.","r":"Variacion diaria &gt; 10% — volatilidad extrema."},'
-        '"ethereum":{"t":"Ethereum (ETH)","d":"Segunda criptomoneda por capitalizacion. Plataforma lider en contratos inteligentes, DeFi y NFTs. Su precio refleja la adopcion de tecnologia blockchain y el ecosistema de finanzas descentralizadas.","g":"Variacion diaria &lt; 4% — mercado estable.","y":"Variacion diaria 4%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, precaucion."}};'
-        'function _showDef(cod){'
-        'var d=_DEFS[cod];if(!d)return;'
-        'document.getElementById("defTitle").innerHTML=d.t;'
-        'document.getElementById("defDesc").innerHTML=d.d;'
-        'document.getElementById("defGreen").innerHTML=d.g;'
-        'document.getElementById("defYellow").innerHTML=d.y;'
-        'document.getElementById("defRed").innerHTML=d.r;'
-        'document.getElementById("defModal").style.display="block";'
-        'document.body.style.overflow="hidden";}'
-        'function _closeDef(){'
-        'document.getElementById("defModal").style.display="none";'
-        'document.body.style.overflow="auto";}'
-        'document.addEventListener("keydown",function(e){if(e.key==="Escape")_closeDef();});'
         # FIX sparklines: doble RAF + resize + array global _sparks
         + spark_js +
 
