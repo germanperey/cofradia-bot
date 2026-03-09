@@ -466,6 +466,15 @@ def init_db():
                 aceptada BOOLEAN DEFAULT NULL,
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
+            # Tabla cache de consultas para acelerar respuestas
+            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cache (
+                id SERIAL PRIMARY KEY,
+                clave TEXT UNIQUE,
+                tipo TEXT DEFAULT 'buscar_web',
+                resultado TEXT,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_expiracion TIMESTAMP
+            )''')
             conn.commit()
             logger.info("✅ Tablas v5.0 (Agente Networking) inicializadas")
         else:
@@ -723,6 +732,15 @@ def init_db():
                 user_id_a INTEGER, user_id_b INTEGER, razon TEXT,
                 aceptada INTEGER DEFAULT NULL,
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            # Tabla cache de consultas
+            c.execute('''CREATE TABLE IF NOT EXISTS consultas_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clave TEXT UNIQUE,
+                tipo TEXT DEFAULT 'buscar_web',
+                resultado TEXT,
+                fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+                fecha_expiracion DATETIME
             )''')
             conn.commit()
             logger.info("✅ Tablas v5.0 SQLite (Agente) inicializadas")
@@ -2189,92 +2207,95 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales
+            # Formatear empleos reales — texto plano con TODOS los campos
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
-            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
-            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado = f"🔎 EMPLEOS REALES ENCONTRADOS\n"
+            resultado += f"📋 Búsqueda: {busqueda_texto}\n"
+            resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado += f"📊 Resultados: {len(empleos[:10])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
             
-            for i, empleo in enumerate(empleos[:8], 1):
+            for i, empleo in enumerate(empleos[:10], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
-                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
                 
-                # Sueldo
+                # Ubicación completa
+                partes_ub = []
+                if empleo.get('job_city'): partes_ub.append(empleo['job_city'])
+                if empleo.get('job_state') and empleo['job_state'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_state'])
+                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
+                ubicacion_job = ', '.join(partes_ub) if partes_ub else 'No especificada'
+                
+                # Sueldo estimado (siempre mostrar)
                 min_salary = empleo.get('job_min_salary')
                 max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
-                
+                salary_cur = empleo.get('job_salary_currency', 'CLP')
+                periodos_es = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal', 'HOUR': '/hora'}
                 if min_salary and max_salary:
                     sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    if salary_period:
-                        sueldo += f" ({salary_period})"
+                    sueldo += f" {salary_cur}"
+                    if salary_period: sueldo += f" ({periodos_es.get(salary_period, salary_period)})"
                 elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".") + f" {salary_cur}"
+                elif max_salary:
+                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".") + f" {salary_cur}"
                 else:
-                    sueldo = "No especificado"
+                    sueldo = "No especificado (consultar en postulación)"
                 
-                # Tipo de empleo
-                tipo = empleo.get('job_employment_type', 'No especificado')
-                if tipo == 'FULLTIME':
-                    tipo = 'Tiempo completo'
-                elif tipo == 'PARTTIME':
-                    tipo = 'Medio tiempo'
-                elif tipo == 'CONTRACTOR':
-                    tipo = 'Contrato'
+                # Modalidad
+                tipo_map = {'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
+                            'CONTRACTOR': 'Contrato/Freelance', 'INTERN': 'Práctica', 'TEMPORARY': 'Temporal'}
+                tipo = tipo_map.get(empleo.get('job_employment_type', ''), empleo.get('job_employment_type', 'No especificado'))
+                es_remoto = empleo.get('job_is_remote', False)
+                modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
                 
-                # Link de postulación
+                # Descripción (siempre mostrar)
+                raw_desc = empleo.get('job_description', '')
+                highlights = empleo.get('job_highlights', {})
+                if not raw_desc:
+                    resp_list = highlights.get('Responsibilities', [])
+                    qual_list = highlights.get('Qualifications', [])
+                    if resp_list: raw_desc = '. '.join(resp_list[:3])
+                    elif qual_list: raw_desc = 'Requisitos: ' + '. '.join(qual_list[:3])
+                if raw_desc:
+                    desc_limpia = re.sub(r'<[^>]+>', ' ', str(raw_desc))
+                    desc_limpia = re.sub(r'\s+', ' ', desc_limpia).strip()[:300]
+                    punto = desc_limpia.rfind(". ")
+                    if punto > 100: desc_limpia = desc_limpia[:punto + 1]
+                    elif len(desc_limpia) >= 300: desc_limpia += "..."
+                else:
+                    desc_limpia = "Ver detalles en el link de postulación"
+                
                 link = empleo.get('job_apply_link', '')
+                publisher = empleo.get('job_publisher', '')
                 
-                # Fecha de publicación
+                # Fecha publicación
                 posted = empleo.get('job_posted_at_datetime_utc', '')
+                fecha_str = ""
                 if posted:
                     try:
                         fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
-                        if dias_atras == 0:
-                            fecha_str = "Hoy"
-                        elif dias_atras == 1:
-                            fecha_str = "Ayer"
-                        else:
-                            fecha_str = f"Hace {dias_atras} días"
-                    except:
-                        fecha_str = ""
-                else:
-                    fecha_str = ""
+                        dias = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        fecha_str = "Hoy" if dias == 0 else "Ayer" if dias == 1 else f"Hace {dias} días"
+                    except: pass
                 
-                # Descripción breve del cargo
-                raw_desc = (empleo.get('job_description') or
-                            empleo.get('job_highlights', {}).get('Responsibilities', [''])[0] or "")
-                if raw_desc:
-                    desc_corta = raw_desc[:280].replace("\n", " ").replace("  ", " ").strip()
-                    ultimo_p = desc_corta.rfind(". ")
-                    if ultimo_p > 80:
-                        desc_corta = desc_corta[:ultimo_p + 1]
-                else:
-                    desc_corta = ""
-
-                resultado += f"**{i}. {titulo}**\n"
-                resultado += f"🏢 {empresa}\n"
-                resultado += f"📍 {ubicacion_job}\n"
-                resultado += f"💰 {sueldo}\n"
-                resultado += f"📋 {tipo}"
-                if fecha_str:
-                    resultado += f" • {fecha_str}"
-                resultado += "\n"
-                if desc_corta:
-                    resultado += f"📝 _{desc_corta}_\n"
-                if link:
-                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
-                
+                resultado += f"{'─' * 28}\n"
+                resultado += f"{i}. {titulo}\n"
+                resultado += f"   🏢 Empresa: {empresa}\n"
+                resultado += f"   📍 Ubicación: {ubicacion_job}\n"
+                resultado += f"   💰 Salario: {sueldo}\n"
+                resultado += f"   📋 Modalidad: {modalidad}\n"
+                if fecha_str: resultado += f"   🕐 Publicado: {fecha_str}\n"
+                if publisher: resultado += f"   📰 Fuente: {publisher}\n"
+                resultado += f"   📝 {desc_limpia}\n"
+                if link: resultado += f"   🔗 {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
-            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales.\n"
+            resultado += "👆 Copia el link para postular directamente."
             
             return resultado
     
@@ -2286,123 +2307,158 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
-        "\n🔗 *Busca más ofertas en:*\n"
-        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
-        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
-        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
-        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
-        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
+        "\n🔗 Busca más ofertas en:\n"
+        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
+        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
+        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
+        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
+        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
     )
 
     def _scrape_trabajando(q_encoded):
-        """Raspa Trabajando.cl — portal chileno con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(
-                f"https://www.trabajando.cl/empleos?q={q_encoded}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"},
-                timeout=15, allow_redirects=True,
-            )
-            if r.status_code != 200:
-                return []
-            soup  = _BS(r.text, "html.parser")
-            items = []
-            # Tarjetas de Trabajando.cl
-            cards = soup.select(
-                "article.job-card, div.job-offer, div.offer-item, "
-                "article[class*='job'], div[class*='job-item'], "
-                "div[class*='oferta'], li[class*='aviso']"
-            )
-            if not cards:
-                # Fallback: cualquier enlace con /empleo/ en la URL
-                cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:10]
-            for card in cards[:10]:
-                t_tag   = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
-                titulo  = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
-                e_tag   = card.select_one(".company, .empresa, [class*='company'], [class*='empresa'], [class*='razon']")
+            r = requests.get(f"https://www.trabajando.cl/empleos?q={q_encoded}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("article.job-card, div.job-offer, div.offer-item, article[class*='job'], div[class*='job-item'], div[class*='oferta'], li[class*='aviso']")
+            if not cards: cards = soup.select("a[href*='/empleo/'], a[href*='/oferta/']")[:12]
+            for card in cards[:12]:
+                t_tag = card.select_one("h2, h3, .title, .job-title, [class*='title'], [class*='puesto']")
+                titulo = t_tag.get_text(strip=True) if t_tag else card.get_text(strip=True)[:80]
+                e_tag = card.select_one(".company, .empresa, [class*='company'], [class*='empresa']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag   = card.select_one(".description, .desc, .snippet, [class*='descri'], [class*='resumen']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
-                c_tag   = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad'], [class*='region']")
-                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
-                a_tag   = card if card.name == "a" else card.select_one("a[href]")
-                href    = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"):
-                    href = "https://www.trabajando.cl" + href
+                d_tag = card.select_one(".description, .desc, .snippet, [class*='descri']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                c_tag = card.select_one(".location, .ciudad, [class*='locat'], [class*='ciudad']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag = card.select_one(".salary, .sueldo, [class*='salary'], [class*='sueldo']")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card if card.name == "a" else card.select_one("a[href]")
+                href = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"): href = "https://www.trabajando.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
-                                  "link": href, "portal": "Trabajando.cl"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Trabajando.cl"})
             return items
         except Exception as _e:
-            logger.debug(f"scrape trabajando: {_e}")
-            return []
+            logger.debug(f"scrape trabajando: {_e}"); return []
 
     def _scrape_computrabajo(q_plus):
-        """Raspa Computrabajo.cl — portal con empleos reales + links directos."""
         try:
             from bs4 import BeautifulSoup as _BS
-            r = requests.get(
-                f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-                         "Accept-Language": "es-CL,es;q=0.9"},
-                timeout=15, allow_redirects=True,
-            )
-            if r.status_code != 200:
-                return []
-            soup  = _BS(r.text, "html.parser")
-            items = []
+            r = requests.get(f"https://www.computrabajo.cl/empleos-en-chile?q={q_plus}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
             cards = soup.select("article[data-id], div.box_offer, article.Item, div[class*='offer']")
-            for card in cards[:10]:
-                t_tag   = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
-                titulo  = t_tag.get_text(strip=True) if t_tag else ""
-                e_tag   = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h2 a, h2, .title_offer, .js-o-link, [class*='title']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one(".company, .name-company, p.dsc, [class*='compan']")
                 empresa = e_tag.get_text(strip=True) if e_tag else ""
-                d_tag   = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
-                desc    = d_tag.get_text(strip=True)[:220] if d_tag else ""
-                c_tag   = card.select_one(".location, .city, .ubic, [class*='locat']")
-                ciudad  = c_tag.get_text(strip=True) if c_tag else "Chile"
-                a_tag   = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
-                href    = (a_tag.get("href", "") if a_tag else "").strip()
-                if href and not href.startswith("http"):
-                    href = "https://www.computrabajo.cl" + href
+                d_tag = card.select_one(".description, .txt-offer, p.fs16, [class*='descri']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                c_tag = card.select_one(".location, .city, .ubic, [class*='locat']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                s_tag = card.select_one(".salary, [class*='salary'], [class*='sueldo']")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card.select_one("h2 a, a.title_offer, a.js-o-link, a[href*='/trabajo/']")
+                href = (a_tag.get("href", "") if a_tag else "").strip()
+                if href and not href.startswith("http"): href = "https://www.computrabajo.cl" + href
                 if titulo and len(titulo) > 4:
-                    items.append({"titulo": titulo[:100], "empresa": empresa,
-                                  "desc": desc, "ciudad": ciudad,
-                                  "link": href, "portal": "Computrabajo"})
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Computrabajo"})
             return items
         except Exception as _ce:
-            logger.debug(f"scrape computrabajo: {_ce}")
-            return []
+            logger.debug(f"scrape computrabajo: {_ce}"); return []
 
-    # Ejecutar scraping en paralelo
+    def _scrape_indeed(q_enc):
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(f"https://cl.indeed.com/jobs?q={q_enc}&l=Chile",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+                         "Accept-Language": "es-CL,es;q=0.9"}, timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("div.job_seen_beacon, div.cardOutline, td.resultContent, div[class*='result']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h2 a span, h2 span, .jobTitle a, [class*='jobTitle']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one(".companyName, [data-testid='company-name'], [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag = card.select_one(".companyLocation, [data-testid='text-location'], [class*='location']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                d_tag = card.select_one(".job-snippet, [class*='snippet']")
+                desc = d_tag.get_text(strip=True)[:250] if d_tag else ""
+                s_tag = card.select_one("[class*='salary'], .salary-snippet")
+                sueldo = s_tag.get_text(strip=True) if s_tag else ""
+                a_tag = card.select_one("h2 a, a[data-jk], a[href*='/rc/']")
+                href = ""
+                if a_tag:
+                    raw = a_tag.get("href", "")
+                    href = raw if raw.startswith("http") else ("https://cl.indeed.com" + raw if raw.startswith("/") else "")
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": desc, "ciudad": ciudad, "sueldo": sueldo, "link": href, "portal": "Indeed Chile"})
+            return items
+        except Exception as _ie:
+            logger.debug(f"scrape indeed: {_ie}"); return []
+
+    def _scrape_linkedin(q_enc):
+        try:
+            from bs4 import BeautifulSoup as _BS
+            r = requests.get(f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={q_enc}&location=Chile&start=0",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"},
+                timeout=15, allow_redirects=True)
+            if r.status_code != 200: return []
+            soup = _BS(r.text, "html.parser"); items = []
+            cards = soup.select("li, div.base-card, div[class*='job-card']")
+            for card in cards[:12]:
+                t_tag = card.select_one("h3, .base-search-card__title, [class*='title']")
+                titulo = t_tag.get_text(strip=True) if t_tag else ""
+                e_tag = card.select_one("h4, .base-search-card__subtitle, [class*='company']")
+                empresa = e_tag.get_text(strip=True) if e_tag else ""
+                c_tag = card.select_one(".job-search-card__location, [class*='location']")
+                ciudad = c_tag.get_text(strip=True) if c_tag else "Chile"
+                a_tag = card.select_one("a[href*='linkedin.com/jobs/'], a.base-card__full-link")
+                href = (a_tag.get("href", "") if a_tag else "").strip().split("?")[0]
+                if titulo and len(titulo) > 4:
+                    items.append({"titulo": titulo[:100], "empresa": empresa, "desc": "", "ciudad": ciudad, "sueldo": "", "link": href, "portal": "LinkedIn"})
+            return items
+        except Exception as _le:
+            logger.debug(f"scrape linkedin: {_le}"); return []
+
+    # Ejecutar scraping en paralelo (4 fuentes)
     from concurrent.futures import ThreadPoolExecutor as _TPEX
     empleos_web = []
-    with _TPEX(max_workers=2) as _ex2:
+    with _TPEX(max_workers=4) as _ex2:
         _ft = _ex2.submit(_scrape_trabajando, q_enc)
         _fc = _ex2.submit(_scrape_computrabajo, q_plus)
+        _fi = _ex2.submit(_scrape_indeed, q_enc)
+        _fl = _ex2.submit(_scrape_linkedin, q_enc)
         empleos_web += (_ft.result() or [])
         empleos_web += (_fc.result() or [])
+        empleos_web += (_fi.result() or [])
+        empleos_web += (_fl.result() or [])
 
     if empleos_web:
         sep = "━" * 30
-        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
-        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
+        n_portales = len(set(e['portal'] for e in empleos_web))
+        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
+        resultado += f"📊 {len(empleos_web)} ofertas de {n_portales} portales\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:8], 1):
-            resultado += f"**{i}. {emp['titulo']}**\n"
-            if emp.get('empresa'):
-                resultado += f"🏢 {emp['empresa']}\n"
-            if emp.get('ciudad'):
-                resultado += f"📍 {emp['ciudad']}\n"
+        for i, emp in enumerate(empleos_web[:12], 1):
+            resultado += f"{'─' * 28}\n"
+            resultado += f"{i}. {emp['titulo']}\n"
+            if emp.get('empresa'): resultado += f"   🏢 Empresa: {emp['empresa']}\n"
+            if emp.get('ciudad'): resultado += f"   📍 Ubicación: {emp['ciudad']}\n"
+            resultado += f"   💰 Salario: {emp.get('sueldo') or 'Consultar en portal'}\n"
+            resultado += f"   📰 Fuente: {emp['portal']}\n"
             if emp.get('desc'):
-                desc_fmt = emp['desc'][:200].strip()
-                resultado += f"📝 _{desc_fmt}_\n"
+                resultado += f"   📝 {emp['desc'][:220].strip()}\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
+                resultado += f"   🔗 {emp['link']}\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -2431,18 +2487,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
-                resultado += f"📋 Búsqueda: _{consulta}_\n"
+                resultado  = f"🔎 ANÁLISIS MERCADO LABORAL — IA\n"
+                resultado += f"📋 Búsqueda: {consulta}\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
+                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
+    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas actualizadas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -2581,6 +2637,89 @@ def registrar_servicio_usado(user_id, servicio):
         logger.error(f"Error registrando servicio: {e}")
         if conn:
             conn.close()
+
+
+# ==================== CACHE DE CONSULTAS + INDICADORES ====================
+
+# ── Cache en memoria para indicadores del día (evita re-consultar APIs) ──
+_indicadores_cache = {
+    'fecha': '',        # formato YYYY-MM-DD
+    'all_data': None,
+    'explicaciones': None,
+    'html_content': None,
+}
+
+def guardar_cache_consulta(clave: str, resultado: str, tipo: str = 'buscar_web', horas_ttl: int = 24):
+    """Guarda resultado de consulta en cache DB con expiración"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        clave_norm = clave.strip().lower()[:200]
+        expira = (datetime.now() + timedelta(hours=horas_ttl)).strftime('%Y-%m-%d %H:%M:%S')
+        if DATABASE_URL:
+            c.execute("""INSERT INTO consultas_cache (clave, tipo, resultado, fecha_expiracion)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (clave) DO UPDATE SET
+                        resultado = EXCLUDED.resultado,
+                        fecha_creacion = CURRENT_TIMESTAMP,
+                        fecha_expiracion = EXCLUDED.fecha_expiracion""",
+                     (clave_norm, tipo, resultado[:15000], expira))
+        else:
+            c.execute("""INSERT OR REPLACE INTO consultas_cache (clave, tipo, resultado, fecha_expiracion)
+                        VALUES (?, ?, ?, ?)""",
+                     (clave_norm, tipo, resultado[:15000], expira))
+        conn.commit()
+        conn.close()
+        logger.debug(f"Cache guardado: {tipo}/{clave_norm[:40]}")
+    except Exception as e:
+        logger.debug(f"Error guardando cache: {e}")
+
+def obtener_cache_consulta(clave: str, tipo: str = 'buscar_web') -> str:
+    """Busca resultado en cache. Retorna texto o None si no existe/expirado"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        clave_norm = clave.strip().lower()[:200]
+        if DATABASE_URL:
+            c.execute("""SELECT resultado FROM consultas_cache
+                        WHERE clave = %s AND tipo = %s
+                        AND fecha_expiracion > CURRENT_TIMESTAMP""",
+                     (clave_norm, tipo))
+        else:
+            c.execute("""SELECT resultado FROM consultas_cache
+                        WHERE clave = ? AND tipo = ?
+                        AND fecha_expiracion > datetime('now')""",
+                     (clave_norm, tipo))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            resultado = row['resultado'] if DATABASE_URL else row[0]
+            logger.info(f"✅ Cache hit: {tipo}/{clave_norm[:40]}")
+            return resultado
+        return None
+    except Exception as e:
+        logger.debug(f"Error leyendo cache: {e}")
+        return None
+
+def limpiar_cache_expirado():
+    """Limpia entradas de cache expiradas"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("DELETE FROM consultas_cache WHERE fecha_expiracion < CURRENT_TIMESTAMP")
+        else:
+            c.execute("DELETE FROM consultas_cache WHERE fecha_expiracion < datetime('now')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 # ==================== COMANDOS BÁSICOS ====================
@@ -3850,12 +3989,12 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Formato simple: /empleo Gerente Finanzas
             cargo = texto
     
-    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo...")
+    msg = await update.message.reply_text("🔍 Buscando ofertas de empleo en 4 portales...")
     
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
+    await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -5147,7 +5286,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts (4 gauges + 8 stats)"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5172,6 +5311,16 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
+            # Nuevos indicadores
+            try:
+                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
+                total_eventos = c.fetchone()['total']
+            except: total_eventos = 0
+            try:
+                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
+                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
+                nuevos_7d = c.fetchone()['total']
+            except: nuevos_7d = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5188,13 +5337,22 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
+            try:
+                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
+                total_eventos = c.fetchone()[0]
+            except: total_eventos = 0
+            try:
+                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
+                nuevos_7d = c.fetchone()[0]
+            except: nuevos_7d = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
+        tasa_crecimiento = round(nuevos_7d / max(suscriptores, 1) * 100, 1) if suscriptores else 0
         
-        # Generar mini-dashboard HTML con gauges ECharts
+        # Generar mini-dashboard HTML con 4 gauges + 8 stat boxes
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5206,12 +5364,14 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
+.stat.highlight .val{{color:#2ecc71}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5221,6 +5381,7 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
+<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5230,12 +5391,14 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
+<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
 </div>
 
-<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
+<div class="foot">Bot Premium v6.0 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3';
+var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5244,8 +5407,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5254,6 +5417,7 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5269,7 +5433,10 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n"
+            f"📅 Eventos activos: {total_eventos:,}\n"
+            f"🆕 Nuevos miembros (7d): {nuevos_7d:,}\n"
+            f"📊 Tasa crecimiento: {tasa_crecimiento}%/semana\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5278,7 +5445,7 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts interactivo con gauges"
+                caption="📊 Dashboard ECharts interactivo — 4 gauges + 8 indicadores"
             )
         
         try:
@@ -9721,22 +9888,6 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
-            # Obtener recomendaciones del usuario para mostrar en tarjeta pública
-            _pub_recs = 0
-            try:
-                conn_pr = get_db_connection()
-                if conn_pr:
-                    cpr = conn_pr.cursor()
-                    if DATABASE_URL:
-                        cpr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
-                        _pub_recs = cpr.fetchone()['t']
-                    else:
-                        cpr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
-                        _pub_recs = cpr.fetchone()[0]
-                    conn_pr.close()
-            except Exception:
-                pass
-
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9747,9 +9898,6 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-            # Recomendaciones de la comunidad
-            if _pub_recs > 0:
-                caption += f"\n⭐ <b>{_pub_recs} recomendación{'es' if _pub_recs != 1 else ''}</b> de la comunidad"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9851,22 +9999,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
-                        # Obtener conteo de recomendaciones para mostrar en tarjeta
-                        _num_recs = 0
-                        try:
-                            conn_r = get_db_connection()
-                            if conn_r:
-                                cr = conn_r.cursor()
-                                if DATABASE_URL:
-                                    cr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
-                                    _num_recs = cr.fetchone()['t']
-                                else:
-                                    cr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
-                                    _num_recs = cr.fetchone()[0]
-                                conn_r.close()
-                        except Exception:
-                            pass
-
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -9877,11 +10009,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
-                        # Link a recomendaciones recibidas
-                        if _num_recs > 0:
-                            caption += f"\n⭐ <b>{_num_recs} recomendación{'es' if _num_recs != 1 else ''}</b> — Ver: /mis_recomendaciones"
-                        else:
-                            caption += "\n⭐ Pide recomendaciones: /recomendar"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -9923,25 +10050,6 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
-                        # Link a recomendaciones
-                        _nr2 = 0
-                        try:
-                            conn_r2 = get_db_connection()
-                            if conn_r2:
-                                cr2 = conn_r2.cursor()
-                                if DATABASE_URL:
-                                    cr2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
-                                    _nr2 = cr2.fetchone()['t']
-                                else:
-                                    cr2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
-                                    _nr2 = cr2.fetchone()[0]
-                                conn_r2.close()
-                        except Exception:
-                            pass
-                        if _nr2 > 0:
-                            msg += f"\n⭐ {_nr2} recomendación{'es' if _nr2 != 1 else ''} — Ver: /mis_recomendaciones\n"
-                        else:
-                            msg += f"\n⭐ Pide recomendaciones: /recomendar\n"
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -15611,88 +15719,122 @@ def generar_html_indicadores(all_data, explicaciones):
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico completo de Chile con análisis IA:
-      • 11 indicadores del día con sparkline 30 días
-      • Tasas CMF: TMC (labels unicos Tipo 1-6) + Contexto Financiero
-      • Análisis IA por indicador (Groq + RAG + BCCH)
-      • Dólar vs Euro últimos 6 meses
-      • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
+    /indicadores — Dashboard económico con cache diario:
+      Primera consulta del día: descarga de APIs + análisis IA → cache
+      Consultas siguientes del mismo día: entrega datos cacheados (~2s)
     """
+    hoy = datetime.now().strftime('%Y-%m-%d')
+    usando_cache = False
+
     msg = await update.message.reply_text(
         "📈 Consultando indicadores económicos...\n"
-        "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
+        "⏳ Verificando cache del día..."
     )
     try:
         loop = asyncio.get_running_loop()
 
-        # 1. Indicadores Banco Central (~80 peticiones en paralelo)
-        all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
-        datos = all_data.get('datos_actuales', {})
-        if not datos:
-            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
-            return
-
-        await msg.edit_text(
-            f"✅ {len(datos)} indicadores obtenidos.\n"
-            "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
-            "🔍 Web scraping Banco Central..."
-        )
-
-        # 2. Tasas CMF (sin necesidad de variable de entorno adicional)
-        datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
-        all_data['datos_cmf'] = datos_cmf or {}
-
-        # 2b. Rentabilidad AFP (6 meses) — corre en paralelo con BCCH scraping
-        datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
-        all_data['datos_afp'] = datos_afp or {}
-
-        # 3. Web scraping BCCH
-        noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
-        contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
-
-        await msg.edit_text(
-            f"✅ Indicadores + CMF obtenidos.\n"
-            "📚 Consultando biblioteca RAG...\n"
-            "🤖 Generando análisis IA..."
-        )
-
-        # 4. RAG por indicador
-        queries_rag = {
-            'uf':             'unidad de fomento inflacion reajuste Chile',
-            'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
-            'euro':           'tipo de cambio euro moneda extranjera',
-            'utm':            'unidad tributaria mensual impuestos Chile',
-            'ipc':            'indice de precios al consumidor inflacion causas efectos',
-            'tpm':            'tasa de politica monetaria banco central tasas de interes',
-            'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
-            'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
-            'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
-            'libra_cobre':    'precio cobre Chile exportaciones materias primas',
-            'ivp':            'indice valor promedio creditos hipotecarios Chile',
-            'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
-            'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
-            'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
-        }
-        fragmentos_rag = {}
-        for cod in datos:
-            query = queries_rag.get(cod, f'indicador economico {cod} Chile')
-            frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
-            fragmentos_rag[cod] = frag
-
-        # 5. Explicaciones IA
-        await msg.edit_text(
-            f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
-            "📊 Construyendo dashboard interactivo..."
-        )
-        explicaciones = {}
-        for cod, d in datos.items():
-            exp = await loop.run_in_executor(
-                None, generar_explicacion_indicador,
-                cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
+        # ── Verificar cache del día ───────────────────────────────────────
+        if (_indicadores_cache.get('fecha') == hoy
+                and _indicadores_cache.get('all_data')
+                and _indicadores_cache.get('html_content')):
+            # Cache válido del mismo día
+            usando_cache = True
+            all_data = _indicadores_cache['all_data']
+            explicaciones = _indicadores_cache['explicaciones'] or {}
+            html_content = _indicadores_cache['html_content']
+            datos = all_data.get('datos_actuales', {})
+            await msg.edit_text(
+                f"✅ {len(datos)} indicadores (cache del día)\n"
+                "📊 Generando respuesta..."
             )
-            explicaciones[cod] = exp
+            logger.info(f"📈 Indicadores: usando cache del día ({len(datos)} indicadores)")
+        else:
+            # Primera consulta del día — pipeline completo
+            await msg.edit_text(
+                "📈 Primera consulta del día — descargando datos frescos...\n"
+                "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
+            )
 
-        # 6. Mensaje de texto resumido
+            # 1. Indicadores Banco Central
+            all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
+            datos = all_data.get('datos_actuales', {})
+            if not datos:
+                await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
+                return
+
+            await msg.edit_text(
+                f"✅ {len(datos)} indicadores obtenidos.\n"
+                "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
+                "🔍 Web scraping Banco Central..."
+            )
+
+            # 2. Tasas CMF
+            datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+            all_data['datos_cmf'] = datos_cmf or {}
+
+            # 2b. Rentabilidad AFP
+            datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
+            all_data['datos_afp'] = datos_afp or {}
+
+            # 3. Web scraping BCCH
+            noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
+            contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
+
+            await msg.edit_text(
+                f"✅ Indicadores + CMF obtenidos.\n"
+                "📚 Consultando biblioteca RAG...\n"
+                "🤖 Generando análisis IA..."
+            )
+
+            # 4. RAG por indicador
+            queries_rag = {
+                'uf':             'unidad de fomento inflacion reajuste Chile',
+                'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
+                'euro':           'tipo de cambio euro moneda extranjera',
+                'utm':            'unidad tributaria mensual impuestos Chile',
+                'ipc':            'indice de precios al consumidor inflacion causas efectos',
+                'tpm':            'tasa de politica monetaria banco central tasas de interes',
+                'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
+                'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
+                'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
+                'libra_cobre':    'precio cobre Chile exportaciones materias primas',
+                'ivp':            'indice valor promedio creditos hipotecarios Chile',
+                'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
+                'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
+                'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
+            }
+            fragmentos_rag = {}
+            for cod in datos:
+                query = queries_rag.get(cod, f'indicador economico {cod} Chile')
+                frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
+                fragmentos_rag[cod] = frag
+
+            # 5. Explicaciones IA
+            await msg.edit_text(
+                f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
+                "📊 Construyendo dashboard interactivo..."
+            )
+            explicaciones = {}
+            for cod, d in datos.items():
+                exp = await loop.run_in_executor(
+                    None, generar_explicacion_indicador,
+                    cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
+                )
+                explicaciones[cod] = exp
+
+            # Generar HTML
+            html_content = await loop.run_in_executor(
+                None, generar_html_indicadores, all_data, explicaciones
+            )
+
+            # ── Guardar en cache del día ──────────────────────────────────
+            _indicadores_cache['fecha'] = hoy
+            _indicadores_cache['all_data'] = all_data
+            _indicadores_cache['explicaciones'] = explicaciones
+            _indicadores_cache['html_content'] = html_content
+            logger.info(f"📈 Indicadores: cache del día actualizado ({len(datos)} indicadores)")
+
+        # ── 6. Mensaje de texto resumido (siempre se genera) ─────────────
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
@@ -15771,27 +15913,27 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # 7. Generar y enviar HTML
         await msg.edit_text("📊 Generando dashboard HTML interactivo...")
-        html_content = await loop.run_in_executor(
-            None, generar_html_indicadores, all_data, explicaciones
-        )
+        if not usando_cache:
+            # html_content ya fue generado arriba y cacheado
+            pass
         html_path = f"/tmp/ind_{update.effective_user.id}.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(html_content)
         with open(html_path, 'rb') as fh:
+            cache_nota = "⚡ Datos del cache diario" if usando_cache else "🔄 Datos frescos de APIs"
             await update.message.reply_document(
                 document=fh,
                 filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
                 caption=(
-                    "📊 Dashboard Indicadores Económicos Chile\n\n"
+                    f"📊 Dashboard Indicadores Económicos Chile\n"
+                    f"{cache_nota}\n\n"
                     "• 14 indicadores del día con sparklines 30 días\n"
                     "  (incl. IPSA Bolsa · Ethereum · Solana)\n"
                     "• 🏦 Tasas CMF: TMC (Tipo 1-6) + Contexto Financiero\n"
                     "• 🐔 Rentabilidad AFP: 7 AFPs x 5 fondos (6 meses)\n"
                     "• 🤖 Análisis IA por indicador\n"
-                    "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
                     "• 💱 Dólar vs Euro últimos 12 meses\n"
-                    "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
-                    "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
+                    "• 📅 Histórico 10 años\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
                 )
             )
@@ -16103,45 +16245,41 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# COMANDO /buscar_web - Búsqueda web con scraping profundo de contenido real
+# COMANDO /buscar_web - Búsqueda web vía DuckDuckGo (sin API key)
 # ═══════════════════════════════════════════════════════════════════════════════
 @requiere_suscripcion
 async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /buscar_web [consulta] — Búsqueda web con scraping profundo:
-      1. DuckDuckGo HTML → obtiene URLs + snippets
-      2. Fallback Google scraping si DDG falla
-      3. EXTRAE contenido real de las 3 mejores páginas (web scraping)
-      4. Groq IA genera resumen profundo basado en contenido REAL extraído
-      5. Incluye fuentes con URLs directas
+    /buscar_web [consulta] — Búsqueda web real.
+    Capas:
+      1. DuckDuckGo HTML scraping (html.duckduckgo.com) → resultados reales con títulos/snippets/URLs
+      2. Si falla scraping → Groq responde desde su conocimiento con disclaimer
     """
     if not context.args:
         await update.message.reply_text(
-            "🌐 BÚSQUEDA WEB INTELIGENTE\n\n"
-            "Busca en Internet, extrae contenido de las páginas\n"
-            "y genera un resumen profesional con IA.\n\n"
-            "Uso: /buscar_web [tu consulta]\n\n"
+            "🌐 Uso: /buscar_web [tu consulta]\n\n"
             "Ejemplos:\n"
-            "  /buscar_web pronóstico temperatura Santiago\n"
+            "  /buscar_web pronóstico temperatura Santiago esta semana\n"
             "  /buscar_web noticias economía Chile hoy\n"
             "  /buscar_web requisitos MBA Universidad de Chile\n"
-            "  /buscar_web precio cobre hoy bolsa metales\n"
-            "  /buscar_web ley 40 horas Chile implementación"
+            "  /buscar_web salario promedio ingeniero naval Chile"
         )
         return
 
     query = " ".join(context.args)
-    msg   = await update.message.reply_text(
-        f"🌐 Buscando: {query[:60]}...\n"
-        "⏳ Paso 1/3: Consultando motores de búsqueda..."
-    )
+    msg   = await update.message.reply_text(f"🌐 Buscando: {query[:60]}...")
     try:
         loop = asyncio.get_running_loop()
 
-        # ── PASO 1: Obtener resultados de búsqueda (URLs) ─────────────────
+        # ── Verificar cache local primero ──────────────────────────────────
+        cached = obtener_cache_consulta(query, 'buscar_web')
+        if cached:
+            await msg.edit_text(cached[:4090] + ("\n..." if len(cached) > 4090 else ""))
+            registrar_servicio_usado(update.effective_user.id, 'buscar_web')
+            return
 
         def _scrape_ddg(q):
-            """Raspa html.duckduckgo.com — obtiene URLs + snippets reales."""
+            """Raspa html.duckduckgo.com — resultados reales sin API key."""
             try:
                 from bs4 import BeautifulSoup as _BS
                 import urllib.parse as _up
@@ -16151,280 +16289,45 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     headers={
                         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                       "Chrome/126.0.0.0 Safari/537.36"),
+                                       "Chrome/124.0.0.0 Safari/537.36"),
                         "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-                        "Accept": "text/html,application/xhtml+xml",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Referer": "https://duckduckgo.com/",
                     },
-                    timeout=18,
+                    timeout=15,
                     allow_redirects=True,
                 )
                 if r.status_code != 200:
+                    logger.debug(f"DDG HTML status: {r.status_code}")
                     return []
                 soup = _BS(r.text, "html.parser")
                 resultados = []
-                for div in soup.select(".result, .web-result")[:10]:
+                for div in soup.select(".result, .web-result")[:8]:
                     a_tag = div.select_one(".result__a, a.result__url, h2 a")
                     if not a_tag:
                         continue
                     titulo = a_tag.get_text(strip=True)
                     href   = a_tag.get("href", "")
+                    # DDG wraps URLs: /l/?uddg=https%3A%2F%2F...
                     if "uddg=" in href or href.startswith("/l/"):
                         qs   = _up.parse_qs(_up.urlparse(href).query)
                         href = (qs.get("uddg", [""])[0] or
                                 qs.get("u",    [""])[0] or href)
                     snip_tag = div.select_one(".result__snippet")
                     snippet  = snip_tag.get_text(strip=True) if snip_tag else ""
-                    if titulo and len(titulo) > 3 and href.startswith("http"):
+                    if titulo and len(titulo) > 3:
                         resultados.append({
-                            "titulo":  titulo[:150],
-                            "snippet": snippet[:500],
-                            "url":     href[:400],
+                            "titulo":  titulo[:120],
+                            "snippet": snippet[:400],
+                            "url":     href[:300],
                         })
                 return resultados
             except Exception as _e:
                 logger.debug(f"DDG scrape error: {_e}")
                 return []
 
-        def _scrape_google(q):
-            """Fallback: Raspa Google Search — resultados con URLs reales."""
-            try:
-                from bs4 import BeautifulSoup as _BS
-                import urllib.parse as _up
-                r = requests.get(
-                    "https://www.google.com/search",
-                    params={"q": q, "hl": "es", "gl": "cl", "num": "10"},
-                    headers={
-                        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"),
-                        "Accept-Language": "es-CL,es;q=0.9",
-                    },
-                    timeout=15,
-                )
-                if r.status_code != 200:
-                    return []
-                soup = _BS(r.text, "html.parser")
-                resultados = []
-                for div in soup.select("div.g, div[data-sokoban-container]")[:10]:
-                    a_tag = div.select_one("a[href^='http']")
-                    if not a_tag:
-                        continue
-                    href = a_tag.get("href", "")
-                    h3 = div.select_one("h3")
-                    titulo = h3.get_text(strip=True) if h3 else a_tag.get_text(strip=True)
-                    snip_el = div.select_one("div.VwiC3b, span.aCOpRe, div[data-sncf]")
-                    snippet = snip_el.get_text(strip=True) if snip_el else ""
-                    if titulo and len(titulo) > 3 and href.startswith("http"):
-                        resultados.append({
-                            "titulo":  titulo[:150],
-                            "snippet": snippet[:500],
-                            "url":     href[:400],
-                        })
-                return resultados
-            except Exception as _ge:
-                logger.debug(f"Google scrape: {_ge}")
-                return []
-
-        # ── PASO 2: Extraer contenido real de las páginas top ─────────────
-
-        def _extraer_contenido_pagina(url, timeout=12):
-            """Extrae texto legible de una página web (artículo/nota/info)."""
-            try:
-                from bs4 import BeautifulSoup as _BS
-                # Evitar archivos pesados (PDF, imágenes, etc.)
-                skip_ext = ('.pdf', '.jpg', '.png', '.gif', '.mp4', '.zip', '.doc', '.xlsx')
-                if any(url.lower().endswith(ext) for ext in skip_ext):
-                    return ""
-                r = requests.get(
-                    url,
-                    headers={
-                        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"),
-                        "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-                        "Accept": "text/html",
-                    },
-                    timeout=timeout,
-                    allow_redirects=True,
-                )
-                if r.status_code != 200:
-                    return ""
-                # Verificar que es HTML
-                ct = r.headers.get("Content-Type", "")
-                if "text/html" not in ct and "application/xhtml" not in ct:
-                    return ""
-                soup = _BS(r.text, "html.parser")
-                # Eliminar scripts, estilos, nav, footer, header, aside
-                for tag in soup.select("script, style, nav, footer, header, aside, "
-                                       "iframe, noscript, form, [role='navigation'], "
-                                       "[role='banner'], [role='contentinfo'], "
-                                       ".sidebar, .nav, .footer, .header, .menu, "
-                                       ".cookie, .popup, .modal, .ad, .ads, .advertisement"):
-                    tag.decompose()
-                # Buscar contenido principal (article > main > body)
-                contenedor = (
-                    soup.select_one("article") or
-                    soup.select_one("[role='main']") or
-                    soup.select_one("main") or
-                    soup.select_one(".post-content, .entry-content, .article-body, "
-                                    ".content, .post, #content, #main-content") or
-                    soup.body
-                )
-                if not contenedor:
-                    return ""
-                # Extraer párrafos de texto
-                parrafos = []
-                for p in contenedor.find_all(['p', 'li', 'h1', 'h2', 'h3', 'td', 'blockquote']):
-                    texto = p.get_text(separator=' ', strip=True)
-                    # Filtrar líneas muy cortas o que son menús/nav
-                    if len(texto) > 40:
-                        parrafos.append(texto)
-                contenido = '\n'.join(parrafos)
-                # Limitar tamaño (para no sobrecargar el prompt de IA)
-                return contenido[:3000]
-            except Exception as _pe:
-                logger.debug(f"Extracción página {url[:60]}: {_pe}")
-                return ""
-
-        def _extraer_multiples_paginas(resultados, max_paginas=3):
-            """Extrae contenido de múltiples páginas en paralelo."""
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            contenidos = []
-            urls_a_extraer = []
-            # Seleccionar las mejores URLs (evitar YouTube, redes sociales, etc.)
-            dominios_skip = {'youtube.com', 'facebook.com', 'instagram.com', 'twitter.com',
-                             'x.com', 'tiktok.com', 'pinterest.com', 'reddit.com'}
-            for r in resultados:
-                url = r.get('url', '')
-                if not url.startswith('http'):
-                    continue
-                dominio = url.split('/')[2] if len(url.split('/')) > 2 else ''
-                if any(ds in dominio for ds in dominios_skip):
-                    continue
-                urls_a_extraer.append(r)
-                if len(urls_a_extraer) >= max_paginas + 2:
-                    break
-
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                fut_map = {
-                    ex.submit(_extraer_contenido_pagina, r['url']): r
-                    for r in urls_a_extraer[:max_paginas + 2]
-                }
-                for fut in as_completed(fut_map):
-                    r = fut_map[fut]
-                    texto = fut.result()
-                    if texto and len(texto) > 100:
-                        contenidos.append({
-                            'titulo': r['titulo'],
-                            'url': r['url'],
-                            'contenido': texto,
-                            'snippet': r.get('snippet', '')
-                        })
-                    if len(contenidos) >= max_paginas:
-                        break
-            return contenidos
-
-        # ── PASO 3: Resumen IA profundo con contenido real ────────────────
-
-        def _ia_resumen_profundo(q, contenidos, resultados_orig):
-            """Groq genera resumen profundo basado en contenido REAL extraído."""
-            if not GROQ_API_KEY:
-                return None
-
-            # Construir contexto con contenido real de las páginas
-            ctx_paginas = ""
-            for i, c in enumerate(contenidos[:3], 1):
-                ctx_paginas += (
-                    f"\n--- FUENTE {i}: {c['titulo']} ---\n"
-                    f"URL: {c['url']}\n"
-                    f"Contenido extraído:\n{c['contenido'][:1800]}\n"
-                )
-
-            # Agregar snippets de resultados que no se pudieron extraer
-            ctx_snippets = ""
-            urls_extraidas = {c['url'] for c in contenidos}
-            extras = [r for r in resultados_orig if r['url'] not in urls_extraidas][:3]
-            if extras:
-                ctx_snippets = "\n--- Resultados adicionales (solo snippets) ---\n"
-                for r in extras:
-                    ctx_snippets += f"• {r['titulo']}: {r['snippet'][:200]}\n"
-
-            try:
-                rg = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                             "Content-Type": "application/json"},
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "max_tokens": 900,
-                        "temperature": 0.3,
-                        "messages": [
-                            {"role": "system",
-                             "content": (
-                                "Eres un analista de información experto. El usuario hizo una búsqueda web "
-                                "y se extrajo contenido REAL de las páginas encontradas. "
-                                "Tu tarea es generar el MEJOR resumen posible con esta información:\n\n"
-                                "1. Responde directamente la consulta del usuario con datos concretos\n"
-                                "2. Incluye cifras, fechas, nombres y datos verificables que encuentres\n"
-                                "3. Organiza la información de forma clara y útil\n"
-                                "4. Si hay datos contradictorios entre fuentes, menciónalo\n"
-                                "5. Máximo 400 palabras, en español de Chile\n"
-                                "6. NO uses emojis, asteriscos ni formatos markdown\n"
-                                "7. Al final, indica brevemente la calidad/confiabilidad de las fuentes"
-                             )},
-                            {"role": "user",
-                             "content": (
-                                f"CONSULTA DEL USUARIO: {q}\n\n"
-                                f"CONTENIDO EXTRAÍDO DE LAS PÁGINAS WEB:\n{ctx_paginas}"
-                                f"{ctx_snippets}\n\n"
-                                f"Genera el resumen más completo y útil posible:"
-                             )}
-                        ]
-                    },
-                    timeout=25,
-                )
-                if rg.status_code == 200:
-                    return rg.json()["choices"][0]["message"]["content"].strip()
-            except Exception as _ge:
-                logger.debug(f"Groq resumen profundo: {_ge}")
-            return None
-
-        def _ia_resumen_simple(q, resultados):
-            """Resumen IA con solo snippets (cuando no se pudo extraer páginas)."""
-            if not GROQ_API_KEY or not resultados:
-                return None
-            ctx = "\n\n".join([
-                f"[{i}] {r['titulo']}\n{r['snippet']}"
-                for i, r in enumerate(resultados[:6], 1)
-            ])
-            try:
-                rg = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                             "Content-Type": "application/json"},
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "max_tokens": 600,
-                        "temperature": 0.3,
-                        "messages": [
-                            {"role": "system",
-                             "content": ("Eres asistente de búsqueda. Con los resultados web, "
-                                        "elabora un resumen útil en español (máx 250 palabras). "
-                                        "Incluye datos concretos: precios, fechas, cifras. "
-                                        "NO uses emojis ni formatos markdown.")},
-                            {"role": "user",
-                             "content": f"Consulta: {q}\n\nResultados web:\n{ctx}\n\nResumen:"}
-                        ]
-                    },
-                    timeout=18,
-                )
-                if rg.status_code == 200:
-                    return rg.json()["choices"][0]["message"]["content"].strip()
-            except Exception as _ge2:
-                logger.debug(f"Groq resumen simple: {_ge2}")
-            return None
-
-        def _groq_conocimiento(q):
-            """Último fallback: Groq responde desde su conocimiento."""
+        def _groq_directo(q):
+            """Fallback: Groq responde desde su conocimiento cuando el scraping falla."""
             if not GROQ_API_KEY:
                 return None
             try:
@@ -16434,13 +16337,14 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                              "Content-Type": "application/json"},
                     json={
                         "model": "llama-3.3-70b-versatile",
-                        "max_tokens": 600,
+                        "max_tokens": 550,
                         "messages": [
                             {"role": "system",
-                             "content": ("Eres un asistente experto. El usuario hizo una búsqueda web "
-                                        "que no pudo completarse. Responde con lo que sepas sobre el "
-                                        "tema. Si es información de tiempo real, indica que el usuario "
-                                        "debería consultar fuentes actualizadas. En español de Chile.")},
+                             "content": ("Eres un asistente experto para profesionales navales chilenos. "
+                                        "El usuario hizo una búsqueda web. Responde en español de Chile con "
+                                        "lo más relevante y útil que sepas sobre el tema. "
+                                        "Si el tema es de tiempo real (clima, noticias hoy), indícalo claramente "
+                                        "y da información de contexto histórico o fuentes donde consultar.")},
                             {"role": "user",
                              "content": f"Búsqueda: {q}\n\nResponde con información útil y concreta:"}
                         ]
@@ -16450,125 +16354,91 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if rg.status_code == 200:
                     return rg.json()["choices"][0]["message"]["content"].strip()
             except Exception as _ge:
-                logger.debug(f"Groq conocimiento: {_ge}")
+                logger.debug(f"Groq directo: {_ge}")
             return None
 
-        # ═══════════════════════════════════════════════════════════════════
-        # EJECUCIÓN DEL PIPELINE
-        # ═══════════════════════════════════════════════════════════════════
+        def _ia_resumen(q, res):
+            """Resume los resultados web scrapeados con Groq."""
+            if not GROQ_API_KEY or not res:
+                return None
+            ctx = "\n\n".join([
+                f"[{i}] {r['titulo']}\n{r['snippet']}"
+                for i, r in enumerate(res[:5], 1)
+            ])
+            try:
+                rg = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                             "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "max_tokens": 450,
+                        "messages": [
+                            {"role": "system",
+                             "content": ("Eres asistente de búsqueda para profesionales navales chilenos. "
+                                        "Con los resultados web reales, elabora un resumen útil en español "
+                                        "(máx 280 palabras). Si hay datos concretos (precios, fechas, "
+                                        "temperaturas, requisitos), inclúyelos textualmente.")},
+                            {"role": "user",
+                             "content": f"Consulta: {q}\n\nResultados web reales:\n{ctx}\n\nResumen útil:"}
+                        ]
+                    },
+                    timeout=16,
+                )
+                if rg.status_code == 200:
+                    return rg.json()["choices"][0]["message"]["content"].strip()
+            except Exception as _ge2:
+                logger.debug(f"Groq resumen: {_ge2}")
+            return None
 
-        # Paso 1: Buscar en DuckDuckGo
+        # ── Ejecutar búsqueda ──────────────────────────────────────────────
         resultados = await loop.run_in_executor(None, _scrape_ddg, query)
-
-        # Si DDG falló, intentar Google
-        if not resultados:
-            await msg.edit_text(
-                f"🌐 Buscando: {query[:50]}...\n"
-                "⏳ Motor alternativo (Google)..."
-            )
-            resultados = await loop.run_in_executor(None, _scrape_google, query)
-
         sep = "━" * 30
 
         if resultados:
-            # Paso 2: Extraer contenido real de las páginas
-            await msg.edit_text(
-                f"🌐 Buscando: {query[:50]}...\n"
-                f"✅ {len(resultados)} resultados encontrados\n"
-                "⏳ Paso 2/3: Extrayendo contenido de las páginas..."
-            )
-            contenidos = await loop.run_in_executor(
-                None, _extraer_multiples_paginas, resultados, 3
-            )
-
-            # Paso 3: Generar resumen IA
-            await msg.edit_text(
-                f"🌐 Buscando: {query[:50]}...\n"
-                f"✅ {len(resultados)} resultados · {len(contenidos)} páginas extraídas\n"
-                "⏳ Paso 3/3: Generando resumen con IA..."
-            )
-
-            if contenidos:
-                # Resumen PROFUNDO con contenido real
-                ia_res = await loop.run_in_executor(
-                    None, _ia_resumen_profundo, query, contenidos, resultados
-                )
-                tipo_resumen = "RESUMEN BASADO EN CONTENIDO EXTRAÍDO"
-                paginas_info = f"📄 {len(contenidos)} páginas analizadas en profundidad"
-            else:
-                # Resumen con solo snippets
-                ia_res = await loop.run_in_executor(
-                    None, _ia_resumen_simple, query, resultados
-                )
-                tipo_resumen = "RESUMEN BASADO EN RESULTADOS DE BÚSQUEDA"
-                paginas_info = "📋 Basado en snippets de búsqueda"
-
-            # Construir respuesta
+            ia_res = await loop.run_in_executor(None, _ia_resumen, query, resultados)
             lines  = [f"🌐 BÚSQUEDA WEB: {query}", sep, ""]
-
             if ia_res:
-                lines += [f"🤖 {tipo_resumen}:", paginas_info, "", ia_res, ""]
-
-            lines += [sep, "📋 FUENTES CONSULTADAS:", ""]
-
-            # Mostrar fuentes (primero las extraídas, luego las demás)
-            urls_mostradas = set()
-            num = 1
-            # Fuentes con contenido extraído
-            for c in contenidos[:3]:
-                tit = c.get('titulo', '')[:90]
-                url = c.get('url', '')
-                lines.append(f"{num}. {tit}")
-                if url:
-                    lines.append(f"   📄 {url[:200]}")
-                    urls_mostradas.add(url)
-                num += 1
-            # Fuentes adicionales (solo snippets)
-            for r in resultados[:8]:
-                url = r.get('url', '')
-                if url in urls_mostradas:
-                    continue
-                tit  = r.get('titulo', '')[:90]
-                snip = r.get('snippet', '')[:150]
-                lines.append(f"\n{num}. {tit}")
-                if snip:
-                    lines.append(f"   {snip}")
-                if url:
+                lines += ["🤖 RESUMEN IA:", ia_res, "", sep, "📋 FUENTES:"]
+            else:
+                lines += [sep, "📋 RESULTADOS:"]
+            for i, r in enumerate(resultados[:6], 1):
+                tit  = (r.get("titulo") or "").strip()[:100]
+                snip = (r.get("snippet") or "").strip()
+                url  = (r.get("url") or "").strip()
+                lines.append(f"\n{i}. {tit}")
+                if snip and snip[:50] not in tit:
+                    lines.append(f"   {snip[:220]}")
+                if url and url.startswith("http"):
                     lines.append(f"   🔗 {url[:200]}")
-                    urls_mostradas.add(url)
-                num += 1
-                if num > 8:
-                    break
-
-            lines += ["", sep, "Fuente: DuckDuckGo + Web Scraping + Groq IA"]
-            lines += ["Cofradía de Networking Bot v6.0"]
-
+            lines += ["", sep, "Fuente: DuckDuckGo · Groq IA | Cofradía de Networking"]
             texto_final = "\n".join(lines)
-            # Telegram max 4096 chars — truncar si excede
-            if len(texto_final) > 4050:
-                texto_final = texto_final[:4040] + "\n..."
-            await msg.edit_text(texto_final)
+            await msg.edit_text(texto_final[:4090])
+            # Guardar en cache (24h)
+            guardar_cache_consulta(query, texto_final, 'buscar_web', 24)
         else:
-            # Ni DDG ni Google — fallback a Groq conocimiento
+            # Scraping falló → Groq directo
             await msg.edit_text(f"🌐 Consultando IA sobre: {query[:50]}...")
-            ia_dir = await loop.run_in_executor(None, _groq_conocimiento, query)
+            ia_dir = await loop.run_in_executor(None, _groq_directo, query)
             lines  = [f"🌐 BÚSQUEDA: {query}", sep, ""]
             if ia_dir:
                 lines += [
-                    "🤖 RESPUESTA IA (conocimiento interno):", "",
-                    ia_dir, "", sep,
+                    "🤖 RESPUESTA IA (conocimiento interno):", ia_dir, "", sep,
                     "ℹ️ La búsqueda web directa no estuvo disponible.",
-                    "Para datos en tiempo real, consulta directamente",
-                    "Google, weather.com o los sitios especializados.",
+                    "Para datos en tiempo real (clima hoy, noticias ahora) consulta",
+                    "directamente Google, weather.com o los sitios especializados.",
                 ]
             else:
                 lines += [
                     "❌ Búsqueda web e IA no disponibles en este momento.",
-                    "Intenta en unos minutos o usa /buscar_ia para buscar",
-                    "en el historial del grupo.",
+                    "Intenta en unos minutos o usa /buscar_ia para buscar en el historial del grupo.",
                 ]
             lines += ["", sep, "Cofradía de Networking"]
-            await msg.edit_text("\n".join(lines))
+            texto_final = "\n".join(lines)
+            await msg.edit_text(texto_final[:4090])
+            # Guardar en cache (12h para respuestas IA)
+            if ia_dir:
+                guardar_cache_consulta(query, texto_final, 'buscar_web', 12)
 
         registrar_servicio_usado(update.effective_user.id, 'buscar_web')
 
