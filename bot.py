@@ -94,6 +94,17 @@ GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemin
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
 
+# ==================== CONFIGURACIÓN CMF (Comisión para el Mercado Financiero) ====================
+# API Key CMF — registrar en https://api.cmfchile.cl  (gratuita)
+CMF_API_KEY  = os.environ.get('CMF_API_KEY', 'SBIF9990SBIF44b7SBIF7f4c5a537d02358e1099')
+CMF_BASE_URL = 'https://api.cmfchile.cl/api-sbifv3/recursos_api'
+
+# ==================== CONFIGURACIÓN AFP (QueTalMiAFP) ====================
+AFP_API_KEY    = '5afad3802d3f2936c722fd41e9932eb34cef39468e'
+AFP_CUOTAS_URL = 'https://www.quetalmiafp.cl/api/Cuota/ObtenerCuotas'
+AFP_LISTA      = 'CAPITAL,CUPRUM,HABITAT,MODELO,PLANVITAL,PROVIDA,UNO'
+AFP_FONDOS     = 'A,B,C,D,E'
+
 # Variables globales para indicar si las IAs están disponibles
 ia_disponible = False
 gemini_disponible = False
@@ -14342,6 +14353,271 @@ def obtener_indicadores_chile():
     }
 
 
+def obtener_indicadores_cmf():
+    """
+    Obtiene 3 indicadores de la CMF (Comisión para el Mercado Financiero):
+      - TMC: Tasa de Interés Máxima Convencional, filtrada para 3 plazos representativos
+      - TAB UF: Tasa Activa Bancaria en UF a 360 días (publicada diariamente por CMF)
+      - TAB Nominal: Tasa Activa Bancaria nominal (endpoint extendido si disponible)
+    API: https://api.cmfchile.cl/api-sbifv3/recursos_api/
+    """
+    AHORA   = datetime.now()
+    # Intentar mes actual; si falla (aún sin datos), retroceder al mes anterior
+    intentos = [(AHORA.year, AHORA.month)]
+    mes_ant = AHORA.month - 1 or 12
+    anio_ant = AHORA.year if AHORA.month > 1 else AHORA.year - 1
+    intentos.append((anio_ant, mes_ant))
+
+    resultado = {
+        'tmc':     [],
+        'tab_uf':  [],
+        'tab_nom': [],
+    }
+    HDR = {'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'}
+
+    def _get(url):
+        try:
+            r = requests.get(url, headers=HDR, timeout=12)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as _e:
+            logger.debug(f'CMF fetch: {_e}')
+        return None
+
+    def _val(s):
+        try:
+            return float(str(s).replace(',', '.').strip())
+        except Exception:
+            return None
+
+    # ── TMC: Tasa Máxima Convencional ─────────────────────────────────────────
+    for yr, mo in intentos:
+        url = f'{CMF_BASE_URL}/tmc/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
+        j = _get(url)
+        if not j:
+            continue
+        tmcs = j.get('TMCs', [])
+        if not tmcs:
+            continue
+
+        # Estrategia de filtrado por palabras clave en Titulo+SubTitulo
+        # Tres plazos representativos para el usuario:
+        GRUPOS = [
+            ('90 días',  ['menos de 90', 'inferior a 90', 'hasta 90']),
+            ('180 días', ['90 días o más', '90 d', 'sobre 90', 'mediano']),
+            ('360 días', ['un año o más', '360', 'reajustable', 'largo plazo']),
+        ]
+        encontrados = {}
+        for tmc in tmcs:
+            txt = (tmc.get('Titulo', '') + ' ' + tmc.get('SubTitulo', '')).lower()
+            v   = _val(tmc.get('Valor'))
+            if v is None or v <= 0:
+                continue
+            for plazo, kws in GRUPOS:
+                if plazo not in encontrados and any(kw in txt for kw in kws):
+                    encontrados[plazo] = {
+                        'plazo':  plazo,
+                        'titulo': tmc.get('Titulo', '')[:70],
+                        'valor':  v,
+                        'fecha':  tmc.get('Fecha', '')[:10],
+                    }
+        # Si no se detectaron los 3 plazos por palabras clave, tomar los primeros 3 únicos
+        if len(encontrados) < 3:
+            etiquetas = ['90 días', '180 días', '360 días']
+            vistos = set()
+            for tmc in tmcs:
+                titulo = tmc.get('Titulo', '')
+                if titulo in vistos:
+                    continue
+                v = _val(tmc.get('Valor'))
+                if v and v > 0 and len(encontrados) < 3:
+                    idx = len(encontrados)
+                    label = etiquetas[idx] if idx < 3 else f'Tipo {idx+1}'
+                    if label not in encontrados:
+                        encontrados[label] = {
+                            'plazo':  label,
+                            'titulo': titulo[:70],
+                            'valor':  v,
+                            'fecha':  tmc.get('Fecha', '')[:10],
+                        }
+                    vistos.add(titulo)
+
+        resultado['tmc'] = list(encontrados.values())[:3]
+        break  # datos obtenidos
+
+    # ── TAB UF (Tasa Activa Bancaria en UF a 360 días) ─────────────────────────
+    for yr, mo in intentos:
+        url = f'{CMF_BASE_URL}/tab/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
+        j = _get(url)
+        if not j:
+            continue
+        tabs = j.get('TABs', [])
+        if tabs:
+            tab = tabs[0]  # más reciente
+            v   = _val(tab.get('Valor'))
+            fecha = tab.get('Fecha', '')[:10]
+            # CMF publica TAB solo a 360 días en UF; 90 y 180 días no disponibles vía API
+            resultado['tab_uf'] = [
+                {'plazo': '90 días',  'valor': None, 'fecha': fecha,
+                 'nota': 'No disponible vía API'},
+                {'plazo': '180 días', 'valor': None, 'fecha': fecha,
+                 'nota': 'No disponible vía API'},
+                {'plazo': '360 días', 'valor': v,    'fecha': fecha,
+                 'nota': 'Dato oficial CMF'},
+            ]
+            break
+
+    # ── TAB Nominal (endpoint extendido; si no existe → N/D con fecha referencial) ──
+    tab_nom_val = None
+    tab_nom_fecha = ''
+    for yr, mo in intentos:
+        # Intentar endpoint alternativo tabnom
+        for endpoint in ['tabnom', 'tab_nom', 'tabnominal']:
+            url = f'{CMF_BASE_URL}/{endpoint}/{yr}/{mo:02d}?apikey={CMF_API_KEY}&formato=json'
+            j = _get(url)
+            if j:
+                for key in ['TABNoms', 'TABNominales', 'TABs']:
+                    items = j.get(key, [])
+                    if items:
+                        tab_nom_val   = _val(items[0].get('Valor'))
+                        tab_nom_fecha = items[0].get('Fecha', '')[:10]
+                        break
+            if tab_nom_val:
+                break
+        if tab_nom_val:
+            break
+    # Si el TAB UF está disponible, usar como referencia para TAB Nominal 360d
+    if tab_nom_val is None and resultado['tab_uf']:
+        tab_360 = next((x for x in resultado['tab_uf'] if x['plazo'] == '360 días'), None)
+        tab_nom_fecha = tab_360['fecha'] if tab_360 else AHORA.strftime('%Y-%m-%d')
+    resultado['tab_nom'] = [
+        {'plazo': '90 días',  'valor': None,          'fecha': tab_nom_fecha},
+        {'plazo': '180 días', 'valor': None,          'fecha': tab_nom_fecha},
+        {'plazo': '360 días', 'valor': tab_nom_val,   'fecha': tab_nom_fecha},
+    ]
+
+    return resultado
+
+
+def obtener_rentabilidad_afp():
+    """
+    Obtiene variación de rentabilidad de todas las AFPs en los últimos 6 meses.
+    API: https://www.quetalmiafp.cl/api/Cuota/ObtenerCuotas
+    Cabecera requerida: X-API-Key
+    Calcula (cuota_final / cuota_inicial - 1) * 100 por AFP y Fondo.
+    """
+    AHORA        = datetime.now()
+    fecha_fin    = AHORA.strftime('%d/%m/%Y')
+    # Inicio = 6 meses atrás (primer día de ese mes)
+    mes_ini  = AHORA.month - 6
+    anio_ini = AHORA.year
+    if mes_ini <= 0:
+        mes_ini  += 12
+        anio_ini -= 1
+    fecha_ini = f'01/{mes_ini:02d}/{anio_ini}'
+
+    resultado = {
+        'afps':     [],
+        'fondos':   [],
+        'tabla':    {},   # {afp: {fondo: {rent_pct, cuota_ini, cuota_fin, fecha_ini, fecha_fin}}}
+        'fecha_ini': fecha_ini,
+        'fecha_fin': fecha_fin,
+        'ok':        False,
+    }
+
+    try:
+        params = {
+            'listaAFPs':    AFP_LISTA,
+            'listaFondos':  AFP_FONDOS,
+            'fechaInicial': fecha_ini,
+            'fechaFinal':   fecha_fin,
+        }
+        hdrs = {
+            'X-API-Key': AFP_API_KEY,
+            'Accept':    'application/json',
+        }
+        r = requests.get(AFP_CUOTAS_URL, params=params, headers=hdrs, timeout=30)
+        if r.status_code != 200:
+            logger.warning(f'AFP API status: {r.status_code}')
+            return resultado
+
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            logger.warning('AFP API: respuesta vacía o inesperada')
+            return resultado
+
+        # Detectar nombres de campos dinámicamente
+        sample = data[0]
+        keys_lower = {k.lower(): k for k in sample.keys()}
+
+        def _campo(*candidatos):
+            for c in candidatos:
+                if c in keys_lower:
+                    return keys_lower[c]
+            return None
+
+        campo_afp   = _campo('afp', 'nombreafp', 'nombre_afp', 'administradora')
+        campo_fondo = _campo('fondo', 'tipofondo', 'tipo_fondo', 'letra', 'nombrefondo')
+        campo_fecha = _campo('fecha', 'fechacuota', 'fecha_cuota', 'date')
+        campo_valor = _campo('valorcuota', 'valor_cuota', 'cuota', 'valor', 'value')
+
+        if not all([campo_afp, campo_fondo, campo_fecha, campo_valor]):
+            logger.warning(f'AFP API campos no mapeados. Keys: {list(sample.keys())}')
+            return resultado
+
+        # Agrupar serie por (AFP, Fondo)
+        series = {}
+        for item in data:
+            afp   = str(item.get(campo_afp,   '')).upper().strip()
+            fondo = str(item.get(campo_fondo, '')).upper().strip()
+            fecha = str(item.get(campo_fecha, ''))
+            try:
+                val = float(str(item.get(campo_valor, '0')).replace(',', '.'))
+            except Exception:
+                continue
+            key = (afp, fondo)
+            if key not in series:
+                series[key] = []
+            series[key].append((fecha, val))
+
+        tabla     = {}
+        afps_set  = set()
+        fondos_set = set()
+
+        for (afp, fondo), serie in series.items():
+            if len(serie) < 2:
+                continue
+            serie_s   = sorted(serie, key=lambda x: x[0])
+            cuota_ini = serie_s[0][1]
+            cuota_fin = serie_s[-1][1]
+            if cuota_ini and cuota_ini != 0:
+                rent_pct = round(((cuota_fin / cuota_ini) - 1) * 100, 2)
+            else:
+                rent_pct = 0.0
+            if afp not in tabla:
+                tabla[afp] = {}
+            tabla[afp][fondo] = {
+                'rent_pct':  rent_pct,
+                'cuota_ini': round(cuota_ini, 4),
+                'cuota_fin': round(cuota_fin, 4),
+                'fecha_ini': serie_s[0][0],
+                'fecha_fin': serie_s[-1][0],
+            }
+            afps_set.add(afp)
+            fondos_set.add(fondo)
+
+        ORDEN_FONDOS = ['A', 'B', 'C', 'D', 'E']
+        resultado['afps']   = sorted(afps_set)
+        resultado['fondos'] = [f for f in ORDEN_FONDOS if f in fondos_set]
+        resultado['tabla']  = tabla
+        resultado['ok']     = bool(tabla)
+
+    except Exception as e:
+        logger.warning(f'AFP API error: {e}')
+
+    return resultado
+
+
 def scraping_bcentral_noticias():
     """
     Web scraping de noticias y comunicados recientes del Banco Central de Chile.
@@ -14595,6 +14871,206 @@ def generar_html_indicadores(all_data, explicaciones):
     # ── HTML completo ──────────────────────────────────────────────────────
     hist_ids_js = ','.join(['"hist_' + cod + '"' for cod in HIST_ORDER if hist_10a.get(cod)])
 
+    # ── CMF: cards HTML ────────────────────────────────────────────────────
+    datos_cmf = all_data.get('datos_cmf', {})
+    cmf_html  = ''
+
+    def _cmf_card(titulo, emoji, items):
+        """Genera una card CMF con tabla de plazos."""
+        filas = ''
+        ultima_fecha = ''
+        for it in items:
+            plazo = it.get('plazo', '')
+            v     = it.get('valor')
+            ultima_fecha = it.get('fecha', '') or ultima_fecha
+            if v is not None:
+                val_str = f'{v:.2f}%'
+                val_cls = 'cmf-val'
+            else:
+                val_str = 'N/D'
+                val_cls = 'cmf-val nd'
+            filas += (
+                f'<div class="cmf-row data">'
+                f'<span class="cmf-plazo">{plazo}</span>'
+                f'<span class="{val_cls}">{val_str}</span>'
+                f'</div>'
+            )
+        if not filas:
+            filas = '<div class="cmf-row data"><span class="cmf-plazo">Sin datos</span><span class="cmf-val nd">N/D</span></div>'
+        fecha_txt = f'Actualizado: {ultima_fecha}' if ultima_fecha else ''
+        return (
+            f'<div class="cmf-card">'
+            f'<div class="cmf-nm">{emoji} {titulo}</div>'
+            f'<div class="cmf-row header"><span>Plazo</span><span>Tasa anual</span></div>'
+            f'{filas}'
+            f'<div class="cmf-fecha">{fecha_txt}</div>'
+            f'</div>'
+        )
+
+    cmf_html += _cmf_card(
+        'Tasa Máxima Convencional (TMC)', '🏦',
+        datos_cmf.get('tmc', []) or [
+            {'plazo': '90 días',  'valor': None, 'fecha': ''},
+            {'plazo': '180 días', 'valor': None, 'fecha': ''},
+            {'plazo': '360 días', 'valor': None, 'fecha': ''},
+        ]
+    )
+    cmf_html += _cmf_card(
+        'Tasa TAB Nominal', '📋',
+        datos_cmf.get('tab_nom', []) or [
+            {'plazo': '90 días',  'valor': None, 'fecha': ''},
+            {'plazo': '180 días', 'valor': None, 'fecha': ''},
+            {'plazo': '360 días', 'valor': None, 'fecha': ''},
+        ]
+    )
+    cmf_html += _cmf_card(
+        'Tasa TAB UF', '💹',
+        datos_cmf.get('tab_uf', []) or [
+            {'plazo': '90 días',  'valor': None, 'fecha': ''},
+            {'plazo': '180 días', 'valor': None, 'fecha': ''},
+            {'plazo': '360 días', 'valor': None, 'fecha': ''},
+        ]
+    )
+
+    # ── AFP: tabla de rentabilidad + gráfico ECharts ───────────────────────
+    import json as _jafp
+    datos_afp   = all_data.get('datos_afp', {})
+    afp_lista   = datos_afp.get('afps',   [])
+    fondos_list = datos_afp.get('fondos', [])
+    tabla_afp   = datos_afp.get('tabla',  {})
+    afp_fecha_ini = datos_afp.get('fecha_ini', '')
+    afp_fecha_fin = datos_afp.get('fecha_fin', '')
+    afp_ok      = datos_afp.get('ok', False)
+
+    # Colores por fondo
+    FONDO_COLOR = {
+        'A': '#e74c3c', 'B': '#e67e22', 'C': '#f39c12',
+        'D': '#2ecc71', 'E': '#3478c3',
+    }
+    FONDO_DESC = {
+        'A': 'Renta Variable', 'B': 'Mixto+',
+        'C': 'Mixto',          'D': 'Mixto-',
+        'E': 'Renta Fija',
+    }
+
+    if afp_ok and afp_lista and fondos_list:
+        # Cabecera tabla
+        thead_ths = '<th class="afp-nm">AFP</th>'
+        for f in fondos_list:
+            desc = FONDO_DESC.get(f, '')
+            col  = FONDO_COLOR.get(f, '#8899aa')
+            thead_ths += (
+                f'<th style="color:{col}">Fondo {f}'
+                f'<br/><span style="font-size:.65em;font-weight:400;color:#8899aa">{desc}</span>'
+                f'</th>'
+            )
+        afp_rows = ''
+        for afp in afp_lista:
+            row = f'<tr><td class="afp-nm">{afp}</td>'
+            for f in fondos_list:
+                cell = tabla_afp.get(afp, {}).get(f)
+                if cell is None:
+                    row += '<td class="nd">N/D</td>'
+                else:
+                    rp  = cell['rent_pct']
+                    sig = '+' if rp >= 0 else ''
+                    cls = 'pos' if rp >= 0 else 'neg'
+                    row += f'<td class="{cls}">{sig}{rp:.2f}%</td>'
+            row += '</tr>'
+            afp_rows += row
+
+        afp_html = (
+            f'<div class="afp-wrap">'
+            f'<table class="afp-tabla">'
+            f'<thead><tr>{thead_ths}</tr></thead>'
+            f'<tbody>{afp_rows}</tbody>'
+            f'</table>'
+            f'</div>'
+            f'<div id="chart_afp"></div>'
+            f'<div class="afp-meta">Período: {afp_fecha_ini} al {afp_fecha_fin} · '
+            f'Rentabilidad = variación del valor cuota · Fuente: AFP</div>'
+        )
+
+        # Datos para gráfico de barras agrupadas ECharts (una serie por Fondo)
+        afp_chart_series = []
+        for f in fondos_list:
+            col  = FONDO_COLOR.get(f, '#8899aa')
+            vals = []
+            for afp in afp_lista:
+                cell = tabla_afp.get(afp, {}).get(f)
+                vals.append(round(cell['rent_pct'], 2) if cell else None)
+            afp_chart_series.append({
+                'name':      f'Fondo {f}',
+                'type':      'bar',
+                'data':      vals,
+                'itemStyle': {'color': col},
+                'label':     {
+                    'show': True, 'position': 'top',
+                    'fontSize': 9, 'color': col,
+                    'formatter': 'function(p){return p.value===null?"":((p.value>=0?"+":"")+p.value.toFixed(1)+"%")}',
+                },
+            })
+        afp_names_js  = _jafp.dumps(afp_lista)
+        afp_series_raw = _jafp.dumps(afp_chart_series)
+        # El formatter de label necesita ser función JS, no string; reemplazar aquí
+        afp_series_js = afp_series_raw.replace(
+            '"formatter": "function(p){return p.value===null?\\"\\":'
+            '((p.value>=0?\\"+\\":\\"\\")+p.value.toFixed(1)+\\"%\\")}"',
+            '"formatter": function(p){return p.value===null?"":'
+            '((p.value>=0?"+":"")+p.value.toFixed(1)+"%")}'
+        )
+        afp_chart_js = (
+            '(function(){'
+            'var ca=echarts.init(document.getElementById("chart_afp"));'
+            'ca.setOption({'
+            'backgroundColor:"transparent",'
+            'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
+            'borderColor:"#c3a55a",textStyle:{color:"#c0c8d4"},'
+            'formatter:function(p){'
+            'var s=p[0].name+"<br/>";'
+            'p.forEach(function(i){'
+            'if(i.value!==null)s+=\'<span style="color:\'+i.color+\'">●</span> \''
+            '+i.seriesName+": "+(i.value>=0?"+":"")+i.value.toFixed(2)+"%<br/>";'
+            '});return s;}},'
+            'legend:{textStyle:{color:"#8899aa"},top:4},'
+            'grid:{left:"10%",right:"3%",bottom:"15%",top:"14%"},'
+            'xAxis:{type:"category",data:' + _jafp.dumps(afp_lista) + ','
+            'axisLabel:{color:"#8899aa",fontSize:10,rotate:30},'
+            'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+            'yAxis:{type:"value",'
+            'axisLabel:{color:"#8899aa",formatter:function(v){return (v>=0?"+":"")+v+"%";}},'
+            'splitLine:{lineStyle:{color:"rgba(52,120,195,.1)"}},'
+            'axisLine:{show:true,lineStyle:{color:"#445566"}}},'
+            'series:[' +
+            ','.join([
+                '{'
+                'name:"Fondo ' + f + '",'
+                'type:"bar",'
+                'data:' + _jafp.dumps([
+                    round(tabla_afp.get(afp, {}).get(f, {}).get('rent_pct', 0) or 0, 2)
+                    if tabla_afp.get(afp, {}).get(f) else None
+                    for afp in afp_lista
+                ]) + ','
+                'itemStyle:{color:"' + FONDO_COLOR.get(f, '#8899aa') + '"},'
+                'label:{show:true,position:"top",fontSize:9,color:"' + FONDO_COLOR.get(f, '#8899aa') + '",'
+                'formatter:function(p){return p.value===null?"":(p.value>=0?"+":"")+p.value.toFixed(1)+"%";}}'
+                '}'
+                for f in fondos_list
+            ]) +
+            ']});'
+            'window.addEventListener("resize",function(){ca.resize();});'
+            '})();'
+        )
+    else:
+        afp_html = (
+            '<div style="background:rgba(15,47,89,.5);border-radius:10px;padding:20px;'
+            'text-align:center;color:#445566;font-size:.85em">'
+            '&#128274; Datos de AFP no disponibles en este momento. '
+            'Verifique conexión con la API QueTalMiAFP.</div>'
+        )
+        afp_chart_js = ''
+
+
     html = (
         '<!DOCTYPE html><html lang="es"><head>'
         '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -14657,43 +15133,87 @@ def generar_html_indicadores(all_data, explicaciones):
         '.cards,.exp-grid,.hist-grid{grid-template-columns:1fr}'
         '}'
 
+        '.cmf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}'
+        '.cmf-card{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);'
+        'border-radius:12px;padding:16px}'
+        '.cmf-nm{font-size:.75em;color:#c3a55a;font-weight:800;letter-spacing:1px;'
+        'text-transform:uppercase;margin-bottom:10px;padding-bottom:7px;'
+        'border-bottom:1px solid rgba(195,165,90,.2)}'
+        '.cmf-row{display:flex;justify-content:space-between;align-items:center;'
+        'padding:7px 10px;border-radius:7px;margin-bottom:5px}'
+        '.cmf-row.header{background:rgba(52,120,195,.12);font-size:.7em;'
+        'color:#8899aa;font-weight:700;text-transform:uppercase;letter-spacing:.8px}'
+        '.cmf-row.data{background:rgba(15,47,89,.5)}'
+        '.cmf-plazo{font-size:.82em;color:#aed6f1;font-weight:600}'
+        '.cmf-val{font-size:1.05em;font-weight:800;color:#c3a55a}'
+        '.cmf-val.nd{color:#445566;font-size:.82em}'
+        '.cmf-fecha{font-size:.6em;color:#334455;margin-top:8px;text-align:right}'
+
+        '.afp-section{margin-bottom:36px}'
+        '.afp-wrap{overflow-x:auto}'
+        '.afp-tabla{width:100%;border-collapse:collapse;font-size:.82em}'
+        '.afp-tabla th{background:rgba(52,120,195,.2);color:#c3a55a;padding:9px 12px;'
+        'text-align:center;font-weight:700;letter-spacing:.5px;border:1px solid rgba(52,120,195,.15)}'
+        '.afp-tabla th.afp-nm{text-align:left}'
+        '.afp-tabla td{padding:8px 12px;text-align:center;border:1px solid rgba(52,120,195,.1);'
+        'color:#e0e6ed;transition:background .2s}'
+        '.afp-tabla td.afp-nm{text-align:left;font-weight:700;color:#c3a55a;'
+        'background:rgba(15,47,89,.5)}'
+        '.afp-tabla .pos{color:#2ecc71;font-weight:700}'
+        '.afp-tabla .neg{color:#e74c3c;font-weight:700}'
+        '.afp-tabla .nd{color:#445566}'
+        '.afp-tabla tr:hover td{background:rgba(52,120,195,.08)}'
+        '#chart_afp{width:100%;height:320px;margin-top:18px}'
+        '.afp-meta{font-size:.7em;color:#445566;margin-top:8px}'
+
         '</style></head><body>'
 
         '<header>'
         '<h1>&#9875; INDICADORES ECONÓMICOS DE CHILE</h1>'
         '<div class="sub">Datos en tiempo real · Análisis IA · '
-        '<a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
-        'Banco Central de Chile · ' + gen + '</div>'
+        'Banco Central de Chile · CMF · AFP · ' + gen + '</div>'
         '</header>'
 
-        # Sección 1: Cards actuales
+        # Sección 1: Cards actuales (11 indicadores)
         '<div class="section">'
         '<div class="section-title">&#128202; Indicadores del Día — 11 Indicadores con Tendencia 30 días</div>'
         '<div class="cards">' + cards_html + '</div>'
         '</div>'
 
-        # Sección 2: Análisis IA
+        # Sección 2: Indicadores CMF (3 indicadores: TMC, TAB UF, TAB Nominal)
+        '<div class="section">'
+        '<div class="section-title">&#127970; Tasas CMF — Comisión para el Mercado Financiero</div>'
+        '<div class="cmf-grid">' + cmf_html + '</div>'
+        '</div>'
+
+        # Sección 3: Análisis IA
         '<div class="section">'
         '<div class="section-title">&#129302; Análisis IA — ¿Por qué varió cada indicador?</div>'
         '<div class="exp-grid">' + exp_cards_html + '</div>'
         '</div>'
 
-        # Sección 3: Dólar vs Euro 6 meses
+        # Sección 4: Dólar vs Euro 6 meses
         '<div class="section">'
         '<div class="section-title">&#128178; Dólar vs Euro — Últimos 6 Meses (valor inicio de mes)</div>'
         '<div class="chart-wide"><div id="chart6m"></div></div>'
         '</div>'
 
-        # Sección 4: Histórico 10 años
+        # Sección 5: Histórico 10 años
         '<div class="section">'
         '<div class="section-title">&#128197; Series Históricas — Últimos 10 Años</div>'
         '<div class="hist-grid">' + hist_cards_html + '</div>'
         '</div>'
 
+        # Sección 6: Rentabilidad AFP
+        '<div class="section afp-section">'
+        '<div class="section-title">&#127963; Rentabilidad AFP — Últimos 6 Meses</div>'
+        + afp_html +
+        '</div>'
+
         '<footer>'
-        'Fuente: <a href="https://mindicador.cl" target="_blank">mindicador.cl</a> · '
-        'API REST Banco Central de Chile · Análisis IA: Groq LLaMA 3.3 70B + RAG Biblioteca Finanzas · '
-        'Cofradía de Networking Bot v6.0'
+        'Banco Central de Chile &nbsp;&middot;&nbsp; CMF &nbsp;&middot;&nbsp; AFP'
+        ' &nbsp;&middot;&nbsp; Análisis IA + RAG Biblioteca de Finanzas'
+        ' &nbsp;&middot;&nbsp; Cofradía de Networking Bot v6.0'
         '</footer>'
 
         '<script>'
@@ -14746,6 +15266,8 @@ def generar_html_indicadores(all_data, explicaciones):
         'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
         '});});'
 
+        + afp_chart_js +
+
         '</script>'
         '</body></html>'
     )
@@ -14755,12 +15277,14 @@ def generar_html_indicadores(all_data, explicaciones):
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico completo de Chile con análisis IA:
-      • 11 indicadores del día con sparkline 30 días
+    /indicadores — Dashboard económico completo de Chile:
+      • 11 indicadores del día con sparkline 30 días (Banco Central)
+      • 3 tasas CMF: TMC · TAB Nominal · TAB UF (90/180/360 días)
       • Análisis IA del por qué varió cada indicador (Groq + RAG + BCCH)
       • Dólar vs Euro últimos 6 meses
       • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
-    Fuentes: mindicador.cl (Banco Central) + Web Scraping BCCH + RAG Biblioteca Finanzas
+      • Rentabilidad AFP últimos 6 meses (todos los fondos)
+    Fuentes: Banco Central · CMF · AFP · RAG Biblioteca Finanzas
     """
     msg = await update.message.reply_text(
         "📈 Consultando indicadores económicos...\n"
@@ -14773,18 +15297,32 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
         datos = all_data.get('datos_actuales', {})
         if not datos:
-            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
+            await msg.edit_text("❌ Sin datos de indicadores. Intenta en unos minutos.")
             return
 
         await msg.edit_text(
             f"✅ {len(datos)} indicadores obtenidos.\n"
             "🔍 Web scraping del Banco Central...\n"
-            "📚 Consultando biblioteca financiera RAG..."
+            "📚 Consultando biblioteca financiera RAG...\n"
+            "🏦 Consultando tasas CMF..."
         )
 
         # 2. Web scraping BCCH
         noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
         contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
+
+        # 2b. Indicadores CMF (TMC, TAB UF, TAB Nominal)
+        datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+        all_data['datos_cmf'] = datos_cmf
+
+        # 2c. Rentabilidad AFP (últimos 6 meses)
+        await msg.edit_text(
+            f"✅ Indicadores + CMF obtenidos.\n"
+            "🏛️ Consultando rentabilidad AFP...\n"
+            "📚 Analizando con IA..."
+        )
+        datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
+        all_data['datos_afp'] = datos_afp
 
         # 3. RAG por indicador
         queries_rag = {
@@ -14827,7 +15365,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
-            "Fuente: mindicador.cl — Banco Central de Chile",
+            "Fuente: Banco Central de Chile · CMF · AFP",
             "",
         ]
         for cod in ORDER_MSG:
@@ -14863,6 +15401,31 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 lineas.append("  " + label + " — USD " + vds + "  |  EUR " + ves)
 
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
+
+        # Agregar resumen CMF al mensaje de texto
+        tmc_list = datos_cmf.get('tmc', [])
+        if tmc_list:
+            lineas += ["", sep, "🏦 Tasas CMF (Comisión para el Mercado Financiero):"]
+            for item in tmc_list:
+                v = item.get('valor')
+                vf = f"{v:.2f}%" if v is not None else "N/D"
+                lineas.append(f"  TMC {item.get('plazo','')}: {vf}")
+        tab_uf_360 = next((x for x in datos_cmf.get('tab_uf', []) if x.get('plazo') == '360 días' and x.get('valor')), None)
+        if tab_uf_360:
+            lineas.append(f"  TAB UF 360 días: {tab_uf_360['valor']:.2f}%")
+
+        # Agregar resumen AFP al mensaje de texto
+        if datos_afp.get('ok') and datos_afp.get('tabla'):
+            lineas += ["", sep, f"🏛️ Rentabilidad AFP — últimos 6 meses ({datos_afp.get('fecha_ini','')}):",  ""]
+            for afp in datos_afp.get('afps', []):
+                row_txt = f"  {afp}:"
+                for f in datos_afp.get('fondos', []):
+                    cell = datos_afp['tabla'].get(afp, {}).get(f)
+                    if cell:
+                        rp = cell['rent_pct']
+                        row_txt += f"  F{f}: {'+'if rp>=0 else ''}{rp:.1f}%"
+                lineas.append(row_txt)
+
         await update.message.reply_text("\n".join(lineas))
 
         # 6. Generar y enviar HTML
@@ -14880,11 +15443,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 caption=(
                     "📊 Dashboard Indicadores Económicos Chile\n\n"
                     "• 11 indicadores del día con sparklines 30 días\n"
+                    "• 🏦 Tasas CMF: TMC · TAB UF · TAB Nominal (90/180/360 días)\n"
                     "• 🤖 Análisis IA del por qué de cada variación\n"
-                    "   (Groq + Banco Central + RAG Biblioteca Finanzas)\n"
                     "• 💱 Dólar vs Euro últimos 6 meses\n"
                     "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
-                    "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
+                    "       Desempleo · IMACEC · Cobre · Bitcoin\n"
+                    "• 🏛️ Rentabilidad AFP últimos 6 meses (Fondos A–E)\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
                 )
             )
