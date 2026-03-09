@@ -2189,11 +2189,11 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales
+            # Formatear empleos reales con todos los campos solicitados
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
-            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
-            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado = f"🔎 EMPLEOS REALES ENCONTRADOS\n"
+            resultado += f"📋 Búsqueda: {busqueda_texto}\n"
+            resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
             resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
@@ -2201,30 +2201,73 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             for i, empleo in enumerate(empleos[:8], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
-                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
                 
-                # Sueldo
+                # Ubicación completa: ciudad + estado + país
+                partes_ubic = []
+                if empleo.get('job_city'):
+                    partes_ubic.append(empleo['job_city'])
+                if empleo.get('job_state'):
+                    partes_ubic.append(empleo['job_state'])
+                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ubic):
+                    partes_ubic.append(empleo['job_country'])
+                ubicacion_job = ', '.join(partes_ubic) if partes_ubic else 'No especificada'
+                
+                # Sueldo estimado
                 min_salary = empleo.get('job_min_salary')
                 max_salary = empleo.get('job_max_salary')
                 salary_period = empleo.get('job_salary_period', '')
+                salary_currency = empleo.get('job_salary_currency', '')
                 
                 if min_salary and max_salary:
                     sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
+                    if salary_currency:
+                        sueldo += f" {salary_currency}"
                     if salary_period:
-                        sueldo += f" ({salary_period})"
+                        periodo_es = {'YEAR': 'anual', 'MONTH': 'mensual', 'WEEK': 'semanal',
+                                      'HOUR': 'por hora', 'DAY': 'diario'}.get(salary_period.upper(), salary_period)
+                        sueldo += f" ({periodo_es})"
                 elif min_salary:
                     sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                elif max_salary:
+                    sueldo = f"Hasta ${int(max_salary):,}".replace(",", ".")
                 else:
                     sueldo = "No especificado"
                 
-                # Tipo de empleo
-                tipo = empleo.get('job_employment_type', 'No especificado')
-                if tipo == 'FULLTIME':
-                    tipo = 'Tiempo completo'
-                elif tipo == 'PARTTIME':
-                    tipo = 'Medio tiempo'
-                elif tipo == 'CONTRACTOR':
-                    tipo = 'Contrato'
+                # Modalidad: tipo de empleo + remoto/presencial
+                tipo = empleo.get('job_employment_type', '')
+                tipo_map = {
+                    'FULLTIME': 'Tiempo completo', 'PARTTIME': 'Medio tiempo',
+                    'CONTRACTOR': 'Contrato/Freelance', 'INTERN': 'Práctica/Pasantía',
+                    'TEMPORARY': 'Temporal', 'VOLUNTEER': 'Voluntariado'
+                }
+                tipo_es = tipo_map.get(tipo, tipo or 'No especificado')
+                
+                es_remoto = empleo.get('job_is_remote', False)
+                if es_remoto:
+                    modalidad = f"{tipo_es} · Remoto"
+                else:
+                    modalidad = f"{tipo_es} · Presencial"
+                
+                # Descripción del cargo (más completa)
+                raw_desc = empleo.get('job_description', '')
+                highlights = empleo.get('job_highlights', {})
+                if not raw_desc and highlights:
+                    resp_list = highlights.get('Responsibilities', [])
+                    if resp_list:
+                        raw_desc = '. '.join(resp_list[:3])
+                
+                if raw_desc:
+                    # Limpiar HTML y caracteres especiales
+                    desc_limpia = re.sub(r'<[^>]+>', ' ', raw_desc)
+                    desc_limpia = re.sub(r'\s+', ' ', desc_limpia).strip()
+                    desc_corta = desc_limpia[:350]
+                    ultimo_p = desc_corta.rfind(". ")
+                    if ultimo_p > 100:
+                        desc_corta = desc_corta[:ultimo_p + 1]
+                    elif len(desc_corta) == 350:
+                        desc_corta += "..."
+                else:
+                    desc_corta = "Sin descripción disponible"
                 
                 # Link de postulación
                 link = empleo.get('job_apply_link', '')
@@ -2246,35 +2289,23 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
                 else:
                     fecha_str = ""
                 
-                # Descripción breve del cargo
-                raw_desc = (empleo.get('job_description') or
-                            empleo.get('job_highlights', {}).get('Responsibilities', [''])[0] or "")
-                if raw_desc:
-                    desc_corta = raw_desc[:280].replace("\n", " ").replace("  ", " ").strip()
-                    ultimo_p = desc_corta.rfind(". ")
-                    if ultimo_p > 80:
-                        desc_corta = desc_corta[:ultimo_p + 1]
-                else:
-                    desc_corta = ""
-
-                resultado += f"**{i}. {titulo}**\n"
-                resultado += f"🏢 {empresa}\n"
-                resultado += f"📍 {ubicacion_job}\n"
-                resultado += f"💰 {sueldo}\n"
-                resultado += f"📋 {tipo}"
+                # Construir bloque de cada empleo con TODOS los campos
+                resultado += f"{'─' * 28}\n"
+                resultado += f"{i}. CARGO: {titulo}\n"
+                resultado += f"🏢 Empresa: {empresa}\n"
+                resultado += f"📍 Ubicación: {ubicacion_job}\n"
+                resultado += f"💰 Salario: {sueldo}\n"
+                resultado += f"📋 Modalidad: {modalidad}\n"
                 if fecha_str:
-                    resultado += f" • {fecha_str}"
-                resultado += "\n"
-                if desc_corta:
-                    resultado += f"📝 _{desc_corta}_\n"
+                    resultado += f"🕐 Publicado: {fecha_str}\n"
+                resultado += f"📝 Descripción: {desc_corta}\n"
                 if link:
-                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
-                
+                    resultado += f"🔗 Link: {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
-            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales.\n"
+            resultado += "👆 Copia el link para postular directamente a la oferta."
             
             return resultado
     
@@ -2286,12 +2317,12 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
-        "\n🔗 *Busca más ofertas en:*\n"
-        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
-        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
-        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
-        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
-        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
+        "\n🔗 Busca más ofertas en:\n"
+        f"• LinkedIn Jobs: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
+        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
+        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
+        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
+        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
     )
 
     def _scrape_trabajando(q_encoded):
@@ -2389,20 +2420,23 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     if empleos_web:
         sep = "━" * 30
-        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
+        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
         resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
         resultado += sep + "\n\n"
         for i, emp in enumerate(empleos_web[:8], 1):
-            resultado += f"**{i}. {emp['titulo']}**\n"
+            resultado += f"{'─' * 28}\n"
+            resultado += f"{i}. CARGO: {emp['titulo']}\n"
             if emp.get('empresa'):
-                resultado += f"🏢 {emp['empresa']}\n"
+                resultado += f"🏢 Empresa: {emp['empresa']}\n"
             if emp.get('ciudad'):
-                resultado += f"📍 {emp['ciudad']}\n"
+                resultado += f"📍 Ubicación: {emp['ciudad']}\n"
+            resultado += f"💰 Salario: No especificado\n"
+            resultado += f"📋 Modalidad: Ver en portal\n"
             if emp.get('desc'):
-                desc_fmt = emp['desc'][:200].strip()
-                resultado += f"📝 _{desc_fmt}_\n"
+                desc_fmt = emp['desc'][:250].strip()
+                resultado += f"📝 Descripción: {desc_fmt}\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
+                resultado += f"🔗 Link: {emp['link']}\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -2431,18 +2465,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
-                resultado += f"📋 Búsqueda: _{consulta}_\n"
+                resultado  = f"🔎 ANÁLISIS MERCADO LABORAL — IA\n"
+                resultado += f"📋 Búsqueda: {consulta}\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
+                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
+    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas actualizadas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -3855,7 +3889,8 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
+    # Enviar sin parse_mode para evitar errores con caracteres especiales en links/descripciones
+    await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -9721,6 +9756,22 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
+            # Obtener conteo de recomendaciones del perfil público
+            _pub_rec = 0
+            try:
+                conn_pr = get_db_connection()
+                if conn_pr:
+                    c_pr = conn_pr.cursor()
+                    if DATABASE_URL:
+                        c_pr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
+                        _pub_rec = c_pr.fetchone()['t']
+                    else:
+                        c_pr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
+                        _pub_rec = c_pr.fetchone()[0]
+                    conn_pr.close()
+            except:
+                pass
+            
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9731,6 +9782,8 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+            if _pub_rec > 0:
+                caption += f"\n⭐ <b>{_pub_rec} recomendación{'es' if _pub_rec != 1 else ''}</b> de la comunidad\n"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9832,6 +9885,22 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
+                        # Obtener conteo de recomendaciones
+                        _rec_count = 0
+                        try:
+                            conn_rec = get_db_connection()
+                            if conn_rec:
+                                c_rec = conn_rec.cursor()
+                                if DATABASE_URL:
+                                    c_rec.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _rec_count = c_rec.fetchone()['t']
+                                else:
+                                    c_rec.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _rec_count = c_rec.fetchone()[0]
+                                conn_rec.close()
+                        except:
+                            pass
+                        
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -9842,6 +9911,11 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+                        # Link a recomendaciones recibidas
+                        if _rec_count > 0:
+                            caption += f"\n⭐ <b>{_rec_count} recomendación{'es' if _rec_count != 1 else ''}</b> — Ver: /mis_recomendaciones\n"
+                        else:
+                            caption += f"\n⭐ Pide recomendaciones con /recomendar\n"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -9883,6 +9957,25 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
+                        # Link a recomendaciones
+                        try:
+                            _rc2 = 0
+                            conn_rc2 = get_db_connection()
+                            if conn_rc2:
+                                c_rc2 = conn_rc2.cursor()
+                                if DATABASE_URL:
+                                    c_rc2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _rc2 = c_rc2.fetchone()['t']
+                                else:
+                                    c_rc2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _rc2 = c_rc2.fetchone()[0]
+                                conn_rc2.close()
+                            if _rc2 > 0:
+                                msg += f"\n⭐ {_rc2} recomendación{'es' if _rc2 != 1 else ''} — Ver: /mis_recomendaciones\n"
+                            else:
+                                msg += f"\n⭐ Pide recomendaciones con /recomendar\n"
+                        except:
+                            pass
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -10822,29 +10915,51 @@ async def recomendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await update.message.reply_text(f"❌ No se encontró al usuario @{objetivo_username}")
                 return
         else:
-            # Búsqueda por nombre
+            # Búsqueda por nombre — insensible a tildes y mayúsculas
+            import unicodedata as _ud_rec
+            def _normalizar_rec(s):
+                """Quita acentos y pasa a minúsculas para comparación flexible"""
+                return ''.join(ch for ch in _ud_rec.normalize('NFD', s.lower()) if _ud_rec.category(ch) != 'Mn')
+            
+            # Estrategia: probar con 3, 2 y 1 palabra(s) como nombre
+            # La primera combinación que encuentre resultados gana
+            all_args = list(context.args)
+            resultados = None
             busqueda_palabras = []
-            for arg in context.args:
-                if len(busqueda_palabras) < 3 and len(arg) > 1 and arg[0].isupper():
-                    busqueda_palabras.append(arg)
+            
+            for num_palabras in range(min(3, len(all_args)), 0, -1):
+                candidato_palabras = all_args[:num_palabras]
+                candidato_texto = ' '.join(all_args[num_palabras:])
+                # Si no queda texto de recomendación con esta división, saltar
+                if not candidato_texto.strip() and num_palabras < len(all_args):
+                    continue
+                nombre_buscar = _normalizar_rec(' '.join(candidato_palabras))
+                busqueda = f"%{nombre_buscar}%"
+                
+                # Buscar con nombre normalizado (sin tildes) en la BD
+                if DATABASE_URL:
+                    c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                               WHERE LOWER(translate(
+                                   first_name || ' ' || COALESCE(last_name,''),
+                                   'áéíóúÁÉÍÓÚàèìòùÀÈÌÒÙäëïöüÄËÏÖÜñÑ',
+                                   'aeiouAEIOUaeiouAEIOUaeiouAEIOUnN'
+                               )) LIKE %s 
+                               AND estado = 'activo' LIMIT 5""", (busqueda,))
                 else:
+                    c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
+                               WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ? 
+                               AND estado = 'activo' LIMIT 5""", (busqueda,))
+                res = c.fetchall()
+                if res:
+                    resultados = res
+                    busqueda_palabras = candidato_palabras
+                    texto_rec = candidato_texto
                     break
-            if len(busqueda_palabras) < 1:
+            
+            if not busqueda_palabras:
                 conn.close()
                 await update.message.reply_text("❌ Indica un @usuario o nombre.\n\nEjemplo: /recomendar @usuario Texto")
                 return
-            nombre_buscar = ' '.join(busqueda_palabras).lower()
-            texto_rec = ' '.join(context.args[len(busqueda_palabras):])
-            busqueda = f"%{nombre_buscar}%"
-            if DATABASE_URL:
-                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
-                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE %s 
-                           AND estado = 'activo' LIMIT 5""", (busqueda,))
-            else:
-                c.execute("""SELECT user_id, first_name, last_name FROM suscripciones 
-                           WHERE LOWER(first_name || ' ' || COALESCE(last_name,'')) LIKE ? 
-                           AND estado = 'activo' LIMIT 5""", (busqueda,))
-            resultados = c.fetchall()
             if not resultados:
                 conn.close()
                 await update.message.reply_text(f"❌ No se encontró a \"{' '.join(busqueda_palabras)}\" entre los miembros.")
@@ -14389,6 +14504,136 @@ def obtener_indicadores_chile():
                         'serie30':     serie[:30],
                     }
 
+    # ── Fallback CMF/SBIF para indicadores faltantes de mindicador.cl ──────
+    # Si mindicador.cl no entregó UF, Dolar, Euro o UTM, intentar con CMF API
+    CMF_FALLBACK_MAP = {
+        'uf':    ('uf',    'UF',        'Unidad de Fomento',             '#c3a55a'),
+        'dolar': ('dolar', 'Dolar USD', 'Tipo de cambio USD/CLP',       '#3478c3'),
+        'euro':  ('euro',  'Euro EUR',  'Tipo de cambio EUR/CLP',       '#2980b9'),
+        'utm':   ('utm',   'UTM',       'Unidad Tributaria Mensual',    '#e67e22'),
+    }
+    missing_cmf = [cod for cod in CMF_FALLBACK_MAP if cod not in datos_actuales]
+    if missing_cmf and CMF_API_KEY:
+        for cod in missing_cmf:
+            try:
+                cmf_endpoint = {
+                    'uf':    f"{CMF_BASE_URL}/uf?apikey={CMF_API_KEY}&formato=json",
+                    'dolar': f"{CMF_BASE_URL}/dolar?apikey={CMF_API_KEY}&formato=json",
+                    'euro':  f"{CMF_BASE_URL}/euro?apikey={CMF_API_KEY}&formato=json",
+                    'utm':   f"{CMF_BASE_URL}/utm?apikey={CMF_API_KEY}&formato=json",
+                }.get(cod)
+                if cmf_endpoint:
+                    r_cmf = requests.get(cmf_endpoint, timeout=12,
+                                         headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'})
+                    if r_cmf.status_code == 200:
+                        j_cmf = r_cmf.json()
+                        # CMF retorna: {"UFs": [{"Valor": "...", "Fecha": "..."}]} o similar
+                        key_map = {'uf': 'UFs', 'dolar': 'Dolares', 'euro': 'Euros', 'utm': 'UTMs'}
+                        items_cmf = j_cmf.get(key_map.get(cod, ''), [])
+                        if items_cmf and len(items_cmf) > 0:
+                            val_raw = items_cmf[0].get('Valor', '')
+                            fecha_raw = str(items_cmf[0].get('Fecha', ''))[:10]
+                            try:
+                                val_num = float(str(val_raw).replace('.', '').replace(',', '.'))
+                            except:
+                                val_num = None
+                            if val_num:
+                                cfg = CMF_FALLBACK_MAP[cod]
+                                datos_actuales[cod] = {
+                                    'nombre':      cfg[1],
+                                    'descripcion': cfg[2],
+                                    'color':       cfg[3],
+                                    'valor':       val_num,
+                                    'fecha':       fecha_raw,
+                                    'unidad':      'Pesos' if cod in ('dolar', 'euro') else cod.upper(),
+                                    'serie30':     [{'valor': val_num, 'fecha': fecha_raw + 'T00:00:00'}],
+                                }
+                                logger.info(f"✅ Fallback CMF para {cod}: {val_num}")
+            except Exception as _cmf_e:
+                logger.debug(f"CMF fallback {cod}: {_cmf_e}")
+
+    # Fallback Bitcoin desde CoinGecko si mindicador.cl falló
+    if 'bitcoin' not in datos_actuales:
+        try:
+            r_btc = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={'ids': 'bitcoin', 'vs_currencies': 'usd', 'include_24hr_change': 'true'},
+                headers={'User-Agent': 'CofrBot/6.0'}, timeout=12
+            )
+            if r_btc.status_code == 200:
+                j_btc = r_btc.json()
+                val_btc = j_btc.get('bitcoin', {}).get('usd')
+                if val_btc:
+                    datos_actuales['bitcoin'] = {
+                        'nombre': 'Bitcoin', 'descripcion': 'Bitcoin en USD',
+                        'color': '#9b59b6', 'valor': val_btc,
+                        'fecha': AHORA.strftime('%Y-%m-%d'), 'unidad': 'USD',
+                        'serie30': [{'valor': val_btc, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                    }
+                    logger.info(f"✅ Fallback CoinGecko para bitcoin: {val_btc}")
+        except Exception as _btc_e:
+            logger.debug(f"CoinGecko bitcoin fallback: {_btc_e}")
+
+    # Fallback web scraping para IPC, TPM, Desempleo, IMACEC, Cobre, IVP
+    WS_FALLBACK = {
+        'ipc':            ('IPC',             'Indice de Precios al Consumidor',       '#2ecc71'),
+        'tpm':            ('TPM',             'Tasa Politica Monetaria (%)',           '#27ae60'),
+        'tasa_desempleo': ('Desempleo',       'Tasa de Desempleo (%)',                 '#e74c3c'),
+        'imacec':         ('IMACEC',          'Indicador Mensual Actividad Eco. (%)',  '#f39c12'),
+        'libra_cobre':    ('Cobre (lb)',      'Precio Libra de Cobre USD',             '#cd7f32'),
+        'ivp':            ('IVP',             'Indice Valor Promedio',                 '#1abc9c'),
+    }
+    missing_ws = [cod for cod in WS_FALLBACK if cod not in datos_actuales]
+    if missing_ws and bs4_disponible:
+        try:
+            # Intentar scraping de bcentral.cl/areas/estadisticas
+            r_bc = requests.get(
+                'https://si3.bcentral.cl/indicadoressiete/secure/IndicadoresDiarios.aspx',
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/6.0)'},
+                timeout=15
+            )
+            if r_bc.status_code == 200:
+                soup_bc = BeautifulSoup(r_bc.text, 'html.parser')
+                # Extraer valores de la tabla de indicadores
+                for row in soup_bc.select('tr'):
+                    cells = row.select('td')
+                    if len(cells) >= 2:
+                        label = cells[0].get_text(strip=True).lower()
+                        val_text = cells[1].get_text(strip=True)
+                        try:
+                            val_clean = float(val_text.replace('.', '').replace(',', '.').replace('%', ''))
+                        except:
+                            continue
+                        
+                        # Mapear labels del BCCH a nuestros códigos
+                        matched_cod = None
+                        if 'ipc' in label and 'ipc' in missing_ws:
+                            matched_cod = 'ipc'
+                        elif 'tpm' in label or 'pol' in label and 'tpm' in missing_ws:
+                            matched_cod = 'tpm'
+                        elif 'desempleo' in label and 'tasa_desempleo' in missing_ws:
+                            matched_cod = 'tasa_desempleo'
+                        elif 'imacec' in label and 'imacec' in missing_ws:
+                            matched_cod = 'imacec'
+                        elif 'cobre' in label and 'libra_cobre' in missing_ws:
+                            matched_cod = 'libra_cobre'
+                        elif 'ivp' in label and 'ivp' in missing_ws:
+                            matched_cod = 'ivp'
+                        
+                        if matched_cod:
+                            cfg_ws = WS_FALLBACK[matched_cod]
+                            datos_actuales[matched_cod] = {
+                                'nombre': cfg_ws[0], 'descripcion': cfg_ws[1],
+                                'color': cfg_ws[2], 'valor': val_clean,
+                                'fecha': AHORA.strftime('%Y-%m-%d'),
+                                'unidad': '%' if matched_cod in ('ipc','tpm','tasa_desempleo','imacec') else 'CLP',
+                                'serie30': [{'valor': val_clean, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                            }
+                            missing_ws.remove(matched_cod)
+                            logger.info(f"✅ Fallback scraping BCCH para {matched_cod}: {val_clean}")
+        except Exception as _ws_e:
+            logger.debug(f"Web scraping BCCH fallback: {_ws_e}")
+
     # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
     def primer_valor_mes(serie, anio, mes):
         for s in reversed(serie):
@@ -15553,7 +15798,7 @@ def generar_html_indicadores(all_data, explicaciones):
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /indicadores — Dashboard económico completo de Chile con análisis IA:
-      • 11 indicadores del día con sparkline 30 días
+      • 14 indicadores del día con sparkline 30 días (con fallback multi-API)
       • Tasas CMF: TMC (labels unicos Tipo 1-6) + Contexto Financiero
       • Análisis IA por indicador (Groq + RAG + BCCH)
       • Dólar vs Euro últimos 6 meses
@@ -15574,7 +15819,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         await msg.edit_text(
-            f"✅ {len(datos)} indicadores obtenidos.\n"
+            f"✅ {len(datos)} de 14 indicadores obtenidos (con fallbacks multi-API).\n"
             "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
             "🔍 Web scraping Banco Central..."
         )
@@ -15641,8 +15886,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                      'ipsa', 'solana', 'ethereum']
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
+            f"📊 14 Indicadores del Día — Tendencia 30 días",
             sep,
-            "Fuente: Banco Central de Chile · CMF",
+            "Fuente: Banco Central · CMF · CoinGecko · Yahoo Finance",
             "",
         ]
         for cod in ORDER_MSG:
