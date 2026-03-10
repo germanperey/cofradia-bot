@@ -106,6 +106,9 @@ gemini_disponible = False
 jsearch_disponible = False
 db_disponible = False
 
+# Cache diario de indicadores (primera consulta descarga, resto usa cache)
+_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
+
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
@@ -5147,7 +5150,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - 4 gauges + 8 stat boxes (matching reference)"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5172,15 +5175,6 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
-            try:
-                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
-                total_eventos = c.fetchone()['total']
-            except: total_eventos = 0
-            try:
-                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
-                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
-                nuevos_7d = c.fetchone()['total']
-            except: nuevos_7d = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5197,20 +5191,13 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
-            try:
-                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
-                total_eventos = c.fetchone()[0]
-            except: total_eventos = 0
-            try:
-                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
-                nuevos_7d = c.fetchone()[0]
-            except: nuevos_7d = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
         
+        # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5222,14 +5209,12 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
-.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
-.stat.highlight .val{{color:#2ecc71}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5239,7 +5224,6 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
-<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5249,14 +5233,12 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
-<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
 </div>
 
-<div class="foot">Bot Premium v6.0 ECharts · Cofradía de Networking</div>
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
+var gold='#c3a55a',blue='#3478c3';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5265,8 +5247,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5275,7 +5257,6 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
-gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5291,9 +5272,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n"
-            f"📅 Eventos activos: {total_eventos:,}\n"
-            f"🆕 Nuevos miembros (7d): {nuevos_7d:,}\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5302,7 +5281,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts — 4 gauges + 8 indicadores"
+                caption="📊 Dashboard ECharts interactivo con gauges"
             )
         
         try:
@@ -9745,6 +9724,21 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Error generando tarjeta pública: {e}")
         
         if img_buffer:
+            # Recomendaciones del perfil público
+            _prec = 0
+            try:
+                conn_pr = get_db_connection()
+                if conn_pr:
+                    cpr = conn_pr.cursor()
+                    if DATABASE_URL:
+                        cpr.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (target_user_id,))
+                        _prec = cpr.fetchone()['t']
+                    else:
+                        cpr.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (target_user_id,))
+                        _prec = cpr.fetchone()[0]
+                    conn_pr.close()
+            except Exception:
+                pass
             # Caption con links clicables (HTML)
             caption = f"📇 <b>{nombre}</b>\n"
             if profesion: caption += f"💼 {profesion}\n"
@@ -9755,6 +9749,8 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
             if linkedin:
                 url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                 caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+            if _prec > 0:
+                caption += f"\n⭐ <b>{_prec} recomendación{'es' if _prec != 1 else ''}</b> de la comunidad"
             caption += "\n🔗 Cofradía de Networking"
             
             await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
@@ -9856,6 +9852,21 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         logger.warning(f"Error generando tarjeta imagen: {e}")
                     
                     if img_buffer:
+                        # Obtener conteo de recomendaciones
+                        _nrec = 0
+                        try:
+                            conn_rc = get_db_connection()
+                            if conn_rc:
+                                crc = conn_rc.cursor()
+                                if DATABASE_URL:
+                                    crc.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nrec = crc.fetchone()['t']
+                                else:
+                                    crc.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nrec = crc.fetchone()[0]
+                                conn_rc.close()
+                        except Exception:
+                            pass
                         # Construir caption con links clicables (HTML)
                         caption = f"📇 <b>Tarjeta de {nombre}</b>\n\n"
                         if profesion: caption += f"💼 {profesion}\n"
@@ -9866,6 +9877,10 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if linkedin:
                             url_li = linkedin if linkedin.startswith('http') else f"https://{linkedin}"
                             caption += f"🔗 <a href=\"{url_li}\">LinkedIn</a>\n"
+                        if _nrec > 0:
+                            caption += f"\n⭐ <b>{_nrec} recomendación{'es' if _nrec != 1 else ''}</b> — Ver: /mis_recomendaciones"
+                        else:
+                            caption += "\n⭐ Pide recomendaciones: /recomendar"
                         caption += "\n✏️ Editar: /mi_tarjeta [campo] [valor]"
                         
                         await update.message.reply_photo(
@@ -9907,6 +9922,24 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if telefono: msg += f"📱 {telefono}\n"
                         if email: msg += f"📧 {email}\n"
                         if linkedin: msg += f"🔗 {linkedin}\n"
+                        _nr2 = 0
+                        try:
+                            conn_r2 = get_db_connection()
+                            if conn_r2:
+                                cr2 = conn_r2.cursor()
+                                if DATABASE_URL:
+                                    cr2.execute("SELECT COUNT(*) as t FROM recomendaciones WHERE destinatario_id = %s", (user_id,))
+                                    _nr2 = cr2.fetchone()['t']
+                                else:
+                                    cr2.execute("SELECT COUNT(*) FROM recomendaciones WHERE destinatario_id = ?", (user_id,))
+                                    _nr2 = cr2.fetchone()[0]
+                                conn_r2.close()
+                        except Exception:
+                            pass
+                        if _nr2 > 0:
+                            msg += f"\n⭐ {_nr2} recomendación{'es' if _nr2 != 1 else ''} — Ver: /mis_recomendaciones\n"
+                        else:
+                            msg += f"\n⭐ Pide recomendaciones: /recomendar\n"
                         msg += f"\n💡 Para editar: /mi_tarjeta [campo] [valor]\n"
                         msg += f"Campos: profesion, empresa, servicios, telefono, email, ciudad, linkedin"
                         await update.message.reply_text(msg)
@@ -14921,7 +14954,7 @@ def generar_explicacion_indicador(codigo, datos, contexto_bcch, fragmento_rag):
     return resp.strip()
 
 
-def generar_html_indicadores(all_data, explicaciones):
+def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
     """
     Dashboard ECharts COMPLETO v6.1 — 6 secciones:
       1. 12 Cards actuales + sparklines 30 dias (con IPSA)
@@ -15472,6 +15505,13 @@ def generar_html_indicadores(all_data, explicaciones):
         ".sem-row.red{background:rgba(231,76,60,.12);border-left:4px solid #e74c3c}"
         ".sem-icon{font-size:1.3em;flex-shrink:0;margin-top:1px}"
         ".sem-text{font-size:.82em;color:#c0c8d4;line-height:1.5}"
+        ".news-section{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);"
+        "border-radius:12px;padding:20px;margin-top:10px}"
+        ".news-title{font-size:1em;font-weight:700;color:#c3a55a;margin-bottom:12px;"
+        "padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2)}"
+        ".news-item{padding:10px;margin-bottom:8px;background:rgba(15,47,89,.5);"
+        "border-radius:8px;border-left:3px solid #3478c3;font-size:.85em;"
+        "color:#aed6f1;line-height:1.6}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
         ".hist-grid{grid-template-columns:1fr}"
@@ -15531,6 +15571,15 @@ def generar_html_indicadores(all_data, explicaciones):
         + afp_html +
         '</div>'
 
+        '<div class="section">'
+        '<div class="section-title">&#128240; Noticias que Impactan los Indicadores</div>'
+        '<div class="news-section">'
+        '<div class="news-title">&#127758; Contexto Internacional y Local</div>'
+        + (noticias_html if noticias_html else
+           '<div class="news-item">&#128196; Sin noticias disponibles. '
+           'Fuentes: bcentral.cl, cmfchile.cl, sii.cl</div>') +
+        '</div></div>'
+
         '<div id="defModal" onclick="if(event.target===this)_closeDef()">'
         '<div class="modal-box">'
         '<button class="modal-close" onclick="_closeDef()">&#10005;</button>'
@@ -15555,7 +15604,7 @@ def generar_html_indicadores(all_data, explicaciones):
         '</footer>'
 
         '<script>'
-        'var _DEFS={"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable segun la inflacion (IPC). Se usa masivamente en Chile para creditos hipotecarios, arriendos, seguros y contratos a largo plazo. Su valor sube cuando hay inflacion y baja en periodos deflacionarios.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, creditos estables.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, monitorear.","r":"Variacion mensual &gt; 0.6% — inflacion alta, encarecimiento de creditos."},"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial entre el dolar estadounidense y el peso chileno, publicado diariamente por el Banco Central. Impacta directamente en importaciones, exportaciones, combustibles y precios de bienes importados.","g":"$780–$880 CLP — rango equilibrado para la economia chilena.","y":"$880–$950 o $700–$780 — volatilidad moderada, atencion a mercados.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario significativo."},"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio entre el euro y el peso chileno. Relevante para comercio con la Union Europea, importacion de bienes europeos, viajes y transferencias internacionales.","g":"$850–$970 CLP — rango equilibrado.","y":"$970–$1.050 o $780–$850 — atencion a tendencias.","r":"&gt; $1.050 o &lt; $780 — desequilibrio importante."},"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida de cuenta utilizada en Chile para fines tributarios y legales. Se reajusta mensualmente segun el IPC. Se usa para calcular multas, impuestos, topes de beneficios sociales y tramos tributarios.","g":"Variacion mensual &lt; 0.4% — estabilidad tributaria.","y":"Variacion mensual 0.4%–0.8% — ajuste moderado.","r":"Variacion mensual &gt; 0.8% — impacto en cargas tributarias."},"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Mide la variacion porcentual mensual de precios de una canasta de bienes y servicios representativa del consumo. Es el indicador oficial de inflacion en Chile, publicado por el INE.","g":"0.0%–0.3% mensual — inflacion dentro de meta del Banco Central (3% anual).","y":"0.3%–0.6% mensual — inflacion sobre la meta, posible ajuste de TPM.","r":"&gt; 0.6% mensual o negativo — inflacion descontrolada o deflacion."},"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de interes de referencia fijada por el Banco Central de Chile. Determina el costo del dinero para bancos y, en cascada, las tasas de creditos hipotecarios, consumo y tarjetas de credito.","g":"3.0%–5.0% — politica monetaria neutra/expansiva.","y":"5.0%–8.0% — politica restrictiva moderada.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema (crisis o sobrecalentamiento)."},"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda descentralizada, la de mayor capitalizacion de mercado. Su precio refleja el sentimiento global de riesgo, adopcion institucional y politicas regulatorias. Altamente volatil.","g":"Variacion diaria &lt; 3% — mercado estable.","y":"Variacion diaria 3%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, riesgo elevado."},"tasa_desempleo":{"t":"Tasa de Desempleo","d":"Porcentaje de la fuerza laboral que busca activamente empleo sin encontrarlo. Publicada trimestralmente por el INE. Indicador clave de salud economica y bienestar social.","g":"&lt; 7.5% — mercado laboral saludable.","y":"7.5%–9.5% — desempleo moderado, alerta.","r":"&gt; 9.5% — crisis laboral, requiere politicas de empleo."},"imacec":{"t":"IMACEC (Actividad Economica)","d":"Indicador Mensual de Actividad Economica. Estimacion mensual del PIB publicada por el Banco Central. Mide el crecimiento o contraccion de la economia chilena en todos los sectores.","g":"&gt; 2.5% — crecimiento saludable.","y":"0.5%–2.5% — crecimiento debil.","r":"&lt; 0.5% o negativo — estancamiento o recesion."},"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Precio de la libra de cobre en mercados internacionales. Chile es el mayor productor mundial. El cobre representa ~50% de las exportaciones y es determinante para ingresos fiscales y tipo de cambio.","g":"&gt; USD 4.00/lb — precios altos, bonanza para Chile.","y":"USD 3.00–4.00/lb — precios moderados.","r":"&lt; USD 3.00/lb — precios bajos, impacto fiscal negativo."},"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Indice diario que mide el valor promedio de la UF del mes anterior. Se utiliza en operaciones de credito y financieras como alternativa a la UF para ciertas transacciones bancarias.","g":"Variacion estable respecto a la UF.","y":"Divergencia moderada con la UF.","r":"Divergencia significativa — revisar condiciones de credito."},"ipsa":{"t":"IPSA (Bolsa de Santiago)","d":"Indice de Precio Selectivo de Acciones. Mide el rendimiento de las 30 acciones con mayor presencia bursatil en la Bolsa de Santiago. Es el principal indicador del mercado accionario chileno.","g":"Tendencia alcista (&gt; 5.500 pts) — confianza inversora.","y":"Lateral (4.500–5.500 pts) — incertidumbre.","r":"Tendencia bajista (&lt; 4.500 pts) — aversion al riesgo."},"solana":{"t":"Solana (SOL)","d":"Criptomoneda y plataforma blockchain de alta velocidad (~65.000 TPS). Utilizada para DeFi, NFTs y aplicaciones descentralizadas. Competidor directo de Ethereum con menores costos de transaccion.","g":"Variacion diaria &lt; 5% — estabilidad relativa.","y":"Variacion diaria 5%–10% — volatilidad moderada.","r":"Variacion diaria &gt; 10% — volatilidad extrema."},"ethereum":{"t":"Ethereum (ETH)","d":"Segunda criptomoneda por capitalizacion. Plataforma lider en contratos inteligentes, DeFi y NFTs. Su precio refleja la adopcion de tecnologia blockchain y el ecosistema de finanzas descentralizadas.","g":"Variacion diaria &lt; 4% — mercado estable.","y":"Variacion diaria 4%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, precaucion."}};'
+        'var _DEFS={"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable segun la inflacion (IPC). Se usa en creditos hipotecarios, arriendos, seguros y contratos a largo plazo. Sube con inflacion, baja en periodos deflacionarios.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, creditos estables.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, monitorear.","r":"Variacion mensual &gt; 0.6% — inflacion alta, encarecimiento de creditos."},"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial publicado por el Banco Central. Impacta importaciones, exportaciones, combustibles y precios de bienes importados.","g":"$780–$880 CLP — rango equilibrado.","y":"$880–$950 o $700–$780 — volatilidad moderada.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario."},"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio euro/peso. Relevante para comercio con UE, viajes y transferencias.","g":"$850–$970 CLP — equilibrado.","y":"$970–$1.050 o $780–$850 — atencion.","r":"&gt; $1.050 o &lt; $780 — desequilibrio."},"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida para fines tributarios. Se reajusta por IPC. Multas, impuestos, topes de beneficios.","g":"Variacion &lt; 0.4% — estabilidad tributaria.","y":"Variacion 0.4%–0.8% — ajuste moderado.","r":"Variacion &gt; 0.8% — impacto en cargas tributarias."},"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Variacion mensual de precios de canasta de consumo. Indicador oficial de inflacion (INE).","g":"0.0%–0.3% — dentro de meta BCCh (3% anual).","y":"0.3%–0.6% — sobre meta, posible ajuste TPM.","r":"&gt; 0.6% o negativo — inflacion descontrolada o deflacion."},"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de referencia del Banco Central. Determina costo de creditos hipotecarios, consumo y tarjetas.","g":"3.0%–5.0% — politica neutra/expansiva.","y":"5.0%–8.0% — restrictiva moderada.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema."},"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda de mayor capitalizacion. Refleja sentimiento global de riesgo. Altamente volatil.","g":"Variacion diaria &lt; 3% — estable.","y":"Variacion diaria 3%–8% — moderada.","r":"Variacion diaria &gt; 8% — riesgo elevado."},"tasa_desempleo":{"t":"Tasa de Desempleo","d":"% de fuerza laboral sin empleo. Publicada trimestralmente por INE.","g":"&lt; 7.5% — mercado laboral saludable.","y":"7.5%–9.5% — desempleo moderado.","r":"&gt; 9.5% — crisis laboral."},"imacec":{"t":"IMACEC (Actividad Economica)","d":"Estimacion mensual del PIB. Mide crecimiento o contraccion de la economia chilena.","g":"&gt; 2.5% — crecimiento saludable.","y":"0.5%–2.5% — crecimiento debil.","r":"&lt; 0.5% o negativo — estancamiento/recesion."},"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Chile es mayor productor mundial. ~50% de exportaciones. Clave para ingresos fiscales.","g":"&gt; USD 4.00/lb — bonanza para Chile.","y":"USD 3.00–4.00/lb — moderado.","r":"&lt; USD 3.00/lb — impacto fiscal negativo."},"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Valor promedio de UF del mes anterior. Usado en operaciones de credito bancarias.","g":"Variacion estable respecto a la UF.","y":"Divergencia moderada con la UF.","r":"Divergencia significativa — revisar credito."},"ipsa":{"t":"IPSA (Bolsa de Santiago)","d":"Rendimiento de 30 acciones principales. Principal indicador bursatil chileno.","g":"Tendencia alcista (&gt; 5.500 pts).","y":"Lateral (4.500–5.500 pts).","r":"Bajista (&lt; 4.500 pts)."},"solana":{"t":"Solana (SOL)","d":"Blockchain alta velocidad. DeFi, NFTs. Competidor de Ethereum.","g":"Variacion diaria &lt; 5%.","y":"Variacion diaria 5%–10%.","r":"Variacion diaria &gt; 10%."},"ethereum":{"t":"Ethereum (ETH)","d":"2da cripto por capitalizacion. Contratos inteligentes, DeFi y NFTs.","g":"Variacion diaria &lt; 4%.","y":"Variacion diaria 4%–8%.","r":"Variacion diaria &gt; 8%."}};'
         'function _showDef(cod){var d=_DEFS[cod];if(!d)return;document.getElementById("defTitle").innerHTML=d.t;document.getElementById("defDesc").innerHTML=d.d;document.getElementById("defGreen").innerHTML=d.g;document.getElementById("defYellow").innerHTML=d.y;document.getElementById("defRed").innerHTML=d.r;document.getElementById("defModal").style.display="block";document.body.style.overflow="hidden";}'
         'function _closeDef(){document.getElementById("defModal").style.display="none";document.body.style.overflow="auto";}'
         'document.addEventListener("keydown",function(e){if(e.key==="Escape")_closeDef();});'
@@ -15619,86 +15668,136 @@ def generar_html_indicadores(all_data, explicaciones):
 @requiere_suscripcion
 async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /indicadores — Dashboard económico completo de Chile con análisis IA:
-      • 11 indicadores del día con sparkline 30 días
-      • Tasas CMF: TMC (labels unicos Tipo 1-6) + Contexto Financiero
-      • Análisis IA por indicador (Groq + RAG + BCCH)
-      • Dólar vs Euro últimos 6 meses
-      • Histórico 10 años: UF, Dólar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre, Bitcoin
+    /indicadores — Dashboard económico con cache diario.
+    Primera consulta del día: APIs + IA (~20s). Siguientes: cache (~2s).
     """
+    hoy = datetime.now().strftime('%Y-%m-%d')
+    datos_cmf = {}
+    datos_afp = {}
+
     msg = await update.message.reply_text(
-        "📈 Consultando indicadores económicos...\n"
-        "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
+        "📈 Consultando indicadores económicos...\n⏳ Verificando datos del día..."
     )
     try:
         loop = asyncio.get_running_loop()
 
-        # 1. Indicadores Banco Central (~80 peticiones en paralelo)
-        all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
-        datos = all_data.get('datos_actuales', {})
-        if not datos:
-            await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
-            return
-
-        await msg.edit_text(
-            f"✅ {len(datos)} indicadores obtenidos.\n"
-            "🏦 Consultando tasas CMF + rentabilidad AFP...\n"
-            "🔍 Web scraping Banco Central..."
-        )
-
-        # 2. Tasas CMF (sin necesidad de variable de entorno adicional)
-        datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
-        all_data['datos_cmf'] = datos_cmf or {}
-
-        # 2b. Rentabilidad AFP (6 meses) — corre en paralelo con BCCH scraping
-        datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
-        all_data['datos_afp'] = datos_afp or {}
-
-        # 3. Web scraping BCCH
-        noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
-        contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
-
-        await msg.edit_text(
-            f"✅ Indicadores + CMF obtenidos.\n"
-            "📚 Consultando biblioteca RAG...\n"
-            "🤖 Generando análisis IA..."
-        )
-
-        # 4. RAG por indicador
-        queries_rag = {
-            'uf':             'unidad de fomento inflacion reajuste Chile',
-            'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
-            'euro':           'tipo de cambio euro moneda extranjera',
-            'utm':            'unidad tributaria mensual impuestos Chile',
-            'ipc':            'indice de precios al consumidor inflacion causas efectos',
-            'tpm':            'tasa de politica monetaria banco central tasas de interes',
-            'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
-            'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
-            'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
-            'libra_cobre':    'precio cobre Chile exportaciones materias primas',
-            'ivp':            'indice valor promedio creditos hipotecarios Chile',
-            'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
-            'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
-            'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
-        }
-        fragmentos_rag = {}
-        for cod in datos:
-            query = queries_rag.get(cod, f'indicador economico {cod} Chile')
-            frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
-            fragmentos_rag[cod] = frag
-
-        # 5. Explicaciones IA
-        await msg.edit_text(
-            f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
-            "📊 Construyendo dashboard interactivo..."
-        )
-        explicaciones = {}
-        for cod, d in datos.items():
-            exp = await loop.run_in_executor(
-                None, generar_explicacion_indicador,
-                cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
+        # ── Verificar cache del día ──
+        if (_indicadores_cache.get('fecha') == hoy
+                and _indicadores_cache.get('all_data')
+                and _indicadores_cache.get('html_content')):
+            all_data = _indicadores_cache['all_data']
+            explicaciones = _indicadores_cache['explicaciones'] or {}
+            html_content = _indicadores_cache['html_content']
+            datos = all_data.get('datos_actuales', {})
+            datos_cmf = all_data.get('datos_cmf', {})
+            datos_afp = all_data.get('datos_afp', {})
+            await msg.edit_text(f"⚡ {len(datos)} indicadores (cache del día)")
+        else:
+            # ── Primera consulta del día: pipeline completo ──
+            await msg.edit_text(
+                "📈 Primera consulta del día — datos frescos...\n"
+                "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
             )
-            explicaciones[cod] = exp
+
+            all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
+            datos = all_data.get('datos_actuales', {})
+            if not datos:
+                await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
+                return
+
+            await msg.edit_text(
+                f"✅ {len(datos)} indicadores obtenidos.\n"
+                "🏦 Consultando tasas CMF + rentabilidad AFP..."
+            )
+
+            try:
+                datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
+            except Exception as _ec:
+                logger.warning(f"CMF falló: {_ec}")
+                datos_cmf = {}
+            all_data['datos_cmf'] = datos_cmf or {}
+
+            try:
+                datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
+            except Exception as _ea:
+                logger.warning(f"AFP falló: {_ea}")
+                datos_afp = {}
+            all_data['datos_afp'] = datos_afp or {}
+
+            noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
+            contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
+
+            await msg.edit_text(
+                f"✅ Indicadores + CMF obtenidos.\n"
+                "📚 Consultando biblioteca RAG...\n"
+                "🤖 Generando análisis IA..."
+            )
+
+            queries_rag = {
+                'uf':             'unidad de fomento inflacion reajuste Chile',
+                'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
+                'euro':           'tipo de cambio euro moneda extranjera',
+                'utm':            'unidad tributaria mensual impuestos Chile',
+                'ipc':            'indice de precios al consumidor inflacion causas efectos',
+                'tpm':            'tasa de politica monetaria banco central tasas de interes',
+                'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
+                'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
+                'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
+                'libra_cobre':    'precio cobre Chile exportaciones materias primas',
+                'ivp':            'indice valor promedio creditos hipotecarios Chile',
+                'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
+                'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
+                'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
+            }
+            fragmentos_rag = {}
+            for cod in datos:
+                query = queries_rag.get(cod, f'indicador economico {cod} Chile')
+                frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
+                fragmentos_rag[cod] = frag
+
+            await msg.edit_text(
+                f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
+                "📊 Construyendo dashboard interactivo..."
+            )
+            explicaciones = {}
+            for cod, d in datos.items():
+                exp = await loop.run_in_executor(
+                    None, generar_explicacion_indicador,
+                    cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
+                )
+                explicaciones[cod] = exp
+
+            # Generar noticias HTML para el pie del dashboard
+            noticias_html = ""
+            if noticias_bcch:
+                for n in noticias_bcch[:5]:
+                    noticias_html += '<div class="news-item">&#128196; ' + str(n).replace('<','&lt;').replace('>','&gt;') + '</div>'
+            try:
+                prompt_news = (
+                    "En 5 bullet points breves, resume las principales noticias "
+                    "internacionales y locales de Chile de esta semana que impactan "
+                    "indicadores economicos (dolar, cobre, inflacion, tasas, bolsa). "
+                    "Cada punto maximo 1 linea. Sin emojis. Solo texto."
+                )
+                news_ia = llamar_groq(prompt_news, max_tokens=300, temperature=0.3)
+                if news_ia:
+                    for line in news_ia.strip().split('\n'):
+                        line = line.strip().lstrip('-•*0123456789.').strip()
+                        if len(line) > 10:
+                            noticias_html += '<div class="news-item">&#127758; ' + line.replace('<','&lt;') + '</div>'
+            except Exception:
+                pass
+
+            html_content = await loop.run_in_executor(
+                None, generar_html_indicadores, all_data, explicaciones, noticias_html
+            )
+
+            # ── Guardar cache del día ──
+            _indicadores_cache['fecha'] = hoy
+            _indicadores_cache['all_data'] = all_data
+            _indicadores_cache['explicaciones'] = explicaciones
+            _indicadores_cache['html_content'] = html_content
+            logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
 
         # 6. Mensaje de texto resumido
         sep = "━" * 30
@@ -15777,11 +15876,8 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
         await update.message.reply_text("\n".join(lineas))
 
-        # 7. Generar y enviar HTML
-        await msg.edit_text("📊 Generando dashboard HTML interactivo...")
-        html_content = await loop.run_in_executor(
-            None, generar_html_indicadores, all_data, explicaciones
-        )
+        # 7. Enviar HTML (usa cache si disponible)
+        await msg.edit_text("📊 Preparando dashboard...")
         html_path = f"/tmp/ind_{update.effective_user.id}.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(html_content)
@@ -16477,14 +16573,13 @@ async def match_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SISTEMA DE EMERGENCIA — 4 botones (Choque, Asalto, Incendio, Accidente)
+# SISTEMA DE EMERGENCIA — /emergencia
+# 4 botones: Choque vehicular, Asalto, Incendio, Accidente
+# Flujo: Tipo → Descripción (opcional) → Geo o Dirección → Broadcast al grupo
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Estados de conversación para emergencia
-EMER_TIPO, EMER_DIRECCION, EMER_DESCRIPCION = range(100, 103)
-
 async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /emergencia — Muestra 4 botones de emergencia"""
+    """Comando /emergencia — 4 botones de emergencia"""
     keyboard = [
         [InlineKeyboardButton("🚗 Choque vehicular", callback_data="emer_choque"),
          InlineKeyboardButton("🔫 Asalto", callback_data="emer_asalto")],
@@ -16495,103 +16590,111 @@ async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🚨 EMERGENCIA — COFRADÍA DE NETWORKING\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Selecciona el tipo de emergencia:\n\n"
-        "⚠️ Al completar, se notificará a TODOS los\n"
-        "miembros del grupo para que presten apoyo.",
+        "⚠️ Se notificará a TODOS los miembros del grupo.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def emergencia_tipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback cuando seleccionan tipo de emergencia"""
+    """Callback: selección tipo de emergencia → pedir descripción + ubicación"""
     query = update.callback_query
     await query.answer()
-    
-    tipos = {
-        'emer_choque': '🚗 CHOQUE VEHICULAR',
-        'emer_asalto': '🔫 ASALTO',
-        'emer_incendio': '🔥 INCENDIO',
-        'emer_accidente': '🚑 ACCIDENTE',
-    }
+    tipos = {'emer_choque': '🚗 CHOQUE VEHICULAR', 'emer_asalto': '🔫 ASALTO',
+             'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'}
     tipo = tipos.get(query.data, 'EMERGENCIA')
-    context.user_data['emergencia_tipo'] = tipo
-    context.user_data['emergencia_hora'] = datetime.now().strftime('%H:%M:%S')
-    
-    keyboard = [
-        [InlineKeyboardButton("📍 Enviar mi ubicación GPS", callback_data="emer_gps")],
-    ]
+    context.user_data['emer_tipo'] = tipo
+    context.user_data['emer_hora'] = datetime.now().strftime('%H:%M:%S')
+    context.user_data['emer_step'] = 'descripcion'
     await query.edit_message_text(
         f"🚨 {tipo}\n\n"
-        "📍 Ingresa la dirección del siniestro:\n\n"
-        "Formato: Calle, Número, Depto/Local (opcional), Comuna\n"
-        "Ejemplo: Av. Providencia 1234, Of. 501, Providencia\n\n"
-        "O presiona el botón para enviar tu ubicación GPS:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "📝 Escribe una breve descripción (opcional).\n"
+        "O selecciona directamente cómo indicar la ubicación:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
+             InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
+        ])
     )
-    context.user_data['emergencia_esperando'] = 'direccion'
 
-async def emergencia_gps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback para solicitar ubicación GPS"""
+async def emergencia_geo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: solicitar geolocalización GPS"""
     query = update.callback_query
     await query.answer()
+    context.user_data['emer_step'] = 'geo'
     await query.edit_message_text(
-        f"🚨 {context.user_data.get('emergencia_tipo', 'EMERGENCIA')}\n\n"
-        "📍 Envía tu ubicación usando el clip 📎 → Ubicación\n"
-        "en la barra de Telegram.\n\n"
-        "O escribe la dirección manualmente:\n"
-        "Ejemplo: Av. Providencia 1234, Providencia"
+        f"🚨 {context.user_data.get('emer_tipo', 'EMERGENCIA')}\n\n"
+        "📍 GEOLOCALIZACIÓN\n\n"
+        "Envía tu ubicación usando: 📎 → Ubicación\n\n"
+        "Tu posición se mostrará en Google Maps automáticamente."
+    )
+
+async def emergencia_dir_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: pedir dirección manual"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data['emer_step'] = 'direccion'
+    await query.edit_message_text(
+        f"🚨 {context.user_data.get('emer_tipo', 'EMERGENCIA')}\n\n"
+        "🏠 MI DIRECCIÓN\n\n"
+        "Escribe la dirección con este formato:\n"
+        "Calle, Número, Depto/Local (opcional), Comuna\n\n"
+        "Ejemplo: Av. Providencia 1234, Of. 501, Providencia"
     )
 
 async def emergencia_recibir_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Recibe ubicación GPS del usuario"""
-    if not context.user_data.get('emergencia_esperando'):
+    if context.user_data.get('emer_step') != 'geo':
         return
-    if update.message.location:
+    if update.message and update.message.location:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
-        context.user_data['emergencia_direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f} (https://maps.google.com/?q={lat},{lon})"
-        context.user_data['emergencia_esperando'] = 'descripcion'
-        await update.message.reply_text(
-            "✅ Ubicación GPS recibida.\n\n"
-            "📝 Describe brevemente qué ocurrió (opcional).\n"
-            "Escribe /enviar_emergencia para enviar ahora sin descripción."
-        )
+        maps_url = f"https://maps.google.com/?q={lat},{lon}"
+        context.user_data['emer_direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f}"
+        context.user_data['emer_maps'] = maps_url
+        context.user_data['emer_step'] = None
+        await _enviar_alerta_emergencia(update, context)
 
 async def emergencia_recibir_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe dirección o descripción de emergencia por texto"""
-    if not context.user_data.get('emergencia_esperando'):
+    """Recibe descripción o dirección de emergencia por texto"""
+    step = context.user_data.get('emer_step')
+    if not step:
         return
-    
     texto = update.message.text.strip()
-    
-    if context.user_data['emergencia_esperando'] == 'direccion':
-        context.user_data['emergencia_direccion'] = f"📍 {texto}"
-        context.user_data['emergencia_esperando'] = 'descripcion'
+
+    if step == 'descripcion':
+        context.user_data['emer_desc'] = texto
+        context.user_data['emer_step'] = 'elegir_ubi'
         await update.message.reply_text(
-            "✅ Dirección registrada.\n\n"
-            "📝 Describe brevemente qué ocurrió (opcional).\n"
-            "Escribe /enviar_emergencia para enviar ahora sin descripción."
+            "✅ Descripción registrada.\n\nAhora indica la ubicación:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
+                 InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
+            ])
         )
-    elif context.user_data['emergencia_esperando'] == 'descripcion':
-        context.user_data['emergencia_descripcion'] = texto
-        context.user_data['emergencia_esperando'] = None
+    elif step == 'direccion':
+        import urllib.parse as _up_e
+        maps_url = f"https://maps.google.com/maps?q={_up_e.quote(texto + ', Chile')}"
+        context.user_data['emer_direccion'] = f"📍 {texto}"
+        context.user_data['emer_maps'] = maps_url
+        context.user_data['emer_step'] = None
         await _enviar_alerta_emergencia(update, context)
 
 async def enviar_emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /enviar_emergencia — Envía la alerta sin descripción adicional"""
-    if not context.user_data.get('emergencia_tipo'):
+    """Comando /enviar_emergencia — Envía alerta sin datos adicionales"""
+    if not context.user_data.get('emer_tipo'):
         await update.message.reply_text("❌ No hay emergencia en curso. Usa /emergencia")
         return
-    context.user_data['emergencia_esperando'] = None
+    context.user_data['emer_step'] = None
     await _enviar_alerta_emergencia(update, context)
 
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía la alerta de emergencia a todos los topics del grupo"""
+    """Envía alerta de emergencia a todos los topics del grupo + Google Maps"""
     user = update.effective_user
-    tipo = context.user_data.get('emergencia_tipo', 'EMERGENCIA')
-    hora = context.user_data.get('emergencia_hora', datetime.now().strftime('%H:%M:%S'))
-    direccion = context.user_data.get('emergencia_direccion', 'No especificada')
-    descripcion = context.user_data.get('emergencia_descripcion', '')
-    nombre = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or 'Usuario'
-    
+    tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
+    hora = context.user_data.get('emer_hora', datetime.now().strftime('%H:%M:%S'))
+    direccion = context.user_data.get('emer_direccion', 'No especificada')
+    maps_url = context.user_data.get('emer_maps', '')
+    descripcion = context.user_data.get('emer_desc', '')
+    nombre = f"{user.first_name or ''} {user.last_name or ''}".strip() or 'Usuario'
+
     # Buscar teléfono en Google Drive Excel
     telefono_usuario = ''
     try:
@@ -16601,128 +16704,111 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             creds_dict = json.loads(creds_json)
             scope = ['https://www.googleapis.com/auth/drive.readonly']
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            import io as _io
             headers_auth = {"Authorization": f"Bearer {creds.get_access_token().access_token}"}
-            r_files = requests.get(
-                "https://www.googleapis.com/drive/v3/files",
+            r_files = requests.get("https://www.googleapis.com/drive/v3/files",
                 headers=headers_auth,
-                params={'q': "name contains 'BD Grupo Laboral' and trashed=false", 'fields': 'files(id,name)'},
-                timeout=10
-            )
+                params={'q': "name contains 'BD Grupo Laboral' and trashed=false",
+                        'fields': 'files(id,name)'}, timeout=10)
             files = r_files.json().get('files', [])
             if files:
-                file_id = files[0]['id']
                 r_dl = requests.get(
-                    f"https://www.googleapis.com/drive/v3/files/{file_id}/export",
+                    f"https://www.googleapis.com/drive/v3/files/{files[0]['id']}/export",
                     headers=headers_auth,
                     params={'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},
-                    timeout=15
-                )
+                    timeout=15)
                 if r_dl.status_code == 200:
-                    df = pd.read_excel(_io.BytesIO(r_dl.content), header=0)
-                    nombre_lower = nombre.lower()
+                    import io as _io_e
+                    df = pd.read_excel(_io_e.BytesIO(r_dl.content), header=0)
                     for _, row in df.iterrows():
-                        nom_excel = str(row.iloc[2] if len(row) > 2 else '').strip().lower()
-                        ape_excel = str(row.iloc[3] if len(row) > 3 else '').strip().lower()
-                        if nom_excel and (nom_excel in nombre_lower or nombre_lower in f"{nom_excel} {ape_excel}"):
+                        nom_e = str(row.iloc[2] if len(row) > 2 else '').strip().lower()
+                        if nom_e and nom_e in nombre.lower():
                             tel = str(row.iloc[5] if len(row) > 5 else '').strip()
                             if tel and tel != 'nan':
                                 telefono_usuario = tel
                                 break
     except Exception as e:
-        logger.debug(f"Error buscando teléfono emergencia: {e}")
-    
-    # Calcular tiempo transcurrido
+        logger.debug(f"Error teléfono emergencia: {e}")
+
     ahora = datetime.now()
-    
-    # Construir mensaje de emergencia
+    try:
+        hora_dt = datetime.strptime(hora, '%H:%M:%S').replace(
+            year=ahora.year, month=ahora.month, day=ahora.day)
+        mins = (ahora - hora_dt).seconds // 60
+    except Exception:
+        mins = 0
+
     alerta = (
-        f"🚨🚨🚨 ALERTA DE EMERGENCIA 🚨🚨🚨\n"
-        f"{'━' * 30}\n\n"
+        f"🚨🚨🚨 ALERTA DE EMERGENCIA 🚨🚨🚨\n{'━' * 30}\n\n"
         f"⚠️ Tipo: {tipo}\n"
         f"👤 Reporta: {nombre}\n"
     )
     if telefono_usuario:
         alerta += f"📱 Teléfono: {telefono_usuario}\n"
-    alerta += (
-        f"🕐 Hora del reporte: {hora}\n"
-        f"⏱️ Tiempo transcurrido: {(ahora - datetime.strptime(hora, '%H:%M:%S').replace(year=ahora.year, month=ahora.month, day=ahora.day)).seconds // 60} min\n"
-        f"\n{direccion}\n"
-    )
+    alerta += f"🕐 Hora: {hora} (hace {mins} min)\n\n{direccion}\n"
+    if maps_url:
+        alerta += f"🗺️ Ver en Google Maps: {maps_url}\n"
     if descripcion:
         alerta += f"\n📝 Descripción: {descripcion}\n"
     alerta += (
         f"\n{'━' * 30}\n"
-        f"🆘 VE PRESENCIALMENTE Y AYUDA SI PUEDES\n"
-        f"O PRESTA APOYO LLAMANDO A EMERGENCIAS:\n\n"
-        f"🚑 131 — Ambulancia (SAMU)\n"
-        f"🚒 132 — Bomberos\n"
-        f"🚔 133 — Carabineros\n"
-        f"🔍 134 — PDI (Investigaciones)\n"
-        f"\n{'━' * 30}\n"
-        f"⚓ Cofradía de Networking — Red de Apoyo"
+        "🆘 URGENTE!!! ACUDE EN AYUDA SI PUEDES,\n"
+        "O PRESTA APOYO LLAMANDO A EMERGENCIAS:\n\n"
+        "🚑 131 — Ambulancia (SAMU)\n"
+        "🚒 132 — Bomberos\n"
+        "🚔 133 — Carabineros\n"
+        "🔍 134 — PDI (Investigaciones)\n"
+        f"\n{'━' * 30}\n⚓ Cofradía de Networking — Red de Apoyo"
     )
-    
-    # Enviar a todos los topics del grupo
+
     enviados = 0
     if COFRADIA_GROUP_ID:
-        # Primero enviar al grupo principal (sin topic)
         try:
             await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=alerta)
             enviados += 1
-        except Exception as e:
-            logger.debug(f"Error enviando emergencia al grupo principal: {e}")
-        
-        # Enviar a cada topic registrado
+        except Exception:
+            pass
         try:
-            conn = get_db_connection()
-            if conn:
-                c = conn.cursor()
-                if DATABASE_URL:
-                    c.execute("SELECT topic_id FROM topics_grupo")
-                else:
-                    c.execute("SELECT topic_id FROM topics_grupo")
-                topics = c.fetchall()
-                conn.close()
+            conn_t = get_db_connection()
+            if conn_t:
+                ct = conn_t.cursor()
+                ct.execute("SELECT topic_id FROM topics_grupo")
+                topics = ct.fetchall()
+                conn_t.close()
                 for t in topics:
                     tid = t['topic_id'] if DATABASE_URL else t[0]
                     if tid:
                         try:
                             await context.bot.send_message(
-                                chat_id=COFRADIA_GROUP_ID,
-                                text=alerta,
-                                message_thread_id=tid
-                            )
+                                chat_id=COFRADIA_GROUP_ID, text=alerta,
+                                message_thread_id=tid)
                             enviados += 1
                         except Exception:
                             pass
-        except Exception as e:
-            logger.debug(f"Error enviando a topics: {e}")
-    
-    # Notificar al owner
+        except Exception:
+            pass
+
     if OWNER_ID:
         try:
-            await context.bot.send_message(chat_id=OWNER_ID, text=f"🚨 EMERGENCIA REPORTADA\n\n{alerta}")
-        except:
+            await context.bot.send_message(
+                chat_id=OWNER_ID, text=f"🚨 EMERGENCIA\n\n{alerta}")
+        except Exception:
             pass
-    
-    # Confirmar al usuario
+
+    # Botones de llamada de emergencia
+    tel_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
+         InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")],
+        [InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
+         InlineKeyboardButton("🔍 134 PDI", url="tel:134")],
+    ])
+
     await update.message.reply_text(
-        f"✅ ALERTA ENVIADA EXITOSAMENTE\n\n"
-        f"📡 Notificados: {enviados} canales del grupo\n"
-        f"⚠️ Tipo: {tipo}\n"
-        f"🕐 Hora: {hora}\n\n"
-        f"🆘 Números de emergencia:\n"
-        f"🚑 131 — Ambulancia\n"
-        f"🚒 132 — Bomberos\n"
-        f"🚔 133 — Carabineros\n"
-        f"🔍 134 — PDI\n\n"
-        f"💪 Fuerza, la Cofradía está contigo."
+        f"✅ ALERTA ENVIADA ({enviados} canales)\n\n"
+        f"⚠️ {tipo}\n🕐 {hora}\n\n🆘 Números de emergencia:",
+        reply_markup=tel_kb
     )
-    
-    # Limpiar datos de emergencia
-    for key in ['emergencia_tipo', 'emergencia_hora', 'emergencia_direccion', 
-                'emergencia_descripcion', 'emergencia_esperando']:
+
+    for key in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc','emer_step']:
         context.user_data.pop(key, None)
 
 
@@ -16975,7 +17061,8 @@ def main():
     application.add_handler(CommandHandler("emergencia", emergencia_comando))
     application.add_handler(CommandHandler("enviar_emergencia", enviar_emergencia_comando))
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
-    application.add_handler(CallbackQueryHandler(emergencia_gps_callback, pattern='^emer_gps$'))
+    application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
+    application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
     application.add_handler(MessageHandler(filters.LOCATION & filters.ChatType.PRIVATE, emergencia_recibir_ubicacion))
     
     # v4.0 handlers: Coins, Premium, Trust
@@ -17059,7 +17146,7 @@ def main():
             return
         
         # Interceptar texto de emergencia en curso
-        if context.user_data.get('emergencia_esperando'):
+        if context.user_data.get('emer_step'):
             await emergencia_recibir_texto(update, context)
             return
         
