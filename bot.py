@@ -2200,93 +2200,81 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos reales
+            # Formatear empleos — TEXTO PLANO con 8 campos obligatorios
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
-            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
-            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
+            resultado = "🔎 EMPLEOS REALES ENCONTRADOS\n"
+            resultado += f"📋 Búsqueda: {busqueda_texto}\n"
+            resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
+            resultado += f"📊 Resultados: {len(empleos[:10])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
             
-            for i, empleo in enumerate(empleos[:8], 1):
+            for i, empleo in enumerate(empleos[:10], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
-                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
                 
-                # Sueldo
-                min_salary = empleo.get('job_min_salary')
-                max_salary = empleo.get('job_max_salary')
-                salary_period = empleo.get('job_salary_period', '')
+                # Ciudad completa
+                partes_ub = []
+                if empleo.get('job_city'): partes_ub.append(empleo['job_city'])
+                if empleo.get('job_state') and empleo['job_state'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_state'])
+                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
+                ubicacion_job = ', '.join(partes_ub) if partes_ub else 'Chile'
                 
-                if min_salary and max_salary:
-                    sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
-                    if salary_period:
-                        sueldo += f" ({salary_period})"
-                elif min_salary:
-                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
+                # Salario — búsqueda en múltiples campos
+                min_sal = empleo.get('job_min_salary')
+                max_sal = empleo.get('job_max_salary')
+                sal_per = empleo.get('job_salary_period', '')
+                sal_cur = empleo.get('job_salary_currency', 'CLP')
+                per_es = {'YEAR':'anual','MONTH':'mensual','WEEK':'semanal','HOUR':'/hora'}
+                if min_sal and max_sal:
+                    sueldo = f"${int(min_sal):,} - ${int(max_sal):,} {sal_cur}".replace(",",".")
+                    if sal_per: sueldo += f" ({per_es.get(sal_per, sal_per)})"
+                elif min_sal:
+                    sueldo = f"Desde ${int(min_sal):,} {sal_cur}".replace(",",".")
+                elif max_sal:
+                    sueldo = f"Hasta ${int(max_sal):,} {sal_cur}".replace(",",".")
                 else:
-                    sueldo = "No especificado"
+                    est = empleo.get('estimated_salaries') or []
+                    if isinstance(est, list) and est:
+                        s0 = est[0]; mn = s0.get('min_salary', s0.get('median_salary',0)); mx = s0.get('max_salary', mn)
+                        sueldo = f"~${int(mn):,} - ${int(mx):,} (est.)".replace(",",".") if mn else "Consultar"
+                    else:
+                        sueldo = "Consultar en portal"
                 
-                # Tipo de empleo
-                tipo = empleo.get('job_employment_type', 'No especificado')
-                if tipo == 'FULLTIME':
-                    tipo = 'Tiempo completo'
-                elif tipo == 'PARTTIME':
-                    tipo = 'Medio tiempo'
-                elif tipo == 'CONTRACTOR':
-                    tipo = 'Contrato'
+                # Modalidad
+                tipo_map = {'FULLTIME':'Tiempo completo','PARTTIME':'Medio tiempo','CONTRACTOR':'Contrato','INTERN':'Práctica','TEMPORARY':'Temporal'}
+                tipo = tipo_map.get(empleo.get('job_employment_type',''), empleo.get('job_employment_type','No especificado'))
+                es_remoto = empleo.get('job_is_remote', False)
+                modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
                 
-                # Link de postulación
-                link = empleo.get('job_apply_link', '')
-                
-                # Fecha de publicación
-                posted = empleo.get('job_posted_at_datetime_utc', '')
-                if posted:
-                    try:
-                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
-                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
-                        if dias_atras == 0:
-                            fecha_str = "Hoy"
-                        elif dias_atras == 1:
-                            fecha_str = "Ayer"
-                        else:
-                            fecha_str = f"Hace {dias_atras} días"
-                    except:
-                        fecha_str = ""
-                else:
-                    fecha_str = ""
-                
-                # Descripción breve del cargo
-                raw_desc = (empleo.get('job_description') or
-                            empleo.get('job_highlights', {}).get('Responsibilities', [''])[0] or "")
+                # Descripción limpia
+                raw_desc = empleo.get('job_description','')
+                if not raw_desc:
+                    hl = empleo.get('job_highlights',{}); rl = hl.get('Responsibilities',[])
+                    if rl: raw_desc = '. '.join(rl[:3])
                 if raw_desc:
-                    desc_corta = raw_desc[:280].replace("\n", " ").replace("  ", " ").strip()
-                    ultimo_p = desc_corta.rfind(". ")
-                    if ultimo_p > 80:
-                        desc_corta = desc_corta[:ultimo_p + 1]
+                    desc_l = re.sub(r'<[^>]+>',' ',str(raw_desc)); desc_l = re.sub(r'\s+',' ',desc_l).strip()[:300]
+                    p = desc_l.rfind(". ")
+                    if p > 100: desc_l = desc_l[:p+1]
+                    elif len(desc_l)>=300: desc_l += "..."
                 else:
-                    desc_corta = ""
-
-                resultado += f"**{i}. {titulo}**\n"
-                resultado += f"🏢 {empresa}\n"
-                resultado += f"📍 {ubicacion_job}\n"
-                resultado += f"💰 {sueldo}\n"
-                resultado += f"📋 {tipo}"
-                if fecha_str:
-                    resultado += f" • {fecha_str}"
-                resultado += "\n"
-                if desc_corta:
-                    resultado += f"📝 _{desc_corta}_\n"
-                if link:
-                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
+                    desc_l = "Ver detalles en el link"
                 
+                link = empleo.get('job_apply_link','')
+                
+                resultado += f"{'─'*28}\n"
+                resultado += f"{i}. {titulo}\n"
+                resultado += f"   💼 Cargo: {titulo}\n"
+                resultado += f"   🏢 Empresa: {empresa}\n"
+                resultado += f"   💰 Salario: {sueldo}\n"
+                resultado += f"   📍 Ciudad: {ubicacion_job}\n"
+                resultado += f"   📋 Modalidad: {modalidad}\n"
+                resultado += f"   📝 Descripción: {desc_l}\n"
+                if link: resultado += f"   🔗 Postular: {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
-            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
-            
+            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales."
             return resultado
     
     # ── FALLBACK: JSearch no disponible → scraping portales chilenos reales ──
@@ -2297,12 +2285,12 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
-        "\n🔗 *Busca más ofertas en:*\n"
-        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
-        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
-        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
-        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
-        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
+        "\n🔗 Busca más ofertas en:\n"
+        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
+        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
+        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
+        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
+        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
     )
 
     def _scrape_trabajando(q_encoded):
@@ -2400,20 +2388,23 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     if empleos_web:
         sep = "━" * 30
-        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
-        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
+        n_portales = len(set(e['portal'] for e in empleos_web))
+        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
+        resultado += f"📊 {len(empleos_web)} ofertas de {n_portales} portales\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:8], 1):
-            resultado += f"**{i}. {emp['titulo']}**\n"
-            if emp.get('empresa'):
-                resultado += f"🏢 {emp['empresa']}\n"
-            if emp.get('ciudad'):
-                resultado += f"📍 {emp['ciudad']}\n"
+        for i, emp in enumerate(empleos_web[:10], 1):
+            resultado += f"{'─'*28}\n"
+            resultado += f"{i}. {emp['titulo']}\n"
+            resultado += f"   💼 Cargo: {emp['titulo']}\n"
+            if emp.get('empresa'): resultado += f"   🏢 Empresa: {emp['empresa']}\n"
+            resultado += f"   💰 Salario: Consultar en portal\n"
+            if emp.get('ciudad'): resultado += f"   📍 Ciudad: {emp['ciudad']}\n"
+            resultado += f"   📋 Modalidad: Consultar en portal\n"
             if emp.get('desc'):
-                desc_fmt = emp['desc'][:200].strip()
-                resultado += f"📝 _{desc_fmt}_\n"
+                resultado += f"   📝 Descripción: {emp['desc'][:220].strip()}\n"
+            resultado += f"   📰 Fuente: {emp['portal']}\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
+                resultado += f"   🔗 Postular: {emp['link']}\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -2442,18 +2433,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
-                resultado += f"📋 Búsqueda: _{consulta}_\n"
+                resultado  = "🔎 ANÁLISIS MERCADO LABORAL — IA\n"
+                resultado += f"📋 Búsqueda: {consulta}\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
+                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
+    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -3866,7 +3857,7 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
+    await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -4284,7 +4275,17 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
         
         if respuesta:
             respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
-            await enviar_mensaje_largo(update, respuesta_limpia)
+            # Sugerencias de comandos al final
+            sugerencias = (
+                "\n\n💡 Comandos que pueden ayudarte:\n"
+                "/rag_consulta [tema] — Consultar documentos\n"
+                "/buscar [palabra] — Buscar en historial\n"
+                "/buscar_ia [tema] — Búsqueda inteligente\n"
+                "/buscar_profesional [nombre] — Directorio\n"
+                "/buscar_apoyo [área] — Cofrades en búsqueda\n"
+                "/empleo [cargo] — Ofertas de empleo"
+            )
+            await enviar_mensaje_largo(update, respuesta_limpia + sugerencias)
             # Enviar también como audio (TTS)
             try:
                 audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
@@ -5170,7 +5171,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
+    """Comando /estadisticas - 4 gauges + 10 stat boxes matching reference HTML"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5195,6 +5196,23 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
+            try:
+                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
+                total_eventos = c.fetchone()['total']
+            except: total_eventos = 0
+            try:
+                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
+                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
+                nuevos_7d = c.fetchone()['total']
+            except: nuevos_7d = 0
+            try:
+                c.execute("SELECT COUNT(DISTINCT user_id) as total FROM servicios_usados")
+                usuarios_ia = c.fetchone()['total']
+            except: usuarios_ia = 0
+            try:
+                c.execute("SELECT COUNT(*) as total FROM servicios_usados WHERE servicio = 'empleo'")
+                busq_empleo = c.fetchone()['total']
+            except: busq_empleo = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5211,13 +5229,28 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
+            try:
+                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
+                total_eventos = c.fetchone()[0]
+            except: total_eventos = 0
+            try:
+                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
+                nuevos_7d = c.fetchone()[0]
+            except: nuevos_7d = 0
+            try:
+                c.execute("SELECT COUNT(DISTINCT user_id) FROM servicios_usados")
+                usuarios_ia = c.fetchone()[0]
+            except: usuarios_ia = 0
+            try:
+                c.execute("SELECT COUNT(*) FROM servicios_usados WHERE servicio = 'empleo'")
+                busq_empleo = c.fetchone()[0]
+            except: busq_empleo = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
         
-        # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5229,12 +5262,14 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
+.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
+.stat.highlight .val{{color:#2ecc71}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5244,6 +5279,7 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
+<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5253,12 +5289,16 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
+<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
+<div class="stat"><div class="val">{usuarios_ia:,}</div><div class="lbl">Usuarios IA</div></div>
+<div class="stat"><div class="val">{busq_empleo:,}</div><div class="lbl">Búsquedas Empleo</div></div>
 </div>
 
-<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
+<div class="foot">Premium Bot · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3';
+var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5267,8 +5307,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5277,6 +5317,7 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
+gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5292,7 +5333,11 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n"
+            f"📅 Eventos activos: {total_eventos:,}\n"
+            f"🆕 Nuevos (7d): {nuevos_7d:,}\n"
+            f"🤖 Usuarios IA: {usuarios_ia:,}\n"
+            f"💼 Búsquedas empleo: {busq_empleo:,}\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5301,7 +5346,7 @@ gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard ECharts interactivo con gauges"
+                caption="📊 Dashboard — 4 gauges + 10 indicadores"
             )
         
         try:
@@ -15555,28 +15600,6 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         ".news-item{padding:10px;margin-bottom:8px;background:rgba(15,47,89,.5);"
         "border-radius:8px;border-left:3px solid #3478c3;font-size:.85em;"
         "color:#aed6f1;line-height:1.6}"
-        "#chatBtn{position:fixed;bottom:24px;right:24px;width:60px;height:60px;"
-        "border-radius:50%;background:linear-gradient(135deg,#c3a55a,#d4b86a);"
-        "border:none;cursor:pointer;box-shadow:0 4px 20px rgba(195,165,90,.5);"
-        "z-index:9990;font-size:1.6em;transition:transform .2s}"
-        "#chatBtn:hover{transform:scale(1.12)}"
-        "#chatBox{display:none;position:fixed;bottom:96px;right:24px;width:360px;"
-        "max-height:480px;background:rgba(10,22,40,.97);border:1px solid rgba(195,165,90,.4);"
-        "border-radius:16px;z-index:9991;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6)}"
-        "#chatHdr{background:rgba(195,165,90,.15);padding:12px 16px;display:flex;"
-        "justify-content:space-between;align-items:center}"
-        "#chatHdr span{color:#c3a55a;font-weight:700;font-size:.95em}"
-        "#chatHdr button{background:none;border:none;color:#667;font-size:1.2em;cursor:pointer}"
-        "#chatMsgs{height:300px;overflow-y:auto;padding:12px;font-size:.85em}"
-        ".cmsg{margin-bottom:10px;padding:8px 12px;border-radius:10px;line-height:1.5;max-width:90%}"
-        ".cmsg.bot{background:rgba(52,120,195,.2);color:#aed6f1;border-left:3px solid #3478c3}"
-        ".cmsg.user{background:rgba(195,165,90,.15);color:#e0e6ed;margin-left:auto;"
-        "border-right:3px solid #c3a55a;text-align:right}"
-        "#chatInp{display:flex;border-top:1px solid rgba(195,165,90,.2);padding:8px}"
-        "#chatInp input{flex:1;background:rgba(15,47,89,.6);border:1px solid rgba(52,120,195,.3);"
-        "border-radius:8px;padding:8px 12px;color:#e0e6ed;font-size:.85em;outline:none}"
-        "#chatInp button{background:#c3a55a;border:none;border-radius:8px;padding:8px 14px;"
-        "margin-left:6px;cursor:pointer;color:#0a1628;font-weight:700;font-size:.85em}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
         ".hist-grid{grid-template-columns:1fr}"
@@ -15613,18 +15636,6 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         ' Comision para el Mercado Financiero</div>'
         '<div class="cmf-grid">' + cmf_html + '</div>'
         '</div>'
-
-        '<button id="chatBtn" onclick="_tgChat()" title="Consultar Asistente IA">&#129302;</button>'
-        '<div id="chatBox">'
-        '<div id="chatHdr"><span>&#129302; Asistente Indicadores</span>'
-        '<button onclick="_tgChat()">&#10005;</button></div>'
-        '<div id="chatMsgs">'
-        '<div class="cmsg bot">Hola! Soy el asistente de indicadores economicos. '
-        'Preguntame sobre cualquier indicador, tasa CMF, variacion o que significa un valor. '
-        'Ej: "Por que subio el dolar?" o "Que es la TMC T26?"</div></div>'
-        '<div id="chatInp"><input id="chatQ" placeholder="Escribe tu consulta..." '
-        'onkeypress="if(event.key===\'Enter\')_sndChat()"/>'
-        '<button onclick="_sndChat()">Enviar</button></div></div>'
 
         '<div class="section">'
         '<div class="section-title">&#129302; Analisis IA \u2014'
@@ -15738,40 +15749,6 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         'var el=document.getElementById(id);'
         'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
         '});});'
-
-        'function _tgChat(){'
-        'var b=document.getElementById("chatBox");'
-        'b.style.display=b.style.display==="block"?"none":"block";}'
-        'function _sndChat(){'
-        'var inp=document.getElementById("chatQ");'
-        'var q=inp.value.trim();if(!q)return;inp.value="";'
-        'var m=document.getElementById("chatMsgs");'
-        'm.innerHTML+=\'<div class="cmsg user">\'+q.replace(/</g,"&lt;")+\'</div>\';'
-        'var ql=q.toLowerCase(),resp="";'
-        'for(var k in _DEFS){'
-        'var d=_DEFS[k];'
-        'if(ql.indexOf(k)>=0||ql.indexOf(d.t.toLowerCase().split("(")[0].trim())>=0){'
-        'resp="<b>"+d.t+"</b><br><br>"+d.d+"<br><br>"'
-        '+"<span style=\\"color:#2ecc71\\">&#128994; Optimo:</span> "+d.g+"<br>"'
-        '+"<span style=\\"color:#f1c40f\\">&#128993; Normal:</span> "+d.y+"<br>"'
-        '+"<span style=\\"color:#e74c3c\\">&#128308; Riesgo:</span> "+d.r;break;}}'
-        'if(!resp){'
-        'var cards=document.querySelectorAll(".card,.exp-card,.cmf-row.data");'
-        'var words=ql.split(" ").filter(function(w){return w.length>2;});'
-        'cards.forEach(function(c){'
-        'var txt=c.textContent.toLowerCase();'
-        'if(!resp && words.some(function(w){return txt.indexOf(w)>=0;})){'
-        'resp=c.textContent.substring(0,350).replace(/\\n/g," ")+"...";}});}'
-        'if(!resp){'
-        'if(ql.indexOf("tmc")>=0||ql.indexOf("tasa max")>=0)'
-        'resp="Las Tasas Maximas Convencionales (TMC) son los topes legales que los bancos pueden cobrar por creditos en Chile. Cada tipo (T21-T47) aplica a un segmento diferente. Haz clic en cada fila de la seccion CMF arriba para ver el detalle.";'
-        'else if(ql.indexOf("afp")>=0)'
-        'resp="La seccion de AFP muestra la rentabilidad de los 5 fondos (A-E) de las 7 AFPs chilenas en los ultimos 6 meses. Fondo A es el mas riesgoso/rentable y Fondo E el mas conservador.";'
-        'else if(ql.indexOf("hist")>=0||ql.indexOf("10 a")>=0)'
-        'resp="Los graficos historicos muestran la evolucion de 9 indicadores clave en los ultimos 10 anos: UF, Dolar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre y Bitcoin.";'
-        'else resp="No encontre informacion especifica. Prueba con: UF, dolar, euro, bitcoin, cobre, IPC, TPM, IPSA, desempleo, IMACEC, AFP, TMC, o pregunta sobre cualquier indicador del dashboard.";}'
-        'm.innerHTML+=\'<div class="cmsg bot">\'+resp+\'</div>\';'
-        'm.scrollTop=m.scrollHeight;}'
 
         '</script>'
         '</body></html>'
@@ -17467,68 +17444,74 @@ def main():
                     return  # El comando fue ejecutado, no necesitamos respuesta de IA
                 # Si falló la ejecución, continuar con flujo normal
             
-            # ===== BÚSQUEDA EXHAUSTIVA EN TODAS LAS FUENTES =====
-            # Usar query mejorada para búsqueda más precisa
-            # 1. Búsqueda unificada: historial + RAG (30-60 chunks)
-            resultados_busq = busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
+            # ===== BÚSQUEDA PARALELA EN TODAS LAS FUENTES =====
+            from concurrent.futures import ThreadPoolExecutor as _TPE_priv
+            
+            def _buscar_tarjetas(query_t):
+                ctx = ""
+                fnt = []
+                try:
+                    conn_d = get_db_connection()
+                    if conn_d:
+                        c_d = conn_d.cursor()
+                        pals = [p for p in query_t.lower().split() if len(p) > 3][:5]
+                        if pals:
+                            conds = []; pars = []
+                            for p in pals:
+                                if DATABASE_URL:
+                                    conds.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
+                                    pars.extend([f'%{p}%']*5)
+                                else:
+                                    conds.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
+                                    pars.extend([f'%{p}%']*5)
+                            if conds:
+                                wh = " OR ".join(conds)
+                                c_d.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", pars)
+                                tars = c_d.fetchall()
+                                if tars:
+                                    lns = []
+                                    for t in tars:
+                                        if DATABASE_URL: lns.append(f"• {t['nombre_completo']} | {t['profesion']} | {t['empresa']} | {t['ciudad']}")
+                                        else: lns.append(f"• {t[0]} | {t[1]} | {t[2]} | {t[3]}")
+                                    ctx = "\n\n=== DIRECTORIO PROFESIONAL COFRADES (Tarjetas) ===\n" + "\n".join(lns)
+                                    fnt.append(f"Directorio ({len(tars)} cofrades)")
+                        conn_d.close()
+                except Exception: pass
+                return ctx, fnt
+            
+            def _buscar_eventos():
+                ctx = ""
+                fnt = []
+                try:
+                    conn_e = get_db_connection()
+                    if conn_e and DATABASE_URL:
+                        c_e = conn_e.cursor()
+                        c_e.execute("""SELECT titulo, descripcion, fecha_evento, lugar 
+                                       FROM eventos WHERE activo = TRUE 
+                                       AND fecha_evento >= CURRENT_TIMESTAMP 
+                                       ORDER BY fecha_evento ASC LIMIT 5""")
+                        evs = c_e.fetchall()
+                        conn_e.close()
+                        if evs:
+                            lns = [f"• {e['titulo']} | {str(e['fecha_evento'])[:16]} | {e['lugar']}" for e in evs]
+                            ctx = "\n\n=== PRÓXIMOS EVENTOS COFRADÍA ===\n" + "\n".join(lns)
+                            fnt.append(f"Eventos ({len(evs)})")
+                except Exception: pass
+                return ctx, fnt
+            
+            # Ejecutar búsquedas en PARALELO
+            with _TPE_priv(max_workers=3) as pool:
+                fut_unif = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
+                fut_tar = pool.submit(_buscar_tarjetas, mensaje)
+                fut_ev = pool.submit(_buscar_eventos)
+                resultados_busq = fut_unif.result()
+                contexto_tarjetas, fnt_tar = fut_tar.result()
+                contexto_eventos, fnt_ev = fut_ev.result()
+            
             contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
-            
-            # 2. Buscar también en tarjetas profesionales (directorio de cofrades)
-            contexto_tarjetas = ""
-            try:
-                conn_dir = get_db_connection()
-                if conn_dir:
-                    c_dir = conn_dir.cursor()
-                    palabras_dir = [p for p in mensaje.lower().split() if len(p) > 3][:5]
-                    if palabras_dir:
-                        cond_dir = []
-                        params_dir = []
-                        for p in palabras_dir:
-                            if DATABASE_URL:
-                                cond_dir.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
-                                params_dir.extend([f'%{p}%']*5)
-                            else:
-                                cond_dir.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
-                                params_dir.extend([f'%{p}%']*5)
-                        if cond_dir:
-                            wh_dir = " OR ".join(cond_dir)
-                            if DATABASE_URL:
-                                c_dir.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios, email, telefono FROM tarjetas_profesional WHERE {wh_dir} LIMIT 10", params_dir)
-                            else:
-                                c_dir.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios, email, telefono FROM tarjetas_profesional WHERE {wh_dir} LIMIT 10", params_dir)
-                            tarjetas_encontradas = c_dir.fetchall()
-                            if tarjetas_encontradas:
-                                lineas_tar = []
-                                for t in tarjetas_encontradas:
-                                    if DATABASE_URL:
-                                        lineas_tar.append(f"• {t['nombre_completo']} | {t['profesion']} | {t['empresa']} | {t['ciudad']} | {t['servicios']}")
-                                    else:
-                                        lineas_tar.append(f"• {t[0]} | {t[1]} | {t[2]} | {t[3]} | {t[4]}")
-                                contexto_tarjetas = "\n\n=== DIRECTORIO PROFESIONAL COFRADES (Tarjetas) ===\n" + "\n".join(lineas_tar)
-                                fuentes_usadas.append(f"Directorio ({len(tarjetas_encontradas)} cofrades)")
-                    conn_dir.close()
-            except Exception as e_dir:
-                logger.debug(f"Error buscando directorio privado: {e_dir}")
-            
-            # 3. Buscar en eventos y actividades del grupo
-            contexto_eventos = ""
-            try:
-                conn_ev = get_db_connection()
-                if conn_ev and DATABASE_URL:
-                    c_ev = conn_ev.cursor()
-                    c_ev.execute("""SELECT titulo, descripcion, fecha_evento, lugar 
-                                   FROM eventos WHERE activo = TRUE 
-                                   AND fecha_evento >= CURRENT_TIMESTAMP 
-                                   ORDER BY fecha_evento ASC LIMIT 5""")
-                    eventos_prox = c_ev.fetchall()
-                    conn_ev.close()
-                    if eventos_prox:
-                        lineas_ev = [f"• {e['titulo']} | {str(e['fecha_evento'])[:16]} | {e['lugar']}" for e in eventos_prox]
-                        contexto_eventos = "\n\n=== PRÓXIMOS EVENTOS COFRADÍA ===\n" + "\n".join(lineas_ev)
-                        fuentes_usadas.append(f"Eventos ({len(eventos_prox)})")
-            except Exception as e_ev:
-                logger.debug(f"Error buscando eventos privado: {e_ev}")
+            fuentes_usadas.extend(fnt_tar)
+            fuentes_usadas.extend(fnt_ev)
 
             # Construir prompt con modo inteligente según relevancia temática
             fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
@@ -17603,8 +17586,14 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
             
             if respuesta:
-                # Agregar footer con fuentes consultadas
-                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}"
+                # Agregar footer con fuentes + sugerencias de comandos
+                sugerencias_cmd = (
+                    "\n\n💡 Comandos que pueden ayudarte:\n"
+                    "/rag_consulta [tema] · /buscar [palabra]\n"
+                    "/buscar_ia [tema] · /buscar_profesional [nombre]\n"
+                    "/buscar_apoyo [área] · /empleo [cargo]"
+                )
+                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}{sugerencias_cmd}"
                 respuesta_final = respuesta + footer
                 try:
                     await msg.edit_text(respuesta_final, parse_mode='Markdown')
