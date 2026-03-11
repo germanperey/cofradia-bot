@@ -109,6 +109,14 @@ db_disponible = False
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
 _indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
+def _safe_call(fn, *args, **kwargs):
+    """Ejecuta una función capturando excepciones (para uso en ThreadPoolExecutor)"""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"_safe_call {fn.__name__}: {e}")
+        return None
+
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
@@ -2192,87 +2200,93 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         empleos = buscar_empleos_jsearch(busqueda_texto, ubicacion_busqueda)
         
         if empleos and len(empleos) > 0:
-            # Formatear empleos — TEXTO PLANO con TODOS los campos
+            # Formatear empleos reales
             fecha_actual = datetime.now().strftime("%d/%m/%Y")
-            resultado = "🔎 EMPLEOS REALES ENCONTRADOS\n"
-            resultado += f"📋 Búsqueda: {busqueda_texto}\n"
-            resultado += f"📍 Ubicación: {ubicacion_busqueda}\n"
+            resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
+            resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
+            resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
             resultado += f"📅 Fecha: {fecha_actual}\n"
-            resultado += f"📊 Resultados: {len(empleos[:10])} ofertas\n"
+            resultado += f"📊 Resultados: {len(empleos[:8])} ofertas\n"
             resultado += "━" * 30 + "\n\n"
             
-            for i, empleo in enumerate(empleos[:10], 1):
+            for i, empleo in enumerate(empleos[:8], 1):
                 titulo = empleo.get('job_title', 'Sin título')
                 empresa = empleo.get('employer_name', 'Empresa no especificada')
+                ubicacion_job = empleo.get('job_city', empleo.get('job_country', 'No especificada'))
                 
-                # Ubicación completa
-                partes_ub = []
-                if empleo.get('job_city'): partes_ub.append(empleo['job_city'])
-                if empleo.get('job_state') and empleo['job_state'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_state'])
-                if empleo.get('job_country') and empleo['job_country'] not in ' '.join(partes_ub): partes_ub.append(empleo['job_country'])
-                ubicacion_job = ', '.join(partes_ub) if partes_ub else 'No especificada'
+                # Sueldo
+                min_salary = empleo.get('job_min_salary')
+                max_salary = empleo.get('job_max_salary')
+                salary_period = empleo.get('job_salary_period', '')
                 
-                # Salario — múltiples campos
-                min_sal = empleo.get('job_min_salary')
-                max_sal = empleo.get('job_max_salary')
-                sal_per = empleo.get('job_salary_period', '')
-                sal_cur = empleo.get('job_salary_currency', 'CLP')
-                periodos = {'YEAR':'anual','MONTH':'mensual','WEEK':'semanal','HOUR':'/hora'}
-                if min_sal and max_sal:
-                    sueldo = f"${int(min_sal):,} - ${int(max_sal):,} {sal_cur}".replace(",",".")
-                    if sal_per: sueldo += f" ({periodos.get(sal_per, sal_per)})"
-                elif min_sal:
-                    sueldo = f"Desde ${int(min_sal):,} {sal_cur}".replace(",",".")
-                elif max_sal:
-                    sueldo = f"Hasta ${int(max_sal):,} {sal_cur}".replace(",",".")
+                if min_salary and max_salary:
+                    sueldo = f"${int(min_salary):,} - ${int(max_salary):,}".replace(",", ".")
+                    if salary_period:
+                        sueldo += f" ({salary_period})"
+                elif min_salary:
+                    sueldo = f"Desde ${int(min_salary):,}".replace(",", ".")
                 else:
-                    est = empleo.get('estimated_salaries') or []
-                    if isinstance(est, list) and est:
-                        s0 = est[0]
-                        mn = s0.get('min_salary', s0.get('median_salary', 0))
-                        mx = s0.get('max_salary', mn)
-                        sueldo = f"~${int(mn):,} - ${int(mx):,} (estimado)".replace(",",".") if mn else "Consultar en portal"
-                    else:
-                        sueldo = "Consultar en portal"
+                    sueldo = "No especificado"
                 
-                # Modalidad
-                tipo_map = {'FULLTIME':'Tiempo completo','PARTTIME':'Medio tiempo','CONTRACTOR':'Contrato/Freelance','INTERN':'Práctica','TEMPORARY':'Temporal'}
-                tipo = tipo_map.get(empleo.get('job_employment_type',''), empleo.get('job_employment_type','No especificado'))
-                es_remoto = empleo.get('job_is_remote', False)
-                modalidad = f"{tipo} · {'Remoto' if es_remoto else 'Presencial'}"
+                # Tipo de empleo
+                tipo = empleo.get('job_employment_type', 'No especificado')
+                if tipo == 'FULLTIME':
+                    tipo = 'Tiempo completo'
+                elif tipo == 'PARTTIME':
+                    tipo = 'Medio tiempo'
+                elif tipo == 'CONTRACTOR':
+                    tipo = 'Contrato'
                 
-                # Descripción
-                raw_desc = empleo.get('job_description','')
-                if not raw_desc:
-                    hl = empleo.get('job_highlights',{})
-                    resp_l = hl.get('Responsibilities',[])
-                    if resp_l: raw_desc = '. '.join(resp_l[:3])
+                # Link de postulación
+                link = empleo.get('job_apply_link', '')
+                
+                # Fecha de publicación
+                posted = empleo.get('job_posted_at_datetime_utc', '')
+                if posted:
+                    try:
+                        fecha_pub = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                        dias_atras = (datetime.now(fecha_pub.tzinfo) - fecha_pub).days
+                        if dias_atras == 0:
+                            fecha_str = "Hoy"
+                        elif dias_atras == 1:
+                            fecha_str = "Ayer"
+                        else:
+                            fecha_str = f"Hace {dias_atras} días"
+                    except:
+                        fecha_str = ""
+                else:
+                    fecha_str = ""
+                
+                # Descripción breve del cargo
+                raw_desc = (empleo.get('job_description') or
+                            empleo.get('job_highlights', {}).get('Responsibilities', [''])[0] or "")
                 if raw_desc:
-                    desc_l = re.sub(r'<[^>]+>',' ',str(raw_desc))
-                    desc_l = re.sub(r'\s+',' ',desc_l).strip()[:300]
-                    punto = desc_l.rfind(". ")
-                    if punto > 100: desc_l = desc_l[:punto+1]
-                    elif len(desc_l)>=300: desc_l += "..."
+                    desc_corta = raw_desc[:280].replace("\n", " ").replace("  ", " ").strip()
+                    ultimo_p = desc_corta.rfind(". ")
+                    if ultimo_p > 80:
+                        desc_corta = desc_corta[:ultimo_p + 1]
                 else:
-                    desc_l = "Ver detalles en el link"
+                    desc_corta = ""
+
+                resultado += f"**{i}. {titulo}**\n"
+                resultado += f"🏢 {empresa}\n"
+                resultado += f"📍 {ubicacion_job}\n"
+                resultado += f"💰 {sueldo}\n"
+                resultado += f"📋 {tipo}"
+                if fecha_str:
+                    resultado += f" • {fecha_str}"
+                resultado += "\n"
+                if desc_corta:
+                    resultado += f"📝 _{desc_corta}_\n"
+                if link:
+                    resultado += f"🔗 [**POSTULAR AQUÍ**]({link})\n"
                 
-                link = empleo.get('job_apply_link','')
-                publisher = empleo.get('job_publisher','')
-                
-                resultado += f"{'─'*28}\n"
-                resultado += f"{i}. {titulo}\n"
-                resultado += f"   💼 Cargo: {titulo}\n"
-                resultado += f"   🏢 Empresa: {empresa}\n"
-                resultado += f"   💰 Salario: {sueldo}\n"
-                resultado += f"   📍 Ciudad: {ubicacion_job}\n"
-                resultado += f"   📋 Modalidad: {modalidad}\n"
-                resultado += f"   📝 Descripción: {desc_l}\n"
-                if publisher: resultado += f"   📰 Fuente: {publisher}\n"
-                if link: resultado += f"   🔗 Postular: {link}\n"
                 resultado += "\n"
             
             resultado += "━" * 30 + "\n"
-            resultado += "✅ Empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales."
+            resultado += "✅ _Estos son empleos REALES de LinkedIn, Indeed, Glassdoor y otros portales._\n"
+            resultado += "👆 _Haz clic en 'POSTULAR AQUÍ' para ir directo a la oferta._"
+            
             return resultado
     
     # ── FALLBACK: JSearch no disponible → scraping portales chilenos reales ──
@@ -2283,12 +2297,12 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     # Links de búsqueda masiva (siempre se incluyen al final)
     links_portales = (
-        "\n🔗 Busca más ofertas en:\n"
-        f"• LinkedIn: https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile\n"
-        f"• Trabajando.cl: https://www.trabajando.cl/empleos?q={q_enc}\n"
-        f"• Laborum: https://www.laborum.cl/empleos-busqueda-{q_dash}.html\n"
-        f"• Indeed Chile: https://cl.indeed.com/jobs?q={q_enc}&l=Chile\n"
-        f"• Computrabajo: https://www.computrabajo.cl/empleos-en-chile?q={q_plus}\n"
+        "\n🔗 *Busca más ofertas en:*\n"
+        f"• [LinkedIn Jobs](https://www.linkedin.com/jobs/search/?keywords={q_enc}&location=Chile)\n"
+        f"• [Trabajando.cl](https://www.trabajando.cl/empleos?q={q_enc})\n"
+        f"• [Laborum](https://www.laborum.cl/empleos-busqueda-{q_dash}.html)\n"
+        f"• [Indeed Chile](https://cl.indeed.com/jobs?q={q_enc}&l=Chile)\n"
+        f"• [Computrabajo](https://www.computrabajo.cl/empleos-en-chile?q={q_plus})\n"
     )
 
     def _scrape_trabajando(q_encoded):
@@ -2386,23 +2400,20 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 
     if empleos_web:
         sep = "━" * 30
-        n_portales = len(set(e['portal'] for e in empleos_web))
-        resultado  = f"🔎 EMPLEOS REALES — {busqueda_texto.title()}\n"
-        resultado += f"📊 {len(empleos_web)} ofertas de {n_portales} portales\n"
+        resultado  = f"🔎 **EMPLEOS REALES — {busqueda_texto.title()}**\n"
+        resultado += f"📊 {len(empleos_web)} ofertas encontradas en portales chilenos\n"
         resultado += sep + "\n\n"
-        for i, emp in enumerate(empleos_web[:10], 1):
-            resultado += f"{'─'*28}\n"
-            resultado += f"{i}. {emp['titulo']}\n"
-            resultado += f"   💼 Cargo: {emp['titulo']}\n"
-            if emp.get('empresa'): resultado += f"   🏢 Empresa: {emp['empresa']}\n"
-            resultado += f"   💰 Salario: {emp.get('sueldo') or 'Consultar en portal'}\n"
-            if emp.get('ciudad'): resultado += f"   📍 Ciudad: {emp['ciudad']}\n"
-            resultado += f"   📋 Modalidad: Consultar en portal\n"
+        for i, emp in enumerate(empleos_web[:8], 1):
+            resultado += f"**{i}. {emp['titulo']}**\n"
+            if emp.get('empresa'):
+                resultado += f"🏢 {emp['empresa']}\n"
+            if emp.get('ciudad'):
+                resultado += f"📍 {emp['ciudad']}\n"
             if emp.get('desc'):
-                resultado += f"   📝 Descripción: {emp['desc'][:220].strip()}\n"
-            resultado += f"   📰 Fuente: {emp['portal']}\n"
+                desc_fmt = emp['desc'][:200].strip()
+                resultado += f"📝 _{desc_fmt}_\n"
             if emp.get('link') and emp['link'].startswith('http'):
-                resultado += f"   🔗 Postular: {emp['link']}\n"
+                resultado += f"🔗 [**POSTULAR EN {emp['portal']}**]({emp['link']})\n"
             resultado += "\n"
         resultado += sep + "\n"
         resultado += links_portales
@@ -2431,18 +2442,18 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
             )
             respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.6)
             if respuesta:
-                resultado  = "🔎 ANÁLISIS MERCADO LABORAL — IA\n"
-                resultado += f"📋 Búsqueda: {consulta}\n"
+                resultado  = f"🔎 **ANÁLISIS MERCADO LABORAL — IA**\n"
+                resultado += f"📋 Búsqueda: _{consulta}_\n"
                 resultado += "━" * 30 + "\n\n"
                 resultado += respuesta
                 resultado += "\n\n" + "━" * 30
-                resultado += "\n⚠️ Análisis orientativo de IA. Para postular con link directo:\n"
+                resultado += "\n⚠️ _Análisis orientativo de IA. Para postular con link directo:_\n"
                 resultado += links_portales
                 return resultado
         except Exception as _ie:
             logger.error(f"IA empleo fallback: {_ie}")
 
-    return f"🔍 BÚSQUEDA DE EMPLEO: {busqueda_texto}\n{links_portales}\n💡 Haz clic en los links para ver ofertas."
+    return f"🔍 **BÚSQUEDA DE EMPLEO: {busqueda_texto}**\n{links_portales}\n💡 Haz clic para ver ofertas actualizadas."
 
 
 # ==================== KEEP-ALIVE PARA RENDER ====================
@@ -3855,7 +3866,7 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultado = await buscar_empleos_web(cargo, ubicacion, renta)
     
     await msg.delete()
-    await enviar_mensaje_largo(update, resultado)
+    await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
     registrar_servicio_usado(update.effective_user.id, 'empleo')
 
 
@@ -4144,8 +4155,11 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_username = BOT_USERNAME.lower()
     
     menciones_validas = [f"@{bot_username}", "@cofradia_premium_bot", "@cofradiapremiumbot"]
+    # También detectar "bot" o "robot" como palabras sueltas (no dentro de otras palabras)
+    tiene_mencion_at = any(m.lower() in mensaje.lower() for m in menciones_validas)
+    tiene_mencion_bot = bool(re.search(r'\b(bot|robot)\b', mensaje.lower()))
     
-    if not any(m.lower() in mensaje.lower() for m in menciones_validas):
+    if not tiene_mencion_at and not tiene_mencion_bot:
         return
     
     # Verificar si es el owner (siempre tiene acceso)
@@ -4271,6 +4285,15 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
         if respuesta:
             respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
             await enviar_mensaje_largo(update, respuesta_limpia)
+            # Enviar también como audio (TTS)
+            try:
+                audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
+                if audio_path and os.path.exists(audio_path):
+                    with open(audio_path, 'rb') as af:
+                        await update.message.reply_voice(voice=af)
+                    os.remove(audio_path)
+            except Exception as _tts_e:
+                logger.debug(f"TTS mencion: {_tts_e}")
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text(
@@ -5147,7 +5170,7 @@ async def set_topic_emoji_comando(update: Update, context: ContextTypes.DEFAULT_
 
 @requiere_suscripcion
 async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /estadisticas - 4 gauges + 10 stat boxes (matching reference + extras)"""
+    """Comando /estadisticas - Estadísticas generales + mini-dashboard ECharts"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -5172,23 +5195,6 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
                         WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
             msgs_7d = c.fetchone()['total']
-            try:
-                c.execute("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE")
-                total_eventos = c.fetchone()['total']
-            except: total_eventos = 0
-            try:
-                c.execute("""SELECT COUNT(*) as total FROM suscripciones 
-                            WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'""")
-                nuevos_7d = c.fetchone()['total']
-            except: nuevos_7d = 0
-            try:
-                c.execute("SELECT COUNT(DISTINCT user_id) as total FROM servicios_usados")
-                usuarios_servicios = c.fetchone()['total']
-            except: usuarios_servicios = 0
-            try:
-                c.execute("SELECT COUNT(*) as total FROM servicios_usados WHERE servicio = 'empleo'")
-                busquedas_empleo = c.fetchone()['total']
-            except: busquedas_empleo = 0
         else:
             c.execute("SELECT COUNT(*) FROM mensajes")
             total_msgs = c.fetchone()[0]
@@ -5205,28 +5211,13 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_7d,))
             msgs_7d = c.fetchone()[0]
-            try:
-                c.execute("SELECT COUNT(*) FROM eventos WHERE activo = 1")
-                total_eventos = c.fetchone()[0]
-            except: total_eventos = 0
-            try:
-                c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ?", (fecha_7d,))
-                nuevos_7d = c.fetchone()[0]
-            except: nuevos_7d = 0
-            try:
-                c.execute("SELECT COUNT(DISTINCT user_id) FROM servicios_usados")
-                usuarios_servicios = c.fetchone()[0]
-            except: usuarios_servicios = 0
-            try:
-                c.execute("SELECT COUNT(*) FROM servicios_usados WHERE servicio = 'empleo'")
-                busquedas_empleo = c.fetchone()[0]
-            except: busquedas_empleo = 0
         
         conn.close()
         
         promedio_7d = round(msgs_7d / 7, 1) if msgs_7d else 0
         pct_tarjetas = round(total_tarjetas / max(suscriptores, 1) * 100) if suscriptores else 0
         
+        # Generar mini-dashboard HTML con gauges ECharts
         import json as _json
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5238,14 +5229,12 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:280px;height:240px}}
 .gauge{{width:100%;height:100%}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;max-width:900px;margin:0 auto}}
 .stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
-.stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
-.stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
-.stat.highlight .val{{color:#2ecc71}}
+.stat .lbl{{font-size:0.8em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
@@ -5255,7 +5244,6 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
 <div class="gauge-box"><div id="g2" class="gauge"></div></div>
 <div class="gauge-box"><div id="g3" class="gauge"></div></div>
-<div class="gauge-box"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
@@ -5265,16 +5253,12 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 <div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
 <div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
 <div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
-<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
-<div class="stat"><div class="val">{usuarios_servicios:,}</div><div class="lbl">Usuarios IA</div></div>
-<div class="stat"><div class="val">{busquedas_empleo:,}</div><div class="lbl">Búsquedas Empleo</div></div>
 </div>
 
-<div class="foot">Premium Bot · Cofradía de Networking</div>
+<div class="foot">Bot Premium v4.3 ECharts · Cofradía de Networking</div>
 
 <script>
-var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
+var gold='#c3a55a',blue='#3478c3';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
   c.setOption({{series:[{{type:'gauge',startAngle:200,endAngle:-20,min:0,max:max,
@@ -5283,8 +5267,8 @@ function gauge(id,val,max,title,color){{
     axisLine:{{lineStyle:{{width:12,color:[[1,'rgba(52,120,195,0.15)']]}}}},
     axisTick:{{show:false}},splitLine:{{show:false}},
     axisLabel:{{show:false}},
-    title:{{show:true,offsetCenter:[0,'75%'],fontSize:12,color:'#8899aa'}},
-    detail:{{valueAnimation:true,fontSize:26,fontWeight:'bold',color:color,
+    title:{{show:true,offsetCenter:[0,'75%'],fontSize:13,color:'#8899aa'}},
+    detail:{{valueAnimation:true,fontSize:28,fontWeight:'bold',color:color,
       offsetCenter:[0,'40%'],formatter:'{{value}}'}},
     data:[{{value:val,name:title}}]
   }}]}});
@@ -5293,7 +5277,6 @@ function gauge(id,val,max,title,color){{
 gauge('g1',{msgs_hoy},{max(msgs_hoy*3,100)},'Mensajes Hoy',gold);
 gauge('g2',{promedio_7d},{max(int(promedio_7d*3),50)},'Promedio/Día',blue);
 gauge('g3',{pct_tarjetas},100,'% Tarjetas',gold);
-gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
 </script></body></html>"""
         
         html_path = f"/tmp/cofradia_stats_{update.effective_user.id}.html"
@@ -5309,11 +5292,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             f"📅 Mensajes hoy: {msgs_hoy:,}\n"
             f"⭐ Recomendaciones: {total_recs:,}\n"
             f"📇 Tarjetas creadas: {total_tarjetas:,}\n"
-            f"📈 Promedio 7 días: {promedio_7d}/día\n"
-            f"📅 Eventos activos: {total_eventos:,}\n"
-            f"🆕 Nuevos (7d): {nuevos_7d:,}\n"
-            f"🤖 Usuarios IA: {usuarios_servicios:,}\n"
-            f"💼 Búsquedas empleo: {busquedas_empleo:,}\n\n"
+            f"📈 Promedio 7 días: {promedio_7d}/día\n\n"
             f"💡 Usa /graficos para dashboard completo."
         )
         await update.message.reply_text(mensaje)
@@ -5322,7 +5301,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,20)},'Nuevos 7d',green);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard — 4 gauges + 10 indicadores"
+                caption="📊 Dashboard ECharts interactivo con gauges"
             )
         
         try:
@@ -15123,6 +15102,22 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
     # =========================================================================
     tmc_list = datos_cmf.get("tmc") or []
 
+    # Explicaciones detalladas de cada tipo de TMC
+    TMC_EXPLICACIONES = {
+        'T21': 'Creditos REAJUSTABLES (en UF) a MENOS de 1 ano. Aplica a: creditos de consumo en UF de corto plazo, lineas de credito reajustables. Si pides un credito en UF pagadero en menos de 12 meses, esta es la tasa maxima legal.',
+        'T22': 'Creditos REAJUSTABLES (en UF) a 1 ano o MAS, montos SOBRE 2.000 UF (~$80M). Aplica a: creditos hipotecarios grandes, creditos comerciales en UF. Es la tasa tope para creditos hipotecarios de montos altos.',
+        'T24': 'Creditos REAJUSTABLES a 1 ano o MAS, montos HASTA 2.000 UF (~$80M). Aplica a: creditos hipotecarios normales de personas, creditos automotrices en UF. La mayoria de los creditos hipotecarios caen aqui.',
+        'T25': 'Creditos NO REAJUSTABLES (en pesos), plazo MENOR a 90 dias, montos SOBRE 5.000 UF. Aplica a: prestamos empresariales de corto plazo, factoring, lineas de credito comerciales grandes.',
+        'T26': 'Creditos NO REAJUSTABLES (en pesos), plazo MENOR a 90 dias, montos de 200-5.000 UF. Aplica a: creditos de consumo con tarjeta, avances en efectivo, prestamos personales rapidos. La tasa MAS ALTA — afecta tarjetas de credito.',
+        'T34': 'Creditos REAJUSTABLES, montos SOBRE 5.000 UF. Aplica a: grandes operaciones empresariales en UF, leasing inmobiliario comercial, financiamiento de proyectos.',
+        'T35': 'Creditos REAJUSTABLES, montos de 200-5.000 UF. Aplica a: creditos de consumo medianos en UF, creditos automotrices, prestamos personales reajustables.',
+        'T43': 'Creditos NO REAJUSTABLES, plazo 90 dias o MAS, con descuento de pension. Aplica a: prestamos a jubilados con descuento directo de su pension. Tasa especial para pensionados.',
+        'T44': 'Creditos REAJUSTABLES, montos de 50-200 UF ($2-8M). Aplica a: creditos de consumo pequenos en UF, compras a credito reajustables.',
+        'T45': 'Creditos REAJUSTABLES, montos HASTA 50 UF ($2M). Aplica a: micro-creditos reajustables, prestamos muy pequenos en UF. Tasa alta por el riesgo del monto bajo.',
+        'T46': 'Creditos NO REAJUSTABLES, plazo 90 dias o MAS, montos HASTA 2.000 UF. Aplica a: creditos de consumo normales en pesos, prestamos personales bancarios tipicos.',
+        'T47': 'Creditos NO REAJUSTABLES, plazo 90 dias o MAS, montos SOBRE 2.000 UF. Aplica a: creditos comerciales en pesos, leasing, creditos empresariales de mediano plazo.',
+    }
+
     # --- Card 1: TMC ---
     tmc_filas = ""
     for it in tmc_list:
@@ -15131,10 +15126,17 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         vf  = "{:.2f}%".format(v) if v is not None else "N/D"
         cls = "cmf-val" if v is not None else "cmf-val nd"
         sub = _s(it.get("subtitulo") or "").replace('"', "'")
-        # Tooltip con titulo completo al pasar mouse
-        tt  = (' title="' + sub[:120] + '"') if sub else ""
+        # Buscar tipo TMC (T21, T22, etc) en el label
+        tipo_tmc = ''
+        for tk in TMC_EXPLICACIONES:
+            if tk in lbl:
+                tipo_tmc = tk
+                break
+        explicacion = TMC_EXPLICACIONES.get(tipo_tmc, sub[:120]) if tipo_tmc else sub[:120]
+        tt = ' title="' + explicacion[:200].replace('"', "'") + '"'
+        onclick = (' onclick="_showDef(\'tmc_' + tipo_tmc + '\')" style="cursor:pointer"') if tipo_tmc else ''
         tmc_filas += (
-            '<div class="cmf-row data"' + tt + '>'
+            '<div class="cmf-row data"' + tt + onclick + '>'
             '<span class="cmf-plazo">' + lbl + '</span>'
             '<span class="' + cls + '">' + vf + '</span>'
             '</div>'
@@ -15570,10 +15572,10 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         ".cmsg.bot{background:rgba(52,120,195,.2);color:#aed6f1;border-left:3px solid #3478c3}"
         ".cmsg.user{background:rgba(195,165,90,.15);color:#e0e6ed;margin-left:auto;"
         "border-right:3px solid #c3a55a;text-align:right}"
-        "#chatInput{display:flex;border-top:1px solid rgba(195,165,90,.2);padding:8px}"
-        "#chatInput input{flex:1;background:rgba(15,47,89,.6);border:1px solid rgba(52,120,195,.3);"
+        "#chatInp{display:flex;border-top:1px solid rgba(195,165,90,.2);padding:8px}"
+        "#chatInp input{flex:1;background:rgba(15,47,89,.6);border:1px solid rgba(52,120,195,.3);"
         "border-radius:8px;padding:8px 12px;color:#e0e6ed;font-size:.85em;outline:none}"
-        "#chatInput button{background:#c3a55a;border:none;border-radius:8px;padding:8px 14px;"
+        "#chatInp button{background:#c3a55a;border:none;border-radius:8px;padding:8px 14px;"
         "margin-left:6px;cursor:pointer;color:#0a1628;font-weight:700;font-size:.85em}"
         "@media(max-width:640px){"
         ".cards,.cmf-grid,.exp-grid{grid-template-columns:1fr}"
@@ -15612,18 +15614,17 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '<div class="cmf-grid">' + cmf_html + '</div>'
         '</div>'
 
-        # Floating Chatbot Button + Chat Window
-        '<button id="chatBtn" onclick="_toggleChat()" title="Consultar al Asistente IA">&#129302;</button>'
+        '<button id="chatBtn" onclick="_tgChat()" title="Consultar Asistente IA">&#129302;</button>'
         '<div id="chatBox">'
-        '<div id="chatHdr"><span>&#129302; Asistente Indicadores IA</span>'
-        '<button onclick="_toggleChat()">&#10005;</button></div>'
+        '<div id="chatHdr"><span>&#129302; Asistente Indicadores</span>'
+        '<button onclick="_tgChat()">&#10005;</button></div>'
         '<div id="chatMsgs">'
-        '<div class="cmsg bot">Hola! Soy el asistente IA de indicadores economicos. '
-        'Preguntame sobre cualquier indicador, tasa CMF, variacion, o que significa un valor. '
-        'Ejemplo: "Por que subio el dolar?" o "Que es la TMC T26?"</div></div>'
-        '<div id="chatInput"><input id="chatQ" placeholder="Escribe tu consulta..." '
-        'onkeypress="if(event.key===\'Enter\')_sendChat()"/>'
-        '<button onclick="_sendChat()">Enviar</button></div></div>'
+        '<div class="cmsg bot">Hola! Soy el asistente de indicadores economicos. '
+        'Preguntame sobre cualquier indicador, tasa CMF, variacion o que significa un valor. '
+        'Ej: "Por que subio el dolar?" o "Que es la TMC T26?"</div></div>'
+        '<div id="chatInp"><input id="chatQ" placeholder="Escribe tu consulta..." '
+        'onkeypress="if(event.key===\'Enter\')_sndChat()"/>'
+        '<button onclick="_sndChat()">Enviar</button></div></div>'
 
         '<div class="section">'
         '<div class="section-title">&#129302; Analisis IA \u2014'
@@ -15680,10 +15681,13 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '</footer>'
 
         '<script>'
-        'var _DEFS={"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable segun la inflacion (IPC). Se usa en creditos hipotecarios, arriendos, seguros y contratos a largo plazo. Sube con inflacion, baja en periodos deflacionarios.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, creditos estables.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, monitorear.","r":"Variacion mensual &gt; 0.6% — inflacion alta, encarecimiento de creditos."},"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial publicado por el Banco Central. Impacta importaciones, exportaciones, combustibles y precios de bienes importados.","g":"$780–$880 CLP — rango equilibrado.","y":"$880–$950 o $700–$780 — volatilidad moderada.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario."},"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio euro/peso. Relevante para comercio con UE, viajes y transferencias.","g":"$850–$970 CLP — equilibrado.","y":"$970–$1.050 o $780–$850 — atencion.","r":"&gt; $1.050 o &lt; $780 — desequilibrio."},"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida para fines tributarios. Se reajusta por IPC. Multas, impuestos, topes de beneficios.","g":"Variacion &lt; 0.4% — estabilidad tributaria.","y":"Variacion 0.4%–0.8% — ajuste moderado.","r":"Variacion &gt; 0.8% — impacto en cargas tributarias."},"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Variacion mensual de precios de canasta de consumo. Indicador oficial de inflacion (INE).","g":"0.0%–0.3% — dentro de meta BCCh (3% anual).","y":"0.3%–0.6% — sobre meta, posible ajuste TPM.","r":"&gt; 0.6% o negativo — inflacion descontrolada o deflacion."},"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de referencia del Banco Central. Determina costo de creditos hipotecarios, consumo y tarjetas.","g":"3.0%–5.0% — politica neutra/expansiva.","y":"5.0%–8.0% — restrictiva moderada.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema."},"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda de mayor capitalizacion. Refleja sentimiento global de riesgo. Altamente volatil.","g":"Variacion diaria &lt; 3% — estable.","y":"Variacion diaria 3%–8% — moderada.","r":"Variacion diaria &gt; 8% — riesgo elevado."},"tasa_desempleo":{"t":"Tasa de Desempleo","d":"% de fuerza laboral sin empleo. Publicada trimestralmente por INE.","g":"&lt; 7.5% — mercado laboral saludable.","y":"7.5%–9.5% — desempleo moderado.","r":"&gt; 9.5% — crisis laboral."},"imacec":{"t":"IMACEC (Actividad Economica)","d":"Estimacion mensual del PIB. Mide crecimiento o contraccion de la economia chilena.","g":"&gt; 2.5% — crecimiento saludable.","y":"0.5%–2.5% — crecimiento debil.","r":"&lt; 0.5% o negativo — estancamiento/recesion."},"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Chile es mayor productor mundial. ~50% de exportaciones. Clave para ingresos fiscales.","g":"&gt; USD 4.00/lb — bonanza para Chile.","y":"USD 3.00–4.00/lb — moderado.","r":"&lt; USD 3.00/lb — impacto fiscal negativo."},"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Valor promedio de UF del mes anterior. Usado en operaciones de credito bancarias.","g":"Variacion estable respecto a la UF.","y":"Divergencia moderada con la UF.","r":"Divergencia significativa — revisar credito."},"ipsa":{"t":"IPSA (Bolsa de Santiago)","d":"Rendimiento de 30 acciones principales. Principal indicador bursatil chileno.","g":"Tendencia alcista (&gt; 5.500 pts).","y":"Lateral (4.500–5.500 pts).","r":"Bajista (&lt; 4.500 pts)."},"solana":{"t":"Solana (SOL)","d":"Blockchain alta velocidad. DeFi, NFTs. Competidor de Ethereum.","g":"Variacion diaria &lt; 5%.","y":"Variacion diaria 5%–10%.","r":"Variacion diaria &gt; 10%."},"ethereum":{"t":"Ethereum (ETH)","d":"2da cripto por capitalizacion. Contratos inteligentes, DeFi y NFTs.","g":"Variacion diaria &lt; 4%.","y":"Variacion diaria 4%–8%.","r":"Variacion diaria &gt; 8%."}};'
+        'var _DEFS={"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable diariamente segun la inflacion (IPC) del mes anterior. Es la medida mas usada en Chile para creditos hipotecarios (dividendos), arriendos comerciales, seguros de vida, AFP, contratos de largo plazo y ahorro (APV/cuenta 2). Su valor sube con inflacion positiva y baja solo en periodos de deflacion. Publicada por el Banco Central de Chile.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, dividendos hipotecarios estables, buen momento para creditos en UF.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, dividendos comienzan a subir, monitorear decisiones del BCCh.","r":"Variacion mensual &gt; 0.6% — inflacion alta, dividendos hipotecarios se encarecen, creditos en UF mas caros, evaluar refinanciamiento."},"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial entre el dolar estadounidense y el peso chileno, publicado diariamente por el Banco Central. Impacta directamente: precio de bencina, alimentos importados, tecnologia, viajes al exterior, deuda en dolares de empresas, y el costo de insumos industriales. Un dolar alto beneficia exportadores (cobre, frutas) pero encarece importaciones.","g":"$780–$880 CLP — rango equilibrado para la economia, bencina estable, importaciones accesibles.","y":"$880–$950 o $700–$780 — volatilidad moderada, posible intervencion del BCCh, atencion a portafolios en USD.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario significativo, impacto en precios de combustibles y alimentos."},"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio entre el euro y el peso chileno. Relevante para comercio con la Union Europea (vinos, frutas, maquinaria), viajes a Europa, estudios en el extranjero, y transferencias internacionales. Correlacionado con el dolar pero influenciado por decisiones del Banco Central Europeo (BCE).","g":"$850–$970 CLP — rango equilibrado para comercio e importaciones europeas.","y":"$970–$1.050 o $780–$850 — atencion a tendencias, posible impacto en importaciones de maquinaria.","r":"&gt; $1.050 o &lt; $780 — desequilibrio importante, impacto en costos de importacion desde Europa."},"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida utilizada en Chile exclusivamente para fines tributarios y legales. Se reajusta mensualmente segun el IPC. Sirve para calcular: multas de transito, topes de beneficios sociales (bonos), tramos de impuesto a la renta (2da categoria), topes para boletas de honorarios, montos exentos de IVA, y limites legales diversos. Publicada por el SII.","g":"Variacion mensual &lt; 0.4% — estabilidad tributaria, tramos impositivos predecibles.","y":"Variacion mensual 0.4%–0.8% — ajuste moderado, revisar tramos tributarios.","r":"Variacion mensual &gt; 0.8% — impacto en cargas tributarias, posible cambio de tramo de renta."},"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Variacion porcentual mensual de precios de una canasta de 303 bienes y servicios representativa del consumo chileno. Es el indicador OFICIAL de inflacion, publicado por el INE el dia 8 de cada mes. Determina el reajuste de la UF, sueldos en UF, arriendos, pensiones y contratos indexados. Meta del Banco Central: 3% anual.","g":"0.0%–0.3% mensual — inflacion dentro de la meta del BCCh (3% anual), economia estable.","y":"0.3%–0.6% mensual — inflacion sobre la meta, probable mantencion o alza de TPM por el BCCh.","r":"&gt; 0.6% mensual o negativo persistente — inflacion descontrolada o deflacion, riesgo para la economia."},"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de interes de referencia fijada por el Consejo del Banco Central de Chile en reuniones mensuales. Es LA tasa que determina el costo del dinero para todo el sistema financiero: creditos hipotecarios, creditos de consumo, tarjetas de credito, lineas de credito y depositos a plazo. Una TPM alta encarece creditos pero controla inflacion; una TPM baja abarata creditos pero puede generar inflacion.","g":"3.0%–5.0% — politica monetaria neutra/expansiva, creditos accesibles, economia en crecimiento.","y":"5.0%–8.0% — politica restrictiva moderada, creditos mas caros, BCCh controlando inflacion.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema: crisis inflacionaria o recesion profunda."},"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda descentralizada creada en 2009, la de mayor capitalizacion de mercado mundial (~$1.3T). Su precio refleja: sentimiento global de riesgo, adopcion institucional (ETFs, fondos), decisiones de la Fed de EE.UU., y regulaciones globales. Altamente volatil — puede variar 10-20% en dias. En Chile se puede comprar en Buda.com, CryptoMarket y otras plataformas.","g":"Variacion diaria &lt; 3% — mercado estable, confianza inversora.","y":"Variacion diaria 3%–8% — volatilidad moderada, atencion a noticias macro globales.","r":"Variacion diaria &gt; 8% — alta volatilidad, riesgo elevado, posible liquidacion de posiciones."},"tasa_desempleo":{"t":"Tasa de Desempleo (INE)","d":"Porcentaje de personas de la fuerza laboral (mayores de 15 anos) que buscan activamente empleo sin encontrarlo. Publicada trimestralmente por el INE (trimestre movil). Es el indicador clave de salud del mercado laboral y bienestar social. Afecta consumo interno, recaudacion fiscal, y politicas sociales del gobierno.","g":"&lt; 7.5% — mercado laboral saludable, buenas oportunidades de empleo.","y":"7.5%–9.5% — desempleo moderado, dificultades para encontrar trabajo, alerta social.","r":"&gt; 9.5% — crisis laboral severa, requiere politicas activas de empleo y subsidios."},"imacec":{"t":"IMACEC (Actividad Economica)","d":"Indicador Mensual de Actividad Economica, publicado por el Banco Central ~35 dias despues del mes medido. Es la estimacion mensual del PIB y mide si la economia chilena crece o se contrae. Incluye todos los sectores: mineria, comercio, servicios, industria, construccion, agricultura. Es el indicador mas seguido por analistas para evaluar la salud economica del pais.","g":"&gt; 2.5% — crecimiento saludable, economia expandiendose, buen momento para inversiones.","y":"0.5%–2.5% — crecimiento debil, economia avanzando lento, cautela en inversiones.","r":"&lt; 0.5% o negativo — estancamiento o recesion tecnica, contraer gastos, proteger capital."},"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Precio de la libra de cobre en la Bolsa de Metales de Londres (LME). Chile es el MAYOR productor mundial (~27% de produccion global). El cobre representa ~50% de las exportaciones chilenas y es determinante para: ingresos fiscales (Codelco), tipo de cambio (dolar), empleo en regiones mineras, y la regla fiscal del gobierno. Llamado el sueldo de Chile.","g":"&gt; USD 4.00/lb — precios altos, bonanza fiscal, fortalecimiento del peso, mayores ingresos para Chile.","y":"USD 3.00–4.00/lb — precios moderados, equilibrio fiscal razonable.","r":"&lt; USD 3.00/lb — precios bajos, menor recaudacion, presion sobre el tipo de cambio, recortes en Codelco."},"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Indice diario publicado por el Banco Central que mide el valor promedio de la UF durante el mes ANTERIOR. Se usa como alternativa a la UF en ciertas operaciones de credito bancarias, pagares reajustables, y transacciones financieras. Es menos volatile que la UF del dia porque promedia todo el mes.","g":"Variacion estable y alineada con la UF — normalidad financiera.","y":"Divergencia moderada con la UF — revisar condiciones de pagares reajustables.","r":"Divergencia significativa — posible anomalia, revisar condiciones de credito indexado a IVP."},"ipsa":{"t":"IPSA — Bolsa de Comercio de Santiago","d":"Indice de Precio Selectivo de Acciones. Mide el rendimiento de las 30 acciones con mayor presencia bursatil en la Bolsa de Santiago. Incluye empresas como Falabella, COPEC, SQM, Banco de Chile, ENELAM, Cencosud, CAP. Es el principal indicador del mercado accionario chileno y refleja la confianza de los inversionistas en la economia local.","g":"Tendencia alcista sostenida — confianza inversora, economia sana, buen momento para fondos mutuos accionarios.","y":"Lateral o volatil — incertidumbre, diversificar inversiones.","r":"Tendencia bajista prolongada — aversion al riesgo, posible fuga de capitales, proteger portafolio."},"solana":{"t":"Solana (SOL)","d":"Criptomoneda y plataforma blockchain de ALTA VELOCIDAD (~65.000 transacciones/seg vs 15 de Ethereum). Utilizada para DeFi (finanzas descentralizadas), NFTs y aplicaciones descentralizadas. Competidor directo de Ethereum con transacciones mucho mas baratas (~$0.01 vs $5-50 de ETH).","g":"Variacion diaria &lt; 5% — estabilidad relativa en cripto.","y":"Variacion diaria 5%–10% — volatilidad moderada, comun en altcoins.","r":"Variacion diaria &gt; 10% — volatilidad extrema, alto riesgo."},"ethereum":{"t":"Ethereum (ETH)","d":"Segunda criptomoneda por capitalizacion (~$400B). Plataforma LIDER en contratos inteligentes (smart contracts), DeFi, NFTs y tokenizacion de activos reales. Migro a Proof of Stake (PoS) reduciendo 99% su consumo energetico. Base de miles de proyectos cripto y Web3. Mas estable que altcoins pero mas volatil que Bitcoin.","g":"Variacion diaria &lt; 4% — mercado estable.","y":"Variacion diaria 4%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, precaucion."}};'
         'function _showDef(cod){var d=_DEFS[cod];if(!d)return;document.getElementById("defTitle").innerHTML=d.t;document.getElementById("defDesc").innerHTML=d.d;document.getElementById("defGreen").innerHTML=d.g;document.getElementById("defYellow").innerHTML=d.y;document.getElementById("defRed").innerHTML=d.r;document.getElementById("defModal").style.display="block";document.body.style.overflow="hidden";}'
         'function _closeDef(){document.getElementById("defModal").style.display="none";document.body.style.overflow="auto";}'
         'document.addEventListener("keydown",function(e){if(e.key==="Escape")_closeDef();});'
+        # TMC definitions injected into _DEFS
+        'var _TMC={"tmc_T21":{"t":"TMC T21 — Reajustables &lt; 1 ano","d":"Tasa maxima legal para creditos REAJUSTABLES (en UF) con plazo menor a 1 ano. Aplica a creditos de consumo en UF de corto plazo y lineas de credito reajustables. Si pides un credito en UF pagadero en menos de 12 meses, esta es la tasa maxima que el banco puede cobrarte.","g":"Si tu credito esta bajo esta tasa, tienes buenas condiciones.","y":"Cercano a la TMC — estas en el limite legal, compara alternativas.","r":"No se puede superar esta tasa — seria usura."},"tmc_T22":{"t":"TMC T22 — Reajustables &gt;1a &gt;2.000 UF","d":"Creditos REAJUSTABLES a 1 ano o mas, montos SOBRE 2.000 UF (~$80M). Aplica a creditos hipotecarios de montos altos y creditos comerciales en UF. Es la tasa tope para creditos hipotecarios grandes.","g":"Credito hipotecario bien bajo esta tasa.","y":"Tasa cercana al tope — negociar mejores condiciones.","r":"Tasa tope legal — no puede superarse."},"tmc_T24":{"t":"TMC T24 — Reajustables &gt;1a &le;2.000 UF","d":"Creditos REAJUSTABLES a 1 ano o mas, montos HASTA 2.000 UF (~$80M). La MAYORIA de creditos hipotecarios normales de personas caen aqui. Si estas comprando una vivienda con credito hipotecario, esta es probablemente tu tasa maxima legal.","g":"Tu hipotecario tiene buena tasa.","y":"Cercano al tope — compara entre bancos.","r":"Tasa tope — evalua otras opciones de financiamiento."},"tmc_T25":{"t":"TMC T25 — No reaj. &lt;90d &gt;5.000 UF","d":"Creditos NO REAJUSTABLES en pesos, plazo menor a 90 dias, montos sobre 5.000 UF. Aplica a prestamos empresariales de corto plazo, factoring y lineas de credito comerciales grandes.","g":"Buena tasa para operacion comercial.","y":"Monitorear — comparar con factoring alternativo.","r":"Tasa tope."},"tmc_T26":{"t":"TMC T26 — No reaj. &lt;90d 200-5K UF","d":"Creditos NO REAJUSTABLES en pesos, plazo menor a 90 dias, montos 200-5.000 UF. Esta es la tasa MAS ALTA de todas y aplica a: avances en efectivo de tarjetas de credito, creditos de consumo rapidos, y prestamos personales de corto plazo. Por eso las tarjetas de credito son tan caras.","g":"Evita estos creditos si puedes.","y":"MUY cara — solo en emergencia.","r":"La tasa mas alta del sistema — EXTREMA PRECAUCION."},"tmc_T34":{"t":"TMC T34 — Reajustables &gt;5.000 UF","d":"Grandes operaciones empresariales en UF, leasing inmobiliario comercial, financiamiento de proyectos inmobiliarios grandes.","g":"Condiciones normales de mercado.","y":"Evaluar alternativas.","r":"Tope legal."},"tmc_T35":{"t":"TMC T35 — Reajustables 200-5K UF","d":"Creditos de consumo medianos en UF (200-5.000 UF), creditos automotrices, prestamos personales reajustables. Comun para compra de vehiculos y creditos de libre disposicion.","g":"Buena tasa para el segmento.","y":"Comparar ofertas.","r":"Tope."},"tmc_T43":{"t":"TMC T43 — No reaj. &ge;90d descuento pension","d":"Creditos para JUBILADOS con descuento directo de su pension. Tasa especial regulada para proteger a pensionados. Si eres jubilado y te ofrecen un credito, la tasa no puede superar este limite.","g":"Proteccion al pensionado.","y":"Verificar que no supere este tope.","r":"Tope legal — denunciar excesos ante CMF."},"tmc_T44":{"t":"TMC T44 — Reajustables 50-200 UF","d":"Creditos pequenos en UF ($2-8M), compras a credito reajustables, prestamos de consumo menores.","g":"Condiciones aceptables.","y":"Tasa elevada — buscar alternativas.","r":"Tope — precaucion."},"tmc_T45":{"t":"TMC T45 — Reajustables &le;50 UF","d":"Micro-creditos de hasta 50 UF (~$2M). Prestamos muy pequenos. Tasa alta porque el riesgo del monto bajo es mayor para el banco. Comun en cooperativas y cajas de compensacion.","g":"Normal para micro-credito.","y":"Alta pero esperable para montos chicos.","r":"Tope — preferir ahorro antes que micro-credito."},"tmc_T46":{"t":"TMC T46 — No reaj. &ge;90d &le;2K UF","d":"Creditos de consumo NORMALES en pesos chilenos, plazo 90 dias o mas, hasta 2.000 UF. Es la categoria mas comun: tu credito de consumo bancario tipico, prestamo personal, credito automotriz en pesos.","g":"Tu credito tiene buena tasa.","y":"Cercano al tope — negociar.","r":"Tope legal para creditos de consumo."},"tmc_T47":{"t":"TMC T47 — No reaj. &ge;90d &gt;2K UF","d":"Creditos comerciales en pesos, leasing empresarial, creditos de mediano plazo sobre 2.000 UF. Para empresas que necesitan financiamiento en pesos sin reajustabilidad.","g":"Buenas condiciones comerciales.","y":"Comparar ofertas bancarias.","r":"Tope para creditos comerciales."}};'
+        'for(var k in _TMC)_DEFS[k]=_TMC[k];'
         # FIX sparklines: doble RAF + resize + array global _sparks
         + spark_js +
 
@@ -15735,39 +15739,37 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         'if(el){var inst=echarts.getInstanceByDom(el);if(inst)inst.resize();}'
         '});});'
 
-        # Chatbot flotante: usa _DEFS + datos de la página para responder
-        'function _toggleChat(){'
+        'function _tgChat(){'
         'var b=document.getElementById("chatBox");'
-        'b.style.display=b.style.display==="none"||!b.style.display?"block":"none";}'
-
-        'function _sendChat(){'
+        'b.style.display=b.style.display==="block"?"none":"block";}'
+        'function _sndChat(){'
         'var inp=document.getElementById("chatQ");'
         'var q=inp.value.trim();if(!q)return;inp.value="";'
         'var m=document.getElementById("chatMsgs");'
-        'm.innerHTML+=\'<div class="cmsg user">\'+q+\'</div>\';'
-        # Buscar en _DEFS y en contenido de la página
-        'var ql=q.toLowerCase();var resp="";'
+        'm.innerHTML+=\'<div class="cmsg user">\'+q.replace(/</g,"&lt;")+\'</div>\';'
+        'var ql=q.toLowerCase(),resp="";'
         'for(var k in _DEFS){'
         'var d=_DEFS[k];'
         'if(ql.indexOf(k)>=0||ql.indexOf(d.t.toLowerCase().split("(")[0].trim())>=0){'
-        'resp="<b>"+d.t+"</b><br>"+d.d+"<br><br>'
-        '<b style=\\"color:#2ecc71\\">Optimo:</b> "+d.g+"<br>'
-        '<b style=\\"color:#f1c40f\\">Normal:</b> "+d.y+"<br>'
-        '<b style=\\"color:#e74c3c\\">Riesgo:</b> "+d.r;break;}}'
-        # Buscar en cards de la página
+        'resp="<b>"+d.t+"</b><br><br>"+d.d+"<br><br>"'
+        '+"<span style=\\"color:#2ecc71\\">&#128994; Optimo:</span> "+d.g+"<br>"'
+        '+"<span style=\\"color:#f1c40f\\">&#128993; Normal:</span> "+d.y+"<br>"'
+        '+"<span style=\\"color:#e74c3c\\">&#128308; Riesgo:</span> "+d.r;break;}}'
         'if(!resp){'
-        'var cards=document.querySelectorAll(".card,.cmf-row.data,.exp-card");'
+        'var cards=document.querySelectorAll(".card,.exp-card,.cmf-row.data");'
+        'var words=ql.split(" ").filter(function(w){return w.length>2;});'
         'cards.forEach(function(c){'
-        'if(c.textContent.toLowerCase().indexOf(ql.split(" ")[0])>=0 && !resp){'
-        'resp=c.textContent.substring(0,300)+"...";}});}'
-        # Fallback genérico
+        'var txt=c.textContent.toLowerCase();'
+        'if(!resp && words.some(function(w){return txt.indexOf(w)>=0;})){'
+        'resp=c.textContent.substring(0,350).replace(/\\n/g," ")+"...";}});}'
         'if(!resp){'
-        'if(ql.indexOf("dolar")>=0||ql.indexOf("dólar")>=0)resp=_DEFS.dolar?_DEFS.dolar.d+" Semaforo: "+_DEFS.dolar.g:"Consulta el indicador Dolar arriba.";'
-        'else if(ql.indexOf("uf")>=0)resp=_DEFS.uf?_DEFS.uf.d:"Revisa la UF arriba.";'
-        'else if(ql.indexOf("bitcoin")>=0||ql.indexOf("btc")>=0)resp=_DEFS.bitcoin?_DEFS.bitcoin.d:"Revisa Bitcoin arriba.";'
-        'else if(ql.indexOf("cobre")>=0)resp=_DEFS.libra_cobre?_DEFS.libra_cobre.d:"Revisa Cobre arriba.";'
-        'else if(ql.indexOf("tmc")>=0||ql.indexOf("tasa")>=0)resp="Las Tasas Maximas Convencionales (TMC) son los topes legales que los bancos pueden cobrar por creditos. Haz clic en cada fila de la seccion CMF para ver el detalle de cada tipo.";'
-        'else resp="No encontre informacion especifica sobre eso en los indicadores actuales. Prueba con: dolar, UF, bitcoin, cobre, IPC, TPM, IPSA, desempleo, IMACEC, o tasa CMF.";}'
+        'if(ql.indexOf("tmc")>=0||ql.indexOf("tasa max")>=0)'
+        'resp="Las Tasas Maximas Convencionales (TMC) son los topes legales que los bancos pueden cobrar por creditos en Chile. Cada tipo (T21-T47) aplica a un segmento diferente. Haz clic en cada fila de la seccion CMF arriba para ver el detalle.";'
+        'else if(ql.indexOf("afp")>=0)'
+        'resp="La seccion de AFP muestra la rentabilidad de los 5 fondos (A-E) de las 7 AFPs chilenas en los ultimos 6 meses. Fondo A es el mas riesgoso/rentable y Fondo E el mas conservador.";'
+        'else if(ql.indexOf("hist")>=0||ql.indexOf("10 a")>=0)'
+        'resp="Los graficos historicos muestran la evolucion de 9 indicadores clave en los ultimos 10 anos: UF, Dolar, Euro, UTM, IPC, Desempleo, IMACEC, Cobre y Bitcoin.";'
+        'else resp="No encontre informacion especifica. Prueba con: UF, dolar, euro, bitcoin, cobre, IPC, TPM, IPSA, desempleo, IMACEC, AFP, TMC, o pregunta sobre cualquier indicador del dashboard.";}'
         'm.innerHTML+=\'<div class="cmsg bot">\'+resp+\'</div>\';'
         'm.scrollTop=m.scrollHeight;}'
 
@@ -15805,98 +15807,102 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             datos_afp = all_data.get('datos_afp', {})
             await msg.edit_text(f"⚡ {len(datos)} indicadores (cache del día)")
         else:
-            # ── Primera consulta del día: pipeline completo ──
+            # ── Primera consulta del día: pipeline PARALELO ──
             await msg.edit_text(
                 "📈 Primera consulta del día — datos frescos...\n"
-                "⏳ Descargando histórico 10 años y analizando con IA (~20 s)"
+                "⏳ Descargando datos en paralelo (~30 s)"
             )
 
+            # PASO 1: Indicadores Banco Central
             all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
             datos = all_data.get('datos_actuales', {})
             if not datos:
                 await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
                 return
 
-            await msg.edit_text(
-                f"✅ {len(datos)} indicadores obtenidos.\n"
-                "🏦 Consultando tasas CMF + rentabilidad AFP..."
-            )
+            await msg.edit_text(f"✅ {len(datos)} indicadores.\n🏦 CMF + AFP + BCCH en paralelo...")
 
-            try:
-                datos_cmf = await loop.run_in_executor(None, obtener_indicadores_cmf)
-            except Exception as _ec:
-                logger.warning(f"CMF falló: {_ec}")
-                datos_cmf = {}
-            all_data['datos_cmf'] = datos_cmf or {}
-
-            try:
-                datos_afp = await loop.run_in_executor(None, obtener_rentabilidad_afp)
-            except Exception as _ea:
-                logger.warning(f"AFP falló: {_ea}")
-                datos_afp = {}
-            all_data['datos_afp'] = datos_afp or {}
-
-            noticias_bcch = await loop.run_in_executor(None, scraping_bcentral_noticias)
+            # PASO 2: CMF + AFP + BCCH EN PARALELO (antes eran secuenciales)
+            from concurrent.futures import ThreadPoolExecutor as _TPE_ind
+            with _TPE_ind(max_workers=3) as pool:
+                fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
+                fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
+                fut_bcch = pool.submit(lambda: _safe_call(scraping_bcentral_noticias))
+                datos_cmf = fut_cmf.result() or {}
+                datos_afp = fut_afp.result() or {}
+                noticias_bcch = fut_bcch.result() or []
+            all_data['datos_cmf'] = datos_cmf
+            all_data['datos_afp'] = datos_afp
             contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
 
-            await msg.edit_text(
-                f"✅ Indicadores + CMF obtenidos.\n"
-                "📚 Consultando biblioteca RAG...\n"
-                "🤖 Generando análisis IA..."
-            )
+            await msg.edit_text("✅ CMF + AFP + BCCH.\n📚 RAG + 🤖 IA en paralelo...")
 
+            # PASO 3: RAG QUERIES EN PARALELO (antes 14 secuenciales = 2-4 min)
             queries_rag = {
-                'uf':             'unidad de fomento inflacion reajuste Chile',
-                'dolar':          'tipo de cambio dolar peso chileno politica cambiaria',
-                'euro':           'tipo de cambio euro moneda extranjera',
-                'utm':            'unidad tributaria mensual impuestos Chile',
-                'ipc':            'indice de precios al consumidor inflacion causas efectos',
-                'tpm':            'tasa de politica monetaria banco central tasas de interes',
-                'bitcoin':        'bitcoin criptomoneda volatilidad mercado digital',
-                'tasa_desempleo': 'desempleo mercado laboral Chile causas empleo',
-                'imacec':         'IMACEC actividad economica Chile indicador mensual PIB',
-                'libra_cobre':    'precio cobre Chile exportaciones materias primas',
-                'ivp':            'indice valor promedio creditos hipotecarios Chile',
-                'ipsa':           'IPSA bolsa de valores Santiago Chile acciones selectivas',
-                'solana':         'Solana criptomoneda blockchain escalabilidad inversion',
-                'ethereum':       'Ethereum blockchain contratos inteligentes DeFi inversion',
+                'uf': 'unidad de fomento inflacion reajuste Chile',
+                'dolar': 'tipo de cambio dolar peso chileno politica cambiaria',
+                'euro': 'tipo de cambio euro moneda extranjera',
+                'utm': 'unidad tributaria mensual impuestos Chile',
+                'ipc': 'indice de precios al consumidor inflacion',
+                'tpm': 'tasa de politica monetaria banco central tasas de interes',
+                'bitcoin': 'bitcoin criptomoneda volatilidad mercado digital',
+                'tasa_desempleo': 'desempleo mercado laboral Chile',
+                'imacec': 'IMACEC actividad economica Chile PIB',
+                'libra_cobre': 'precio cobre Chile exportaciones materias primas',
+                'ivp': 'indice valor promedio creditos hipotecarios',
+                'ipsa': 'IPSA bolsa de valores Santiago Chile',
+                'solana': 'Solana criptomoneda blockchain escalabilidad',
+                'ethereum': 'Ethereum blockchain contratos inteligentes DeFi',
             }
             fragmentos_rag = {}
-            for cod in datos:
-                query = queries_rag.get(cod, f'indicador economico {cod} Chile')
-                frag  = await loop.run_in_executor(None, consultar_rag_economia, query)
-                fragmentos_rag[cod] = frag
+            with _TPE_ind(max_workers=6) as pool:
+                rag_futures = {}
+                for cod in datos:
+                    q = queries_rag.get(cod, f'indicador {cod} Chile')
+                    rag_futures[cod] = pool.submit(lambda _q=q: _safe_call(consultar_rag_economia, _q))
+                for cod, fut in rag_futures.items():
+                    fragmentos_rag[cod] = fut.result() or ''
 
-            await msg.edit_text(
-                f"🤖 Generando análisis IA para {len(datos)} indicadores...\n"
-                "📊 Construyendo dashboard interactivo..."
-            )
+            # PASO 4: EXPLICACIONES IA EN PARALELO (antes 14 secuenciales = 4-8 min)
+            await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores en paralelo...")
             explicaciones = {}
-            for cod, d in datos.items():
-                exp = await loop.run_in_executor(
-                    None, generar_explicacion_indicador,
-                    cod, d, contexto_bcch, fragmentos_rag.get(cod, '')
-                )
-                explicaciones[cod] = exp
+            with _TPE_ind(max_workers=4) as pool:
+                ia_futures = {}
+                for cod, d in datos.items():
+                    ia_futures[cod] = pool.submit(
+                        lambda _c=cod, _d=d: _safe_call(
+                            generar_explicacion_indicador,
+                            _c, _d, contexto_bcch, fragmentos_rag.get(_c, '')
+                        )
+                    )
+                for cod, fut in ia_futures.items():
+                    explicaciones[cod] = fut.result() or ''
 
-            # Generar noticias HTML para el pie del dashboard
+            # PASO 5: Noticias HTML con análisis IA completo
             noticias_html = ""
             if noticias_bcch:
                 for n in noticias_bcch[:5]:
                     noticias_html += '<div class="news-item">&#128196; ' + str(n).replace('<','&lt;').replace('>','&gt;') + '</div>'
             try:
                 prompt_news = (
-                    "En 5 bullet points breves, resume las principales noticias "
-                    "internacionales y locales de Chile de esta semana que impactan "
-                    "indicadores economicos (dolar, cobre, inflacion, tasas, bolsa). "
-                    "Cada punto maximo 1 linea. Sin emojis. Solo texto."
+                    "Eres un analista economico chileno experto. Analiza las principales noticias "
+                    "internacionales y locales de Chile de esta semana que impactan indicadores economicos. "
+                    "Para cada noticia (maximo 5), escribe:\n"
+                    "1. Titulo breve de la noticia\n"
+                    "2. Resumen de 1-2 lineas explicando que paso\n"
+                    "3. Impacto: que indicadores afecta (dolar, cobre, IPC, TPM, IPSA, etc) "
+                    "y si la variacion fue al alza o a la baja, y por que.\n\n"
+                    "Formato cada noticia: TITULO | Resumen | Impacto: indicadores afectados (alza/baja)\n"
+                    "Sin emojis. Maximo 5 noticias. Directo al contenido."
                 )
-                news_ia = llamar_groq(prompt_news, max_tokens=300, temperature=0.3)
+                news_ia = llamar_groq(prompt_news, max_tokens=600, temperature=0.3)
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
-                        if len(line) > 10:
-                            noticias_html += '<div class="news-item">&#127758; ' + line.replace('<','&lt;') + '</div>'
+                        if len(line) > 15:
+                            # Detectar si menciona alza o baja para iconos
+                            icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
+                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;') + '</div>'
             except Exception:
                 pass
 
@@ -17243,7 +17249,7 @@ def main():
     
     # Handler de mensajes de voz (privado y grupo)
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@'), responder_mencion))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)(@|bot|robot)'), responder_mencion))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, guardar_mensaje_grupo))
     
     # PENDIENTE 3: Handler para chat privado (usuarios registrados pueden escribir directo)
@@ -17604,6 +17610,15 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                     await msg.edit_text(respuesta_final, parse_mode='Markdown')
                 except Exception:
                     await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
+                # Enviar también como audio (TTS)
+                try:
+                    audio_priv = await generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3")
+                    if audio_priv and os.path.exists(audio_priv):
+                        with open(audio_priv, 'rb') as af:
+                            await update.message.reply_voice(voice=af)
+                        os.remove(audio_priv)
+                except Exception as _tts_p:
+                    logger.debug(f"TTS privado: {_tts_p}")
             else:
                 await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
                 
