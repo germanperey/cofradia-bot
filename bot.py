@@ -109,6 +109,28 @@ db_disponible = False
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
 _indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
+# Cache diario de comandos — se limpia automáticamente al cambiar de día
+_cmd_cache_dia = {'fecha': '', 'datos': {}}
+def _cache_get(clave):
+    """Obtiene valor del cache si es del mismo día"""
+    hoy = datetime.now().strftime('%Y-%m-%d')
+    if _cmd_cache_dia.get('fecha') != hoy:
+        _cmd_cache_dia['fecha'] = hoy
+        _cmd_cache_dia['datos'] = {}
+        return None
+    return _cmd_cache_dia['datos'].get(clave)
+
+def _cache_set(clave, valor):
+    """Guarda valor en cache del día (se elimina al cambiar de día)"""
+    hoy = datetime.now().strftime('%Y-%m-%d')
+    if _cmd_cache_dia.get('fecha') != hoy:
+        _cmd_cache_dia['fecha'] = hoy
+        _cmd_cache_dia['datos'] = {}
+    _cmd_cache_dia['datos'][clave] = valor
+
+# GLM-5 API (Z.AI) — tercer LLM fallback gratuito (744B params)
+GLM_API_KEY = os.environ.get('GLM_API_KEY', '')
+
 def _safe_call(fn, *args, **kwargs):
     """Ejecuta una función capturando excepciones (para uso en ThreadPoolExecutor)"""
     try:
@@ -949,6 +971,35 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
             logger.warning(f"Gemini error: {r.status_code} — {r.text[:300]}")
     except Exception as e:
         logger.warning(f"Error Gemini: {e}")
+    return None
+
+
+def llamar_glm5(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """GLM-5 (Z.AI) — LLM gratuito 744B params, tercer fallback después de Groq y Gemini."""
+    if not GLM_API_KEY:
+        return None
+    try:
+        url = "https://api.z.ai/api/paas/v4/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GLM_API_KEY}"}
+        payload = {
+            "model": "glm-4-flash",
+            "messages": [
+                {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena. Responde en español, profesional y cercano."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=25)
+        if r.status_code == 200:
+            texto = r.json()["choices"][0]["message"]["content"]
+            if texto and texto.strip():
+                logger.info("✅ Respuesta GLM-5 (Z.AI)")
+                return texto.strip()
+        else:
+            logger.warning(f"GLM-5 error: {r.status_code}")
+    except Exception as e:
+        logger.warning(f"Error GLM-5: {e}")
     return None
 
 
@@ -4305,6 +4356,10 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
         respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
         
         await msg.delete()
         
@@ -17440,68 +17495,65 @@ def main():
                     return  # El comando fue ejecutado, no necesitamos respuesta de IA
                 # Si falló la ejecución, continuar con flujo normal
             
-            # ===== BÚSQUEDA EXHAUSTIVA EN TODAS LAS FUENTES =====
-            # Usar query mejorada para búsqueda más precisa
-            # 1. Búsqueda unificada: historial + RAG (30-60 chunks)
-            resultados_busq = busqueda_unificada(query_para_busqueda, limit_historial=20, limit_rag=40)
+            # ===== BÚSQUEDA PARALELA EN TODAS LAS FUENTES (3 hilos simultáneos) =====
+            from concurrent.futures import ThreadPoolExecutor as _TPE_priv
+            
+            def _buscar_tarjetas_priv(q):
+                ctx = ""; fnt = []
+                try:
+                    cn = get_db_connection()
+                    if cn:
+                        cr = cn.cursor()
+                        pals = [p for p in q.lower().split() if len(p) > 3][:5]
+                        if pals:
+                            conds = []; pars = []
+                            for p in pals:
+                                if DATABASE_URL:
+                                    conds.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
+                                    pars.extend([f'%{p}%']*5)
+                                else:
+                                    conds.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
+                                    pars.extend([f'%{p}%']*5)
+                            if conds:
+                                wh = " OR ".join(conds)
+                                cr.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 10", pars)
+                                trs = cr.fetchall()
+                                if trs:
+                                    lns = [f"• {t['nombre_completo'] if DATABASE_URL else t[0]} | {t['profesion'] if DATABASE_URL else t[1]} | {t['empresa'] if DATABASE_URL else t[2]} | {t['ciudad'] if DATABASE_URL else t[3]}" for t in trs]
+                                    ctx = "\n\n=== DIRECTORIO PROFESIONAL ===\n" + "\n".join(lns)
+                                    fnt.append(f"Directorio ({len(trs)})")
+                        cn.close()
+                except Exception: pass
+                return ctx, fnt
+            
+            def _buscar_eventos_priv():
+                ctx = ""; fnt = []
+                try:
+                    cn = get_db_connection()
+                    if cn and DATABASE_URL:
+                        cr = cn.cursor()
+                        cr.execute("SELECT titulo, fecha_evento, lugar FROM eventos WHERE activo = TRUE AND fecha_evento >= CURRENT_TIMESTAMP ORDER BY fecha_evento ASC LIMIT 5")
+                        evs = cr.fetchall()
+                        cn.close()
+                        if evs:
+                            lns = [f"• {e['titulo']} | {str(e['fecha_evento'])[:16]} | {e['lugar']}" for e in evs]
+                            ctx = "\n\n=== PRÓXIMOS EVENTOS ===\n" + "\n".join(lns)
+                            fnt.append(f"Eventos ({len(evs)})")
+                except Exception: pass
+                return ctx, fnt
+            
+            with _TPE_priv(max_workers=3) as pool:
+                fut_rag = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
+                fut_tar = pool.submit(_buscar_tarjetas_priv, mensaje)
+                fut_ev = pool.submit(_buscar_eventos_priv)
+                resultados_busq = fut_rag.result()
+                contexto_tarjetas, fnt_tar = fut_tar.result()
+                contexto_eventos, fnt_ev = fut_ev.result()
+            
             contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
-            
-            # 2. Buscar también en tarjetas profesionales (directorio de cofrades)
-            contexto_tarjetas = ""
-            try:
-                conn_dir = get_db_connection()
-                if conn_dir:
-                    c_dir = conn_dir.cursor()
-                    palabras_dir = [p for p in mensaje.lower().split() if len(p) > 3][:5]
-                    if palabras_dir:
-                        cond_dir = []
-                        params_dir = []
-                        for p in palabras_dir:
-                            if DATABASE_URL:
-                                cond_dir.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(ciudad) LIKE %s)")
-                                params_dir.extend([f'%{p}%']*5)
-                            else:
-                                cond_dir.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(ciudad) LIKE ?)")
-                                params_dir.extend([f'%{p}%']*5)
-                        if cond_dir:
-                            wh_dir = " OR ".join(cond_dir)
-                            if DATABASE_URL:
-                                c_dir.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios, email, telefono FROM tarjetas_profesional WHERE {wh_dir} LIMIT 10", params_dir)
-                            else:
-                                c_dir.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios, email, telefono FROM tarjetas_profesional WHERE {wh_dir} LIMIT 10", params_dir)
-                            tarjetas_encontradas = c_dir.fetchall()
-                            if tarjetas_encontradas:
-                                lineas_tar = []
-                                for t in tarjetas_encontradas:
-                                    if DATABASE_URL:
-                                        lineas_tar.append(f"• {t['nombre_completo']} | {t['profesion']} | {t['empresa']} | {t['ciudad']} | {t['servicios']}")
-                                    else:
-                                        lineas_tar.append(f"• {t[0]} | {t[1]} | {t[2]} | {t[3]} | {t[4]}")
-                                contexto_tarjetas = "\n\n=== DIRECTORIO PROFESIONAL COFRADES (Tarjetas) ===\n" + "\n".join(lineas_tar)
-                                fuentes_usadas.append(f"Directorio ({len(tarjetas_encontradas)} cofrades)")
-                    conn_dir.close()
-            except Exception as e_dir:
-                logger.debug(f"Error buscando directorio privado: {e_dir}")
-            
-            # 3. Buscar en eventos y actividades del grupo
-            contexto_eventos = ""
-            try:
-                conn_ev = get_db_connection()
-                if conn_ev and DATABASE_URL:
-                    c_ev = conn_ev.cursor()
-                    c_ev.execute("""SELECT titulo, descripcion, fecha_evento, lugar 
-                                   FROM eventos WHERE activo = TRUE 
-                                   AND fecha_evento >= CURRENT_TIMESTAMP 
-                                   ORDER BY fecha_evento ASC LIMIT 5""")
-                    eventos_prox = c_ev.fetchall()
-                    conn_ev.close()
-                    if eventos_prox:
-                        lineas_ev = [f"• {e['titulo']} | {str(e['fecha_evento'])[:16]} | {e['lugar']}" for e in eventos_prox]
-                        contexto_eventos = "\n\n=== PRÓXIMOS EVENTOS COFRADÍA ===\n" + "\n".join(lineas_ev)
-                        fuentes_usadas.append(f"Eventos ({len(eventos_prox)})")
-            except Exception as e_ev:
-                logger.debug(f"Error buscando eventos privado: {e_ev}")
+            fuentes_usadas.extend(fnt_tar)
+            fuentes_usadas.extend(fnt_ev)
 
             # Construir prompt con modo inteligente según relevancia temática
             fuentes_str = " | ".join(fuentes_usadas) if fuentes_usadas else "conocimiento propio"
@@ -17574,6 +17626,9 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             if not respuesta:
                 respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
+            
+            if not respuesta:
+                respuesta = llamar_glm5(prompt, max_tokens=1800, temperature=0.7)
             
             if respuesta:
                 # Agregar footer con fuentes consultadas
