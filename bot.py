@@ -16973,12 +16973,7 @@ async def _enviar_alerta_emergencia_v2(update: Update, context, uid: int):
     botones = []
     if maps_url:
         botones.append([InlineKeyboardButton("🗺️ ABRIR MAPA EMERGENCIA", url=maps_url)])
-    botones.append([
-        InlineKeyboardButton("🚑 131", url="tel:131"),
-        InlineKeyboardButton("🚒 132", url="tel:132"),
-        InlineKeyboardButton("🚔 133", url="tel:133"),
-        InlineKeyboardButton("🔍 134", url="tel:134")
-    ])
+    botones.append([InlineKeyboardButton("🚨 VER NÚMEROS DE EMERGENCIA", url="https://www.bomberos.cl/telefonos-de-emergencia")])
     tel_kb = InlineKeyboardMarkup(botones)
 
     # === ENVIAR A GRUPO + TOPICS + OWNER ===
