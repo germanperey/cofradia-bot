@@ -16820,20 +16820,27 @@ async def _emer_interceptar_gps(update: Update, context: ContextTypes.DEFAULT_TY
     uid = update.effective_user.id
     em = _EMER.get(uid)
     if not em or em.get('state') != 'waiting_geo':
-        return  # No hay emergencia esperando GPS → no interceptar
-    lat = update.message.location.latitude
-    lon = update.message.location.longitude
-    maps_url = f"https://www.google.com/maps?q={lat},{lon}"
-    em['direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f}"
-    em['maps'] = maps_url
-    em['state'] = 'done'
-    logger.info(f"🚨 EMER [{uid}] GPS recibido: {lat},{lon}")
-    # Quitar teclado especial de ubicación
-    from telegram import ReplyKeyboardRemove
-    await update.message.reply_text("✅ Ubicación recibida. Enviando alerta...",
-                                     reply_markup=ReplyKeyboardRemove())
-    await _enviar_alerta_emergencia_v2(update, context, uid)
+        return
     from telegram.ext import ApplicationHandlerStop
+    try:
+        lat = update.message.location.latitude
+        lon = update.message.location.longitude
+        maps_url = f"https://www.google.com/maps?q={lat},{lon}"
+        em['direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f}"
+        em['maps'] = maps_url
+        em['state'] = 'done'
+        logger.info(f"🚨 EMER [{uid}] GPS recibido: {lat},{lon}")
+        from telegram import ReplyKeyboardRemove
+        await update.message.reply_text("✅ Ubicación recibida. Enviando alerta...",
+                                         reply_markup=ReplyKeyboardRemove())
+        try:
+            await _enviar_alerta_emergencia_v2(update, context, uid)
+        except Exception as _ea:
+            logger.error(f"🚨 ERROR enviando alerta (GPS): {_ea}")
+            import traceback; logger.error(traceback.format_exc())
+            await update.message.reply_text(f"⚠️ Error enviando alerta: {_ea}\nIntenta /emergencia de nuevo.")
+    except Exception as _e:
+        logger.error(f"🚨 ERROR interceptor GPS: {_e}")
     raise ApplicationHandlerStop()
 
 async def _emer_interceptar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16843,17 +16850,17 @@ async def _emer_interceptar_texto(update: Update, context: ContextTypes.DEFAULT_
     uid = update.effective_user.id
     em = _EMER.get(uid)
     if not em:
-        return  # No hay emergencia → no interceptar
+        return
     texto = update.message.text.strip()
     if texto.startswith('/'):
-        return  # Es un comando → no interceptar
+        return
     state = em.get('state')
     from telegram.ext import ApplicationHandlerStop
 
     if state == 'waiting_desc':
         em['desc'] = texto
         em['state'] = 'waiting_ubi_choice'
-        logger.info(f"🚨 EMER [{uid}] desc guardada, state=waiting_ubi_choice")
+        logger.info(f"🚨 EMER [{uid}] desc guardada")
         await update.message.reply_text(
             "✅ Descripción registrada.\n\nAhora indica la ubicación del siniestro:",
             reply_markup=InlineKeyboardMarkup([
@@ -16864,21 +16871,32 @@ async def _emer_interceptar_texto(update: Update, context: ContextTypes.DEFAULT_
         raise ApplicationHandlerStop()
 
     elif state == 'waiting_dir':
-        import urllib.parse as _up_emer
-        dir_q = texto if 'chile' in texto.lower() else texto + ', Chile'
-        maps_url = f"https://www.google.com/maps/search/{_up_emer.quote(dir_q)}"
-        em['direccion'] = f"📍 {texto}"
-        em['maps'] = maps_url
-        em['state'] = 'done'
-        logger.info(f"🚨 EMER [{uid}] dirección recibida: {texto}")
-        await _enviar_alerta_emergencia_v2(update, context, uid)
+        try:
+            import urllib.parse as _up_emer
+            dir_q = texto if 'chile' in texto.lower() else texto + ', Chile'
+            maps_url = f"https://www.google.com/maps/search/{_up_emer.quote(dir_q)}"
+            em['direccion'] = f"📍 {texto}"
+            em['maps'] = maps_url
+            em['state'] = 'done'
+            logger.info(f"🚨 EMER [{uid}] dirección recibida: {texto}")
+            await update.message.reply_text("✅ Dirección recibida. Enviando alerta...")
+            try:
+                await _enviar_alerta_emergencia_v2(update, context, uid)
+            except Exception as _ea:
+                logger.error(f"🚨 ERROR enviando alerta (DIR): {_ea}")
+                import traceback; logger.error(traceback.format_exc())
+                await update.message.reply_text(f"⚠️ Error enviando alerta: {_ea}\nIntenta /emergencia de nuevo.")
+        except Exception as _e:
+            logger.error(f"🚨 ERROR interceptor DIR: {_e}")
         raise ApplicationHandlerStop()
 
 async def _enviar_alerta_emergencia_v2(update: Update, context, uid: int):
-    """Envía alerta de emergencia usando dict global _EMER[uid]"""
+    """Envía alerta de emergencia — FAULT TOLERANT (envía siempre, aunque falle el teléfono)"""
     em = _EMER.get(uid)
     if not em:
+        logger.warning(f"🚨 _EMER[{uid}] no existe al enviar alerta")
         return
+    
     user = update.effective_user
     tipo = em.get('tipo', 'EMERGENCIA')
     hora = em.get('hora', datetime.now().strftime('%H:%M:%S'))
@@ -16887,94 +16905,97 @@ async def _enviar_alerta_emergencia_v2(update: Update, context, uid: int):
     descripcion = em.get('desc', '')
     nombre = f"{user.first_name or ''} {user.last_name or ''}".strip() or 'Usuario'
 
-    # Buscar teléfono en Google Drive Excel
+    # Teléfono: OPCIONAL — si falla, se envía alerta sin teléfono
     telefono_usuario = ''
     try:
-        from oauth2client.service_account import ServiceAccountCredentials
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
         if creds_json:
+            from oauth2client.service_account import ServiceAccountCredentials
             creds_dict = json.loads(creds_json)
-            scope = ['https://www.googleapis.com/auth/drive.readonly']
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            headers_auth = {"Authorization": f"Bearer {creds.get_access_token().access_token}"}
-            r_files = requests.get("https://www.googleapis.com/drive/v3/files",
-                headers=headers_auth,
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(
+                creds_dict, ['https://www.googleapis.com/auth/drive.readonly'])
+            h_auth = {"Authorization": f"Bearer {creds.get_access_token().access_token}"}
+            rf = requests.get("https://www.googleapis.com/drive/v3/files",
+                headers=h_auth,
                 params={'q': "name contains 'BD Grupo Laboral' and trashed=false",
-                        'fields': 'files(id,name)'}, timeout=10)
-            files = r_files.json().get('files', [])
-            if files:
-                r_dl = requests.get(
-                    f"https://www.googleapis.com/drive/v3/files/{files[0]['id']}/export",
-                    headers=headers_auth,
+                        'fields': 'files(id,name)'}, timeout=8)
+            fl = rf.json().get('files', [])
+            if fl:
+                rd = requests.get(
+                    f"https://www.googleapis.com/drive/v3/files/{fl[0]['id']}/export",
+                    headers=h_auth,
                     params={'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},
-                    timeout=15)
-                if r_dl.status_code == 200:
-                    import io as _io_e
-                    df = pd.read_excel(_io_e.BytesIO(r_dl.content), header=0)
-                    for _, row in df.iterrows():
-                        nom_e = str(row.iloc[2] if len(row) > 2 else '').strip().lower()
-                        if nom_e and nom_e in nombre.lower():
-                            tel = str(row.iloc[5] if len(row) > 5 else '').strip()
-                            if tel and tel != 'nan':
-                                telefono_usuario = tel
+                    timeout=10)
+                if rd.status_code == 200:
+                    import io as _io_e2
+                    df2 = pd.read_excel(_io_e2.BytesIO(rd.content), header=0)
+                    for _, row in df2.iterrows():
+                        ne = str(row.iloc[2] if len(row) > 2 else '').strip().lower()
+                        if ne and ne in nombre.lower():
+                            tl = str(row.iloc[5] if len(row) > 5 else '').strip()
+                            if tl and tl != 'nan':
+                                telefono_usuario = tl
                                 break
-    except Exception as e:
-        logger.debug(f"Error teléfono emergencia: {e}")
+    except Exception as _ep:
+        logger.debug(f"Teléfono no disponible (OK): {_ep}")
 
-    ahora = datetime.now()
+    # Calcular tiempo transcurrido
+    mins = 0
     try:
         hora_dt = datetime.strptime(hora, '%H:%M:%S').replace(
-            year=ahora.year, month=ahora.month, day=ahora.day)
-        mins = (ahora - hora_dt).seconds // 60
+            year=datetime.now().year, month=datetime.now().month, day=datetime.now().day)
+        mins = (datetime.now() - hora_dt).seconds // 60
     except Exception:
-        mins = 0
+        pass
 
-    alerta = (
-        f"🚨🚨🚨 ALERTA DE EMERGENCIA 🚨🚨🚨\n{'━' * 30}\n\n"
-        f"⚠️ Tipo: {tipo}\n"
-        f"👤 Reporta: {nombre}\n"
-    )
+    # === CONSTRUIR ALERTA ===
+    alerta = f"🚨🚨🚨 ALERTA DE EMERGENCIA 🚨🚨🚨\n{'━' * 30}\n\n"
+    alerta += f"⚠️ Tipo: {tipo}\n"
+    alerta += f"👤 Reporta: {nombre}\n"
     if telefono_usuario:
         alerta += f"📱 Teléfono: {telefono_usuario}\n"
-    alerta += f"🕐 Hora: {hora} (hace {mins} min)\n\n{direccion}\n"
+    alerta += f"🕐 Hora: {hora} (hace {mins} min)\n\n"
+    alerta += f"{direccion}\n"
     if maps_url:
         alerta += f"\n🗺️ VER MAPA: {maps_url}\n"
     if descripcion:
         alerta += f"\n📝 Descripción: {descripcion}\n"
-    alerta += (
-        f"\n{'━' * 30}\n"
-        "🆘 URGENTE!!! ACUDE EN AYUDA SI PUEDES,\n"
-        "O PRESTA APOYO LLAMANDO A EMERGENCIAS:\n\n"
-        "🚑 131 — Ambulancia (SAMU)\n"
-        "🚒 132 — Bomberos\n"
-        "🚔 133 — Carabineros\n"
-        "🔍 134 — PDI (Investigaciones)\n"
-        f"\n{'━' * 30}\n⚓ Cofradía de Networking — Red de Apoyo"
-    )
+    alerta += f"\n{'━' * 30}\n"
+    alerta += "🆘 URGENTE!!! ACUDE EN AYUDA SI PUEDES,\n"
+    alerta += "O PRESTA APOYO LLAMANDO A EMERGENCIAS:\n\n"
+    alerta += "🚑 131 — Ambulancia (SAMU)\n"
+    alerta += "🚒 132 — Bomberos\n"
+    alerta += "🚔 133 — Carabineros\n"
+    alerta += "🔍 134 — PDI (Investigaciones)\n"
+    alerta += f"\n{'━' * 30}\n⚓ Cofradía de Networking — Red de Apoyo"
 
-    # Botones: mapa + llamadas
+    # === BOTONES: mapa + llamadas ===
     botones = []
     if maps_url:
         botones.append([InlineKeyboardButton("🗺️ ABRIR MAPA EMERGENCIA", url=maps_url)])
     botones.append([
-        InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
-        InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")
-    ])
-    botones.append([
-        InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
-        InlineKeyboardButton("🔍 134 PDI", url="tel:134")
+        InlineKeyboardButton("🚑 131", url="tel:131"),
+        InlineKeyboardButton("🚒 132", url="tel:132"),
+        InlineKeyboardButton("🚔 133", url="tel:133"),
+        InlineKeyboardButton("🔍 134", url="tel:134")
     ])
     tel_kb = InlineKeyboardMarkup(botones)
 
-    # Broadcast al grupo + topics + owner
+    # === ENVIAR A GRUPO + TOPICS + OWNER ===
     enviados = 0
+    
+    # 1. Grupo principal
     if COFRADIA_GROUP_ID:
         try:
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
             enviados += 1
+            logger.info(f"🚨 Alerta enviada a grupo principal")
         except Exception as _eg:
-            logger.warning(f"Emergencia grupo: {_eg}")
+            logger.error(f"🚨 ERROR grupo principal: {_eg}")
+    
+    # 2. Topics del grupo
+    if COFRADIA_GROUP_ID:
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -16992,9 +17013,10 @@ async def _enviar_alerta_emergencia_v2(update: Update, context, uid: int):
                             enviados += 1
                         except Exception:
                             pass
-        except Exception:
-            pass
+        except Exception as _et:
+            logger.debug(f"Topics: {_et}")
 
+    # 3. Owner
     if OWNER_ID:
         try:
             await context.bot.send_message(
@@ -17002,27 +17024,24 @@ async def _enviar_alerta_emergencia_v2(update: Update, context, uid: int):
         except Exception:
             pass
 
-    # Confirmación al reportante
-    confirm = (
-        f"✅ ALERTA ENVIADA ({enviados} canales)\n\n"
-        f"⚠️ {tipo}\n👤 {nombre}\n🕐 {hora}\n{direccion}\n"
-    )
+    # === CONFIRMACIÓN AL REPORTANTE ===
+    confirm = f"✅ ALERTA ENVIADA ({enviados} canales)\n\n"
+    confirm += f"⚠️ {tipo}\n👤 {nombre}\n🕐 {hora}\n{direccion}\n"
     if maps_url:
         confirm += f"\n🗺️ Mapa: {maps_url}\n"
     confirm += "\n🆘 Números de emergencia:"
+
     try:
-        if update.message:
-            await update.message.reply_text(confirm, reply_markup=tel_kb)
-        else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=confirm, reply_markup=tel_kb)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=confirm, reply_markup=tel_kb)
     except Exception:
         try:
-            await context.bot.send_message(chat_id=uid, text=confirm, reply_markup=tel_kb)
-        except Exception:
-            pass
+            await context.bot.send_message(
+                chat_id=uid, text=confirm, reply_markup=tel_kb)
+        except Exception as _ec:
+            logger.error(f"🚨 No se pudo confirmar al usuario: {_ec}")
 
-    logger.info(f"🚨 EMER [{uid}] ALERTA ENVIADA a {enviados} canales")
+    logger.info(f"🚨 EMER [{uid}] COMPLETADO — {enviados} canales notificados")
     _EMER.pop(uid, None)
 
 
