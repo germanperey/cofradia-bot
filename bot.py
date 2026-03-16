@@ -17209,7 +17209,22 @@ def main():
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
-    application.add_handler(MessageHandler(filters.LOCATION & filters.ChatType.PRIVATE, emergencia_recibir_ubicacion))
+    application.add_handler(MessageHandler(filters.LOCATION, emergencia_recibir_ubicacion))
+    
+    # Handler para texto de emergencia en CUALQUIER chat (grupo o privado)
+    async def _emer_texto_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Intercepta texto cuando hay emergencia activa (grupo o privado)"""
+        step = context.user_data.get('emer_step')
+        if not step:
+            return  # No hay emergencia activa → no interceptar
+        if step in ('descripcion', 'direccion'):
+            await emergencia_recibir_texto(update, context)
+            raise ApplicationHandlerStop()  # Procesado → no pasar a otros handlers
+        # Si step es 'geo' o 'elegir_ubi' → esperando ubicación/botón, no texto libre
+    
+    from telegram.ext import ApplicationHandlerStop
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, _emer_texto_any), group=-1)
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
