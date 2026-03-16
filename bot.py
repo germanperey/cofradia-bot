@@ -16904,13 +16904,22 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
         f"\n{'━' * 30}\n⚓ Cofradía de Networking — Red de Apoyo"
     )
 
+    # Botones de llamada de emergencia (para grupo Y usuario)
+    tel_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
+         InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")],
+        [InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
+         InlineKeyboardButton("🔍 134 PDI", url="tel:134")],
+    ])
+
     enviados = 0
     if COFRADIA_GROUP_ID:
         try:
-            await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=alerta)
+            await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
             enviados += 1
-        except Exception:
-            pass
+        except Exception as _eg:
+            logger.debug(f"Emergencia grupo: {_eg}")
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -16924,7 +16933,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                         try:
                             await context.bot.send_message(
                                 chat_id=COFRADIA_GROUP_ID, text=alerta,
-                                message_thread_id=tid)
+                                message_thread_id=tid, reply_markup=tel_kb)
                             enviados += 1
                         except Exception:
                             pass
@@ -16934,23 +16943,31 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     if OWNER_ID:
         try:
             await context.bot.send_message(
-                chat_id=OWNER_ID, text=f"🚨 EMERGENCIA\n\n{alerta}")
+                chat_id=OWNER_ID, text=f"🚨 EMERGENCIA\n\n{alerta}",
+                reply_markup=tel_kb)
         except Exception:
             pass
 
-    # Botones de llamada de emergencia
-    tel_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
-         InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")],
-        [InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
-         InlineKeyboardButton("🔍 134 PDI", url="tel:134")],
-    ])
-
-    await update.message.reply_text(
+    # Confirmación al usuario (protección si update.message es None)
+    confirm_text = (
         f"✅ ALERTA ENVIADA ({enviados} canales)\n\n"
-        f"⚠️ {tipo}\n🕐 {hora}\n\n🆘 Números de emergencia:",
-        reply_markup=tel_kb
+        f"⚠️ {tipo}\n🕐 {hora}\n\n🆘 Números de emergencia:"
     )
+    try:
+        if update.message:
+            await update.message.reply_text(confirm_text, reply_markup=tel_kb)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(confirm_text, reply_markup=tel_kb)
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=confirm_text, reply_markup=tel_kb)
+    except Exception as _ce:
+        logger.debug(f"Confirmación emergencia: {_ce}")
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id, text=confirm_text, reply_markup=tel_kb)
+        except Exception:
+            pass
 
     for key in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc','emer_step']:
         context.user_data.pop(key, None)
@@ -17209,22 +17226,19 @@ def main():
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
+    # GPS sin filtro PRIVATE → funciona en grupo Y privado
     application.add_handler(MessageHandler(filters.LOCATION, emergencia_recibir_ubicacion))
     
-    # Handler para texto de emergencia en CUALQUIER chat (grupo o privado)
-    async def _emer_texto_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Intercepta texto cuando hay emergencia activa (grupo o privado)"""
+    # Handler PRIORITARIO para texto de emergencia (grupo + privado)
+    # group=-1 → se ejecuta ANTES que responder_mencion y responder_chat_privado
+    from telegram.ext import ApplicationHandlerStop
+    async def _emer_texto_prioritario(update: Update, context: ContextTypes.DEFAULT_TYPE):
         step = context.user_data.get('emer_step')
-        if not step:
-            return  # No hay emergencia activa → no interceptar
         if step in ('descripcion', 'direccion'):
             await emergencia_recibir_texto(update, context)
-            raise ApplicationHandlerStop()  # Procesado → no pasar a otros handlers
-        # Si step es 'geo' o 'elegir_ubi' → esperando ubicación/botón, no texto libre
-    
-    from telegram.ext import ApplicationHandlerStop
+            raise ApplicationHandlerStop()
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, _emer_texto_any), group=-1)
+        filters.TEXT & ~filters.COMMAND, _emer_texto_prioritario), group=-1)
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
