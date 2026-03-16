@@ -109,20 +109,29 @@ db_disponible = False
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
 _indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
-# Cache diario de comandos — se limpia automáticamente al cambiar de día
+def _ahora_chile():
+    """Retorna datetime.now() en hora Chile (America/Santiago) — SIEMPRE"""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/Santiago')).replace(tzinfo=None)
+    except Exception:
+        return datetime.utcnow() - timedelta(hours=3)
+
+# Cache diario de comandos — se limpia automáticamente al cambiar de día (hora Chile)
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
 def _cache_get(clave):
-    """Obtiene valor del cache si es del mismo día"""
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    """Obtiene valor del cache si es del mismo día (hora Chile)"""
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
+        logger.info("🗑️ Cache diario limpiado (nuevo día Chile)")
         return None
     return _cmd_cache_dia['datos'].get(clave)
 
 def _cache_set(clave, valor):
-    """Guarda valor en cache del día (se elimina al cambiar de día)"""
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    """Guarda valor en cache del día (hora Chile)"""
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
@@ -1722,7 +1731,7 @@ def verificar_suscripcion_activa(user_id):
         if isinstance(fecha_exp, str):
             fecha_exp = datetime.strptime(fecha_exp, "%Y-%m-%d %H:%M:%S")
         
-        return fecha_exp > datetime.now()
+        return fecha_exp > _ahora_chile()
         
     except Exception as e:
         logger.error(f"Error verificando suscripción: {e}")
@@ -1759,7 +1768,7 @@ def obtener_dias_restantes(user_id):
         if isinstance(fecha_exp, str):
             fecha_exp = datetime.strptime(fecha_exp, "%Y-%m-%d %H:%M:%S")
         
-        dias = (fecha_exp - datetime.now()).days
+        dias = (fecha_exp - _ahora_chile()).days
         return max(0, dias)
         
     except Exception as e:
@@ -1785,7 +1794,7 @@ def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False,
             c.execute("SELECT user_id FROM suscripciones WHERE user_id = ?", (user_id,))
         
         existente = c.fetchone()
-        fecha_registro = datetime.now()
+        fecha_registro = _ahora_chile()
         
         if existente:
             # Usuario ya existe - solo actualizar nombre/username
@@ -1864,8 +1873,8 @@ def extender_suscripcion(user_id, dias):
             if isinstance(fecha_actual, str):
                 fecha_actual = datetime.strptime(fecha_actual, "%Y-%m-%d %H:%M:%S")
             
-            if fecha_actual < datetime.now():
-                fecha_actual = datetime.now()
+            if fecha_actual < _ahora_chile():
+                fecha_actual = _ahora_chile()
             
             nueva_fecha = fecha_actual + timedelta(days=dias)
             
@@ -1980,7 +1989,7 @@ def generar_insights_temas(dias=7):
                         ORDER BY fecha DESC LIMIT 50""" % int(dias))
             mensajes = [r['message'] for r in c.fetchall()]
         else:
-            fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+            fecha_inicio = (_ahora_chile() - timedelta(days=dias)).strftime("%Y-%m-%d")
             c.execute("""SELECT message FROM mensajes 
                         WHERE fecha >= ? AND message IS NOT NULL AND LENGTH(message) > 10
                         ORDER BY fecha DESC LIMIT 50""", (fecha_inicio,))
@@ -2127,12 +2136,12 @@ def usar_codigo_activacion(codigo, user_id):
             c.execute("""UPDATE codigos_activacion 
                          SET usado = 1, user_id_usado = %s, fecha_uso = %s 
                          WHERE codigo = %s""",
-                      (user_id, datetime.now(), codigo))
+                      (user_id, _ahora_chile(), codigo))
         else:
             c.execute("""UPDATE codigos_activacion 
                          SET usado = 1, user_id_usado = ?, fecha_uso = ? 
                          WHERE codigo = ?""",
-                      (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), codigo))
+                      (user_id, _ahora_chile().strftime("%Y-%m-%d %H:%M:%S"), codigo))
         
         conn.commit()
         conn.close()
@@ -2258,7 +2267,7 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
         
         if empleos and len(empleos) > 0:
             # Formatear empleos reales
-            fecha_actual = datetime.now().strftime("%d/%m/%Y")
+            fecha_actual = _ahora_chile().strftime("%d/%m/%Y")
             resultado = f"🔎 **EMPLEOS REALES ENCONTRADOS**\n"
             resultado += f"📋 Búsqueda: _{busqueda_texto}_\n"
             resultado += f"📍 Ubicación: _{ubicacion_busqueda}_\n"
@@ -2649,7 +2658,7 @@ def registrar_servicio_usado(user_id, servicio):
             except:
                 servicios = []
             
-            servicios.append({"servicio": servicio, "fecha": datetime.now().isoformat()})
+            servicios.append({"servicio": servicio, "fecha": _ahora_chile().isoformat()})
             servicios = servicios[-100:]  # Mantener últimos 100
             
             if DATABASE_URL:
@@ -3280,7 +3289,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # ===== RECOLECTAR TODOS LOS DATOS =====
-        fecha_inicio = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+        fecha_inicio = (_ahora_chile() - timedelta(days=dias)).strftime("%Y-%m-%d")
         
         # 1. Mensajes por día
         if DATABASE_URL:
@@ -3542,7 +3551,7 @@ body {{
 </div>
 
 <div class="footer">
-    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Bot Premium v4.3 ECharts
+    Generado el {_ahora_chile().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Bot Premium v4.3 ECharts
 </div>
 
 <script>
@@ -3778,7 +3787,7 @@ window.addEventListener('resize', function() {{
         with open(html_path, 'rb') as f:
             await update.message.reply_document(
                 document=f,
-                filename=f"cofradia_dashboard_{datetime.now().strftime('%Y%m%d')}.html",
+                filename=f"cofradia_dashboard_{_ahora_chile().strftime('%Y%m%d')}.html",
                 caption="📊 Dashboard Interactivo ECharts\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
             )
         
@@ -4815,7 +4824,7 @@ async def vencimientos_mes_comando(update: Update, context: ContextTypes.DEFAULT
     if update.effective_user.id != OWNER_ID:
         return
     
-    mes = datetime.now().month
+    mes = _ahora_chile().month
     if context.args:
         try:
             mes = int(context.args[0])
@@ -4835,7 +4844,7 @@ async def vencimientos_mes_comando(update: Update, context: ContextTypes.DEFAULT
             return
         
         c = conn.cursor()
-        anio = datetime.now().year
+        anio = _ahora_chile().year
         
         if DATABASE_URL:
             c.execute("""SELECT user_id, first_name, last_name, fecha_expiracion
@@ -4908,7 +4917,7 @@ async def ingresos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = c.fetchone()[0]
             c.execute("SELECT COALESCE(SUM(precio), 0) FROM pagos_pendientes WHERE estado = 'aprobado'")
             total_ingresos = c.fetchone()[0] or 0
-            primer_dia = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            primer_dia = _ahora_chile().replace(day=1).strftime("%Y-%m-%d")
             c.execute("SELECT COALESCE(SUM(precio), 0) FROM pagos_pendientes WHERE estado = 'aprobado' AND fecha_envio >= ?", (primer_dia,))
             ingresos_mes = c.fetchone()[0] or 0
         
@@ -4930,7 +4939,7 @@ async def crecimiento_mes_comando(update: Update, context: ContextTypes.DEFAULT_
     if update.effective_user.id != OWNER_ID:
         return
     
-    mes = datetime.now().month
+    mes = _ahora_chile().month
     if context.args:
         try:
             mes = int(context.args[0])
@@ -4950,7 +4959,7 @@ async def crecimiento_mes_comando(update: Update, context: ContextTypes.DEFAULT_
             return
         
         c = conn.cursor()
-        anio = datetime.now().year
+        anio = _ahora_chile().year
         
         if DATABASE_URL:
             c.execute("""SELECT COUNT(*) as nuevos FROM suscripciones 
@@ -4991,7 +5000,7 @@ async def crecimiento_anual_comando(update: Update, context: ContextTypes.DEFAUL
             return
         
         c = conn.cursor()
-        anio = datetime.now().year
+        anio = _ahora_chile().year
         meses_nombre = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
         
         mensaje = f"📊 CRECIMIENTO ANUAL {anio}\n\n"
@@ -5009,7 +5018,7 @@ async def crecimiento_anual_comando(update: Update, context: ContextTypes.DEFAUL
                 count = c.fetchone()[0]
             
             barra = "█" * count if count > 0 else ""
-            if mes <= datetime.now().month:
+            if mes <= _ahora_chile().month:
                 mensaje += f"  {meses_nombre[mes-1]}: {barra} {count}\n"
         
         if DATABASE_URL:
@@ -5271,7 +5280,7 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         msgs_hoy = _q("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE", "SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now')")
         total_recs = _q("SELECT COUNT(*) as total FROM recomendaciones", "SELECT COUNT(*) FROM recomendaciones")
         total_tarjetas = _q("SELECT COUNT(*) as total FROM tarjetas_profesional", "SELECT COUNT(*) FROM tarjetas_profesional")
-        fecha_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        fecha_7d = (_ahora_chile() - timedelta(days=7)).strftime("%Y-%m-%d")
         msgs_7d = _q("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'", f"SELECT COUNT(*) FROM mensajes WHERE fecha >= '{fecha_7d}'")
         total_eventos = _q("SELECT COUNT(*) as total FROM eventos WHERE activo = TRUE", "SELECT COUNT(*) FROM eventos WHERE activo = 1")
         nuevos_7d = _q("SELECT COUNT(*) as total FROM suscripciones WHERE fecha_registro >= CURRENT_DATE - INTERVAL '7 days'", f"SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= '{fecha_7d}'")
@@ -5303,7 +5312,7 @@ h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spa
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
-<div class="sub">Resumen General — {datetime.now().strftime('%d/%m/%Y')}</div>
+<div class="sub">Resumen General — {_ahora_chile().strftime('%d/%m/%Y')}</div>
 
 <div class="gauges">
 <div class="gauge-box"><div id="g1" class="gauge"></div></div>
@@ -5374,7 +5383,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,30)},'Nuevos 7d',green);
         with open(html_path, 'rb') as f:
             await update.message.reply_document(
                 document=f,
-                filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
+                filename=f"cofradia_estadisticas_{_ahora_chile().strftime('%Y%m%d')}.html",
                 caption="📊 Dashboard — 4 gauges + 10 indicadores"
             )
         try: os.remove(html_path)
@@ -5604,8 +5613,8 @@ async def resumen_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         c = conn.cursor()
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-        hora_actual = datetime.now().strftime("%H:%M")
+        fecha_hoy = _ahora_chile().strftime("%d/%m/%Y")
+        hora_actual = _ahora_chile().strftime("%H:%M")
         
         if DATABASE_URL:
             c.execute("""SELECT first_name, message, topic_id, categoria FROM mensajes 
@@ -5722,8 +5731,8 @@ async def resumen_semanal_comando(update: Update, context: ContextTypes.DEFAULT_
             return
         
         c = conn.cursor()
-        fecha_inicio = datetime.now() - timedelta(days=7)
-        fecha_fin = datetime.now()
+        fecha_inicio = _ahora_chile() - timedelta(days=7)
+        fecha_fin = _ahora_chile()
         
         if DATABASE_URL:
             c.execute("""SELECT COUNT(*) as total FROM mensajes 
@@ -5903,7 +5912,7 @@ async def resumen_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                         GROUP BY categoria ORDER BY total DESC LIMIT 5""")
             cats = [(r['categoria'], r['total']) for r in c.fetchall()]
         else:
-            fecha_inicio = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            fecha_inicio = (_ahora_chile() - timedelta(days=30)).strftime("%Y-%m-%d")
             
             c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fecha_inicio,))
             total = c.fetchone()[0]
@@ -7069,7 +7078,7 @@ async def recibir_documento_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
     
-    filename = document.file_name or f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    filename = document.file_name or f"documento_{_ahora_chile().strftime('%Y%m%d_%H%M%S')}.pdf"
     file_size_mb = document.file_size / (1024 * 1024) if document.file_size else 0
     
     # Límite de tamaño por archivo (20 MB para Telegram API)
@@ -9073,7 +9082,7 @@ def obtener_cumpleanos_hoy():
         df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
         
         # Fecha de hoy
-        hoy = datetime.now()
+        hoy = _ahora_chile()
         dia_hoy = hoy.day
         mes_hoy = hoy.month
         
@@ -9151,7 +9160,7 @@ async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Crear mensaje de cumpleaños
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        fecha_hoy = _ahora_chile().strftime("%d/%m/%Y")
         
         mensaje = "🎂🎉 CUMPLEANOS DEL DIA! 🎉🎂\n"
         mensaje += "━" * 30 + "\n"
@@ -9187,7 +9196,7 @@ async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
             return
         
         c = conn.cursor()
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        fecha_hoy = _ahora_chile().strftime("%d/%m/%Y")
         
         if DATABASE_URL:
             # Estadísticas del día
@@ -9454,7 +9463,7 @@ def obtener_stats_tarjeta(user_id_param: int) -> dict:
                             except:
                                 continue
                     if fecha_dt:
-                        delta = datetime.now() - fecha_dt
+                        delta = _ahora_chile() - fecha_dt
                         total_meses = delta.days // 30
                         anios = total_meses // 12
                         meses = total_meses % 12
@@ -10344,7 +10353,7 @@ async def publicar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             c = conn.cursor()
             nombre = f"{user.first_name or ''} {user.last_name or ''}".strip()
-            fecha_exp = datetime.now() + timedelta(days=30)
+            fecha_exp = _ahora_chile() + timedelta(days=30)
             
             if DATABASE_URL:
                 c.execute("""INSERT INTO anuncios (user_id, nombre_autor, categoria, titulo, descripcion, contacto, fecha_expiracion)
@@ -10509,7 +10518,7 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
     """Comando /cumpleanos_mes [1-12] - Cumpleaños de un mes desde Google Drive (columna X: DD-MMM)"""
     
     # Parsear mes: si viene argumento usar ese, si no, mes actual
-    mes_consulta = datetime.now().month
+    mes_consulta = _ahora_chile().month
     if context.args:
         try:
             mes_input = int(context.args[0])
@@ -10687,7 +10696,7 @@ async def cumpleanos_mes_comando(update: Update, context: ContextTypes.DEFAULT_T
         
         texto = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_consulta].upper()}\n{'━' * 28}\n\n"
         for c in cumples:
-            hoy = datetime.now()
+            hoy = _ahora_chile()
             es_hoy = (c['dia'] == hoy.day and mes_consulta == hoy.month)
             marca = " 🎉 ¡HOY!" if es_hoy else ""
             texto += f"🎂 {c['dia']:02d}/{mes_consulta:02d} — {c['nombre']}{marca}\n"
@@ -11523,7 +11532,7 @@ def calcular_trust_score(user_id: int) -> dict:
             fecha = row['fecha_registro'] if DATABASE_URL else row[0]
             if fecha:
                 try:
-                    dias = (datetime.now() - datetime.fromisoformat(str(fecha)[:19])).days
+                    dias = (_ahora_chile() - datetime.fromisoformat(str(fecha)[:19])).days
                     pts = min(20, dias // 15)
                     score += pts
                     detalles['Antigüedad'] = pts
@@ -12064,7 +12073,7 @@ async def generar_reporte_laboral(context):
             c.execute("SELECT COUNT(*) as t FROM tarjetas_profesional")
             total_tarjetas = c.fetchone()['t']
         conn.close()
-        rpt = f"📈 REPORTE LABORAL SEMANAL\n{'━' * 30}\n📅 {datetime.now().strftime('%d/%m/%Y')}\n\n"
+        rpt = f"📈 REPORTE LABORAL SEMANAL\n{'━' * 30}\n📅 {_ahora_chile().strftime('%d/%m/%Y')}\n\n"
         if profesiones:
             rpt += "🏢 PROFESIONES MÁS REPRESENTADAS\n"
             for p, t in profesiones:
@@ -13747,7 +13756,7 @@ async def agendar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        if fecha_evento < datetime.now():
+        if fecha_evento < _ahora_chile():
             await update.message.reply_text("⚠️ La fecha ya pasó. Ingresa una fecha futura.")
             return
         
@@ -13849,7 +13858,7 @@ async def mi_agenda_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        ahora = datetime.now()
+        ahora = _ahora_chile()
         proximas = []
         pasadas = []
         completadas = []
@@ -14198,7 +14207,7 @@ async def briefing_diario_comando(update: Update, context: ContextTypes.DEFAULT_
     msg = await update.message.reply_text("☀️ Preparando tu briefing diario de networking...")
     
     try:
-        ahora = datetime.now()
+        ahora = _ahora_chile()
         hoy_str = ahora.strftime("%A %d/%m/%Y")
         
         conn = get_db_connection()
@@ -14469,7 +14478,7 @@ def obtener_indicadores_chile():
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     BASE   = 'https://mindicador.cl/api'
-    AHORA  = datetime.now()
+    AHORA  = _ahora_chile()
     ANIO_A = AHORA.year
 
     # ── Indicadores para cards actuales (12) ──────────────────────────────
@@ -14722,52 +14731,6 @@ def obtener_indicadores_chile():
         except Exception as _cge:
             logger.debug('CoinGecko fallback: ' + str(_cge))
 
-    # Fallback Euro: si mindicador.cl no lo entregó, usar tipo de cambio cruzado
-    if 'euro' not in datos_actuales:
-        logger.warning("⚠️ Euro no obtenido de mindicador.cl — intentando fallback")
-        try:
-            # Intento 1: re-fetch directo de mindicador.cl/api/euro
-            r_euro = requests.get(BASE + '/euro', timeout=12,
-                                  headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'})
-            if r_euro.status_code == 200:
-                j_euro = r_euro.json()
-                s_euro = j_euro.get('serie', [])
-                if s_euro:
-                    datos_actuales['euro'] = {
-                        'nombre': 'Euro EUR', 'descripcion': 'Tipo de cambio EUR/CLP',
-                        'color': '#2980b9', 'valor': s_euro[0].get('valor', 0),
-                        'fecha': str(s_euro[0].get('fecha', ''))[:10],
-                        'unidad': j_euro.get('unidad_medida', 'Pesos'),
-                        'serie30': s_euro[:30],
-                    }
-                    logger.info("✅ Euro obtenido en re-fetch directo")
-        except Exception as _ee1:
-            logger.debug(f"Euro re-fetch: {_ee1}")
-
-    # Intento 2: calcular Euro desde Dólar * tasa EUR/USD (exchangerate-api)
-    if 'euro' not in datos_actuales and 'dolar' in datos_actuales:
-        try:
-            r_rate = requests.get('https://open.er-api.com/v6/latest/EUR',
-                                  timeout=10, headers={'User-Agent': 'CofrBot/6.0'})
-            if r_rate.status_code == 200:
-                rates = r_rate.json().get('rates', {})
-                clp_rate = rates.get('CLP')
-                if clp_rate:
-                    datos_actuales['euro'] = {
-                        'nombre': 'Euro EUR', 'descripcion': 'Tipo de cambio EUR/CLP',
-                        'color': '#2980b9', 'valor': round(clp_rate, 2),
-                        'fecha': AHORA.strftime('%Y-%m-%d'),
-                        'unidad': 'Pesos',
-                        'serie30': [{'valor': round(clp_rate, 2),
-                                     'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                    }
-                    logger.info(f"✅ Euro calculado desde exchangerate-api: {clp_rate}")
-        except Exception as _ee2:
-            logger.debug(f"Euro exchangerate fallback: {_ee2}")
-
-    # Log final de indicadores obtenidos
-    logger.info(f"📈 Indicadores obtenidos: {sorted(datos_actuales.keys())} ({len(datos_actuales)} total)")
-
     return {
         'datos_actuales': datos_actuales,
         'hist_12m':       hist_12m,
@@ -14784,7 +14747,7 @@ def obtener_indicadores_cmf():
     Campos reales del JSON CMF:
       TMC: TMCs[{Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo}]
     """
-    AHORA = datetime.now()
+    AHORA = _ahora_chile()
     HDR   = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
 
     # Labels unicos por Tipo (codigo numerico garantizado por CMF, nunca cambia)
@@ -14903,7 +14866,7 @@ def obtener_rentabilidad_afp():
     from datetime import timedelta
     from collections import defaultdict
 
-    AHORA   = datetime.now()
+    AHORA   = _ahora_chile()
     INICIO  = AHORA - timedelta(days=183)
     FI_STR  = INICIO.strftime("%d/%m/%Y")
     FF_STR  = AHORA.strftime("%d/%m/%Y")
@@ -15832,7 +15795,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     /indicadores — Dashboard económico con cache diario.
     Primera consulta del día: APIs + IA (~20s). Siguientes: cache (~2s).
     """
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     datos_cmf = {}
     datos_afp = {}
 
@@ -15964,32 +15927,23 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             _indicadores_cache['html_content'] = html_content
             logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
 
-        # 6. Mensaje de texto resumido MEJORADO
+        # 6. Mensaje de texto resumido
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
-        ICONOS = {
-            'uf': '🟡', 'dolar': '💵', 'euro': '💶', 'utm': '🟠',
-            'ipc': '📊', 'tpm': '🏦', 'bitcoin': '₿', 'tasa_desempleo': '👷',
-            'imacec': '📈', 'libra_cobre': '🔶', 'ivp': '🔷', 'ipsa': '📉',
-            'solana': '🟣', 'ethereum': '🔵'
-        }
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
                      'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp',
                      'ipsa', 'solana', 'ethereum']
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
-            f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-            "Fuente: Banco Central · CMF · CoinGecko",
-            f"📊 {len([c for c in ORDER_MSG if datos.get(c)])} indicadores activos",
+            "Fuente: Banco Central de Chile · CMF",
             "",
         ]
-        alzas = 0; bajas = 0
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
             v = d.get('valor')
-            ic = ICONOS.get(cod, '•')
+            # Guard None valor antes de formatear
             if v is None:
                 vf = "N/D"
             elif cod in PORCENTAJES:
@@ -16003,7 +15957,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             elif cod in ('solana', 'ethereum'):
                 vf = "${:,.0f} USD".format(v).replace(',', '.')
             else:
-                vf = "${:,.2f}".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
+                vf = "${:,.2f} CLP".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
             serie = d.get('serie30', [])
             tend  = ''
             if len(serie) >= 2:
@@ -16011,22 +15965,11 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 v1 = serie[1].get('valor') or 1
                 if v1:
                     pct  = ((v0 - v1) / v1) * 100
-                    if pct >= 0:
-                        tend = ' ▲ {:.2f}%'.format(abs(pct))
-                        alzas += 1
-                    else:
-                        tend = ' ▼ {:.2f}%'.format(abs(pct))
-                        bajas += 1
+                    tend = '  ' + ('▲' if pct >= 0 else '▼') + ' {:.3f}%'.format(abs(pct))
             nombre = d.get('nombre') or cod
-            lineas.append(f"{ic} {nombre}: {vf}{tend}")
-
-        # Resumen ejecutivo
-        lineas += [
-            "", sep,
-            "📋 RESUMEN DEL DÍA:",
-            f"  ▲ {alzas} indicadores al alza",
-            f"  ▼ {bajas} indicadores a la baja",
-        ]
+            fecha  = d.get('fecha') or ''
+            sufijo = '  (' + fecha + ')' if fecha else ''
+            lineas.append(nombre + ": " + vf + tend + sufijo)
 
         # Tasas CMF en mensaje
         tmc_items = (datos_cmf or {}).get('tmc', [])
@@ -16069,7 +16012,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         with open(html_path, 'rb') as fh:
             await update.message.reply_document(
                 document=fh,
-                filename="indicadores_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
+                filename="indicadores_chile_" + _ahora_chile().strftime('%Y%m%d') + ".html",
                 caption=(
                     "📊 Dashboard Indicadores Económicos Chile\n\n"
                     "• 14 indicadores del día con sparklines 30 días\n"
@@ -16117,7 +16060,7 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       1. API oficial Gobierno de Chile: apis.digital.gob.cl/fl/feriados/{año}
       2. Backup boostr.cl: api.boostr.cl/holidays.json  (filtra por año)
     """
-    AHORA     = datetime.now()
+    AHORA     = _ahora_chile()
     anio_arg  = None
     if context.args:
         try:
@@ -16812,7 +16755,7 @@ async def emergencia_tipo_callback(update: Update, context: ContextTypes.DEFAULT
              'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'}
     tipo = tipos.get(query.data, 'EMERGENCIA')
     context.user_data['emer_tipo'] = tipo
-    context.user_data['emer_hora'] = datetime.now().strftime('%H:%M:%S')
+    context.user_data['emer_hora'] = _ahora_chile().strftime('%H:%M:%S')
     context.user_data['emer_step'] = 'descripcion'
     await query.edit_message_text(
         f"🚨 {tipo}\n\n"
@@ -16899,7 +16842,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     """Envía alerta de emergencia a todos los topics del grupo + Google Maps"""
     user = update.effective_user
     tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
-    hora = context.user_data.get('emer_hora', datetime.now().strftime('%H:%M:%S'))
+    hora = context.user_data.get('emer_hora', _ahora_chile().strftime('%H:%M:%S'))
     direccion = context.user_data.get('emer_direccion', 'No especificada')
     maps_url = context.user_data.get('emer_maps', '')
     descripcion = context.user_data.get('emer_desc', '')
@@ -16939,7 +16882,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.debug(f"Error teléfono emergencia: {e}")
 
-    ahora = datetime.now()
+    ahora = _ahora_chile()
     try:
         hora_dt = datetime.strptime(hora, '%H:%M:%S').replace(
             year=ahora.year, month=ahora.month, day=ahora.day)
