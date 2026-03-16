@@ -16692,9 +16692,7 @@ async def match_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SISTEMA DE EMERGENCIA — /emergencia
-# 4 botones: Choque vehicular, Asalto, Incendio, Accidente
-# Flujo: Tipo → Descripción (opcional) → Geo o Dirección → Broadcast al grupo
+# CALCULADORA — /calculadora
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @requiere_suscripcion
@@ -16722,8 +16720,16 @@ async def calculadora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     registrar_servicio_usado(update.effective_user.id, 'calculadora')
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE EMERGENCIA — /emergencia (ConversationHandler)
+# Flujo: /emergencia → Tipo → [Descripción opcional] → Geo/Dirección → Alerta
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Estados del ConversationHandler de emergencia
+EMER_TIPO, EMER_DESC, EMER_UBI_CHOICE, EMER_GEO, EMER_DIR = range(5)
+
 async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /emergencia — 4 botones de emergencia"""
+    """Comando /emergencia — Paso 1: elegir tipo"""
     keyboard = [
         [InlineKeyboardButton("🚗 Choque vehicular", callback_data="emer_choque"),
          InlineKeyboardButton("🔫 Asalto", callback_data="emer_asalto")],
@@ -16737,100 +16743,113 @@ async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "⚠️ Se notificará a TODOS los miembros del grupo.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    return EMER_TIPO
 
-async def emergencia_tipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback: selección tipo de emergencia → pedir descripción + ubicación"""
+async def emergencia_tipo_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 2: tipo seleccionado → pedir descripción o ir a ubicación"""
     query = update.callback_query
     await query.answer()
-    tipos = {'emer_choque': '🚗 CHOQUE VEHICULAR', 'emer_asalto': '🔫 ASALTO',
-             'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'}
+    tipos = {
+        'emer_choque': '🚗 CHOQUE VEHICULAR', 'emer_asalto': '🔫 ASALTO',
+        'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'
+    }
     tipo = tipos.get(query.data, 'EMERGENCIA')
     context.user_data['emer_tipo'] = tipo
     context.user_data['emer_hora'] = datetime.now().strftime('%H:%M:%S')
-    context.user_data['emer_step'] = 'descripcion'
+    context.user_data['emer_desc'] = ''
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
+         InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
+    ])
     await query.edit_message_text(
         f"🚨 {tipo}\n\n"
         "📝 Escribe una breve descripción (opcional).\n"
         "O selecciona directamente cómo indicar la ubicación:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
-             InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
-        ])
+        reply_markup=keyboard
     )
+    return EMER_DESC
 
-async def emergencia_geo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback: solicitar geolocalización GPS"""
+async def emergencia_desc_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 2b: recibir descripción de texto → mostrar botones de ubicación"""
+    context.user_data['emer_desc'] = update.message.text.strip()
+    tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
+         InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
+    ])
+    await update.message.reply_text(
+        f"✅ Descripción registrada.\n\n"
+        f"🚨 {tipo}\nAhora indica la ubicación del siniestro:",
+        reply_markup=keyboard
+    )
+    return EMER_UBI_CHOICE
+
+async def emergencia_geo_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 3a: usuario eligió Geolocalización → pedir GPS"""
     query = update.callback_query
     await query.answer()
-    context.user_data['emer_step'] = 'geo'
+    tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
     await query.edit_message_text(
-        f"🚨 {context.user_data.get('emer_tipo', 'EMERGENCIA')}\n\n"
+        f"🚨 {tipo}\n\n"
         "📍 GEOLOCALIZACIÓN\n\n"
-        "Envía tu ubicación usando: 📎 → Ubicación\n\n"
-        "Tu posición se mostrará en Google Maps automáticamente."
+        "Envía tu ubicación usando:\n"
+        "📎 (clip) → Ubicación → Enviar ubicación actual\n\n"
+        "⏳ Esperando tu ubicación GPS..."
     )
+    return EMER_GEO
 
-async def emergencia_dir_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback: pedir dirección manual"""
+async def emergencia_dir_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 3b: usuario eligió Mi Dirección → pedir datos"""
     query = update.callback_query
     await query.answer()
-    context.user_data['emer_step'] = 'direccion'
+    tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
     await query.edit_message_text(
-        f"🚨 {context.user_data.get('emer_tipo', 'EMERGENCIA')}\n\n"
+        f"🚨 {tipo}\n\n"
         "🏠 MI DIRECCIÓN\n\n"
-        "Escribe la dirección con este formato:\n"
-        "Calle, Número, Depto/Local (opcional), Comuna\n\n"
-        "Ejemplo: Av. Providencia 1234, Of. 501, Providencia"
+        "Escribe la dirección completa:\n"
+        "Calle, Número, Depto/Oficina (opcional), Comuna, País\n\n"
+        "Ejemplo:\n"
+        "Av. Providencia 1234, Of. 501, Providencia, Chile"
     )
+    return EMER_DIR
 
-async def emergencia_recibir_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe ubicación GPS del usuario"""
-    if context.user_data.get('emer_step') != 'geo':
-        return
-    if update.message and update.message.location:
-        lat = update.message.location.latitude
-        lon = update.message.location.longitude
-        maps_url = f"https://maps.google.com/?q={lat},{lon}"
-        context.user_data['emer_direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f}"
-        context.user_data['emer_maps'] = maps_url
-        context.user_data['emer_step'] = None
-        await _enviar_alerta_emergencia(update, context)
+async def emergencia_recibir_gps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 4a: recibir ubicación GPS → enviar alerta"""
+    if not update.message or not update.message.location:
+        await update.message.reply_text("⚠️ No recibí una ubicación válida. Usa 📎 → Ubicación.")
+        return EMER_GEO
+    lat = update.message.location.latitude
+    lon = update.message.location.longitude
+    maps_url = f"https://www.google.com/maps?q={lat},{lon}"
+    context.user_data['emer_direccion'] = f"📍 GPS: {lat:.6f}, {lon:.6f}"
+    context.user_data['emer_maps'] = maps_url
+    await _enviar_alerta_emer(update, context)
+    return ConversationHandler.END
 
-async def emergencia_recibir_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe descripción o dirección de emergencia por texto"""
-    step = context.user_data.get('emer_step')
-    if not step:
-        return
+async def emergencia_recibir_dir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paso 4b: recibir dirección de texto → enviar alerta"""
     texto = update.message.text.strip()
+    if len(texto) < 5:
+        await update.message.reply_text("⚠️ Dirección muy corta. Escribe: Calle, Número, Comuna, País")
+        return EMER_DIR
+    import urllib.parse as _up_em
+    dir_query = texto if 'chile' in texto.lower() else texto + ', Chile'
+    maps_url = f"https://www.google.com/maps/search/{_up_em.quote(dir_query)}"
+    context.user_data['emer_direccion'] = f"📍 {texto}"
+    context.user_data['emer_maps'] = maps_url
+    await _enviar_alerta_emer(update, context)
+    return ConversationHandler.END
 
-    if step == 'descripcion':
-        context.user_data['emer_desc'] = texto
-        context.user_data['emer_step'] = 'elegir_ubi'
-        await update.message.reply_text(
-            "✅ Descripción registrada.\n\nAhora indica la ubicación:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📍 Geolocalización", callback_data="emer_geo"),
-                 InlineKeyboardButton("🏠 Mi Dirección", callback_data="emer_dir")],
-            ])
-        )
-    elif step == 'direccion':
-        import urllib.parse as _up_e
-        maps_url = f"https://maps.google.com/maps?q={_up_e.quote(texto + ', Chile')}"
-        context.user_data['emer_direccion'] = f"📍 {texto}"
-        context.user_data['emer_maps'] = maps_url
-        context.user_data['emer_step'] = None
-        await _enviar_alerta_emergencia(update, context)
+async def emergencia_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancelar emergencia"""
+    for k in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc']:
+        context.user_data.pop(k, None)
+    if update.message:
+        await update.message.reply_text("❌ Emergencia cancelada.")
+    return ConversationHandler.END
 
-async def enviar_emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /enviar_emergencia — Envía alerta sin datos adicionales"""
-    if not context.user_data.get('emer_tipo'):
-        await update.message.reply_text("❌ No hay emergencia en curso. Usa /emergencia")
-        return
-    context.user_data['emer_step'] = None
-    await _enviar_alerta_emergencia(update, context)
-
-async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía alerta de emergencia a todos los topics del grupo + Google Maps"""
+async def _enviar_alerta_emer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Construye y envía alerta de emergencia a grupo + topics + owner"""
     user = update.effective_user
     tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
     hora = context.user_data.get('emer_hora', datetime.now().strftime('%H:%M:%S'))
@@ -16881,6 +16900,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     except Exception:
         mins = 0
 
+    # Construir mensaje de alerta
     alerta = (
         f"🚨🚨🚨 ALERTA DE EMERGENCIA 🚨🚨🚨\n{'━' * 30}\n\n"
         f"⚠️ Tipo: {tipo}\n"
@@ -16890,7 +16910,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
         alerta += f"📱 Teléfono: {telefono_usuario}\n"
     alerta += f"🕐 Hora: {hora} (hace {mins} min)\n\n{direccion}\n"
     if maps_url:
-        alerta += f"🗺️ Ver en Google Maps: {maps_url}\n"
+        alerta += f"\n🗺️ VER MAPA: {maps_url}\n"
     if descripcion:
         alerta += f"\n📝 Descripción: {descripcion}\n"
     alerta += (
@@ -16904,14 +16924,21 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
         f"\n{'━' * 30}\n⚓ Cofradía de Networking — Red de Apoyo"
     )
 
-    # Botones de llamada de emergencia (para grupo Y usuario)
-    tel_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
-         InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")],
-        [InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
-         InlineKeyboardButton("🔍 134 PDI", url="tel:134")],
+    # Botones: mapa + teléfonos de emergencia
+    botones = []
+    if maps_url:
+        botones.append([InlineKeyboardButton("🗺️ VER MAPA EMERGENCIA", url=maps_url)])
+    botones.append([
+        InlineKeyboardButton("🚑 131 Ambulancia", url="tel:131"),
+        InlineKeyboardButton("🚒 132 Bomberos", url="tel:132")
     ])
+    botones.append([
+        InlineKeyboardButton("🚔 133 Carabineros", url="tel:133"),
+        InlineKeyboardButton("🔍 134 PDI", url="tel:134")
+    ])
+    tel_kb = InlineKeyboardMarkup(botones)
 
+    # Enviar a grupo principal + todos los topics + owner
     enviados = 0
     if COFRADIA_GROUP_ID:
         try:
@@ -16919,7 +16946,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                 chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
             enviados += 1
         except Exception as _eg:
-            logger.debug(f"Emergencia grupo: {_eg}")
+            logger.warning(f"Emergencia grupo principal: {_eg}")
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -16943,34 +16970,38 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     if OWNER_ID:
         try:
             await context.bot.send_message(
-                chat_id=OWNER_ID, text=f"🚨 EMERGENCIA\n\n{alerta}",
+                chat_id=OWNER_ID, text=f"🚨 EMERGENCIA REPORTADA\n\n{alerta}",
                 reply_markup=tel_kb)
         except Exception:
             pass
 
-    # Confirmación al usuario (protección si update.message es None)
-    confirm_text = (
+    # Confirmación al usuario que reportó
+    confirm = (
         f"✅ ALERTA ENVIADA ({enviados} canales)\n\n"
-        f"⚠️ {tipo}\n🕐 {hora}\n\n🆘 Números de emergencia:"
+        f"⚠️ {tipo}\n👤 {nombre}\n🕐 {hora}\n{direccion}\n"
     )
+    if maps_url:
+        confirm += f"\n🗺️ Mapa: {maps_url}\n"
+    confirm += "\n🆘 Números de emergencia:"
+
     try:
         if update.message:
-            await update.message.reply_text(confirm_text, reply_markup=tel_kb)
+            await update.message.reply_text(confirm, reply_markup=tel_kb)
         elif update.callback_query:
-            await update.callback_query.message.reply_text(confirm_text, reply_markup=tel_kb)
+            await update.callback_query.message.reply_text(confirm, reply_markup=tel_kb)
         else:
             await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=confirm_text, reply_markup=tel_kb)
-    except Exception as _ce:
-        logger.debug(f"Confirmación emergencia: {_ce}")
+                chat_id=update.effective_chat.id, text=confirm, reply_markup=tel_kb)
+    except Exception:
         try:
             await context.bot.send_message(
-                chat_id=update.effective_user.id, text=confirm_text, reply_markup=tel_kb)
+                chat_id=update.effective_user.id, text=confirm, reply_markup=tel_kb)
         except Exception:
             pass
 
-    for key in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc','emer_step']:
-        context.user_data.pop(key, None)
+    # Limpiar datos
+    for k in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc']:
+        context.user_data.pop(k, None)
 
 
 def main():
@@ -17219,26 +17250,41 @@ def main():
     application.add_handler(CommandHandler("perfiles_hh", perfiles_hh_comando))
     application.add_handler(CommandHandler("match_hh", match_hh_comando))
     
-    # EMERGENCIA handlers
-    application.add_handler(CommandHandler("emergencia", emergencia_comando))
+    # EMERGENCIA — ConversationHandler (maneja estado internamente)
+    from telegram.ext import ConversationHandler as _CH_emer
+    emer_conv = _CH_emer(
+        entry_points=[CommandHandler("emergencia", emergencia_comando)],
+        states={
+            EMER_TIPO: [
+                CallbackQueryHandler(emergencia_tipo_cb, pattern='^emer_(choque|asalto|incendio|accidente)$'),
+            ],
+            EMER_DESC: [
+                CallbackQueryHandler(emergencia_geo_cb, pattern='^emer_geo$'),
+                CallbackQueryHandler(emergencia_dir_cb, pattern='^emer_dir$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, emergencia_desc_texto),
+            ],
+            EMER_UBI_CHOICE: [
+                CallbackQueryHandler(emergencia_geo_cb, pattern='^emer_geo$'),
+                CallbackQueryHandler(emergencia_dir_cb, pattern='^emer_dir$'),
+            ],
+            EMER_GEO: [
+                MessageHandler(filters.LOCATION, emergencia_recibir_gps),
+            ],
+            EMER_DIR: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, emergencia_recibir_dir),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancelar", emergencia_cancelar),
+            CommandHandler("emergencia", emergencia_comando),
+        ],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+        allow_reentry=True,
+    )
+    application.add_handler(emer_conv)
     application.add_handler(CommandHandler("calculadora", calculadora_comando))
-    application.add_handler(CommandHandler("enviar_emergencia", enviar_emergencia_comando))
-    application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
-    application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
-    application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
-    # GPS sin filtro PRIVATE → funciona en grupo Y privado
-    application.add_handler(MessageHandler(filters.LOCATION, emergencia_recibir_ubicacion))
-    
-    # Handler PRIORITARIO para texto de emergencia (grupo + privado)
-    # group=-1 → se ejecuta ANTES que responder_mencion y responder_chat_privado
-    from telegram.ext import ApplicationHandlerStop
-    async def _emer_texto_prioritario(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        step = context.user_data.get('emer_step')
-        if step in ('descripcion', 'direccion'):
-            await emergencia_recibir_texto(update, context)
-            raise ApplicationHandlerStop()
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, _emer_texto_prioritario), group=-1)
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
@@ -17318,11 +17364,6 @@ def main():
         
         # No interferir con onboarding activo
         if context.user_data.get('onboard_activo'):
-            return
-        
-        # Interceptar texto de emergencia en curso
-        if context.user_data.get('emer_step'):
-            await emergencia_recibir_texto(update, context)
             return
         
         # Solo responder a owner y usuarios registrados
