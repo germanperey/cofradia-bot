@@ -14466,19 +14466,21 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 def obtener_indicadores_chile():
     """
-    Obtiene indicadores desde mindicador.cl (API REST gratuita del Banco Central).
-    Retorna dict con:
-      - datos_actuales: 12 cards con sparkline 30 dias + variacion (incluye IPSA)
-      - hist_12m: Dolar vs Euro ultimos 12 meses (valor inicio de cada mes)
-      - hist_10a: series anuales ultimos 10 anos por indicador
-    Usa ThreadPoolExecutor para paralelizar ~100 llamadas historicas.
+    ULTRA-FAST: Obtiene 14 indicadores con timeouts agresivos (5s) y SIN reintentos.
+    Paso A: 1 request a /api → 12 valores instantáneos (2s)
+    Paso B: Series 30d en paralelo 6 workers (10s max)
+    Paso C: Extras IPSA/SOL/ETH en paralelo (5s max)
+    Paso D: Histórico 12m (5s max)
+    Paso E: Histórico 5 años (15s max)
+    TOTAL MÁXIMO: ~35 segundos. Cache: ~2 segundos.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _t_ind
+    t0 = _t_ind.time()
     BASE   = 'https://mindicador.cl/api'
     AHORA  = _ahora_chile()
     ANIO_A = AHORA.year
 
-    # ── Indicadores para cards actuales (12) ──────────────────────────────
     CARDS_CFG = [
         ('uf',             'UF',              'Unidad de Fomento',                     '#c3a55a'),
         ('dolar',          'Dolar USD',       'Tipo de cambio USD/CLP',                '#3478c3'),
@@ -14491,12 +14493,10 @@ def obtener_indicadores_chile():
         ('imacec',         'IMACEC',          'Indicador Mensual Actividad Eco. (%)',  '#f39c12'),
         ('libra_cobre',    'Cobre (lb)',      'Precio Libra de Cobre USD',             '#cd7f32'),
         ('ivp',            'IVP',             'Indice Valor Promedio',                 '#1abc9c'),
-        ('ipsa',           'IPSA',            'Indice Precio Selectivo de Acciones',  '#ff6b35'),
     ]
     seen = set()
     CARDS_CFG_UNIQ = [t for t in CARDS_CFG if t[0] not in seen and not seen.add(t[0])]
 
-    # ── Indicadores para historico 10 anos ────────────────────────────────
     HIST_CFG = [
         ('dolar',          'Dolar USD',       '#3478c3'),
         ('euro',           'Euro EUR',        '#2980b9'),
@@ -14509,27 +14509,21 @@ def obtener_indicadores_chile():
         ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
     ]
 
-    def fetch(url, timeout=18):
-        """Fetch con User-Agent y retry en 429"""
-        for _try in range(2):
-            try:
-                r = requests.get(url, timeout=timeout,
-                                 headers={'Accept': 'application/json',
-                                          'User-Agent': 'Mozilla/5.0 CofrBot/6.0'})
-                if r.status_code == 200:
-                    return r.json()
-                if r.status_code == 429:
-                    import time; time.sleep(1)
-                    continue
-            except Exception as _e:
-                logger.debug(f'mindicador fetch: {_e}')
+    def _ff(url, timeout=5):
+        """Fetch FAST: timeout corto, SIN retry, nunca cuelga"""
+        try:
+            r = requests.get(url, timeout=timeout,
+                             headers={'Accept': 'application/json',
+                                      'User-Agent': 'Mozilla/5.0 CofrBot/7'})
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
         return None
 
-    # ── 1. Cards: PASO A) 1 solo request a /api para valores actuales ─────
+    # ═══════ PASO A: 1 request → 12 valores al instante (~2s) ═══════
     datos_actuales = {}
-
-    # Un solo request obtiene TODOS los indicadores al instante
-    j_all = fetch(BASE, timeout=15)
+    j_all = _ff(BASE, timeout=8)
     if j_all:
         for cod, nombre, desc, color in CARDS_CFG_UNIQ:
             d = j_all.get(cod)
@@ -14541,51 +14535,120 @@ def obtener_indicadores_chile():
                     'unidad': d.get('unidad_medida', ''),
                     'serie30': [{'valor': d['valor'], 'fecha': str(d.get('fecha', ''))}],
                 }
-        logger.info(f"📈 Paso A (/api): {len(datos_actuales)} indicadores instantáneos")
+    logger.info(f"📈 PASO A ({_t_ind.time()-t0:.1f}s): {len(datos_actuales)} valores instantáneos")
 
-    # PASO B) Series 30 días en paralelo (4 workers, no satura la API)
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        fut_map = {ex.submit(fetch, BASE + '/' + cod): cod
+    # ═══════ PASO B: Series 30d en paralelo (6 workers, 5s timeout) ═══════
+    t1 = _t_ind.time()
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        fut_map = {ex.submit(_ff, BASE + '/' + cod, 6): cod
                    for cod, *_ in CARDS_CFG_UNIQ}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
-            j   = fut.result()
+            j = fut.result()
             if j:
                 serie = j.get('serie', [])
                 if serie:
                     cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
                     datos_actuales[cod] = {
-                        'nombre':      cfg[1] if cfg else cod,
+                        'nombre': cfg[1] if cfg else cod,
                         'descripcion': cfg[2] if cfg else '',
-                        'color':       cfg[3] if cfg else '#3478c3',
-                        'valor':       serie[0].get('valor', 0),
-                        'fecha':       str(serie[0].get('fecha', ''))[:10],
-                        'unidad':      j.get('unidad_medida', ''),
-                        'serie30':     serie[:30],
+                        'color': cfg[3] if cfg else '#3478c3',
+                        'valor': serie[0].get('valor', 0),
+                        'fecha': str(serie[0].get('fecha', ''))[:10],
+                        'unidad': j.get('unidad_medida', ''),
+                        'serie30': serie[:30],
+                    }
+    logger.info(f"📈 PASO B ({_t_ind.time()-t1:.1f}s): {len(datos_actuales)} con series")
+
+    # ═══════ PASO C: Extras IPSA + Solana + Ethereum en paralelo ═══════
+    t2 = _t_ind.time()
+    EXTRAS_CFG = [
+        ('ipsa',     'IPSA',     'Ind. Precio Selectivo de Acciones', '#ff6b35'),
+        ('solana',   'Solana',   'Solana (USD)',                      '#9945FF'),
+        ('ethereum', 'Ethereum', 'Ethereum (USD)',                    '#627EEA'),
+    ]
+
+    def _fetch_findic(codigo):
+        try:
+            r = requests.get('https://findic.cl/api/' + codigo, timeout=6,
+                             headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/7'})
+            if r.status_code == 200: return r.json()
+        except Exception: pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        fut_ex = {ex.submit(_fetch_findic, cod): cod for cod, *_ in EXTRAS_CFG}
+        for fut in as_completed(fut_ex):
+            cod = fut_ex[fut]
+            j = fut.result()
+            if j:
+                serie = j.get('serie', [])
+                if serie:
+                    cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                    datos_actuales[cod] = {
+                        'nombre': cfg[1] if cfg else cod,
+                        'descripcion': cfg[2] if cfg else '',
+                        'color': cfg[3] if cfg else '#3478c3',
+                        'valor': serie[0].get('valor', 0),
+                        'fecha': str(serie[0].get('fecha', ''))[:10],
+                        'unidad': j.get('unidad_medida', 'CLP'),
+                        'serie30': serie[:30],
                     }
 
-    # PASO C) Retry individual para los que aún falten
-    faltantes = [c for c, *_ in CARDS_CFG_UNIQ if c not in datos_actuales]
-    if faltantes:
-        logger.warning(f"⚠️ Faltantes: {faltantes} — retry individual")
-        import time as _t_retry
-        for cod in faltantes:
-            _t_retry.sleep(0.8)
-            j = fetch(BASE + '/' + cod, timeout=25)
-            if j and j.get('serie'):
-                serie = j['serie']
-                cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
-                datos_actuales[cod] = {
-                    'nombre': cfg[1] if cfg else cod, 'descripcion': cfg[2] if cfg else '',
-                    'color': cfg[3] if cfg else '#3478c3', 'valor': serie[0].get('valor', 0),
-                    'fecha': str(serie[0].get('fecha', ''))[:10],
-                    'unidad': j.get('unidad_medida', ''), 'serie30': serie[:30],
-                }
-                logger.info(f"✅ Retry OK: {cod}")
+    # Fallback IPSA: Yahoo Finance
+    if 'ipsa' not in datos_actuales:
+        try:
+            r_yf = requests.get(
+                'https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
+                params={'interval': '1d', 'range': '30d'},
+                headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
+            if r_yf.status_code == 200:
+                jyf = r_yf.json()
+                res = (jyf.get('chart') or {}).get('result') or []
+                if res:
+                    closes = (res[0].get('indicators') or {}).get('quote', [{}])[0].get('close', [])
+                    timestamps = res[0].get('timestamp', [])
+                    serie_yf = []
+                    for ts, cl in zip(timestamps, closes):
+                        if cl is not None:
+                            serie_yf.append({'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
+                                             'valor': round(float(cl), 2)})
+                    if serie_yf:
+                        serie_yf.sort(key=lambda x: x['fecha'], reverse=True)
+                        datos_actuales['ipsa'] = {
+                            'nombre': 'IPSA', 'descripcion': 'Ind. Precio Selectivo de Acciones',
+                            'color': '#ff6b35', 'valor': serie_yf[0]['valor'],
+                            'fecha': serie_yf[0]['fecha'][:10], 'unidad': 'Puntos', 'serie30': serie_yf[:30],
+                        }
+        except Exception: pass
 
-    logger.info(f"📈 Cards finales: {sorted(datos_actuales.keys())} ({len(datos_actuales)} total)")
+    # Fallback SOL/ETH: CoinGecko
+    missing_crypto = [cod for cod in ('solana', 'ethereum') if cod not in datos_actuales]
+    if missing_crypto:
+        try:
+            r_cg = requests.get('https://api.coingecko.com/api/v3/simple/price',
+                params={'ids': ','.join(missing_crypto), 'vs_currencies': 'usd',
+                        'include_24hr_change': 'true'},
+                headers={'User-Agent': 'CofrBot/7'}, timeout=6)
+            if r_cg.status_code == 200:
+                jcg = r_cg.json()
+                for cod in missing_crypto:
+                    dat = jcg.get(cod) or {}
+                    val = dat.get('usd')
+                    if val:
+                        cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
+                        datos_actuales[cod] = {
+                            'nombre': cfg[1] if cfg else cod.capitalize(),
+                            'descripcion': cfg[2] if cfg else cod, 'color': cfg[3] if cfg else '#9945FF',
+                            'valor': val, 'fecha': AHORA.strftime('%Y-%m-%d'),
+                            'unidad': 'USD',
+                            'serie30': [{'valor': val, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
+                        }
+        except Exception: pass
+    logger.info(f"📈 PASO C ({_t_ind.time()-t2:.1f}s): {len(datos_actuales)} con extras")
 
-    # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
+    # ═══════ PASO D: Histórico 12 meses Dólar vs Euro ═══════
+    t3 = _t_ind.time()
     def primer_valor_mes(serie, anio, mes):
         for s in reversed(serie):
             f = s.get('fecha', '')[:7]
@@ -14596,25 +14659,22 @@ def obtener_indicadores_chile():
     hist_12m = {}
     meses_labels  = []
     meses_targets = []
-    MESES_ES = ['Ene','Feb','Mar','Abr','May','Jun',
-                'Jul','Ago','Sep','Oct','Nov','Dic']
+    MESES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
     for i in range(11, -1, -1):
         mes_offset = AHORA.month - i
         yr_offset  = ANIO_A
         while mes_offset <= 0:
-            mes_offset += 12
-            yr_offset  -= 1
+            mes_offset += 12; yr_offset -= 1
         meses_targets.append((yr_offset, mes_offset))
         meses_labels.append(MESES_ES[mes_offset - 1] + ' ' + str(yr_offset)[-2:])
 
     anios_necesarios = list(set(yr for yr, _ in meses_targets))
-    serie_dol = {}
-    serie_eur = {}
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    serie_dol = {}; serie_eur = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futs = {}
         for yr in anios_necesarios:
-            futs[ex.submit(fetch, BASE + '/dolar/' + str(yr))] = ('dolar', yr)
-            futs[ex.submit(fetch, BASE + '/euro/'  + str(yr))] = ('euro',  yr)
+            futs[ex.submit(_ff, BASE + '/dolar/' + str(yr), 6)] = ('dolar', yr)
+            futs[ex.submit(_ff, BASE + '/euro/'  + str(yr), 6)] = ('euro',  yr)
         for fut in as_completed(futs):
             cod, yr = futs[fut]
             j = fut.result()
@@ -14630,33 +14690,33 @@ def obtener_indicadores_chile():
         ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
         hist_12m['dolar'].append(round(vd, 2) if vd else None)
         hist_12m['euro'].append(round(ve, 2) if ve else None)
+    logger.info(f"📈 PASO D ({_t_ind.time()-t3:.1f}s): hist 12m OK")
 
-    # ── 3. Historico 10 anos (valor representativo por ano) ───────────────
-    ANIOS_10 = list(range(ANIO_A - 9, ANIO_A + 1))
-    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_10, 'valores': []}
+    # ═══════ PASO E: Histórico 5 años (no 10) — más rápido ═══════
+    t4 = _t_ind.time()
+    ANIOS_5 = list(range(ANIO_A - 4, ANIO_A + 1))
+    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_5, 'valores': []}
                 for cod, nom, col in HIST_CFG}
-
-    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_10]
-    raw_hist   = {}
-
+    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_5]
+    raw_hist = {}
     PORCENTAJES_H = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
 
-    def fetch_year(cod_yr):
+    def _fetch_year(cod_yr):
         cod, yr = cod_yr
-        j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=15)
+        j = _ff(BASE + '/' + cod + '/' + str(yr), 6)
         return (cod, yr, j.get('serie', []) if j else [])
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for cod, yr, serie in ex.map(fetch_year, tasks_hist):
+    # 9 indicadores × 5 años = 45 requests / 8 workers × 6s = ~34s max
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for cod, yr, serie in ex.map(_fetch_year, tasks_hist):
             raw_hist[(cod, yr)] = serie
 
     for cod, nom, col in HIST_CFG:
         valores = []
-        for yr in ANIOS_10:
+        for yr in ANIOS_5:
             serie = raw_hist.get((cod, yr), [])
             if not serie:
-                valores.append(None)
-                continue
+                valores.append(None); continue
             if cod in PORCENTAJES_H:
                 vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
                 v = round(sum(vals) / len(vals), 3) if vals else None
@@ -14665,112 +14725,8 @@ def obtener_indicadores_chile():
             valores.append(v)
         hist_10a[cod]['valores'] = valores
 
-    # ── 4. Extras: IPSA, Solana, Ethereum (findic.cl + fallbacks) ───────────
-    EXTRAS_CFG = [
-        ('ipsa',     'IPSA',     'Ind. Precio Selectivo de Acciones', '#ff6b35'),
-        ('solana',   'Solana',   'Solana en CLP',                     '#9945FF'),
-        ('ethereum', 'Ethereum', 'Ethereum en CLP',                   '#627EEA'),
-    ]
-
-    def fetch_findic(codigo, timeout=12):
-        try:
-            url = 'https://findic.cl/api/' + codigo
-            r = requests.get(url, timeout=timeout,
-                             headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/6.0'})
-            if r.status_code == 200:
-                return r.json()
-        except Exception as _fe:
-            logger.debug('findic fetch ' + codigo + ': ' + str(_fe))
-        return None
-
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        fut_ex = {ex.submit(fetch_findic, cod): cod for cod, *_ in EXTRAS_CFG}
-        for fut in as_completed(fut_ex):
-            cod = fut_ex[fut]
-            j   = fut.result()
-            if j:
-                serie = j.get('serie', [])
-                if serie:
-                    cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
-                    datos_actuales[cod] = {
-                        'nombre':      cfg[1] if cfg else cod,
-                        'descripcion': cfg[2] if cfg else '',
-                        'color':       cfg[3] if cfg else '#3478c3',
-                        'valor':       serie[0].get('valor', 0),
-                        'fecha':       str(serie[0].get('fecha', ''))[:10],
-                        'unidad':      j.get('unidad_medida', 'CLP'),
-                        'serie30':     serie[:30],
-                    }
-
-    # Fallback IPSA: Yahoo Finance si findic.cl no lo entrego
-    if 'ipsa' not in datos_actuales:
-        try:
-            r_yf = requests.get(
-                'https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
-                params={'interval': '1d', 'range': '30d'},
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/6.0)'},
-                timeout=14
-            )
-            if r_yf.status_code == 200:
-                jyf = r_yf.json()
-                res = (jyf.get('chart') or {}).get('result') or []
-                if res:
-                    closes     = (res[0].get('indicators') or {}).get('quote', [{}])[0].get('close', [])
-                    timestamps = res[0].get('timestamp', [])
-                    serie_yf   = []
-                    for ts, cl in zip(timestamps, closes):
-                        if cl is not None:
-                            serie_yf.append({
-                                'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
-                                'valor': round(float(cl), 2),
-                            })
-                    if serie_yf:
-                        serie_yf.sort(key=lambda x: x['fecha'], reverse=True)
-                        datos_actuales['ipsa'] = {
-                            'nombre':      'IPSA',
-                            'descripcion': 'Ind. Precio Selectivo de Acciones',
-                            'color':       '#ff6b35',
-                            'valor':       serie_yf[0]['valor'],
-                            'fecha':       serie_yf[0]['fecha'][:10],
-                            'unidad':      'Puntos',
-                            'serie30':     serie_yf[:30],
-                        }
-        except Exception as _ye:
-            logger.debug('IPSA Yahoo fallback: ' + str(_ye))
-
-    # Fallback SOL/ETH: CoinGecko si findic.cl no los entrego
-    missing_crypto = [cod for cod in ('solana', 'ethereum') if cod not in datos_actuales]
-    if missing_crypto:
-        try:
-            r_cg = requests.get(
-                'https://api.coingecko.com/api/v3/simple/price',
-                params={
-                    'ids':               ','.join(missing_crypto),
-                    'vs_currencies':     'clp',
-                    'include_24hr_change': 'true',
-                },
-                headers={'User-Agent': 'CofrBot/6.0'},
-                timeout=12
-            )
-            if r_cg.status_code == 200:
-                jcg = r_cg.json()
-                for cod in missing_crypto:
-                    dat = jcg.get(cod) or {}
-                    val = dat.get('clp')
-                    if val:
-                        cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
-                        datos_actuales[cod] = {
-                            'nombre':      cfg[1] if cfg else cod.capitalize(),
-                            'descripcion': cfg[2] if cfg else cod,
-                            'color':       cfg[3] if cfg else '#9945FF',
-                            'valor':       val,
-                            'fecha':       AHORA.strftime('%Y-%m-%d'),
-                            'unidad':      'CLP',
-                            'serie30':     [{'valor': val,
-                                             'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                        }
-        except Exception as _cge:
-            logger.debug('CoinGecko fallback: ' + str(_cge))
+    logger.info(f"📈 PASO E ({_t_ind.time()-t4:.1f}s): hist 5a OK")
+    logger.info(f"🏁 obtener_indicadores_chile TOTAL: {_t_ind.time()-t0:.1f}s — {len(datos_actuales)} indicadores")
 
     return {
         'datos_actuales': datos_actuales,
