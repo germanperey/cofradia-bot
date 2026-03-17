@@ -14536,8 +14536,7 @@ def obtener_indicadores_chile():
     resultado_dolar = None   # json de dolarapi.com
 
     def _fetch_findic(cod):
-        j = _get('https://findic.cl/api/' + cod, 12)
-        return (cod, j)
+        return _get('https://findic.cl/api/' + cod, 12)
 
     def _fetch_mindicador():
         return _get('https://mindicador.cl/api', 15)
@@ -14560,6 +14559,7 @@ def obtener_indicadores_chile():
 
     # TODOS en paralelo al mismo tiempo
     codigos_findic = [c[0] for c in ALL_CFG]
+    resultado_gecko = None
     with ThreadPoolExecutor(max_workers=20) as ex:
         # 14 requests a findic.cl + 1 a mindicador + 1 a dolarapi + 1 a coingecko
         fut_findic = {ex.submit(_fetch_findic, cod): cod for cod in codigos_findic}
