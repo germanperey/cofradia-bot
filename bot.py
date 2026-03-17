@@ -14466,18 +14466,20 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 def obtener_indicadores_chile():
     """
-    Obtiene 14 indicadores con requests.Session (reutiliza TCP) + timeouts realistas.
-    Render está en EE.UU., mindicador.cl en Chile → latencia ~3s por conexión nueva.
-    Session elimina esa latencia después del primer request.
+    14 indicadores desde 3 fuentes EN PARALELO simultáneo:
+      1) findic.cl — PRIMARY (funciona desde Render, probado con IPSA/SOL/ETH)
+      2) mindicador.cl — SECONDARY (1 request /api para valores base)
+      3) dolarapi.com + CoinGecko — TERTIARY (dolar/euro/cripto)
+    Merge: primero findic, luego mindicador llena huecos, luego dolarapi.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import time as _t_ind
-    t0 = _t_ind.time()
-    BASE   = 'https://mindicador.cl/api'
+    import time as _t
+    t0 = _t.time()
     AHORA  = _ahora_chile()
     ANIO_A = AHORA.year
 
-    CARDS_CFG = [
+    # Los 14 indicadores que queremos
+    ALL_CFG = [
         ('uf',             'UF',              'Unidad de Fomento',                     '#c3a55a'),
         ('dolar',          'Dolar USD',       'Tipo de cambio USD/CLP',                '#3478c3'),
         ('euro',           'Euro EUR',        'Tipo de cambio EUR/CLP',                '#2980b9'),
@@ -14489,9 +14491,11 @@ def obtener_indicadores_chile():
         ('imacec',         'IMACEC',          'Indicador Mensual Actividad Eco. (%)',  '#f39c12'),
         ('libra_cobre',    'Cobre (lb)',      'Precio Libra de Cobre USD',             '#cd7f32'),
         ('ivp',            'IVP',             'Indice Valor Promedio',                 '#1abc9c'),
+        ('ipsa',           'IPSA',            'Ind. Precio Selectivo de Acciones',     '#ff6b35'),
+        ('solana',         'Solana',          'Solana (USD)',                          '#9945FF'),
+        ('ethereum',       'Ethereum',        'Ethereum (USD)',                        '#627EEA'),
     ]
-    seen = set()
-    CARDS_CFG_UNIQ = [t for t in CARDS_CFG if t[0] not in seen and not seen.add(t[0])]
+    CFG_MAP = {c[0]: c for c in ALL_CFG}
 
     HIST_CFG = [
         ('dolar', 'Dolar USD', '#3478c3'), ('euro', 'Euro EUR', '#2980b9'),
@@ -14501,212 +14505,195 @@ def obtener_indicadores_chile():
         ('bitcoin', 'Bitcoin (CLP)', '#9b59b6'),
     ]
 
-    # Session con pool de conexiones (thread-safe para ThreadPoolExecutor)
     from requests.adapters import HTTPAdapter
     _S = requests.Session()
     _S.headers.update({'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 CofrBot/7'})
-    _S.mount('https://', HTTPAdapter(pool_connections=10, pool_maxsize=10))
+    _S.mount('https://', HTTPAdapter(pool_connections=15, pool_maxsize=15))
 
-    def _ff(url, t=12):
-        """Fetch con Session (reutiliza TCP). Timeout=(connect 5s, read ts)"""
+    def _get(url, t=12):
         try:
             r = _S.get(url, timeout=(5, t))
-            if r.status_code == 200:
-                return r.json()
-            logger.debug(f"mindicador {r.status_code}: {url[-25:]}")
-        except Exception as _e:
-            logger.debug(f"mindicador timeout: {url[-25:]}")
-        return None
-
-    # ═══════ PASO A: 1 request → 11 valores al instante ═══════
-    datos_actuales = {}
-    j_all = _ff(BASE, 15)
-    if j_all:
-        for cod, nombre, desc, color in CARDS_CFG_UNIQ:
-            d = j_all.get(cod)
-            if d and isinstance(d, dict) and d.get('valor') is not None:
-                datos_actuales[cod] = {
-                    'nombre': nombre, 'descripcion': desc, 'color': color,
-                    'valor': d['valor'], 'fecha': str(d.get('fecha', ''))[:10],
-                    'unidad': d.get('unidad_medida', ''),
-                    'serie30': [{'valor': d['valor'], 'fecha': str(d.get('fecha', ''))}],
-                }
-    logger.info(f"📈 A ({_t_ind.time()-t0:.1f}s): {len(datos_actuales)} base")
-
-    # ═══════ PASO B: Series 30d — Session YA conectada, va rápido ═══════
-    t1 = _t_ind.time()
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        fut_map = {ex.submit(_ff, BASE + '/' + cod, 12): cod
-                   for cod, *_ in CARDS_CFG_UNIQ}
-        for fut in as_completed(fut_map):
-            cod = fut_map[fut]
-            j = fut.result()
-            if j:
-                serie = j.get('serie', [])
-                if serie:
-                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
-                    datos_actuales[cod] = {
-                        'nombre': cfg[1] if cfg else cod,
-                        'descripcion': cfg[2] if cfg else '',
-                        'color': cfg[3] if cfg else '#3478c3',
-                        'valor': serie[0].get('valor', 0),
-                        'fecha': str(serie[0].get('fecha', ''))[:10],
-                        'unidad': j.get('unidad_medida', ''),
-                        'serie30': serie[:30],
-                    }
-    logger.info(f"📈 B ({_t_ind.time()-t1:.1f}s): {len(datos_actuales)} series")
-
-    # ═══════ PASO C: Extras IPSA + Solana + Ethereum ═══════
-    t2 = _t_ind.time()
-    EXTRAS_CFG = [
-        ('ipsa',     'IPSA',     'Ind. Precio Selectivo de Acciones', '#ff6b35'),
-        ('solana',   'Solana',   'Solana (USD)',                      '#9945FF'),
-        ('ethereum', 'Ethereum', 'Ethereum (USD)',                    '#627EEA'),
-    ]
-    def _fetch_extra(codigo):
-        try:
-            r = _S.get('https://findic.cl/api/' + codigo, timeout=(5, 10))
             if r.status_code == 200: return r.json()
         except Exception: pass
         return None
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        fut_ex = {ex.submit(_fetch_extra, cod): cod for cod, *_ in EXTRAS_CFG}
-        for fut in as_completed(fut_ex):
-            cod = fut_ex[fut]
-            j = fut.result()
-            if j:
-                serie = j.get('serie', [])
-                if serie:
-                    cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
-                    datos_actuales[cod] = {
-                        'nombre': cfg[1] if cfg else cod,
-                        'descripcion': cfg[2] if cfg else '',
-                        'color': cfg[3] if cfg else '#3478c3',
-                        'valor': serie[0].get('valor', 0),
-                        'fecha': str(serie[0].get('fecha', ''))[:10],
-                        'unidad': j.get('unidad_medida', 'CLP'),
-                        'serie30': serie[:30],
-                    }
+    datos_actuales = {}
 
-    # Fallback IPSA: Yahoo Finance
-    if 'ipsa' not in datos_actuales:
+    def _add(cod, valor, fecha='', unidad='', serie30=None):
+        """Agrega indicador si no existe aún (first-wins)"""
+        if cod in datos_actuales or valor is None: return
+        cfg = CFG_MAP.get(cod)
+        if not cfg: return
+        datos_actuales[cod] = {
+            'nombre': cfg[1], 'descripcion': cfg[2], 'color': cfg[3],
+            'valor': valor, 'fecha': str(fecha)[:10], 'unidad': unidad,
+            'serie30': serie30 or [{'valor': valor, 'fecha': str(fecha)}],
+        }
+
+    # ═══════ FETCH SIMULTÁNEO: 3 fuentes en paralelo ═══════
+    resultado_findic = {}    # {cod: json_response}
+    resultado_mindicador = None  # json de /api
+    resultado_dolar = None   # json de dolarapi.com
+
+    def _fetch_findic(cod):
+        j = _get('https://findic.cl/api/' + cod, 12)
+        return (cod, j)
+
+    def _fetch_mindicador():
+        return _get('https://mindicador.cl/api', 15)
+
+    def _fetch_dolarapi():
         try:
-            r_yf = _S.get('https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
-                params={'interval': '1d', 'range': '30d'}, timeout=(5, 10))
-            if r_yf.status_code == 200:
-                jyf = r_yf.json()
-                res = (jyf.get('chart') or {}).get('result') or []
-                if res:
-                    closes = (res[0].get('indicators') or {}).get('quote', [{}])[0].get('close', [])
-                    timestamps = res[0].get('timestamp', [])
-                    serie_yf = [{'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
-                                 'valor': round(float(cl), 2)}
-                                for ts, cl in zip(timestamps, closes) if cl is not None]
-                    if serie_yf:
-                        serie_yf.sort(key=lambda x: x['fecha'], reverse=True)
-                        datos_actuales['ipsa'] = {
-                            'nombre': 'IPSA', 'descripcion': 'Ind. Precio Selectivo de Acciones',
-                            'color': '#ff6b35', 'valor': serie_yf[0]['valor'],
-                            'fecha': serie_yf[0]['fecha'][:10], 'unidad': 'Puntos', 'serie30': serie_yf[:30]}
+            r = _S.get('https://cl.dolarapi.com/v1/cotizaciones', timeout=(5, 10))
+            if r.status_code == 200: return r.json()
         except Exception: pass
-
-    # Fallback SOL/ETH: CoinGecko (USD)
-    missing_crypto = [c for c in ('solana', 'ethereum') if c not in datos_actuales]
-    if missing_crypto:
-        try:
-            r_cg = _S.get('https://api.coingecko.com/api/v3/simple/price',
-                params={'ids': ','.join(missing_crypto), 'vs_currencies': 'usd',
-                        'include_24hr_change': 'true'}, timeout=(5, 8))
-            if r_cg.status_code == 200:
-                jcg = r_cg.json()
-                for cod in missing_crypto:
-                    val = (jcg.get(cod) or {}).get('usd')
-                    if val:
-                        cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
-                        datos_actuales[cod] = {
-                            'nombre': cfg[1] if cfg else cod.capitalize(),
-                            'descripcion': cfg[2] if cfg else '', 'color': cfg[3] if cfg else '#9945FF',
-                            'valor': val, 'fecha': AHORA.strftime('%Y-%m-%d'), 'unidad': 'USD',
-                            'serie30': [{'valor': val, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}]}
-        except Exception: pass
-    logger.info(f"📈 C ({_t_ind.time()-t2:.1f}s): {len(datos_actuales)} total")
-
-    # ═══════ PASO D: Hist 12 meses Dólar vs Euro ═══════
-    t3 = _t_ind.time()
-    def _pvm(serie, anio, mes):
-        for s in reversed(serie):
-            if s.get('fecha', '')[:7] == '%04d-%02d' % (anio, mes):
-                return s.get('valor')
         return None
 
-    hist_12m = {}; meses_labels = []; meses_targets = []
-    MESES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+    def _fetch_coingecko():
+        try:
+            r = _S.get('https://api.coingecko.com/api/v3/simple/price',
+                params={'ids': 'bitcoin,solana,ethereum', 'vs_currencies': 'usd',
+                        'include_24hr_change': 'true'}, timeout=(5, 10))
+            if r.status_code == 200: return r.json()
+        except Exception: pass
+        return None
+
+    # TODOS en paralelo al mismo tiempo
+    codigos_findic = [c[0] for c in ALL_CFG]
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        # 14 requests a findic.cl + 1 a mindicador + 1 a dolarapi + 1 a coingecko
+        fut_findic = {ex.submit(_fetch_findic, cod): cod for cod in codigos_findic}
+        fut_mindi  = ex.submit(_fetch_mindicador)
+        fut_dolar  = ex.submit(_fetch_dolarapi)
+        fut_gecko  = ex.submit(_fetch_coingecko)
+
+        for fut in as_completed(list(fut_findic.keys()) + [fut_mindi, fut_dolar, fut_gecko]):
+            try:
+                if fut in fut_findic:
+                    cod = fut_findic[fut]
+                    resultado_findic[cod] = fut.result()
+                elif fut == fut_mindi:
+                    resultado_mindicador = fut.result()
+                elif fut == fut_dolar:
+                    resultado_dolar = fut.result()
+                elif fut == fut_gecko:
+                    resultado_gecko = fut.result()
+            except Exception:
+                pass
+
+    logger.info(f"📈 FETCH ({_t.time()-t0:.1f}s): findic={len([v for v in resultado_findic.values() if v])} mindicador={'OK' if resultado_mindicador else 'FAIL'} dolar={'OK' if resultado_dolar else 'FAIL'}")
+
+    # ═══════ MERGE: findic primero (con serie30) ═══════
+    for cod, j in resultado_findic.items():
+        if not j: continue
+        serie = j.get('serie', [])
+        if serie:
+            _add(cod, serie[0].get('valor'), serie[0].get('fecha', ''),
+                 j.get('unidad_medida', ''), serie[:30])
+
+    # ═══════ MERGE: mindicador llena huecos ═══════
+    if resultado_mindicador:
+        for cod in codigos_findic:
+            if cod in datos_actuales: continue
+            d = resultado_mindicador.get(cod)
+            if d and isinstance(d, dict) and d.get('valor') is not None:
+                _add(cod, d['valor'], d.get('fecha', ''), d.get('unidad_medida', ''))
+
+    # ═══════ MERGE: dolarapi.com para dolar/euro ═══════
+    if resultado_dolar and isinstance(resultado_dolar, list):
+        for item in resultado_dolar:
+            moneda = (item.get('moneda') or '').lower()
+            if moneda == 'dólar' or moneda == 'dolar':
+                _add('dolar', item.get('compra') or item.get('venta'), AHORA.strftime('%Y-%m-%d'), 'Pesos')
+            elif moneda == 'euro':
+                _add('euro', item.get('compra') or item.get('venta'), AHORA.strftime('%Y-%m-%d'), 'Pesos')
+
+    # ═══════ MERGE: CoinGecko para cripto (USD) ═══════
+    try:
+        if resultado_gecko:
+            for cod_api, cod_local in [('bitcoin','bitcoin'),('solana','solana'),('ethereum','ethereum')]:
+                val = (resultado_gecko.get(cod_api) or {}).get('usd')
+                if val: _add(cod_local, val, AHORA.strftime('%Y-%m-%d'), 'USD')
+    except Exception: pass
+
+    logger.info(f"📈 MERGED: {sorted(datos_actuales.keys())} ({len(datos_actuales)}/14)")
+
+    # ═══════ Series 30d para los que vinieron sin serie (de mindicador) ═══════
+    t1 = _t.time()
+    sin_serie = [cod for cod in datos_actuales if len(datos_actuales[cod].get('serie30', [])) <= 1]
+    if sin_serie:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(_get, 'https://mindicador.cl/api/' + cod, 12): cod for cod in sin_serie
+                    if cod not in ('ipsa','solana','ethereum')}
+            for fut in as_completed(futs):
+                cod = futs[fut]
+                j = fut.result()
+                if j and j.get('serie'):
+                    datos_actuales[cod]['serie30'] = j['serie'][:30]
+    logger.info(f"📈 SERIES ({_t.time()-t1:.1f}s)")
+
+    # ═══════ HIST 12 meses Dólar vs Euro ═══════
+    t3 = _t.time()
+    def _pvm(serie, anio, mes):
+        for s in reversed(serie):
+            if s.get('fecha', '')[:7] == '%04d-%02d' % (anio, mes): return s.get('valor')
+        return None
+
+    hist_12m = {}; ml = []; mt = []
+    MES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
     for i in range(11, -1, -1):
         m = AHORA.month - i; y = ANIO_A
         while m <= 0: m += 12; y -= 1
-        meses_targets.append((y, m))
-        meses_labels.append(MESES_ES[m-1] + ' ' + str(y)[-2:])
+        mt.append((y, m)); ml.append(MES[m-1] + ' ' + str(y)[-2:])
 
-    anios_n = list(set(yr for yr, _ in meses_targets))
-    serie_dol = {}; serie_eur = {}
+    an = list(set(yr for yr, _ in mt))
+    sd = {}; se = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
         futs = {}
-        for yr in anios_n:
-            futs[ex.submit(_ff, BASE + '/dolar/' + str(yr), 12)] = ('dolar', yr)
-            futs[ex.submit(_ff, BASE + '/euro/' + str(yr), 12)]  = ('euro', yr)
+        for yr in an:
+            futs[ex.submit(_get, 'https://mindicador.cl/api/dolar/' + str(yr), 12)] = ('d', yr)
+            futs[ex.submit(_get, 'https://mindicador.cl/api/euro/' + str(yr), 12)]  = ('e', yr)
         for fut in as_completed(futs):
-            cod, yr = futs[fut]
-            j = fut.result()
-            s = j.get('serie', []) if j else []
-            if cod == 'dolar': serie_dol[yr] = s
-            else: serie_eur[yr] = s
+            k, yr = futs[fut]; j = fut.result(); s = j.get('serie', []) if j else []
+            if k == 'd': sd[yr] = s
+            else: se[yr] = s
 
-    hist_12m['labels'] = meses_labels
-    hist_12m['dolar'] = [round(_pvm(serie_dol.get(y, []), y, m), 2) if _pvm(serie_dol.get(y, []), y, m) else None for y, m in meses_targets]
-    hist_12m['euro']  = [round(_pvm(serie_eur.get(y, []), y, m), 2) if _pvm(serie_eur.get(y, []), y, m) else None for y, m in meses_targets]
-    logger.info(f"📈 D ({_t_ind.time()-t3:.1f}s): hist12m")
+    hist_12m['labels'] = ml
+    hist_12m['dolar'] = [round(_pvm(sd.get(y,[]),y,m),2) if _pvm(sd.get(y,[]),y,m) else None for y,m in mt]
+    hist_12m['euro']  = [round(_pvm(se.get(y,[]),y,m),2) if _pvm(se.get(y,[]),y,m) else None for y,m in mt]
+    logger.info(f"📈 HIST12 ({_t.time()-t3:.1f}s)")
 
-    # ═══════ PASO E: Hist 5 años ═══════
-    t4 = _t_ind.time()
-    ANIOS_5 = list(range(ANIO_A - 4, ANIO_A + 1))
-    hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_5, 'valores': []}
-                for cod, nom, col in HIST_CFG}
-    tasks_h = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_5]
-    raw_h = {}
-    PCT_H = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+    # ═══════ HIST 5 años ═══════
+    t4 = _t.time()
+    A5 = list(range(ANIO_A - 4, ANIO_A + 1))
+    hist_10a = {cod: {'nombre': n, 'color': c, 'anios': A5, 'valores': []} for cod, n, c in HIST_CFG}
+    th = [(cod, yr) for cod, *_ in HIST_CFG for yr in A5]
+    rh = {}; PH = {'ipc','tasa_desempleo','imacec','tpm'}
 
-    def _fy(cod_yr):
-        cod, yr = cod_yr
-        j = _ff(BASE + '/' + cod + '/' + str(yr), 10)
-        return (cod, yr, j.get('serie', []) if j else [])
+    def _fy(cy):
+        c, y = cy; j = _get('https://mindicador.cl/api/' + c + '/' + str(y), 10)
+        return (c, y, j.get('serie', []) if j else [])
 
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for cod, yr, serie in ex.map(_fy, tasks_h):
-            raw_h[(cod, yr)] = serie
+        for c, y, s in ex.map(_fy, th): rh[(c,y)] = s
 
-    for cod, nom, col in HIST_CFG:
-        vals = []
-        for yr in ANIOS_5:
-            serie = raw_h.get((cod, yr), [])
-            if not serie: vals.append(None); continue
-            if cod in PCT_H:
-                vv = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
-                vals.append(round(sum(vv)/len(vv), 3) if vv else None)
-            else:
-                vals.append(round(serie[0].get('valor', 0), 2))
-        hist_10a[cod]['valores'] = vals
+    for cod, n, cl in HIST_CFG:
+        vl = []
+        for yr in A5:
+            s = rh.get((cod,yr), [])
+            if not s: vl.append(None); continue
+            if cod in PH:
+                vv = [x.get('valor',0) for x in s if x.get('valor') is not None]
+                vl.append(round(sum(vv)/len(vv),3) if vv else None)
+            else: vl.append(round(s[0].get('valor',0),2))
+        hist_10a[cod]['valores'] = vl
 
     _S.close()
-    logger.info(f"📈 E ({_t_ind.time()-t4:.1f}s): hist5a")
-    logger.info(f"🏁 TOTAL: {_t_ind.time()-t0:.1f}s — {len(datos_actuales)} indicadores")
+    logger.info(f"📈 HIST5 ({_t.time()-t4:.1f}s)")
+    logger.info(f"🏁 TOTAL: {_t.time()-t0:.1f}s — {len(datos_actuales)}/14 indicadores")
 
-    return {
-        'datos_actuales': datos_actuales,
-        'hist_12m':       hist_12m,
-        'hist_10a':       hist_10a,
-        'generado':       AHORA.strftime('%d/%m/%Y %H:%M'),
-    }
+    return {'datos_actuales': datos_actuales, 'hist_12m': hist_12m,
+            'hist_10a': hist_10a, 'generado': AHORA.strftime('%d/%m/%Y %H:%M')}
 
 
 def obtener_indicadores_cmf():
@@ -15689,7 +15676,6 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
-        ' &nbsp;&middot;&nbsp; quetalmiafp.cl'
         ' &nbsp;&middot;&nbsp; Analisis IA + RAG &nbsp;&middot;&nbsp;'
         ' Cofradia de Networking Bot v6.0'
         '</footer>'
@@ -15867,25 +15853,27 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 _anio_n = _ahora_chile().strftime('%Y')
                 _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
                 prompt_news = (
-                    f"Eres analista economico chileno. HOY es {_fecha_n} (ano {_anio_n}).\n"
-                    f"Lista 7 noticias RECIENTES de esta semana que impactan indicadores economicos.\n\n"
-                    "OBLIGATORIO incluir:\n"
-                    "- Conflictos geopoliticos (guerras, bloqueos maritimos, sanciones)\n"
-                    "- Decisiones Fed EE.UU., BCE, Banco Central Chile\n"
-                    "- Precio cobre y materias primas\n"
-                    "- Cripto (Bitcoin, Ethereum)\n"
-                    "- Economia interna Chile, aranceles, comercio\n\n"
-                    "Formato: TITULO | Resumen 2 lineas | Impacto: indicadores (alza/baja)\n"
-                    f"SOLO noticias {_anio_n}. NUNCA mencionar anos anteriores. 7 noticias."
+                    f"Eres analista economico senior. HOY es {_fecha_n} ({_anio_n}).\n"
+                    f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
+                    "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
+                    "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
+                    "CADA noticia DEBE tener EXACTAMENTE este formato (3 lineas minimo):\n"
+                    "Linea 1: TITULO EN MAYUSCULAS de la noticia\n"
+                    "Linea 2: Descripcion detallada de que ocurrio, con datos concretos\n"
+                    "Linea 3: IMPACTO: indicadores afectados con flechas — "
+                    "ej: Dolar (alza +1.2%) por mayor demanda de refugio, Cobre (baja -0.8%) "
+                    "por menor demanda china, IPSA (baja -0.5%) por aversion al riesgo\n\n"
+                    f"SOLO noticias de {_anio_n}. NUNCA mencionar anos anteriores.\n"
+                    "Sin emojis. Sin asteriscos. Sin markdown. 7 noticias completas."
                 )
-                news_ia = llamar_groq(prompt_news, max_tokens=1200, temperature=0.3)
+                news_ia = llamar_groq(prompt_news, max_tokens=2000, temperature=0.3)
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
                         if len(line) > 15:
                             # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
-                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;') + '</div>'
+                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
             except Exception:
                 pass
 
