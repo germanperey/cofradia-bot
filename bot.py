@@ -107,6 +107,14 @@ jsearch_disponible = False
 db_disponible = False
 
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
+def _ahora_chile():
+    """Retorna datetime en hora Chile (America/Santiago) — NO UTC"""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/Santiago')).replace(tzinfo=None)
+    except Exception:
+        return datetime.utcnow() - timedelta(hours=3)
+
 _indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
 # Cache diario de comandos — se limpia automáticamente al cambiar de día
@@ -3250,8 +3258,8 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /graficos - Dashboard interactivo ECharts con análisis del grupo"""
-    msg = await update.message.reply_text("📊 Generando dashboard interactivo ECharts...")
+    """Comando /graficos - Dashboard interactivo con análisis del grupo"""
+    msg = await update.message.reply_text("📊 Generando dashboard interactivo...")
     
     try:
         conn = get_db_connection()
@@ -3542,7 +3550,7 @@ body {{
 </div>
 
 <div class="footer">
-    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Bot Premium v4.3 ECharts
+    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Premium Bot
 </div>
 
 <script>
@@ -3768,7 +3776,7 @@ window.addEventListener('resize', function() {{
                 caption=f"📊 Dashboard Cofradía — Últimos 7 días\n\n"
                         f"📨 {total_msgs_7d} mensajes · 👥 {len(usuarios_clean)} usuarios activos\n"
                         f"📈 Promedio: {promedio_diario}/día · 🕐 Pico: {hora_pico:02d}:00\n\n"
-                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo con ECharts."
+                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo."
             )
         except Exception as e:
             logger.warning(f"Error matplotlib preview: {e}")
@@ -3779,7 +3787,7 @@ window.addEventListener('resize', function() {{
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_dashboard_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard Interactivo ECharts\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
+                caption="📊 Dashboard Interactivo\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
             )
         
         # Limpiar
@@ -15885,11 +15893,11 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 for n in noticias_bcch[:5]:
                     noticias_html += '<div class="news-item">&#128196; ' + str(n).replace('<','&lt;').replace('>','&gt;') + '</div>'
             try:
-                _fecha_hoy_news = _ahora_chile().strftime('%d/%m/%Y')
-                _anio_news = _ahora_chile().strftime('%Y')
+                _anio_n = _ahora_chile().strftime('%Y')
+                _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
                 prompt_news = (
-                    f"Eres un analista economico chileno experto. HOY es {_fecha_hoy_news}.\n"
-                    f"Analiza las 7 noticias MAS IMPORTANTES de esta semana (marzo {_anio_news}) "
+                    f"Eres un analista economico chileno experto. HOY es {_fecha_n}.\n"
+                    f"Analiza las 7 noticias MAS IMPORTANTES de esta semana ({_anio_n}) "
                     "que impactan los indicadores economicos de Chile.\n\n"
                     "OBLIGATORIO incluir noticias sobre:\n"
                     "- Conflictos geopoliticos actuales (guerras, bloqueos maritimos, sanciones)\n"
@@ -15899,10 +15907,10 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "- Mercados cripto (Bitcoin, Ethereum)\n"
                     "- Situacion economica interna de Chile\n"
                     "- Comercio internacional y aranceles\n\n"
-                    "Para CADA noticia escribe EXACTAMENTE asi:\n"
-                    "TITULO_BREVE | Resumen de 2 lineas explicando que ocurrio | "
+                    "Para CADA noticia escribe:\n"
+                    "TITULO_BREVE | Resumen de 2 lineas | "
                     "Impacto: indicadores afectados con flecha (alza o baja) y por que\n\n"
-                    f"IMPORTANTE: Solo noticias de {_anio_news}. NO mencionar datos de anos anteriores.\n"
+                    f"IMPORTANTE: Solo noticias de {_anio_n}. NO mencionar datos de anos anteriores.\n"
                     "Sin emojis. 7 noticias. Directo al contenido."
                 )
                 news_ia = llamar_groq(prompt_news, max_tokens=1200, temperature=0.3)
@@ -15927,7 +15935,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             _indicadores_cache['html_content'] = html_content
             logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
 
-        # 6. Mensaje de texto resumido CON ICONOS
+        # 6. Mensaje de texto con ICONOS por indicador
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ICONOS = {
@@ -15939,13 +15947,13 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
                      'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp',
                      'ipsa', 'solana', 'ethereum']
-        n_activos = len([c for c in ORDER_MSG if datos.get(c)])
+        n_act = len([c for c in ORDER_MSG if datos.get(c)])
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
             f"🕐 {_ahora_chile().strftime('%d/%m/%Y %H:%M')}",
             "Fuente: Banco Central · CMF · CoinGecko",
-            f"📊 {n_activos} indicadores activos",
+            f"📊 {n_act} indicadores activos",
             "",
         ]
         alzas = 0; bajas = 0
@@ -15976,21 +15984,12 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if v1:
                     pct = ((v0 - v1) / v1) * 100
                     if pct >= 0:
-                        tend = ' ▲ {:.2f}%'.format(abs(pct))
-                        alzas += 1
+                        tend = ' ▲ {:.2f}%'.format(abs(pct)); alzas += 1
                     else:
-                        tend = ' ▼ {:.2f}%'.format(abs(pct))
-                        bajas += 1
+                        tend = ' ▼ {:.2f}%'.format(abs(pct)); bajas += 1
             nombre = d.get('nombre') or cod
             lineas.append(f"{ic} {nombre}: {vf}{tend}")
-
-        # Resumen ejecutivo
-        lineas += [
-            "", sep,
-            "📋 RESUMEN DEL DÍA:",
-            f"  ▲ {alzas} indicadores al alza",
-            f"  ▼ {bajas} indicadores a la baja",
-        ]
+        lineas += ["", sep, "📋 RESUMEN:", f"  ▲ {alzas} al alza  ▼ {bajas} a la baja"]
 
         # Tasas CMF en mensaje
         tmc_items = (datos_cmf or {}).get('tmc', [])
