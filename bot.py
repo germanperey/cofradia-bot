@@ -14466,13 +14466,9 @@ async def recordatorio_agenda_job(context: ContextTypes.DEFAULT_TYPE):
 
 def obtener_indicadores_chile():
     """
-    ULTRA-FAST: Obtiene 14 indicadores con timeouts agresivos (5s) y SIN reintentos.
-    Paso A: 1 request a /api → 12 valores instantáneos (2s)
-    Paso B: Series 30d en paralelo 6 workers (10s max)
-    Paso C: Extras IPSA/SOL/ETH en paralelo (5s max)
-    Paso D: Histórico 12m (5s max)
-    Paso E: Histórico 5 años (15s max)
-    TOTAL MÁXIMO: ~35 segundos. Cache: ~2 segundos.
+    Obtiene 14 indicadores con requests.Session (reutiliza TCP) + timeouts realistas.
+    Render está en EE.UU., mindicador.cl en Chile → latencia ~3s por conexión nueva.
+    Session elimina esa latencia después del primer request.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time as _t_ind
@@ -14498,49 +14494,49 @@ def obtener_indicadores_chile():
     CARDS_CFG_UNIQ = [t for t in CARDS_CFG if t[0] not in seen and not seen.add(t[0])]
 
     HIST_CFG = [
-        ('dolar',          'Dolar USD',       '#3478c3'),
-        ('euro',           'Euro EUR',        '#2980b9'),
-        ('uf',             'UF',              '#c3a55a'),
-        ('utm',            'UTM',             '#e67e22'),
-        ('ipc',            'IPC',             '#2ecc71'),
-        ('tasa_desempleo', 'Desempleo (%)',   '#e74c3c'),
-        ('imacec',         'IMACEC (%)',      '#f39c12'),
-        ('libra_cobre',    'Cobre (USD/lb)',  '#cd7f32'),
-        ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
+        ('dolar', 'Dolar USD', '#3478c3'), ('euro', 'Euro EUR', '#2980b9'),
+        ('uf', 'UF', '#c3a55a'), ('utm', 'UTM', '#e67e22'),
+        ('ipc', 'IPC', '#2ecc71'), ('tasa_desempleo', 'Desempleo (%)', '#e74c3c'),
+        ('imacec', 'IMACEC (%)', '#f39c12'), ('libra_cobre', 'Cobre (USD/lb)', '#cd7f32'),
+        ('bitcoin', 'Bitcoin (CLP)', '#9b59b6'),
     ]
 
-    def _ff(url, timeout=5):
-        """Fetch FAST: timeout corto, SIN retry, nunca cuelga"""
+    # Session con pool de conexiones (thread-safe para ThreadPoolExecutor)
+    from requests.adapters import HTTPAdapter
+    _S = requests.Session()
+    _S.headers.update({'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 CofrBot/7'})
+    _S.mount('https://', HTTPAdapter(pool_connections=10, pool_maxsize=10))
+
+    def _ff(url, t=12):
+        """Fetch con Session (reutiliza TCP). Timeout=(connect 5s, read ts)"""
         try:
-            r = requests.get(url, timeout=timeout,
-                             headers={'Accept': 'application/json',
-                                      'User-Agent': 'Mozilla/5.0 CofrBot/7'})
+            r = _S.get(url, timeout=(5, t))
             if r.status_code == 200:
                 return r.json()
-        except Exception:
-            pass
+            logger.debug(f"mindicador {r.status_code}: {url[-25:]}")
+        except Exception as _e:
+            logger.debug(f"mindicador timeout: {url[-25:]}")
         return None
 
-    # ═══════ PASO A: 1 request → 12 valores al instante (~2s) ═══════
+    # ═══════ PASO A: 1 request → 11 valores al instante ═══════
     datos_actuales = {}
-    j_all = _ff(BASE, timeout=8)
+    j_all = _ff(BASE, 15)
     if j_all:
         for cod, nombre, desc, color in CARDS_CFG_UNIQ:
             d = j_all.get(cod)
             if d and isinstance(d, dict) and d.get('valor') is not None:
                 datos_actuales[cod] = {
                     'nombre': nombre, 'descripcion': desc, 'color': color,
-                    'valor': d['valor'],
-                    'fecha': str(d.get('fecha', ''))[:10],
+                    'valor': d['valor'], 'fecha': str(d.get('fecha', ''))[:10],
                     'unidad': d.get('unidad_medida', ''),
                     'serie30': [{'valor': d['valor'], 'fecha': str(d.get('fecha', ''))}],
                 }
-    logger.info(f"📈 PASO A ({_t_ind.time()-t0:.1f}s): {len(datos_actuales)} valores instantáneos")
+    logger.info(f"📈 A ({_t_ind.time()-t0:.1f}s): {len(datos_actuales)} base")
 
-    # ═══════ PASO B: Series 30d en paralelo (6 workers, 5s timeout) ═══════
+    # ═══════ PASO B: Series 30d — Session YA conectada, va rápido ═══════
     t1 = _t_ind.time()
     with ThreadPoolExecutor(max_workers=6) as ex:
-        fut_map = {ex.submit(_ff, BASE + '/' + cod, 6): cod
+        fut_map = {ex.submit(_ff, BASE + '/' + cod, 12): cod
                    for cod, *_ in CARDS_CFG_UNIQ}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
@@ -14558,26 +14554,24 @@ def obtener_indicadores_chile():
                         'unidad': j.get('unidad_medida', ''),
                         'serie30': serie[:30],
                     }
-    logger.info(f"📈 PASO B ({_t_ind.time()-t1:.1f}s): {len(datos_actuales)} con series")
+    logger.info(f"📈 B ({_t_ind.time()-t1:.1f}s): {len(datos_actuales)} series")
 
-    # ═══════ PASO C: Extras IPSA + Solana + Ethereum en paralelo ═══════
+    # ═══════ PASO C: Extras IPSA + Solana + Ethereum ═══════
     t2 = _t_ind.time()
     EXTRAS_CFG = [
         ('ipsa',     'IPSA',     'Ind. Precio Selectivo de Acciones', '#ff6b35'),
         ('solana',   'Solana',   'Solana (USD)',                      '#9945FF'),
         ('ethereum', 'Ethereum', 'Ethereum (USD)',                    '#627EEA'),
     ]
-
-    def _fetch_findic(codigo):
+    def _fetch_extra(codigo):
         try:
-            r = requests.get('https://findic.cl/api/' + codigo, timeout=6,
-                             headers={'Accept': 'application/json', 'User-Agent': 'CofrBot/7'})
+            r = _S.get('https://findic.cl/api/' + codigo, timeout=(5, 10))
             if r.status_code == 200: return r.json()
         except Exception: pass
         return None
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        fut_ex = {ex.submit(_fetch_findic, cod): cod for cod, *_ in EXTRAS_CFG}
+        fut_ex = {ex.submit(_fetch_extra, cod): cod for cod, *_ in EXTRAS_CFG}
         for fut in as_completed(fut_ex):
             cod = fut_ex[fut]
             j = fut.result()
@@ -14598,135 +14592,114 @@ def obtener_indicadores_chile():
     # Fallback IPSA: Yahoo Finance
     if 'ipsa' not in datos_actuales:
         try:
-            r_yf = requests.get(
-                'https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
-                params={'interval': '1d', 'range': '30d'},
-                headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
+            r_yf = _S.get('https://query1.finance.yahoo.com/v8/finance/chart/%5EIPSA',
+                params={'interval': '1d', 'range': '30d'}, timeout=(5, 10))
             if r_yf.status_code == 200:
                 jyf = r_yf.json()
                 res = (jyf.get('chart') or {}).get('result') or []
                 if res:
                     closes = (res[0].get('indicators') or {}).get('quote', [{}])[0].get('close', [])
                     timestamps = res[0].get('timestamp', [])
-                    serie_yf = []
-                    for ts, cl in zip(timestamps, closes):
-                        if cl is not None:
-                            serie_yf.append({'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
-                                             'valor': round(float(cl), 2)})
+                    serie_yf = [{'fecha': datetime.fromtimestamp(ts).strftime('%Y-%m-%dT00:00:00'),
+                                 'valor': round(float(cl), 2)}
+                                for ts, cl in zip(timestamps, closes) if cl is not None]
                     if serie_yf:
                         serie_yf.sort(key=lambda x: x['fecha'], reverse=True)
                         datos_actuales['ipsa'] = {
                             'nombre': 'IPSA', 'descripcion': 'Ind. Precio Selectivo de Acciones',
                             'color': '#ff6b35', 'valor': serie_yf[0]['valor'],
-                            'fecha': serie_yf[0]['fecha'][:10], 'unidad': 'Puntos', 'serie30': serie_yf[:30],
-                        }
+                            'fecha': serie_yf[0]['fecha'][:10], 'unidad': 'Puntos', 'serie30': serie_yf[:30]}
         except Exception: pass
 
-    # Fallback SOL/ETH: CoinGecko
-    missing_crypto = [cod for cod in ('solana', 'ethereum') if cod not in datos_actuales]
+    # Fallback SOL/ETH: CoinGecko (USD)
+    missing_crypto = [c for c in ('solana', 'ethereum') if c not in datos_actuales]
     if missing_crypto:
         try:
-            r_cg = requests.get('https://api.coingecko.com/api/v3/simple/price',
+            r_cg = _S.get('https://api.coingecko.com/api/v3/simple/price',
                 params={'ids': ','.join(missing_crypto), 'vs_currencies': 'usd',
-                        'include_24hr_change': 'true'},
-                headers={'User-Agent': 'CofrBot/7'}, timeout=6)
+                        'include_24hr_change': 'true'}, timeout=(5, 8))
             if r_cg.status_code == 200:
                 jcg = r_cg.json()
                 for cod in missing_crypto:
-                    dat = jcg.get(cod) or {}
-                    val = dat.get('usd')
+                    val = (jcg.get(cod) or {}).get('usd')
                     if val:
                         cfg = next((c for c in EXTRAS_CFG if c[0] == cod), None)
                         datos_actuales[cod] = {
                             'nombre': cfg[1] if cfg else cod.capitalize(),
-                            'descripcion': cfg[2] if cfg else cod, 'color': cfg[3] if cfg else '#9945FF',
-                            'valor': val, 'fecha': AHORA.strftime('%Y-%m-%d'),
-                            'unidad': 'USD',
-                            'serie30': [{'valor': val, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}],
-                        }
+                            'descripcion': cfg[2] if cfg else '', 'color': cfg[3] if cfg else '#9945FF',
+                            'valor': val, 'fecha': AHORA.strftime('%Y-%m-%d'), 'unidad': 'USD',
+                            'serie30': [{'valor': val, 'fecha': AHORA.strftime('%Y-%m-%dT00:00:00')}]}
         except Exception: pass
-    logger.info(f"📈 PASO C ({_t_ind.time()-t2:.1f}s): {len(datos_actuales)} con extras")
+    logger.info(f"📈 C ({_t_ind.time()-t2:.1f}s): {len(datos_actuales)} total")
 
-    # ═══════ PASO D: Histórico 12 meses Dólar vs Euro ═══════
+    # ═══════ PASO D: Hist 12 meses Dólar vs Euro ═══════
     t3 = _t_ind.time()
-    def primer_valor_mes(serie, anio, mes):
+    def _pvm(serie, anio, mes):
         for s in reversed(serie):
-            f = s.get('fecha', '')[:7]
-            if f == '%04d-%02d' % (anio, mes):
-                return s.get('valor', None)
+            if s.get('fecha', '')[:7] == '%04d-%02d' % (anio, mes):
+                return s.get('valor')
         return None
 
-    hist_12m = {}
-    meses_labels  = []
-    meses_targets = []
+    hist_12m = {}; meses_labels = []; meses_targets = []
     MESES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
     for i in range(11, -1, -1):
-        mes_offset = AHORA.month - i
-        yr_offset  = ANIO_A
-        while mes_offset <= 0:
-            mes_offset += 12; yr_offset -= 1
-        meses_targets.append((yr_offset, mes_offset))
-        meses_labels.append(MESES_ES[mes_offset - 1] + ' ' + str(yr_offset)[-2:])
+        m = AHORA.month - i; y = ANIO_A
+        while m <= 0: m += 12; y -= 1
+        meses_targets.append((y, m))
+        meses_labels.append(MESES_ES[m-1] + ' ' + str(y)[-2:])
 
-    anios_necesarios = list(set(yr for yr, _ in meses_targets))
+    anios_n = list(set(yr for yr, _ in meses_targets))
     serie_dol = {}; serie_eur = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
         futs = {}
-        for yr in anios_necesarios:
-            futs[ex.submit(_ff, BASE + '/dolar/' + str(yr), 6)] = ('dolar', yr)
-            futs[ex.submit(_ff, BASE + '/euro/'  + str(yr), 6)] = ('euro',  yr)
+        for yr in anios_n:
+            futs[ex.submit(_ff, BASE + '/dolar/' + str(yr), 12)] = ('dolar', yr)
+            futs[ex.submit(_ff, BASE + '/euro/' + str(yr), 12)]  = ('euro', yr)
         for fut in as_completed(futs):
             cod, yr = futs[fut]
             j = fut.result()
-            serie = j.get('serie', []) if j else []
-            if cod == 'dolar': serie_dol[yr] = serie
-            else:              serie_eur[yr] = serie
+            s = j.get('serie', []) if j else []
+            if cod == 'dolar': serie_dol[yr] = s
+            else: serie_eur[yr] = s
 
     hist_12m['labels'] = meses_labels
-    hist_12m['dolar']  = []
-    hist_12m['euro']   = []
-    for yr, mes in meses_targets:
-        vd = primer_valor_mes(serie_dol.get(yr, []), yr, mes)
-        ve = primer_valor_mes(serie_eur.get(yr, []), yr, mes)
-        hist_12m['dolar'].append(round(vd, 2) if vd else None)
-        hist_12m['euro'].append(round(ve, 2) if ve else None)
-    logger.info(f"📈 PASO D ({_t_ind.time()-t3:.1f}s): hist 12m OK")
+    hist_12m['dolar'] = [round(_pvm(serie_dol.get(y, []), y, m), 2) if _pvm(serie_dol.get(y, []), y, m) else None for y, m in meses_targets]
+    hist_12m['euro']  = [round(_pvm(serie_eur.get(y, []), y, m), 2) if _pvm(serie_eur.get(y, []), y, m) else None for y, m in meses_targets]
+    logger.info(f"📈 D ({_t_ind.time()-t3:.1f}s): hist12m")
 
-    # ═══════ PASO E: Histórico 5 años (no 10) — más rápido ═══════
+    # ═══════ PASO E: Hist 5 años ═══════
     t4 = _t_ind.time()
     ANIOS_5 = list(range(ANIO_A - 4, ANIO_A + 1))
     hist_10a = {cod: {'nombre': nom, 'color': col, 'anios': ANIOS_5, 'valores': []}
                 for cod, nom, col in HIST_CFG}
-    tasks_hist = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_5]
-    raw_hist = {}
-    PORCENTAJES_H = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
+    tasks_h = [(cod, yr) for cod, *_ in HIST_CFG for yr in ANIOS_5]
+    raw_h = {}
+    PCT_H = {'ipc', 'tasa_desempleo', 'imacec', 'tpm'}
 
-    def _fetch_year(cod_yr):
+    def _fy(cod_yr):
         cod, yr = cod_yr
-        j = _ff(BASE + '/' + cod + '/' + str(yr), 6)
+        j = _ff(BASE + '/' + cod + '/' + str(yr), 10)
         return (cod, yr, j.get('serie', []) if j else [])
 
-    # 9 indicadores × 5 años = 45 requests / 8 workers × 6s = ~34s max
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for cod, yr, serie in ex.map(_fetch_year, tasks_hist):
-            raw_hist[(cod, yr)] = serie
+        for cod, yr, serie in ex.map(_fy, tasks_h):
+            raw_h[(cod, yr)] = serie
 
     for cod, nom, col in HIST_CFG:
-        valores = []
+        vals = []
         for yr in ANIOS_5:
-            serie = raw_hist.get((cod, yr), [])
-            if not serie:
-                valores.append(None); continue
-            if cod in PORCENTAJES_H:
-                vals = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
-                v = round(sum(vals) / len(vals), 3) if vals else None
+            serie = raw_h.get((cod, yr), [])
+            if not serie: vals.append(None); continue
+            if cod in PCT_H:
+                vv = [s.get('valor', 0) for s in serie if s.get('valor') is not None]
+                vals.append(round(sum(vv)/len(vv), 3) if vv else None)
             else:
-                v = round(serie[0].get('valor', 0), 2)
-            valores.append(v)
-        hist_10a[cod]['valores'] = valores
+                vals.append(round(serie[0].get('valor', 0), 2))
+        hist_10a[cod]['valores'] = vals
 
-    logger.info(f"📈 PASO E ({_t_ind.time()-t4:.1f}s): hist 5a OK")
-    logger.info(f"🏁 obtener_indicadores_chile TOTAL: {_t_ind.time()-t0:.1f}s — {len(datos_actuales)} indicadores")
+    _S.close()
+    logger.info(f"📈 E ({_t_ind.time()-t4:.1f}s): hist5a")
+    logger.info(f"🏁 TOTAL: {_t_ind.time()-t0:.1f}s — {len(datos_actuales)} indicadores")
 
     return {
         'datos_actuales': datos_actuales,
