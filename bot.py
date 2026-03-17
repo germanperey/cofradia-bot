@@ -120,8 +120,8 @@ def _ahora_chile():
 # Cache diario de comandos — se limpia automáticamente al cambiar de día
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
 def _cache_get(clave):
-    """Obtiene valor del cache si es del mismo día"""
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    """Obtiene valor del cache si es del mismo día (hora Chile)"""
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
@@ -129,8 +129,8 @@ def _cache_get(clave):
     return _cmd_cache_dia['datos'].get(clave)
 
 def _cache_set(clave, valor):
-    """Guarda valor en cache del día (se elimina al cambiar de día)"""
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    """Guarda valor en cache del día (hora Chile)"""
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
@@ -14511,38 +14511,46 @@ def obtener_indicadores_chile():
         ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
     ]
 
-    def fetch(url, timeout=20):
-        """Fetch con 2 reintentos automáticos y timeout extendido"""
-        for intento in range(3):
-            try:
-                r = requests.get(url, timeout=timeout,
-                                 headers={'Accept': 'application/json',
-                                          'User-Agent': 'CofrBot/6.0'})
-                if r.status_code == 200:
-                    return r.json()
-                elif r.status_code == 429:
-                    # Rate-limited → esperar y reintentar
-                    import time; time.sleep(1 + intento)
-                    continue
-                else:
-                    logger.debug(f'mindicador {r.status_code}: {url}')
-            except requests.exceptions.Timeout:
-                logger.debug(f'mindicador timeout (intento {intento+1}): {url}')
-                import time; time.sleep(0.5)
-            except Exception as _e:
-                logger.debug(f'mindicador fetch error: {_e}')
-                break
+    def fetch(url, timeout=18):
+        """Fetch robusto con User-Agent"""
+        try:
+            r = requests.get(url, timeout=timeout,
+                             headers={'Accept': 'application/json',
+                                      'User-Agent': 'CofrBot/6.0'})
+            if r.status_code == 200:
+                return r.json()
+            logger.debug(f'mindicador {r.status_code}: {url[-30:]}')
+        except Exception as _e:
+            logger.debug(f'mindicador fetch: {_e}')
         return None
 
-    # ── 1. Cards: serie ultimos 30 dias (4 workers para no saturar API) ───
+    # ── 1. Cards: PRIMERO obtener valores actuales en 1 SOLO request ──────
     datos_actuales = {}
-    card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
-    # Usar 4 workers en vez de 14 para no saturar mindicador.cl
+    
+    # Paso 1A: UN request a /api → todos los valores actuales al instante
+    all_data_raw = fetch(BASE, timeout=15)
+    if all_data_raw:
+        for cod, nombre, desc, color in CARDS_CFG_UNIQ:
+            ind_data = all_data_raw.get(cod)
+            if ind_data and isinstance(ind_data, dict) and ind_data.get('valor') is not None:
+                datos_actuales[cod] = {
+                    'nombre': nombre, 'descripcion': desc, 'color': color,
+                    'valor': ind_data.get('valor', 0),
+                    'fecha': str(ind_data.get('fecha', ''))[:10],
+                    'unidad': ind_data.get('unidad_medida', ''),
+                    'serie30': [{'valor': ind_data.get('valor', 0),
+                                 'fecha': str(ind_data.get('fecha', ''))}],
+                }
+        logger.info(f"📈 /api base: {len(datos_actuales)} indicadores obtenidos al instante")
+
+    # Paso 1B: Series 30 días en paralelo (4 workers para no saturar)
+    import time as _time_ind
+    codigos_serie = [cod for cod, *_ in CARDS_CFG_UNIQ]
     with ThreadPoolExecutor(max_workers=4) as ex:
-        fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
+        fut_map = {ex.submit(fetch, BASE + '/' + cod): cod for cod in codigos_serie}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
-            j   = fut.result()
+            j = fut.result()
             if j:
                 serie = j.get('serie', [])
                 if serie:
@@ -14552,40 +14560,12 @@ def obtener_indicadores_chile():
                         'descripcion': cfg[2] if cfg else '',
                         'color':       cfg[3] if cfg else '#3478c3',
                         'valor':       serie[0].get('valor', 0),
-                        'fecha':       serie[0].get('fecha', '')[:10],
+                        'fecha':       str(serie[0].get('fecha', ''))[:10],
                         'unidad':      j.get('unidad_medida', ''),
                         'serie30':     serie[:30],
                     }
 
-    # ── RETRY: reintentar indicadores que fallaron (uno por uno) ──────────
-    faltantes = [cod for cod, *_ in CARDS_CFG_UNIQ if cod not in datos_actuales]
-    if faltantes:
-        logger.warning(f"⚠️ Indicadores faltantes tras paralelo: {faltantes} — reintentando uno a uno")
-        import time as _time_retry
-        for cod in faltantes:
-            _time_retry.sleep(0.5)  # Pausa entre requests para no saturar
-            url = BASE + '/' + cod
-            j = fetch(url, timeout=25)
-            if j:
-                serie = j.get('serie', [])
-                if serie:
-                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
-                    datos_actuales[cod] = {
-                        'nombre':      cfg[1] if cfg else cod,
-                        'descripcion': cfg[2] if cfg else '',
-                        'color':       cfg[3] if cfg else '#3478c3',
-                        'valor':       serie[0].get('valor', 0),
-                        'fecha':       serie[0].get('fecha', '')[:10],
-                        'unidad':      j.get('unidad_medida', ''),
-                        'serie30':     serie[:30],
-                    }
-                    logger.info(f"✅ Retry exitoso: {cod}")
-                else:
-                    logger.warning(f"❌ Retry sin serie: {cod}")
-            else:
-                logger.warning(f"❌ Retry falló: {cod}")
-    
-    logger.info(f"📈 Cards obtenidas: {sorted(datos_actuales.keys())} ({len(datos_actuales)}/{len(CARDS_CFG_UNIQ)})")
+    logger.info(f"📈 Cards finales: {sorted(datos_actuales.keys())} ({len(datos_actuales)} total)")
 
     # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
     def primer_valor_mes(serie, anio, mes):
@@ -15838,7 +15818,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     /indicadores — Dashboard económico con cache diario.
     Primera consulta del día: APIs + IA (~20s). Siguientes: cache (~2s).
     """
-    hoy = datetime.now().strftime('%Y-%m-%d')
+    hoy = _ahora_chile().strftime('%Y-%m-%d')
     datos_cmf = {}
     datos_afp = {}
 
@@ -16813,7 +16793,7 @@ async def emergencia_tipo_callback(update: Update, context: ContextTypes.DEFAULT
              'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'}
     tipo = tipos.get(query.data, 'EMERGENCIA')
     context.user_data['emer_tipo'] = tipo
-    context.user_data['emer_hora'] = datetime.now().strftime('%H:%M:%S')
+    context.user_data['emer_hora'] = _ahora_chile().strftime('%H:%M:%S')
     context.user_data['emer_step'] = 'descripcion'
     await query.edit_message_text(
         f"🚨 {tipo}\n\n"
@@ -16900,7 +16880,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     """Envía alerta de emergencia a todos los topics del grupo + Google Maps"""
     user = update.effective_user
     tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
-    hora = context.user_data.get('emer_hora', datetime.now().strftime('%H:%M:%S'))
+    hora = context.user_data.get('emer_hora', _ahora_chile().strftime('%H:%M:%S'))
     direccion = context.user_data.get('emer_direccion', 'No especificada')
     maps_url = context.user_data.get('emer_maps', '')
     descripcion = context.user_data.get('emer_desc', '')
@@ -16940,7 +16920,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.debug(f"Error teléfono emergencia: {e}")
 
-    ahora = datetime.now()
+    ahora = _ahora_chile()
     try:
         hora_dt = datetime.strptime(hora, '%H:%M:%S').replace(
             year=ahora.year, month=ahora.month, day=ahora.day)
