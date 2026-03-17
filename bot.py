@@ -117,10 +117,9 @@ def _ahora_chile():
     except Exception:
         return datetime.utcnow() - timedelta(hours=3)
 
-# Cache diario de comandos — se limpia automáticamente al cambiar de día
+# Cache diario de comandos — se limpia automáticamente al cambiar de día (hora Chile)
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
 def _cache_get(clave):
-    """Obtiene valor del cache si es del mismo día (hora Chile)"""
     hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
@@ -129,7 +128,6 @@ def _cache_get(clave):
     return _cmd_cache_dia['datos'].get(clave)
 
 def _cache_set(clave, valor):
-    """Guarda valor en cache del día (hora Chile)"""
     hoy = _ahora_chile().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
@@ -14477,7 +14475,7 @@ def obtener_indicadores_chile():
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     BASE   = 'https://mindicador.cl/api'
-    AHORA  = datetime.now()
+    AHORA  = _ahora_chile()
     ANIO_A = AHORA.year
 
     # ── Indicadores para cards actuales (12) ──────────────────────────────
@@ -14512,45 +14510,46 @@ def obtener_indicadores_chile():
     ]
 
     def fetch(url, timeout=18):
-        """Fetch robusto con User-Agent"""
-        try:
-            r = requests.get(url, timeout=timeout,
-                             headers={'Accept': 'application/json',
-                                      'User-Agent': 'CofrBot/6.0'})
-            if r.status_code == 200:
-                return r.json()
-            logger.debug(f'mindicador {r.status_code}: {url[-30:]}')
-        except Exception as _e:
-            logger.debug(f'mindicador fetch: {_e}')
+        """Fetch con User-Agent y retry en 429"""
+        for _try in range(2):
+            try:
+                r = requests.get(url, timeout=timeout,
+                                 headers={'Accept': 'application/json',
+                                          'User-Agent': 'Mozilla/5.0 CofrBot/6.0'})
+                if r.status_code == 200:
+                    return r.json()
+                if r.status_code == 429:
+                    import time; time.sleep(1)
+                    continue
+            except Exception as _e:
+                logger.debug(f'mindicador fetch: {_e}')
         return None
 
-    # ── 1. Cards: PRIMERO obtener valores actuales en 1 SOLO request ──────
+    # ── 1. Cards: PASO A) 1 solo request a /api para valores actuales ─────
     datos_actuales = {}
-    
-    # Paso 1A: UN request a /api → todos los valores actuales al instante
-    all_data_raw = fetch(BASE, timeout=15)
-    if all_data_raw:
+
+    # Un solo request obtiene TODOS los indicadores al instante
+    j_all = fetch(BASE, timeout=15)
+    if j_all:
         for cod, nombre, desc, color in CARDS_CFG_UNIQ:
-            ind_data = all_data_raw.get(cod)
-            if ind_data and isinstance(ind_data, dict) and ind_data.get('valor') is not None:
+            d = j_all.get(cod)
+            if d and isinstance(d, dict) and d.get('valor') is not None:
                 datos_actuales[cod] = {
                     'nombre': nombre, 'descripcion': desc, 'color': color,
-                    'valor': ind_data.get('valor', 0),
-                    'fecha': str(ind_data.get('fecha', ''))[:10],
-                    'unidad': ind_data.get('unidad_medida', ''),
-                    'serie30': [{'valor': ind_data.get('valor', 0),
-                                 'fecha': str(ind_data.get('fecha', ''))}],
+                    'valor': d['valor'],
+                    'fecha': str(d.get('fecha', ''))[:10],
+                    'unidad': d.get('unidad_medida', ''),
+                    'serie30': [{'valor': d['valor'], 'fecha': str(d.get('fecha', ''))}],
                 }
-        logger.info(f"📈 /api base: {len(datos_actuales)} indicadores obtenidos al instante")
+        logger.info(f"📈 Paso A (/api): {len(datos_actuales)} indicadores instantáneos")
 
-    # Paso 1B: Series 30 días en paralelo (4 workers para no saturar)
-    import time as _time_ind
-    codigos_serie = [cod for cod, *_ in CARDS_CFG_UNIQ]
+    # PASO B) Series 30 días en paralelo (4 workers, no satura la API)
     with ThreadPoolExecutor(max_workers=4) as ex:
-        fut_map = {ex.submit(fetch, BASE + '/' + cod): cod for cod in codigos_serie}
+        fut_map = {ex.submit(fetch, BASE + '/' + cod): cod
+                   for cod, *_ in CARDS_CFG_UNIQ}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
-            j = fut.result()
+            j   = fut.result()
             if j:
                 serie = j.get('serie', [])
                 if serie:
@@ -14564,6 +14563,25 @@ def obtener_indicadores_chile():
                         'unidad':      j.get('unidad_medida', ''),
                         'serie30':     serie[:30],
                     }
+
+    # PASO C) Retry individual para los que aún falten
+    faltantes = [c for c, *_ in CARDS_CFG_UNIQ if c not in datos_actuales]
+    if faltantes:
+        logger.warning(f"⚠️ Faltantes: {faltantes} — retry individual")
+        import time as _t_retry
+        for cod in faltantes:
+            _t_retry.sleep(0.8)
+            j = fetch(BASE + '/' + cod, timeout=25)
+            if j and j.get('serie'):
+                serie = j['serie']
+                cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
+                datos_actuales[cod] = {
+                    'nombre': cfg[1] if cfg else cod, 'descripcion': cfg[2] if cfg else '',
+                    'color': cfg[3] if cfg else '#3478c3', 'valor': serie[0].get('valor', 0),
+                    'fecha': str(serie[0].get('fecha', ''))[:10],
+                    'unidad': j.get('unidad_medida', ''), 'serie30': serie[:30],
+                }
+                logger.info(f"✅ Retry OK: {cod}")
 
     logger.info(f"📈 Cards finales: {sorted(datos_actuales.keys())} ({len(datos_actuales)} total)")
 
@@ -14770,7 +14788,7 @@ def obtener_indicadores_cmf():
     Campos reales del JSON CMF:
       TMC: TMCs[{Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo}]
     """
-    AHORA = datetime.now()
+    AHORA = _ahora_chile()
     HDR   = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
 
     # Labels unicos por Tipo (codigo numerico garantizado por CMF, nunca cambia)
@@ -14889,7 +14907,7 @@ def obtener_rentabilidad_afp():
     from datetime import timedelta
     from collections import defaultdict
 
-    AHORA   = datetime.now()
+    AHORA   = _ahora_chile()
     INICIO  = AHORA - timedelta(days=183)
     FI_STR  = INICIO.strftime("%d/%m/%Y")
     FF_STR  = AHORA.strftime("%d/%m/%Y")
@@ -15929,7 +15947,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "- Cripto (Bitcoin, Ethereum)\n"
                     "- Economia interna Chile, aranceles, comercio\n\n"
                     "Formato: TITULO | Resumen 2 lineas | Impacto: indicadores (alza/baja)\n"
-                    f"SOLO noticias de {_anio_n}. NUNCA mencionar anos anteriores. 7 noticias."
+                    f"SOLO noticias {_anio_n}. NUNCA mencionar anos anteriores. 7 noticias."
                 )
                 news_ia = llamar_groq(prompt_news, max_tokens=1200, temperature=0.3)
                 if news_ia:
@@ -15953,7 +15971,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             _indicadores_cache['html_content'] = html_content
             logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
 
-        # 6. Mensaje de texto con ICONOS por indicador
+        # 6. Mensaje de texto con ICONOS
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
         ICONOS = {
@@ -16098,7 +16116,7 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       1. API oficial Gobierno de Chile: apis.digital.gob.cl/fl/feriados/{año}
       2. Backup boostr.cl: api.boostr.cl/holidays.json  (filtra por año)
     """
-    AHORA     = datetime.now()
+    AHORA     = _ahora_chile()
     anio_arg  = None
     if context.args:
         try:
