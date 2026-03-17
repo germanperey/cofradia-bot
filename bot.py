@@ -107,6 +107,8 @@ jsearch_disponible = False
 db_disponible = False
 
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
+_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
+
 def _ahora_chile():
     """Retorna datetime en hora Chile (America/Santiago) — NO UTC"""
     try:
@@ -114,8 +116,6 @@ def _ahora_chile():
         return datetime.now(ZoneInfo('America/Santiago')).replace(tzinfo=None)
     except Exception:
         return datetime.utcnow() - timedelta(hours=3)
-
-_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
 # Cache diario de comandos — se limpia automáticamente al cambiar de día
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
@@ -14511,20 +14511,34 @@ def obtener_indicadores_chile():
         ('bitcoin',        'Bitcoin (CLP)',   '#9b59b6'),
     ]
 
-    def fetch(url, timeout=14):
-        try:
-            r = requests.get(url, timeout=timeout,
-                             headers={'Accept': 'application/json'})
-            if r.status_code == 200:
-                return r.json()
-        except Exception as _e:
-            logger.debug('mindicador fetch: ' + str(_e))
+    def fetch(url, timeout=20):
+        """Fetch con 2 reintentos automáticos y timeout extendido"""
+        for intento in range(3):
+            try:
+                r = requests.get(url, timeout=timeout,
+                                 headers={'Accept': 'application/json',
+                                          'User-Agent': 'CofrBot/6.0'})
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code == 429:
+                    # Rate-limited → esperar y reintentar
+                    import time; time.sleep(1 + intento)
+                    continue
+                else:
+                    logger.debug(f'mindicador {r.status_code}: {url}')
+            except requests.exceptions.Timeout:
+                logger.debug(f'mindicador timeout (intento {intento+1}): {url}')
+                import time; time.sleep(0.5)
+            except Exception as _e:
+                logger.debug(f'mindicador fetch error: {_e}')
+                break
         return None
 
-    # ── 1. Cards: serie ultimos 30 dias ───────────────────────────────────
+    # ── 1. Cards: serie ultimos 30 dias (4 workers para no saturar API) ───
     datos_actuales = {}
     card_tasks = {cod: BASE + '/' + cod for cod, *_ in CARDS_CFG_UNIQ}
-    with ThreadPoolExecutor(max_workers=14) as ex:
+    # Usar 4 workers en vez de 14 para no saturar mindicador.cl
+    with ThreadPoolExecutor(max_workers=4) as ex:
         fut_map = {ex.submit(fetch, url): cod for cod, url in card_tasks.items()}
         for fut in as_completed(fut_map):
             cod = fut_map[fut]
@@ -14542,6 +14556,36 @@ def obtener_indicadores_chile():
                         'unidad':      j.get('unidad_medida', ''),
                         'serie30':     serie[:30],
                     }
+
+    # ── RETRY: reintentar indicadores que fallaron (uno por uno) ──────────
+    faltantes = [cod for cod, *_ in CARDS_CFG_UNIQ if cod not in datos_actuales]
+    if faltantes:
+        logger.warning(f"⚠️ Indicadores faltantes tras paralelo: {faltantes} — reintentando uno a uno")
+        import time as _time_retry
+        for cod in faltantes:
+            _time_retry.sleep(0.5)  # Pausa entre requests para no saturar
+            url = BASE + '/' + cod
+            j = fetch(url, timeout=25)
+            if j:
+                serie = j.get('serie', [])
+                if serie:
+                    cfg = next((c for c in CARDS_CFG_UNIQ if c[0] == cod), None)
+                    datos_actuales[cod] = {
+                        'nombre':      cfg[1] if cfg else cod,
+                        'descripcion': cfg[2] if cfg else '',
+                        'color':       cfg[3] if cfg else '#3478c3',
+                        'valor':       serie[0].get('valor', 0),
+                        'fecha':       serie[0].get('fecha', '')[:10],
+                        'unidad':      j.get('unidad_medida', ''),
+                        'serie30':     serie[:30],
+                    }
+                    logger.info(f"✅ Retry exitoso: {cod}")
+                else:
+                    logger.warning(f"❌ Retry sin serie: {cod}")
+            else:
+                logger.warning(f"❌ Retry falló: {cod}")
+    
+    logger.info(f"📈 Cards obtenidas: {sorted(datos_actuales.keys())} ({len(datos_actuales)}/{len(CARDS_CFG_UNIQ)})")
 
     # ── 2. Dolar vs Euro ultimos 12 meses (inicio de cada mes) ───────────
     def primer_valor_mes(serie, anio, mes):
@@ -14604,7 +14648,7 @@ def obtener_indicadores_chile():
         j = fetch(BASE + '/' + cod + '/' + str(yr), timeout=15)
         return (cod, yr, j.get('serie', []) if j else [])
 
-    with ThreadPoolExecutor(max_workers=30) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         for cod, yr, serie in ex.map(fetch_year, tasks_hist):
             raw_hist[(cod, yr)] = serie
 
@@ -15896,22 +15940,16 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 _anio_n = _ahora_chile().strftime('%Y')
                 _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
                 prompt_news = (
-                    f"Eres un analista economico chileno experto. HOY es {_fecha_n}.\n"
-                    f"Analiza las 7 noticias MAS IMPORTANTES de esta semana ({_anio_n}) "
-                    "que impactan los indicadores economicos de Chile.\n\n"
-                    "OBLIGATORIO incluir noticias sobre:\n"
-                    "- Conflictos geopoliticos actuales (guerras, bloqueos maritimos, sanciones)\n"
-                    "- Decisiones de la Fed de EE.UU. y bancos centrales\n"
-                    "- Precio del cobre y materias primas\n"
-                    "- Politica monetaria del Banco Central de Chile\n"
-                    "- Mercados cripto (Bitcoin, Ethereum)\n"
-                    "- Situacion economica interna de Chile\n"
-                    "- Comercio internacional y aranceles\n\n"
-                    "Para CADA noticia escribe:\n"
-                    "TITULO_BREVE | Resumen de 2 lineas | "
-                    "Impacto: indicadores afectados con flecha (alza o baja) y por que\n\n"
-                    f"IMPORTANTE: Solo noticias de {_anio_n}. NO mencionar datos de anos anteriores.\n"
-                    "Sin emojis. 7 noticias. Directo al contenido."
+                    f"Eres analista economico chileno. HOY es {_fecha_n} (ano {_anio_n}).\n"
+                    f"Lista 7 noticias RECIENTES de esta semana que impactan indicadores economicos.\n\n"
+                    "OBLIGATORIO incluir:\n"
+                    "- Conflictos geopoliticos (guerras, bloqueos maritimos, sanciones)\n"
+                    "- Decisiones Fed EE.UU., BCE, Banco Central Chile\n"
+                    "- Precio cobre y materias primas\n"
+                    "- Cripto (Bitcoin, Ethereum)\n"
+                    "- Economia interna Chile, aranceles, comercio\n\n"
+                    "Formato: TITULO | Resumen 2 lineas | Impacto: indicadores (alza/baja)\n"
+                    f"SOLO noticias de {_anio_n}. NUNCA mencionar anos anteriores. 7 noticias."
                 )
                 news_ia = llamar_groq(prompt_news, max_tokens=1200, temperature=0.3)
                 if news_ia:
