@@ -2825,7 +2825,7 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
     return ONBOARD_NOMBRE
 
 
-@solo_chat_privado
+@requiere_suscripcion
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos con ejemplos expandibles"""
     user_id = update.effective_user.id
@@ -17108,6 +17108,28 @@ def main():
     
     application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
+    # ── LOGGER GLOBAL: registra TODO comando recibido (para diagnóstico) ──
+    async def _log_all_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.text:
+            chat = update.effective_chat
+            user = update.effective_user
+            logger.info(f"📩 CMD: '{update.message.text[:50]}' from {user.first_name}({user.id}) in {chat.type}({chat.id})")
+    application.add_handler(MessageHandler(filters.COMMAND, _log_all_commands), group=-1)
+    
+    # ── DIAGNÓSTICO: /ping sin decoradores, funciona en CUALQUIER chat ──
+    async def _ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat = update.effective_chat
+        user = update.effective_user
+        info = (f"🏓 PONG!\n"
+                f"Chat: {chat.type} (id: {chat.id})\n"
+                f"User: {user.first_name} (id: {user.id})\n"
+                f"OWNER_ID: {OWNER_ID}\n"
+                f"Match: {'SI' if user.id == OWNER_ID else 'NO'}\n"
+                f"Thread: {update.message.message_thread_id if update.message else 'N/A'}")
+        logger.info(f"🏓 PING desde {chat.type} chat_id={chat.id} user={user.id}")
+        await update.message.reply_text(info)
+    application.add_handler(CommandHandler("ping", _ping_cmd))
+    
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
@@ -17229,9 +17251,10 @@ def main():
         completar_item_comando
     ))
     
-    # Onboarding: ConversationHandler — SOLO en chat privado, con timeout
+    # Onboarding: ConversationHandler para preguntas de ingreso
+    # /start es el entry point - detecta si es usuario nuevo o registrado
+    # Onboarding: SOLO chat privado, con timeout y fallback para comandos
     async def _onboard_fallback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cualquier otro comando cancela onboarding para no bloquear"""
         context.user_data.pop('onboard_activo', None)
         return ConversationHandler.END
 
@@ -17257,12 +17280,12 @@ def main():
         conversation_timeout=300,
     )
     application.add_handler(onboarding_conv)
-    # /start en grupo → respuesta simple sin onboarding
+    # /start en grupo sin onboarding
     async def _start_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "⚓ Cofradía de Networking — Bot Premium\n\n"
-            "Escribe /ayuda para ver los comandos.\n"
-            "Para registrarte escríbeme en privado: @Cofradia_Premium_Bot")
+            "⚓ Cofradía de Networking — Bot Premium\n"
+            "Escribe /ayuda o /ping para ver si funciono.\n"
+            "Para registrarte: @Cofradia_Premium_Bot")
     application.add_handler(CommandHandler("start", _start_grupo, filters=filters.ChatType.GROUPS))
     
     # ChatJoinRequest handler (fallback si alguien solicita por link con aprobación)
