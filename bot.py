@@ -74,6 +74,7 @@ DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')  # Obtener en platform.dee
 TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
+logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -14550,10 +14551,10 @@ def obtener_indicadores_chile():
     resultado_dolar = None   # json de dolarapi.com
 
     def _fetch_findic(cod):
-        return _get('https://findic.cl/api/' + cod, 12)
+        return _get('https://findic.cl/api/' + cod, 5)
 
     def _fetch_mindicador():
-        return _get('https://mindicador.cl/api', 15)
+        return _get('https://mindicador.cl/api', 8)
 
     def _fetch_dolarapi():
         try:
@@ -14638,8 +14639,8 @@ def obtener_indicadores_chile():
     if sin_serie:
         try:
             with ThreadPoolExecutor(max_workers=6) as ex:
-                futs = {ex.submit(_get, 'https://findic.cl/api/' + cod, 8): cod for cod in sin_serie}
-                for fut in as_completed(futs, timeout=15):
+                futs = {ex.submit(_get, 'https://findic.cl/api/' + cod, 3): cod for cod in sin_serie}
+                for fut in as_completed(futs, timeout=8):
                     cod = futs[fut]
                     try:
                         j = fut.result()
@@ -14649,7 +14650,7 @@ def obtener_indicadores_chile():
         except Exception: pass
     logger.info(f"📈 SERIES ({_t.time()-t1:.1f}s)")
 
-    # ═══════ HIST 12 meses — findic.cl, timeout 8s ═══════
+    # ═══════ HIST 12 meses — timeout 3s, max 10s total ═══════
     t3 = _t.time()
     hist_12m = {'labels': [], 'dolar': [], 'euro': []}
     try:
@@ -14670,9 +14671,9 @@ def obtener_indicadores_chile():
         with ThreadPoolExecutor(max_workers=4) as ex:
             futs = {}
             for yr in an:
-                futs[ex.submit(_get, f'https://findic.cl/api/dolar/{yr}', 8)] = ('d', yr)
-                futs[ex.submit(_get, f'https://findic.cl/api/euro/{yr}', 8)]  = ('e', yr)
-            for fut in as_completed(futs, timeout=20):
+                futs[ex.submit(_get, f'https://findic.cl/api/dolar/{yr}', 3)] = ('d', yr)
+                futs[ex.submit(_get, f'https://findic.cl/api/euro/{yr}', 3)]  = ('e', yr)
+            for fut in as_completed(futs, timeout=10):
                 k, yr = futs[fut]; j = fut.result(); s = j.get('serie', []) if j else []
                 if k == 'd': sd[yr] = s
                 else: se[yr] = s
@@ -14681,10 +14682,10 @@ def obtener_indicadores_chile():
         hist_12m['dolar'] = [round(_pvm(sd.get(y,[]),y,m),2) if _pvm(sd.get(y,[]),y,m) else None for y,m in mt]
         hist_12m['euro']  = [round(_pvm(se.get(y,[]),y,m),2) if _pvm(se.get(y,[]),y,m) else None for y,m in mt]
     except Exception as _eh:
-        logger.warning(f"⚠️ HIST12 falló (OK, gráfico vacío): {_eh}")
+        logger.warning(f"⚠️ HIST12 skip: {_eh}")
     logger.info(f"📈 HIST12 ({_t.time()-t3:.1f}s)")
 
-    # ═══════ HIST 5 años — findic.cl, timeout 8s ═══════
+    # ═══════ HIST 5 años — timeout 3s, max 15s total ═══════
     t4 = _t.time()
     A5 = list(range(ANIO_A - 4, ANIO_A + 1))
     hist_10a = {cod: {'nombre': n, 'color': c, 'anios': A5, 'valores': []} for cod, n, c in HIST_CFG}
@@ -14694,11 +14695,11 @@ def obtener_indicadores_chile():
 
         def _fy(cy):
             c, y = cy
-            j = _get(f'https://findic.cl/api/{c}/{y}', 8)
+            j = _get(f'https://findic.cl/api/{c}/{y}', 3)
             return (c, y, j.get('serie', []) if j else [])
 
         with ThreadPoolExecutor(max_workers=10) as ex:
-            for c, y, s in ex.map(_fy, th, timeout=30): rh[(c,y)] = s
+            for c, y, s in ex.map(_fy, th, timeout=15): rh[(c,y)] = s
 
         for cod, n, cl in HIST_CFG:
             vl = []
@@ -14711,7 +14712,7 @@ def obtener_indicadores_chile():
                 else: vl.append(round(s[0].get('valor',0),2))
             hist_10a[cod]['valores'] = vl
     except Exception as _eh5:
-        logger.warning(f"⚠️ HIST5 falló (OK, gráficos vacíos): {_eh5}")
+        logger.warning(f"⚠️ HIST5 skip: {_eh5}")
 
     _S.close()
     logger.info(f"📈 HIST5 ({_t.time()-t4:.1f}s)")
@@ -17852,6 +17853,37 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
+    # ── ERROR HANDLER GLOBAL: maneja Topic_closed en grupos con forum ──
+    async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        """Captura errores globales — especialmente Topic_closed en grupos forum"""
+        import traceback
+        error = context.error
+        error_msg = str(error).lower()
+        
+        # Topic_closed: el topic donde escribió el usuario está cerrado
+        if 'topic_closed' in error_msg or 'topic_deleted' in error_msg:
+            if update and hasattr(update, 'effective_chat') and update.effective_chat:
+                try:
+                    # Reintentar en el General topic (sin message_thread_id)
+                    cmd = ''
+                    if hasattr(update, 'message') and update.message and update.message.text:
+                        cmd = update.message.text.split()[0] if update.message.text else ''
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"⚠️ El topic donde escribiste está cerrado.\n"
+                             f"Escribe {cmd} aquí en General para que funcione."
+                    )
+                except Exception:
+                    pass
+            logger.warning(f"Topic cerrado: {error}")
+            return
+        
+        # Otros errores: loguear
+        logger.error(f"Error no manejado: {error}\n{''.join(traceback.format_exception(type(error), error, error.__traceback__))[:500]}")
+    
+    application.add_error_handler(_global_error_handler)
+    
+    # POLLING
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
