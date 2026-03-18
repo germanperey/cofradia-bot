@@ -2578,13 +2578,21 @@ def requiere_suscripcion(func):
         if user_id == OWNER_ID:
             return await func(update, context)
         
+        # Admin anónimo en el grupo de Cofradía → permitir (solo admins pueden enviar anónimo)
+        ANONYMOUS_BOT_ID = 1087968824  # GroupAnonymousBot de Telegram
+        if user_id == ANONYMOUS_BOT_ID and update.effective_chat:
+            chat_id = update.effective_chat.id
+            if chat_id == COFRADIA_GROUP_ID or (COFRADIA_GROUP_ID and chat_id == COFRADIA_GROUP_ID):
+                return await func(update, context)
+        
         if not verificar_suscripcion_activa(user_id):
-            await update.message.reply_text(
-                "❌ **Falta activar tu cuenta**\n\n"
-                "👉 Actívala desde @Cofradia_Premium_Bot con el comando /start "
-                "para empezar a asesorarte en Networking y en todo lo que necesites.",
-                parse_mode='Markdown'
-            )
+            # Solo mostrar error en chat privado (no spamear el grupo)
+            if update.effective_chat and update.effective_chat.type == 'private':
+                await update.message.reply_text(
+                    "❌ Falta activar tu cuenta\n\n"
+                    "Actívala desde @Cofradia_Premium_Bot con el comando /start "
+                    "para empezar a asesorarte en Networking y en todo lo que necesites."
+                )
             return
         return await func(update, context)
     return wrapper
@@ -4245,13 +4253,16 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tiene_mencion_at and not tiene_mencion_bot:
         return
     
-    # Verificar si es el owner (siempre tiene acceso)
+    # Verificar si es el owner o admin anónimo del grupo Cofradía
+    ANONYMOUS_BOT_ID = 1087968824
     es_owner = (user_id == OWNER_ID)
+    es_admin_grupo = (user_id == ANONYMOUS_BOT_ID and update.effective_chat
+                      and update.effective_chat.id == COFRADIA_GROUP_ID)
     
-    if not es_owner and not verificar_suscripcion_activa(user_id):
+    if not es_owner and not es_admin_grupo and not verificar_suscripcion_activa(user_id):
         await update.message.reply_text(
-            "👋 ¡Hola! Falta activar tu cuenta.\n\n"
-            "👉 Actívala desde @Cofradia_Premium_Bot con /start "
+            "👋 Hola! Falta activar tu cuenta.\n\n"
+            "Actívala desde @Cofradia_Premium_Bot con /start "
             "para empezar a asesorarte en Networking y en todo lo que necesites."
         )
         return
@@ -16974,34 +16985,16 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook anterior + verificar grupo + configurar comandos"""
-        # PASO 1: Limpiar webhook SIN descartar updates (preserva conexión con grupo)
+        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
+        # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
-            await app.bot.delete_webhook(drop_pending_updates=False)
-            logger.info("🧹 Webhook eliminado (updates preservados)")
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
         
-        # PASO 2: Esperar que la instancia anterior muera en Render
-        await asyncio.sleep(5)
-        
-        # PASO 2.1: Flush updates viejos con getUpdates offset=-1
-        try:
-            updates = await app.bot.get_updates(offset=-1, timeout=1)
-            if updates:
-                await app.bot.get_updates(offset=updates[-1].update_id + 1, timeout=1)
-            logger.info(f"🔄 Updates flushed ({len(updates) if updates else 0} pendientes)")
-        except Exception as e:
-            logger.debug(f"Flush updates: {e}")
-        
-        # PASO 2.2: Verificar conexión con grupo de Cofradía
-        if COFRADIA_GROUP_ID:
-            try:
-                chat = await app.bot.get_chat(COFRADIA_GROUP_ID)
-                me = await app.bot.get_chat_member(COFRADIA_GROUP_ID, (await app.bot.get_me()).id)
-                logger.info(f"✅ GRUPO OK: {chat.title} — Bot es: {me.status}")
-            except Exception as e:
-                logger.error(f"❌ GRUPO ERROR: {e} — El bot puede no recibir comandos del grupo")
+        # PASO 2: Esperar un momento para que Telegram procese la eliminación
+        await asyncio.sleep(2)
         
         # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
@@ -17832,7 +17825,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
+        drop_pending_updates=True,
         close_loop=False,
     )
 
