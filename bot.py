@@ -14618,91 +14618,86 @@ def obtener_indicadores_chile():
 
     logger.info(f"📈 MERGED: {sorted(datos_actuales.keys())} ({len(datos_actuales)}/14)")
 
-    # ═══════ Series 30d para los que vinieron sin serie ═══════
+    # ═══════ Series 30d — solo findic, timeout corto, NUNCA bloquea ═══════
     t1 = _t.time()
     sin_serie = [cod for cod in datos_actuales if len(datos_actuales[cod].get('serie30', [])) <= 1]
     if sin_serie:
-        def _fetch_serie30(cod):
-            # Intentar findic primero, luego mindicador
-            j = _get('https://findic.cl/api/' + cod, 12)
-            if not j or not j.get('serie'):
-                j = _get('https://mindicador.cl/api/' + cod, 15)
-            return (cod, j)
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            futs = {ex.submit(_fetch_serie30, cod): cod for cod in sin_serie}
-            for fut in as_completed(futs):
-                cod = futs[fut]
-                try:
-                    _, j = fut.result()
-                    if j and j.get('serie'):
-                        datos_actuales[cod]['serie30'] = j['serie'][:30]
-                except Exception: pass
+        try:
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futs = {ex.submit(_get, 'https://findic.cl/api/' + cod, 8): cod for cod in sin_serie}
+                for fut in as_completed(futs, timeout=15):
+                    cod = futs[fut]
+                    try:
+                        j = fut.result()
+                        if j and j.get('serie'):
+                            datos_actuales[cod]['serie30'] = j['serie'][:30]
+                    except Exception: pass
+        except Exception: pass
     logger.info(f"📈 SERIES ({_t.time()-t1:.1f}s)")
 
-    # ═══════ HIST 12 meses Dólar vs Euro ═══════
+    # ═══════ HIST 12 meses — findic.cl, timeout 8s ═══════
     t3 = _t.time()
-    def _pvm(serie, anio, mes):
-        for s in reversed(serie):
-            if s.get('fecha', '')[:7] == '%04d-%02d' % (anio, mes): return s.get('valor')
-        return None
+    hist_12m = {'labels': [], 'dolar': [], 'euro': []}
+    try:
+        def _pvm(serie, anio, mes):
+            for s in reversed(serie):
+                if s.get('fecha', '')[:7] == '%04d-%02d' % (anio, mes): return s.get('valor')
+            return None
 
-    hist_12m = {}; ml = []; mt = []
-    MES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
-    for i in range(11, -1, -1):
-        m = AHORA.month - i; y = ANIO_A
-        while m <= 0: m += 12; y -= 1
-        mt.append((y, m)); ml.append(MES[m-1] + ' ' + str(y)[-2:])
+        ml = []; mt = []
+        MES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+        for i in range(11, -1, -1):
+            m = AHORA.month - i; y = ANIO_A
+            while m <= 0: m += 12; y -= 1
+            mt.append((y, m)); ml.append(MES[m-1] + ' ' + str(y)[-2:])
 
-    # Intentar findic.cl Y mindicador.cl en paralelo (el que responda primero gana)
-    an = list(set(yr for yr, _ in mt))
-    sd = {}; se = {}
-    def _fetch_hist_yr(params):
-        cod, yr = params
-        # Intentar findic primero, luego mindicador
-        j = _get(f'https://findic.cl/api/{cod}/{yr}', 15)
-        if not j or not j.get('serie'):
-            j = _get(f'https://mindicador.cl/api/{cod}/{yr}', 20)
-        return (cod, yr, j.get('serie', []) if j else [])
+        an = list(set(yr for yr, _ in mt))
+        sd = {}; se = {}
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {}
+            for yr in an:
+                futs[ex.submit(_get, f'https://findic.cl/api/dolar/{yr}', 8)] = ('d', yr)
+                futs[ex.submit(_get, f'https://findic.cl/api/euro/{yr}', 8)]  = ('e', yr)
+            for fut in as_completed(futs, timeout=20):
+                k, yr = futs[fut]; j = fut.result(); s = j.get('serie', []) if j else []
+                if k == 'd': sd[yr] = s
+                else: se[yr] = s
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        tasks_12m = [('dolar', yr) for yr in an] + [('euro', yr) for yr in an]
-        for cod, yr, serie in ex.map(_fetch_hist_yr, tasks_12m):
-            if cod == 'dolar': sd[yr] = serie
-            else: se[yr] = serie
-
-    hist_12m['labels'] = ml
-    hist_12m['dolar'] = [round(_pvm(sd.get(y,[]),y,m),2) if _pvm(sd.get(y,[]),y,m) else None for y,m in mt]
-    hist_12m['euro']  = [round(_pvm(se.get(y,[]),y,m),2) if _pvm(se.get(y,[]),y,m) else None for y,m in mt]
+        hist_12m['labels'] = ml
+        hist_12m['dolar'] = [round(_pvm(sd.get(y,[]),y,m),2) if _pvm(sd.get(y,[]),y,m) else None for y,m in mt]
+        hist_12m['euro']  = [round(_pvm(se.get(y,[]),y,m),2) if _pvm(se.get(y,[]),y,m) else None for y,m in mt]
+    except Exception as _eh:
+        logger.warning(f"⚠️ HIST12 falló (OK, gráfico vacío): {_eh}")
     logger.info(f"📈 HIST12 ({_t.time()-t3:.1f}s)")
 
-    # ═══════ HIST 5 años ═══════
+    # ═══════ HIST 5 años — findic.cl, timeout 8s ═══════
     t4 = _t.time()
     A5 = list(range(ANIO_A - 4, ANIO_A + 1))
     hist_10a = {cod: {'nombre': n, 'color': c, 'anios': A5, 'valores': []} for cod, n, c in HIST_CFG}
-    th = [(cod, yr) for cod, *_ in HIST_CFG for yr in A5]
-    rh = {}; PH = {'ipc','tasa_desempleo','imacec','tpm'}
+    try:
+        th = [(cod, yr) for cod, *_ in HIST_CFG for yr in A5]
+        rh = {}; PH = {'ipc','tasa_desempleo','imacec','tpm'}
 
-    def _fy(cy):
-        c, y = cy
-        # Intentar findic primero, luego mindicador
-        j = _get(f'https://findic.cl/api/{c}/{y}', 15)
-        if not j or not j.get('serie'):
-            j = _get(f'https://mindicador.cl/api/{c}/{str(y)}', 20)
-        return (c, y, j.get('serie', []) if j else [])
+        def _fy(cy):
+            c, y = cy
+            j = _get(f'https://findic.cl/api/{c}/{y}', 8)
+            return (c, y, j.get('serie', []) if j else [])
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for c, y, s in ex.map(_fy, th): rh[(c,y)] = s
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            for c, y, s in ex.map(_fy, th, timeout=30): rh[(c,y)] = s
 
-    for cod, n, cl in HIST_CFG:
-        vl = []
-        for yr in A5:
-            s = rh.get((cod,yr), [])
-            if not s: vl.append(None); continue
-            if cod in PH:
-                vv = [x.get('valor',0) for x in s if x.get('valor') is not None]
-                vl.append(round(sum(vv)/len(vv),3) if vv else None)
-            else: vl.append(round(s[0].get('valor',0),2))
-        hist_10a[cod]['valores'] = vl
+        for cod, n, cl in HIST_CFG:
+            vl = []
+            for yr in A5:
+                s = rh.get((cod,yr), [])
+                if not s: vl.append(None); continue
+                if cod in PH:
+                    vv = [x.get('valor',0) for x in s if x.get('valor') is not None]
+                    vl.append(round(sum(vv)/len(vv),3) if vv else None)
+                else: vl.append(round(s[0].get('valor',0),2))
+            hist_10a[cod]['valores'] = vl
+    except Exception as _eh5:
+        logger.warning(f"⚠️ HIST5 falló (OK, gráficos vacíos): {_eh5}")
 
     _S.close()
     logger.info(f"📈 HIST5 ({_t.time()-t4:.1f}s)")
