@@ -17229,11 +17229,15 @@ def main():
         completar_item_comando
     ))
     
-    # Onboarding: ConversationHandler para preguntas de ingreso
-    # /start es el entry point - detecta si es usuario nuevo o registrado
+    # Onboarding: ConversationHandler — SOLO en chat privado, con timeout
+    async def _onboard_fallback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cualquier otro comando cancela onboarding para no bloquear"""
+        context.user_data.pop('onboard_activo', None)
+        return ConversationHandler.END
+
     onboarding_conv = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start),
+            CommandHandler("start", start, filters=filters.ChatType.PRIVATE),
         ],
         states={
             ONBOARD_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_nombre)],
@@ -17245,12 +17249,21 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancelar", onboard_cancelar),
-            CommandHandler("start", start),  # Permite reiniciar con /start
+            CommandHandler("start", start),
+            MessageHandler(filters.COMMAND, _onboard_fallback_cmd),
         ],
         per_user=True,
         per_chat=True,
+        conversation_timeout=300,
     )
     application.add_handler(onboarding_conv)
+    # /start en grupo → respuesta simple sin onboarding
+    async def _start_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "⚓ Cofradía de Networking — Bot Premium\n\n"
+            "Escribe /ayuda para ver los comandos.\n"
+            "Para registrarte escríbeme en privado: @Cofradia_Premium_Bot")
+    application.add_handler(CommandHandler("start", _start_grupo, filters=filters.ChatType.GROUPS))
     
     # ChatJoinRequest handler (fallback si alguien solicita por link con aprobación)
     application.add_handler(ChatJoinRequestHandler(manejar_solicitud_ingreso))
