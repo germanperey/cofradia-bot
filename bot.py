@@ -15880,6 +15880,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
                         if len(line) > 15:
+                            # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
                             noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
             except Exception:
@@ -16973,16 +16974,34 @@ def main():
     
     # Crear aplicación
     async def post_init(app):
-        """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
-        # PASO 1: Limpiar webhook para evitar Conflict en Render
+        """Eliminar webhook anterior + verificar grupo + configurar comandos"""
+        # PASO 1: Limpiar webhook SIN descartar updates (preserva conexión con grupo)
         try:
-            await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
+            await app.bot.delete_webhook(drop_pending_updates=False)
+            logger.info("🧹 Webhook eliminado (updates preservados)")
         except Exception as e:
             logger.warning(f"Nota al limpiar webhook: {e}")
         
-        # PASO 2: Esperar un momento para que Telegram procese la eliminación
-        await asyncio.sleep(2)
+        # PASO 2: Esperar que la instancia anterior muera en Render
+        await asyncio.sleep(5)
+        
+        # PASO 2.1: Flush updates viejos con getUpdates offset=-1
+        try:
+            updates = await app.bot.get_updates(offset=-1, timeout=1)
+            if updates:
+                await app.bot.get_updates(offset=updates[-1].update_id + 1, timeout=1)
+            logger.info(f"🔄 Updates flushed ({len(updates) if updates else 0} pendientes)")
+        except Exception as e:
+            logger.debug(f"Flush updates: {e}")
+        
+        # PASO 2.2: Verificar conexión con grupo de Cofradía
+        if COFRADIA_GROUP_ID:
+            try:
+                chat = await app.bot.get_chat(COFRADIA_GROUP_ID)
+                me = await app.bot.get_chat_member(COFRADIA_GROUP_ID, (await app.bot.get_me()).id)
+                logger.info(f"✅ GRUPO OK: {chat.title} — Bot es: {me.status}")
+            except Exception as e:
+                logger.error(f"❌ GRUPO ERROR: {e} — El bot puede no recibir comandos del grupo")
         
         # PASO 2.5: Limpiar registros con nombres vacíos o inválidos en la BD
         try:
@@ -17813,7 +17832,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
+        drop_pending_updates=False,
         close_loop=False,
     )
 
