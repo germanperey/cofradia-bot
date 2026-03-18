@@ -56,7 +56,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, 
     filters, ContextTypes, CallbackQueryHandler,
-    ConversationHandler, ChatJoinRequestHandler
+    ConversationHandler, ChatJoinRequestHandler, TypeHandler
 )
 
 # ==================== CONFIGURACIÓN DE LOGGING ====================
@@ -107,20 +107,22 @@ jsearch_disponible = False
 db_disponible = False
 
 # Cache diario de indicadores (primera consulta descarga, resto usa cache)
-_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
 
 def _ahora_chile():
-    """Retorna datetime en hora Chile (America/Santiago) — NO UTC"""
+    """Retorna datetime en hora Chile (America/Santiago)"""
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo('America/Santiago')).replace(tzinfo=None)
     except Exception:
         return datetime.utcnow() - timedelta(hours=3)
 
-# Cache diario de comandos
+_indicadores_cache = {'fecha': '', 'all_data': None, 'explicaciones': None, 'html_content': None}
+
+# Cache diario de comandos — se limpia automáticamente al cambiar de día
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
 def _cache_get(clave):
-    hoy = _ahora_chile().strftime('%Y-%m-%d')
+    """Obtiene valor del cache si es del mismo día"""
+    hoy = datetime.now().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
@@ -128,7 +130,8 @@ def _cache_get(clave):
     return _cmd_cache_dia['datos'].get(clave)
 
 def _cache_set(clave, valor):
-    hoy = _ahora_chile().strftime('%Y-%m-%d')
+    """Guarda valor en cache del día (se elimina al cambiar de día)"""
+    hoy = datetime.now().strftime('%Y-%m-%d')
     if _cmd_cache_dia.get('fecha') != hoy:
         _cmd_cache_dia['fecha'] = hoy
         _cmd_cache_dia['datos'] = {}
@@ -2578,21 +2581,13 @@ def requiere_suscripcion(func):
         if user_id == OWNER_ID:
             return await func(update, context)
         
-        # Admin anónimo en el grupo de Cofradía → permitir (solo admins pueden enviar anónimo)
-        ANONYMOUS_BOT_ID = 1087968824  # GroupAnonymousBot de Telegram
-        if user_id == ANONYMOUS_BOT_ID and update.effective_chat:
-            chat_id = update.effective_chat.id
-            if chat_id == COFRADIA_GROUP_ID or (COFRADIA_GROUP_ID and chat_id == COFRADIA_GROUP_ID):
-                return await func(update, context)
-        
         if not verificar_suscripcion_activa(user_id):
-            # Solo mostrar error en chat privado (no spamear el grupo)
-            if update.effective_chat and update.effective_chat.type == 'private':
-                await update.message.reply_text(
-                    "❌ Falta activar tu cuenta\n\n"
-                    "Actívala desde @Cofradia_Premium_Bot con el comando /start "
-                    "para empezar a asesorarte en Networking y en todo lo que necesites."
-                )
+            await update.message.reply_text(
+                "❌ **Falta activar tu cuenta**\n\n"
+                "👉 Actívala desde @Cofradia_Premium_Bot con el comando /start "
+                "para empezar a asesorarte en Networking y en todo lo que necesites.",
+                parse_mode='Markdown'
+            )
             return
         return await func(update, context)
     return wrapper
@@ -3264,8 +3259,8 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /graficos - Dashboard interactivo con análisis del grupo"""
-    msg = await update.message.reply_text("📊 Generando dashboard interactivo...")
+    """Comando /graficos - Dashboard interactivo ECharts con análisis del grupo"""
+    msg = await update.message.reply_text("📊 Generando dashboard interactivo ECharts...")
     
     try:
         conn = get_db_connection()
@@ -3556,7 +3551,7 @@ body {{
 </div>
 
 <div class="footer">
-    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Premium Bot
+    Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · <span>Cofradía de Networking</span> · Bot Premium v4.3 ECharts
 </div>
 
 <script>
@@ -3782,7 +3777,7 @@ window.addEventListener('resize', function() {{
                 caption=f"📊 Dashboard Cofradía — Últimos 7 días\n\n"
                         f"📨 {total_msgs_7d} mensajes · 👥 {len(usuarios_clean)} usuarios activos\n"
                         f"📈 Promedio: {promedio_diario}/día · 🕐 Pico: {hora_pico:02d}:00\n\n"
-                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo."
+                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo con ECharts."
             )
         except Exception as e:
             logger.warning(f"Error matplotlib preview: {e}")
@@ -3793,7 +3788,7 @@ window.addEventListener('resize', function() {{
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_dashboard_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard Interactivo\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
+                caption="📊 Dashboard Interactivo ECharts\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
             )
         
         # Limpiar
@@ -4253,16 +4248,13 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tiene_mencion_at and not tiene_mencion_bot:
         return
     
-    # Verificar si es el owner o admin anónimo del grupo Cofradía
-    ANONYMOUS_BOT_ID = 1087968824
+    # Verificar si es el owner (siempre tiene acceso)
     es_owner = (user_id == OWNER_ID)
-    es_admin_grupo = (user_id == ANONYMOUS_BOT_ID and update.effective_chat
-                      and update.effective_chat.id == COFRADIA_GROUP_ID)
     
-    if not es_owner and not es_admin_grupo and not verificar_suscripcion_activa(user_id):
+    if not es_owner and not verificar_suscripcion_activa(user_id):
         await update.message.reply_text(
-            "👋 Hola! Falta activar tu cuenta.\n\n"
-            "Actívala desde @Cofradia_Premium_Bot con /start "
+            "👋 ¡Hola! Falta activar tu cuenta.\n\n"
+            "👉 Actívala desde @Cofradia_Premium_Bot con /start "
             "para empezar a asesorarte en Networking y en todo lo que necesites."
         )
         return
@@ -14727,7 +14719,7 @@ def obtener_indicadores_cmf():
     Campos reales del JSON CMF:
       TMC: TMCs[{Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo}]
     """
-    AHORA = _ahora_chile()
+    AHORA = datetime.now()
     HDR   = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
 
     # Labels unicos por Tipo (codigo numerico garantizado por CMF, nunca cambia)
@@ -14846,7 +14838,7 @@ def obtener_rentabilidad_afp():
     from datetime import timedelta
     from collections import defaultdict
 
-    AHORA   = _ahora_chile()
+    AHORA   = datetime.now()
     INICIO  = AHORA - timedelta(days=183)
     FI_STR  = INICIO.strftime("%d/%m/%Y")
     FF_STR  = AHORA.strftime("%d/%m/%Y")
@@ -15699,6 +15691,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
+        ' &nbsp;&middot;&nbsp; quetalmiafp.cl'
         ' &nbsp;&middot;&nbsp; Analisis IA + RAG &nbsp;&middot;&nbsp;'
         ' Cofradia de Networking Bot v6.0'
         '</footer>'
@@ -15873,27 +15866,25 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 for n in noticias_bcch[:5]:
                     noticias_html += '<div class="news-item">&#128196; ' + str(n).replace('<','&lt;').replace('>','&gt;') + '</div>'
             try:
-                _anio_n = _ahora_chile().strftime('%Y')
-                _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
                 prompt_news = (
-                    f"Eres analista economico senior. HOY es {_fecha_n} ({_anio_n}).\n"
-                    f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
-                    "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
-                    "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
-                    "CADA noticia DEBE tener 3 lineas minimo:\n"
-                    "Linea 1: TITULO de la noticia\n"
-                    "Linea 2: Descripcion detallada con datos concretos\n"
-                    "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
-                    f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
+                    "Eres un analista economico chileno experto. Analiza las principales noticias "
+                    "internacionales y locales de Chile de esta semana que impactan indicadores economicos. "
+                    "Para cada noticia (maximo 5), escribe:\n"
+                    "1. Titulo breve de la noticia\n"
+                    "2. Resumen de 1-2 lineas explicando que paso\n"
+                    "3. Impacto: que indicadores afecta (dolar, cobre, IPC, TPM, IPSA, etc) "
+                    "y si la variacion fue al alza o a la baja, y por que.\n\n"
+                    "Formato cada noticia: TITULO | Resumen | Impacto: indicadores afectados (alza/baja)\n"
+                    "Sin emojis. Maximo 5 noticias. Directo al contenido."
                 )
-                news_ia = llamar_groq(prompt_news, max_tokens=2000, temperature=0.3)
+                news_ia = llamar_groq(prompt_news, max_tokens=600, temperature=0.3)
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
                         if len(line) > 15:
                             # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
-                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
+                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;') + '</div>'
             except Exception:
                 pass
 
@@ -15908,33 +15899,23 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             _indicadores_cache['html_content'] = html_content
             logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
 
-        # 6. Mensaje de texto con ICONOS
+        # 6. Mensaje de texto resumido
         sep = "━" * 30
         PORCENTAJES = {'ipc', 'tpm', 'tasa_desempleo', 'imacec'}
-        ICONOS = {
-            'uf': '🟡', 'dolar': '💵', 'euro': '💶', 'utm': '🟠',
-            'ipc': '📊', 'tpm': '🏦', 'bitcoin': '₿', 'tasa_desempleo': '👷',
-            'imacec': '📈', 'libra_cobre': '🔶', 'ivp': '🔷', 'ipsa': '📉',
-            'solana': '🟣', 'ethereum': '🔵'
-        }
         ORDER_MSG = ['uf', 'dolar', 'euro', 'utm', 'ipc', 'tpm',
                      'bitcoin', 'tasa_desempleo', 'imacec', 'libra_cobre', 'ivp',
                      'ipsa', 'solana', 'ethereum']
-        n_act = len([c for c in ORDER_MSG if datos.get(c)])
         lineas = [
             "📈 INDICADORES ECONÓMICOS DE CHILE",
             sep,
-            f"🕐 {_ahora_chile().strftime('%d/%m/%Y %H:%M')}",
-            "Fuente: Banco Central · CMF · CoinGecko",
-            f"📊 {n_act} indicadores activos",
+            "Fuente: Banco Central de Chile · CMF",
             "",
         ]
-        alzas = 0; bajas = 0
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
             v = d.get('valor')
-            ic = ICONOS.get(cod, '•')
+            # Guard None valor antes de formatear
             if v is None:
                 vf = "N/D"
             elif cod in PORCENTAJES:
@@ -15948,21 +15929,19 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             elif cod in ('solana', 'ethereum'):
                 vf = "${:,.0f} USD".format(v).replace(',', '.')
             else:
-                vf = "${:,.2f}".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
+                vf = "${:,.2f} CLP".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
             serie = d.get('serie30', [])
-            tend = ''
+            tend  = ''
             if len(serie) >= 2:
                 v0 = serie[0].get('valor') or 0
                 v1 = serie[1].get('valor') or 1
                 if v1:
-                    pct = ((v0 - v1) / v1) * 100
-                    if pct >= 0:
-                        tend = ' ▲ {:.2f}%'.format(abs(pct)); alzas += 1
-                    else:
-                        tend = ' ▼ {:.2f}%'.format(abs(pct)); bajas += 1
+                    pct  = ((v0 - v1) / v1) * 100
+                    tend = '  ' + ('▲' if pct >= 0 else '▼') + ' {:.3f}%'.format(abs(pct))
             nombre = d.get('nombre') or cod
-            lineas.append(f"{ic} {nombre}: {vf}{tend}")
-        lineas += ["", sep, "📋 RESUMEN:", f"  ▲ {alzas} al alza  ▼ {bajas} a la baja"]
+            fecha  = d.get('fecha') or ''
+            sufijo = '  (' + fecha + ')' if fecha else ''
+            lineas.append(nombre + ": " + vf + tend + sufijo)
 
         # Tasas CMF en mensaje
         tmc_items = (datos_cmf or {}).get('tmc', [])
@@ -16053,7 +16032,7 @@ async def feriados_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       1. API oficial Gobierno de Chile: apis.digital.gob.cl/fl/feriados/{año}
       2. Backup boostr.cl: api.boostr.cl/holidays.json  (filtra por año)
     """
-    AHORA     = _ahora_chile()
+    AHORA     = datetime.now()
     anio_arg  = None
     if context.args:
         try:
@@ -16748,7 +16727,7 @@ async def emergencia_tipo_callback(update: Update, context: ContextTypes.DEFAULT
              'emer_incendio': '🔥 INCENDIO', 'emer_accidente': '🚑 ACCIDENTE'}
     tipo = tipos.get(query.data, 'EMERGENCIA')
     context.user_data['emer_tipo'] = tipo
-    context.user_data['emer_hora'] = _ahora_chile().strftime('%H:%M:%S')
+    context.user_data['emer_hora'] = datetime.now().strftime('%H:%M:%S')
     context.user_data['emer_step'] = 'descripcion'
     await query.edit_message_text(
         f"🚨 {tipo}\n\n"
@@ -16835,7 +16814,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     """Envía alerta de emergencia a todos los topics del grupo + Google Maps"""
     user = update.effective_user
     tipo = context.user_data.get('emer_tipo', 'EMERGENCIA')
-    hora = context.user_data.get('emer_hora', _ahora_chile().strftime('%H:%M:%S'))
+    hora = context.user_data.get('emer_hora', datetime.now().strftime('%H:%M:%S'))
     direccion = context.user_data.get('emer_direccion', 'No especificada')
     maps_url = context.user_data.get('emer_maps', '')
     descripcion = context.user_data.get('emer_desc', '')
@@ -16875,7 +16854,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.debug(f"Error teléfono emergencia: {e}")
 
-    ahora = _ahora_chile()
+    ahora = datetime.now()
     try:
         hora_dt = datetime.strptime(hora, '%H:%M:%S').replace(
             year=ahora.year, month=ahora.month, day=ahora.day)
@@ -17114,8 +17093,34 @@ def main():
             logger.info("✅ Comandos configurados")
         except Exception as e:
             logger.warning(f"Error configurando comandos: {e}")
+        
+        # PASO 4: Verificar conexión con grupo de Cofradía
+        if COFRADIA_GROUP_ID and COFRADIA_GROUP_ID != 0:
+            try:
+                chat = await app.bot.get_chat(COFRADIA_GROUP_ID)
+                me = await app.bot.get_chat_member(COFRADIA_GROUP_ID, (await app.bot.get_me()).id)
+                logger.info(f"✅ GRUPO: {chat.title} | Bot={me.status} | forum={getattr(chat, 'is_forum', False)}")
+            except Exception as e:
+                logger.error(f"❌ GRUPO ERROR({COFRADIA_GROUP_ID}): {e}")
+        else:
+            logger.warning("⚠️ COFRADIA_GROUP_ID no configurado (grupo no verificado)")
     
     application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
+    
+    # ── DIAGNÓSTICO: registra CADA update recibido (no interfiere con handlers) ──
+    async def _diag_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            chat = update.effective_chat
+            user = update.effective_user
+            txt = ''
+            if update.message and update.message.text:
+                txt = update.message.text[:40]
+            elif update.callback_query:
+                txt = f'callback:{update.callback_query.data}'
+            logger.info(f"📩 {chat.type}({chat.id}) user={user.id if user else '?'}: {txt}")
+        except Exception:
+            pass
+    application.add_handler(TypeHandler(Update, _diag_log), group=-99)
     
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
