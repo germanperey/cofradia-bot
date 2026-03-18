@@ -14618,18 +14618,25 @@ def obtener_indicadores_chile():
 
     logger.info(f"📈 MERGED: {sorted(datos_actuales.keys())} ({len(datos_actuales)}/14)")
 
-    # ═══════ Series 30d para los que vinieron sin serie (de mindicador) ═══════
+    # ═══════ Series 30d para los que vinieron sin serie ═══════
     t1 = _t.time()
     sin_serie = [cod for cod in datos_actuales if len(datos_actuales[cod].get('serie30', [])) <= 1]
     if sin_serie:
+        def _fetch_serie30(cod):
+            # Intentar findic primero, luego mindicador
+            j = _get('https://findic.cl/api/' + cod, 12)
+            if not j or not j.get('serie'):
+                j = _get('https://mindicador.cl/api/' + cod, 15)
+            return (cod, j)
         with ThreadPoolExecutor(max_workers=6) as ex:
-            futs = {ex.submit(_get, 'https://mindicador.cl/api/' + cod, 12): cod for cod in sin_serie
-                    if cod not in ('ipsa','solana','ethereum')}
+            futs = {ex.submit(_fetch_serie30, cod): cod for cod in sin_serie}
             for fut in as_completed(futs):
                 cod = futs[fut]
-                j = fut.result()
-                if j and j.get('serie'):
-                    datos_actuales[cod]['serie30'] = j['serie'][:30]
+                try:
+                    _, j = fut.result()
+                    if j and j.get('serie'):
+                        datos_actuales[cod]['serie30'] = j['serie'][:30]
+                except Exception: pass
     logger.info(f"📈 SERIES ({_t.time()-t1:.1f}s)")
 
     # ═══════ HIST 12 meses Dólar vs Euro ═══════
@@ -14646,17 +14653,22 @@ def obtener_indicadores_chile():
         while m <= 0: m += 12; y -= 1
         mt.append((y, m)); ml.append(MES[m-1] + ' ' + str(y)[-2:])
 
+    # Intentar findic.cl Y mindicador.cl en paralelo (el que responda primero gana)
     an = list(set(yr for yr, _ in mt))
     sd = {}; se = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futs = {}
-        for yr in an:
-            futs[ex.submit(_get, 'https://mindicador.cl/api/dolar/' + str(yr), 12)] = ('d', yr)
-            futs[ex.submit(_get, 'https://mindicador.cl/api/euro/' + str(yr), 12)]  = ('e', yr)
-        for fut in as_completed(futs):
-            k, yr = futs[fut]; j = fut.result(); s = j.get('serie', []) if j else []
-            if k == 'd': sd[yr] = s
-            else: se[yr] = s
+    def _fetch_hist_yr(params):
+        cod, yr = params
+        # Intentar findic primero, luego mindicador
+        j = _get(f'https://findic.cl/api/{cod}/{yr}', 15)
+        if not j or not j.get('serie'):
+            j = _get(f'https://mindicador.cl/api/{cod}/{yr}', 20)
+        return (cod, yr, j.get('serie', []) if j else [])
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        tasks_12m = [('dolar', yr) for yr in an] + [('euro', yr) for yr in an]
+        for cod, yr, serie in ex.map(_fetch_hist_yr, tasks_12m):
+            if cod == 'dolar': sd[yr] = serie
+            else: se[yr] = serie
 
     hist_12m['labels'] = ml
     hist_12m['dolar'] = [round(_pvm(sd.get(y,[]),y,m),2) if _pvm(sd.get(y,[]),y,m) else None for y,m in mt]
@@ -14671,7 +14683,11 @@ def obtener_indicadores_chile():
     rh = {}; PH = {'ipc','tasa_desempleo','imacec','tpm'}
 
     def _fy(cy):
-        c, y = cy; j = _get('https://mindicador.cl/api/' + c + '/' + str(y), 10)
+        c, y = cy
+        # Intentar findic primero, luego mindicador
+        j = _get(f'https://findic.cl/api/{c}/{y}', 15)
+        if not j or not j.get('serie'):
+            j = _get(f'https://mindicador.cl/api/{c}/{str(y)}', 20)
         return (c, y, j.get('serie', []) if j else [])
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -15300,7 +15316,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         cid   = "hist_" + cod
         hist_html += (
             '<div class="hcard">'
-            '<div class="htitle">' + _s(d.get("nombre")) + ' \u2014 Ultimos 10 anos</div>'
+            '<div class="htitle">' + _s(d.get("nombre")) + ' \u2014 Ultimos 5 anos</div>'
             '<div id="' + cid + '" class="hchart"></div>'
             '</div>'
         )
@@ -15639,7 +15655,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '</div>'
 
         '<div class="section">'
-        '<div class="section-title">&#128197; Series Historicas \u2014 Ultimos 10 Anos</div>'
+        '<div class="section-title">&#128197; Series Historicas \u2014 Ultimos 5 Anos</div>'
         '<div class="hist-grid">' + hist_html + '</div>'
         '</div>'
 
