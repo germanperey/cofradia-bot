@@ -117,7 +117,7 @@ def _ahora_chile():
     except Exception:
         return datetime.utcnow() - timedelta(hours=3)
 
-# Cache diario de comandos — se limpia automáticamente al cambiar de día (hora Chile)
+# Cache diario de comandos
 _cmd_cache_dia = {'fecha': '', 'datos': {}}
 def _cache_get(clave):
     hoy = _ahora_chile().strftime('%Y-%m-%d')
@@ -2825,7 +2825,7 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
     return ONBOARD_NOMBRE
 
 
-@requiere_suscripcion
+@solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos con ejemplos expandibles"""
     user_id = update.effective_user.id
@@ -14707,6 +14707,7 @@ def obtener_indicadores_chile():
             'hist_10a': hist_10a, 'generado': AHORA.strftime('%d/%m/%Y %H:%M')}
 
 
+
 def obtener_indicadores_cmf():
     """
     Obtiene tasas TMC de la CMF (Comision para el Mercado Financiero).
@@ -15311,7 +15312,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         cid   = "hist_" + cod
         hist_html += (
             '<div class="hcard">'
-            '<div class="htitle">' + _s(d.get("nombre")) + ' \u2014 Ultimos 5 anos</div>'
+            '<div class="htitle">' + _s(d.get("nombre")) + ' \u2014 Ultimos 10 anos</div>'
             '<div id="' + cid + '" class="hchart"></div>'
             '</div>'
         )
@@ -15650,7 +15651,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '</div>'
 
         '<div class="section">'
-        '<div class="section-title">&#128197; Series Historicas \u2014 Ultimos 5 Anos</div>'
+        '<div class="section-title">&#128197; Series Historicas \u2014 Ultimos 10 Anos</div>'
         '<div class="hist-grid">' + hist_html + '</div>'
         '</div>'
 
@@ -15868,21 +15869,17 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
                     "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
                     "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
-                    "CADA noticia DEBE tener EXACTAMENTE este formato (3 lineas minimo):\n"
-                    "Linea 1: TITULO EN MAYUSCULAS de la noticia\n"
-                    "Linea 2: Descripcion detallada de que ocurrio, con datos concretos\n"
-                    "Linea 3: IMPACTO: indicadores afectados con flechas — "
-                    "ej: Dolar (alza +1.2%) por mayor demanda de refugio, Cobre (baja -0.8%) "
-                    "por menor demanda china, IPSA (baja -0.5%) por aversion al riesgo\n\n"
-                    f"SOLO noticias de {_anio_n}. NUNCA mencionar anos anteriores.\n"
-                    "Sin emojis. Sin asteriscos. Sin markdown. 7 noticias completas."
+                    "CADA noticia DEBE tener 3 lineas minimo:\n"
+                    "Linea 1: TITULO de la noticia\n"
+                    "Linea 2: Descripcion detallada con datos concretos\n"
+                    "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
+                    f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
                 )
                 news_ia = llamar_groq(prompt_news, max_tokens=2000, temperature=0.3)
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
                         if len(line) > 15:
-                            # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
                             noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
             except Exception:
@@ -17108,28 +17105,6 @@ def main():
     
     application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
-    # ── LOGGER GLOBAL: registra TODO comando recibido (para diagnóstico) ──
-    async def _log_all_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message and update.message.text:
-            chat = update.effective_chat
-            user = update.effective_user
-            logger.info(f"📩 CMD: '{update.message.text[:50]}' from {user.first_name}({user.id}) in {chat.type}({chat.id})")
-    application.add_handler(MessageHandler(filters.COMMAND, _log_all_commands), group=-1)
-    
-    # ── DIAGNÓSTICO: /ping sin decoradores, funciona en CUALQUIER chat ──
-    async def _ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat = update.effective_chat
-        user = update.effective_user
-        info = (f"🏓 PONG!\n"
-                f"Chat: {chat.type} (id: {chat.id})\n"
-                f"User: {user.first_name} (id: {user.id})\n"
-                f"OWNER_ID: {OWNER_ID}\n"
-                f"Match: {'SI' if user.id == OWNER_ID else 'NO'}\n"
-                f"Thread: {update.message.message_thread_id if update.message else 'N/A'}")
-        logger.info(f"🏓 PING desde {chat.type} chat_id={chat.id} user={user.id}")
-        await update.message.reply_text(info)
-    application.add_handler(CommandHandler("ping", _ping_cmd))
-    
     # Handlers básicos (NOTA: /start se maneja en el ConversationHandler de onboarding más abajo)
     application.add_handler(CommandHandler("ayuda", ayuda))
     application.add_handler(CommandHandler("registrarse", registrarse_comando))
@@ -17253,14 +17228,9 @@ def main():
     
     # Onboarding: ConversationHandler para preguntas de ingreso
     # /start es el entry point - detecta si es usuario nuevo o registrado
-    # Onboarding: SOLO chat privado, con timeout y fallback para comandos
-    async def _onboard_fallback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data.pop('onboard_activo', None)
-        return ConversationHandler.END
-
     onboarding_conv = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start, filters=filters.ChatType.PRIVATE),
+            CommandHandler("start", start),
         ],
         states={
             ONBOARD_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, onboard_nombre)],
@@ -17272,21 +17242,12 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancelar", onboard_cancelar),
-            CommandHandler("start", start),
-            MessageHandler(filters.COMMAND, _onboard_fallback_cmd),
+            CommandHandler("start", start),  # Permite reiniciar con /start
         ],
         per_user=True,
         per_chat=True,
-        conversation_timeout=300,
     )
     application.add_handler(onboarding_conv)
-    # /start en grupo sin onboarding
-    async def _start_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "⚓ Cofradía de Networking — Bot Premium\n"
-            "Escribe /ayuda o /ping para ver si funciono.\n"
-            "Para registrarte: @Cofradia_Premium_Bot")
-    application.add_handler(CommandHandler("start", _start_grupo, filters=filters.ChatType.GROUPS))
     
     # ChatJoinRequest handler (fallback si alguien solicita por link con aprobación)
     application.add_handler(ChatJoinRequestHandler(manejar_solicitud_ingreso))
