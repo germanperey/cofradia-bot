@@ -2847,10 +2847,17 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
+👤 MI CUENTA
+/registrarse - Registrarse en la Cofradía
+/mi_cuenta - Estado de tu suscripción
+/renovar - Renovar suscripción
+/activar [código] - Activar código de acceso
+
 🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Búsqueda con IA
 /buscar_web [consulta] - Búsqueda en Internet 🌐
+/buscar_especialista_sec [esp] - Buscar en CMF/SEC 🏦
 /rag_consulta [pregunta] - Buscar en documentos
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
@@ -2869,6 +2876,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /consultar titulo | desc - Consulta profesional
 /consultas - Ver consultas abiertas
 /responder [ID] [resp] - Responder consulta
+/ver_consulta [ID] - Ver detalle de consulta
 /encuesta pregunta | opc1 | opc2 - Crear encuesta
 
 📅 EVENTOS Y CALENDARIO
@@ -2884,8 +2892,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
 /top_usuarios - Ranking de participación
+/categorias - Categorías de mensajes
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
+/dotacion - Total de integrantes
 
 💰 ASISTENTE FINANCIERO
 /finanzas [consulta] - Asesoría basada en libros (gratis)
@@ -2894,6 +2904,15 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📊 TU DASHBOARD (GRATIS)
 ⭐ /mi_dashboard - Tu dashboard personal ⭐
+
+🤖 AGENTE INTELIGENTE DE NETWORKING
+/agente - Plan de networking personalizado con IA
+/match - Match inteligente con cofrades compatibles
+/agendar [fecha] [actividad] - Agendar con recordatorio
+/mi_agenda - Ver tu agenda personal
+/tarea [descripción] - Agregar tarea de networking
+/mis_tareas - Ver tus tareas pendientes
+/briefing - Briefing diario de networking
 
 🚨 EMERGENCIA
 /emergencia - Reportar emergencia (4 tipos) 🆘
@@ -2940,8 +2959,23 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /eliminar_solicitud [ID] - Eliminar usuario
 /buscar_usuario [nombre] - Buscar ID de usuario
 /cobros_admin - Panel de cobros
-/ver_solicitudes - Ver solicitudes pendientes
 /generar_codigo - Generar código de activación
+
+💰 GESTIÓN FINANCIERA
+/precios - Ver precios de servicios
+/set_precios [srv] [pesos] [coins] - Editar precios
+/pagos_pendientes - Ver pagos pendientes
+/vencimientos - Suscripciones por vencer
+/vencimientos_mes - Vencimientos del mes
+/ingresos - Resumen de ingresos
+/crecimiento_mes - Crecimiento mensual
+/crecimiento_anual - Crecimiento anual
+/resumen_usuario [ID] - Resumen de un usuario
+
+📡 GESTIÓN GRUPO
+/ver_topics - Ver topics del grupo
+/set_topic [nombre] - Crear/configurar topic
+/set_topic_emoji [topic] [emoji] - Cambiar emoji topic
 /nuevo_evento fecha | título | lugar | desc - Crear evento
 /dotacion - Ver dotación completa de miembros
 
@@ -2952,9 +2986,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /directorio [búsqueda] - Directorio completo de la Cofradía
 
 🧠 RAG (Base de conocimiento)
+/subir_pdf - Subir PDF a la biblioteca
 /rag_status - Estado del sistema RAG
+/rag_debug - Debug del sistema RAG
 /rag_backup - Verificar integridad datos RAG
 /rag_reindexar - Re-indexar documentos
+/rag_enriquecer - Enriquecer keywords RAG
 /eliminar_pdf [nombre] - Eliminar PDF indexado
 
 💰 PRECIOS Y COINS
@@ -16863,6 +16900,59 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
             "Copia el número y llama desde tu teléfono."
         )
 
+def _generar_sirena_wav(duracion=3, sample_rate=24000):
+    """Genera un archivo WAV de sirena/alarma en memoria (sin dependencias externas).
+    Produce un sonido de sirena tipo europeo (600Hz↔1200Hz) con volumen alto."""
+    import struct as _struct
+    import math as _math
+    
+    num_samples = int(sample_rate * duracion)
+    samples = []
+    
+    # Sirena: frecuencia oscila entre 600 y 1200 Hz (ciclo completo cada 1s)
+    for i in range(num_samples):
+        t = i / sample_rate
+        # Oscilación de frecuencia tipo sirena
+        freq = 600 + 600 * (0.5 + 0.5 * _math.sin(2 * _math.pi * t * 1.0))  # 1 ciclo/segundo
+        # Generar onda con armónicos para sonido más agresivo
+        phase = 2 * _math.pi * freq * t
+        sample = 0.7 * _math.sin(phase) + 0.2 * _math.sin(2 * phase) + 0.1 * _math.sin(3 * phase)
+        # Modulación de amplitud para efecto pulsante
+        envelope = 0.8 + 0.2 * _math.sin(2 * _math.pi * t * 8)
+        sample *= envelope
+        # Convertir a int16
+        sample_int = int(max(-1, min(1, sample)) * 32000)
+        samples.append(sample_int)
+    
+    # Construir WAV en memoria
+    buf = io.BytesIO()
+    num_channels = 1
+    sample_width = 2  # 16-bit
+    data_size = num_samples * sample_width
+    
+    # WAV header
+    buf.write(b'RIFF')
+    buf.write(_struct.pack('<I', 36 + data_size))
+    buf.write(b'WAVE')
+    buf.write(b'fmt ')
+    buf.write(_struct.pack('<I', 16))  # chunk size
+    buf.write(_struct.pack('<H', 1))   # PCM
+    buf.write(_struct.pack('<H', num_channels))
+    buf.write(_struct.pack('<I', sample_rate))
+    buf.write(_struct.pack('<I', sample_rate * num_channels * sample_width))
+    buf.write(_struct.pack('<H', num_channels * sample_width))
+    buf.write(_struct.pack('<H', sample_width * 8))
+    buf.write(b'data')
+    buf.write(_struct.pack('<I', data_size))
+    
+    for s in samples:
+        buf.write(_struct.pack('<h', s))
+    
+    buf.seek(0)
+    buf.name = "sirena_emergencia.wav"
+    return buf
+
+
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía alerta a grupo + topics + mensaje privado a CADA miembro + owner"""
     user = update.effective_user
@@ -16961,6 +17051,15 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
             enviados += 1
+            # Enviar sirena al grupo
+            try:
+                sirena_grupo = _generar_sirena_wav(duracion=3)
+                await context.bot.send_audio(
+                    chat_id=COFRADIA_GROUP_ID, audio=sirena_grupo,
+                    title="🚨 SIRENA EMERGENCIA COFRADÍA",
+                    performer="Bot Cofradía Premium")
+            except Exception:
+                pass
         except Exception as _eg:
             logger.warning(f"Emergencia grupo: {_eg}")
         try:
@@ -16989,11 +17088,27 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             await context.bot.send_message(
                 chat_id=OWNER_ID, text=f"🚨 EMERGENCIA REPORTADA\n\n{alerta}",
                 reply_markup=tel_kb)
+            # Enviar sirena al owner
+            try:
+                sirena = _generar_sirena_wav(duracion=3)
+                await context.bot.send_audio(
+                    chat_id=OWNER_ID, audio=sirena,
+                    title="🚨 SIRENA EMERGENCIA",
+                    performer="Cofradía de Networking")
+            except Exception:
+                pass
         except Exception:
             pass
 
-    # 3. Enviar mensaje privado a CADA miembro activo
+    # 3. Enviar mensaje privado + sirena a CADA miembro activo
     miembros_notificados = 0
+    try:
+        # Generar sirena una sola vez para reutilizar
+        sirena_base = _generar_sirena_wav(duracion=3)
+        sirena_bytes = sirena_base.read()
+    except Exception:
+        sirena_bytes = None
+    
     try:
         conn_m = get_db_connection()
         if conn_m:
@@ -17009,6 +17124,17 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                             chat_id=mid,
                             text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
                             reply_markup=tel_kb)
+                        # Enviar sirena adjunta
+                        if sirena_bytes:
+                            try:
+                                sirena_io = io.BytesIO(sirena_bytes)
+                                sirena_io.name = "sirena_emergencia.wav"
+                                await context.bot.send_audio(
+                                    chat_id=mid, audio=sirena_io,
+                                    title="🚨 SIRENA EMERGENCIA",
+                                    performer="Cofradía de Networking")
+                            except Exception:
+                                pass
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
@@ -17045,6 +17171,462 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     # Limpiar estado
     for k in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc','emer_step']:
         context.user_data.pop(k, None)
+
+
+# ==================== AGENTES AUTOMÁTICOS (job_queue) ====================
+
+# --- Mensajes motivacionales aleatorios para incentivar participación ---
+_MENSAJES_AGENTE = [
+    "💡 ¿Sabías que puedes usar /indicadores para ver el dólar, UF, Bitcoin y más indicadores económicos al instante? ¡Pruébalo!",
+    "🤝 Recuerda que puedes usar /conectar y la IA te sugerirá cofrades ideales para hacer networking. ¡Anímate!",
+    "📇 ¿Ya tienes tu tarjeta profesional? Usa /mi_tarjeta para crearla y que otros cofrades te encuentren.",
+    "💼 ¿Buscas empleo o quieres ayudar a un cofrade? Usa /empleo [cargo] para encontrar ofertas reales.",
+    "📊 Usa /mi_dashboard para ver tu perfil completo: ranking, coins, servicios canjeables y mucho más. ¡Es GRATIS!",
+    "🚀 ¿Conoces a alguien que debería estar en la Cofradía? Invítalo a sumarse. ¡Más Marinos, más fuerza!",
+    "⭐ ¿Un cofrade te ayudó? Usa /recomendar @user [texto] para dejarle una recomendación pública y ganar 5 coins.",
+    "📚 Tenemos +100 libros en la biblioteca digital. Usa /rag_consulta [pregunta] y consulta lo que necesites.",
+    "🔍 ¿Necesitas un abogado, contador o ingeniero? Usa /buscar_profesional [área] y encuentra al cofrade indicado.",
+    "📅 Revisa los próximos eventos de la Cofradía con /eventos y confirma tu asistencia con /asistir [ID].",
+    "💰 Usa /finanzas [consulta] para recibir asesoría financiera gratuita basada en nuestra biblioteca de libros.",
+    "🪙 ¿Cuántos Cofradía Coins tienes? Usa /mis_coins para ver tu balance y en qué puedes canjearlos.",
+    "📈 ¿Quieres saber quiénes son los más activos de la semana? Usa /top_usuarios y mira el ranking.",
+    "🎂 ¿Cuándo es el cumpleaños de tus compañeros? Usa /cumpleanos_mes para ver los del mes actual.",
+    "🤖 Usa /agente para que la IA te arme un plan personalizado de networking. ¡Potencia tus conexiones!",
+    "🎯 Usa /match para encontrar cofrades compatibles con tus intereses y experiencia profesional.",
+    "🗓️ Organiza tu networking con /agendar y /mis_tareas. ¡El éxito es cuestión de hábitos!",
+    "💬 Cada mensaje que envías en el grupo te da 1 Cofradía Coin. ¡Participa y acumula!",
+    "🌐 ¿Necesitas buscar algo en internet? Usa /buscar_web [consulta] directo desde el chat.",
+    "🏦 Busca especialistas financieros regulados con /buscar_especialista_sec [especialidad]. ¡Datos CMF reales!",
+    "📋 Al final del día publicaré el resumen automático. ¿Quieres verlo ahora? Usa /resumen.",
+    "⚓ ¡Somos la red de apoyo más grande de ex-navales en Chile! Invita a tus compañeros de generación.",
+    "🧮 ¿Necesitas calcular un crédito, inversión o sueldo líquido? Usa /calculadora — Suite Económica Pro.",
+    "📰 Cada lunes envío la Newsletter semanal con lo más destacado. ¡No te la pierdas!",
+    "🚨 En caso de emergencia real, usa /emergencia y se notificará a TODOS los cofrades al instante.",
+    "🎤 ¿Sabías que puedo responder mensajes de voz? Envía un audio mencionando 'Bot' y te respondo.",
+    "💡 Tip del día: Completa tu /mi_tarjeta con todos los campos para aparecer en más búsquedas profesionales.",
+    "📊 Usa /resumen_semanal para ver un análisis completo de la actividad de los últimos 7 días.",
+    "🔔 Configura /alertas [palabras] y recibe notificación cuando alguien hable de temas que te interesan.",
+    "⚡ ¿Ya conoces el /briefing? Te arma un resumen diario personalizado de lo que pasa en la Cofradía.",
+]
+
+_SALUDOS_PROACTIVOS = [
+    "👋 ¡Hola {nombre}! ¿Cómo va todo? Recuerda que estoy aquí para lo que necesites. Escribe /ayuda para ver qué puedo hacer por ti.",
+    "⚓ ¡Buenas {nombre}! ¿Necesitas buscar empleo, conectar con cofrades o consultar indicadores? Solo escríbeme.",
+    "🤝 ¡Hola {nombre}! ¿Has revisado tu /mi_dashboard últimamente? Tiene info útil sobre tu actividad.",
+    "💡 ¡Hey {nombre}! ¿Sabías que puedes usar /finanzas para consultas financieras gratuitas? ¡Pruébalo!",
+    "🚀 ¡Qué tal {nombre}! Si necesitas apoyo profesional, usa /buscar_profesional o /conectar. ¡La Cofradía te respalda!",
+]
+
+
+async def agente_resumen_semanal_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Publica resumen semanal automático al grupo cada domingo"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        fecha_inicio = _ahora_chile() - timedelta(days=7)
+        fecha_fin = _ahora_chile()
+
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
+            total = c.fetchone()['total']
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
+            usuarios = c.fetchone()['total']
+            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                        AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || 
+                        COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo,
+                        COUNT(*) as msgs FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
+            top = [((r['nombre_completo'] or 'Usuario').strip(), r['msgs']) for r in c.fetchall()]
+        else:
+            fi = fecha_inicio.strftime("%Y-%m-%d")
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fi,))
+            total = c.fetchone()[0]
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fi,))
+            usuarios = c.fetchone()[0]
+            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                        AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || 
+                        COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo,
+                        COUNT(*) as msgs FROM mensajes WHERE fecha >= ?
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fi,))
+            top = c.fetchall()
+        conn.close()
+
+        if total == 0:
+            return
+
+        msg = "━" * 30 + "\n"
+        msg += "📅 RESUMEN SEMANAL AUTOMÁTICO\n"
+        msg += "━" * 30 + "\n\n"
+        msg += f"📆 {fecha_inicio.strftime('%d/%m')} - {fecha_fin.strftime('%d/%m/%Y')}\n\n"
+        msg += f"💬 Mensajes: {total:,}\n"
+        msg += f"👥 Participantes: {usuarios}\n"
+        msg += f"📈 Promedio diario: {total/7:.1f}\n\n"
+
+        if top:
+            msg += "🏆 TOP 10 MÁS ACTIVOS\n"
+            medallas = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
+            for i, item in enumerate(top[:10]):
+                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', '')
+                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
+                nombre_l = limpiar_nombre_display(nombre)
+                msg += f"   {medallas[i]} {nombre_l}: {msgs}\n"
+            msg += "\n"
+
+        insights = generar_insights_temas(dias=7)
+        if insights:
+            msg += "🏷️ TEMAS PRINCIPALES\n"
+            for tema in insights:
+                t = tema.replace('*','').replace('_','').strip()
+                if t:
+                    msg += f"   {t}\n"
+            msg += "\n"
+
+        msg += "━" * 30 + "\n"
+        msg += "🤖 Resumen generado automáticamente por Bot Cofradía Premium\n"
+        msg += "━" * 30
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info("🤖 Agente: resumen semanal automático publicado")
+    except Exception as e:
+        logger.error(f"Error agente resumen semanal: {e}")
+
+
+async def agente_cumpleanos_semana_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Publica cumpleaños de la semana cada domingo"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+
+        r_files = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers,
+            params={'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+                    'fields': 'files(id,name)'}, timeout=30)
+        archivos = r_files.json().get('files', [])
+        if not archivos:
+            return
+
+        r_dl = requests.get(f"https://www.googleapis.com/drive/v3/files/{archivos[0]['id']}?alt=media",
+            headers=headers, timeout=60)
+        if r_dl.status_code != 200:
+            return
+
+        df = pd.read_excel(BytesIO(r_dl.content), engine='openpyxl', header=0)
+
+        hoy = _ahora_chile()
+        MESES = {
+            'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,
+            'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12,
+            'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,
+            'julio':7,'agosto':8,'septiembre':9,'octubre':10,'noviembre':11,'diciembre':12
+        }
+        dias_semana_nombre = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom']
+        cumples_semana = []
+
+        for _, row in df.iterrows():
+            try:
+                fecha_cumple = row.iloc[23] if len(row) > 23 else None
+                if pd.isna(fecha_cumple) or not fecha_cumple:
+                    continue
+                fecha_str = str(fecha_cumple).strip().lower()
+                dia_c = mes_c = None
+                if '-' in fecha_str:
+                    partes = fecha_str.split('-')
+                    if len(partes) >= 2:
+                        try:
+                            dia_c = int(partes[0])
+                            mes_c = MESES.get(partes[1].strip()[:3])
+                        except:
+                            pass
+                elif '/' in fecha_str:
+                    partes = fecha_str.split('/')
+                    if len(partes) >= 2:
+                        try:
+                            dia_c = int(partes[0])
+                            mes_c = int(partes[1])
+                        except:
+                            pass
+                if dia_c and mes_c:
+                    try:
+                        fecha_cumple_dt = datetime(hoy.year, mes_c, dia_c)
+                    except ValueError:
+                        continue
+                    diff = (fecha_cumple_dt - hoy).days
+                    if 0 <= diff <= 7:
+                        nombre = str(row.iloc[2]).strip() if len(row) > 2 else ''
+                        apellido = str(row.iloc[3]).strip() if len(row) > 3 else ''
+                        if nombre and nombre.lower() not in ['nan','none','']:
+                            dia_nombre = dias_semana_nombre[fecha_cumple_dt.weekday()]
+                            cumples_semana.append((diff, f"{nombre} {apellido}".strip(),
+                                f"{dia_c}/{mes_c}", dia_nombre))
+            except Exception:
+                continue
+
+        if not cumples_semana:
+            return
+
+        cumples_semana.sort(key=lambda x: x[0])
+        msg = "🎂🎉 CUMPLEAÑOS DE LA SEMANA 🎉🎂\n"
+        msg += "━" * 30 + "\n"
+        msg += f"📅 Semana del {hoy.strftime('%d/%m')} al {(hoy + timedelta(days=7)).strftime('%d/%m/%Y')}\n\n"
+
+        for diff, nombre, fecha, dia_nom in cumples_semana:
+            if diff == 0:
+                msg += f"🎈 HOY — {nombre}\n"
+            elif diff == 1:
+                msg += f"🎈 Mañana ({dia_nom} {fecha}) — {nombre}\n"
+            else:
+                msg += f"🎈 {dia_nom} {fecha} — {nombre}\n"
+
+        msg += "\n" + "━" * 30 + "\n"
+        msg += "💐 ¡No olvides saludar a los cumpleañeros!\n"
+        msg += "━" * 30
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"🤖 Agente: {len(cumples_semana)} cumpleaños de la semana publicados")
+    except Exception as e:
+        logger.error(f"Error agente cumpleaños semana: {e}")
+
+
+async def agente_cumpleanos_mes_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Publica cumpleaños del mes siguiente el último día de cada mes"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        import calendar
+        hoy = _ahora_chile()
+        ultimo_dia = calendar.monthrange(hoy.year, hoy.month)[1]
+        if hoy.day != ultimo_dia:
+            return  # Solo ejecutar el último día del mes
+
+        # Calcular mes siguiente
+        if hoy.month == 12:
+            mes_sig = 1
+            anio_sig = hoy.year + 1
+        else:
+            mes_sig = hoy.month + 1
+            anio_sig = hoy.year
+
+        meses_nombres = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio',
+                         'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
+
+        from oauth2client.service_account import ServiceAccountCredentials
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        access_token = creds.get_access_token().access_token
+        headers = {'Authorization': f'Bearer {access_token}'}
+
+        r_files = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers,
+            params={'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+                    'fields': 'files(id,name)'}, timeout=30)
+        archivos = r_files.json().get('files', [])
+        if not archivos:
+            return
+
+        r_dl = requests.get(f"https://www.googleapis.com/drive/v3/files/{archivos[0]['id']}?alt=media",
+            headers=headers, timeout=60)
+        if r_dl.status_code != 200:
+            return
+
+        df = pd.read_excel(BytesIO(r_dl.content), engine='openpyxl', header=0)
+        MESES = {
+            'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,
+            'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12
+        }
+        cumples = []
+        for _, row in df.iterrows():
+            try:
+                fc = row.iloc[23] if len(row) > 23 else None
+                if pd.isna(fc) or not fc:
+                    continue
+                fs = str(fc).strip().lower()
+                dia_c = mes_c = None
+                if '-' in fs:
+                    p = fs.split('-')
+                    if len(p) >= 2:
+                        dia_c = int(p[0])
+                        mes_c = MESES.get(p[1].strip()[:3])
+                elif '/' in fs:
+                    p = fs.split('/')
+                    if len(p) >= 2:
+                        dia_c = int(p[0])
+                        mes_c = int(p[1])
+                if mes_c == mes_sig:
+                    nombre = str(row.iloc[2]).strip() if len(row) > 2 else ''
+                    apellido = str(row.iloc[3]).strip() if len(row) > 3 else ''
+                    if nombre and nombre.lower() not in ['nan','none','']:
+                        cumples.append((dia_c, f"{nombre} {apellido}".strip()))
+            except Exception:
+                continue
+
+        if not cumples:
+            return
+
+        cumples.sort(key=lambda x: x[0])
+        msg = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_sig].upper()} {anio_sig} 🎂\n"
+        msg += "━" * 30 + "\n\n"
+        for dia, nombre in cumples:
+            msg += f"🎈 {dia:02d}/{mes_sig:02d} — {nombre}\n"
+        msg += f"\n🎉 ¡{len(cumples)} cofrades cumplen años en {meses_nombres[mes_sig]}!\n"
+        msg += "━" * 30
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"🤖 Agente: cumpleaños de {meses_nombres[mes_sig]} publicados ({len(cumples)})")
+    except Exception as e:
+        logger.error(f"Error agente cumpleaños mes: {e}")
+
+
+async def agente_graficos_matutino_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Publica resumen gráfico matutino breve al grupo"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'")
+            msgs_ayer = c.fetchone()['total']
+            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'")
+            users_ayer = c.fetchone()['total']
+            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
+            total_miembros = c.fetchone()['total']
+            c.execute("""SELECT DATE(fecha) as dia, COUNT(*) as msgs FROM mensajes
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY DATE(fecha) ORDER BY dia""")
+            semana = [(str(r['dia']), r['msgs']) for r in c.fetchall()]
+        else:
+            c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now', '-1 day')")
+            msgs_ayer = c.fetchone()[0]
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now', '-1 day')")
+            users_ayer = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
+            total_miembros = c.fetchone()[0]
+            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes
+                        WHERE fecha >= DATE('now', '-7 days') GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
+            semana = c.fetchall()
+        conn.close()
+
+        ahora = _ahora_chile()
+        dias_nombre = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom']
+
+        msg = "☀️ BUENOS DÍAS COFRADÍA\n"
+        msg += "━" * 30 + "\n"
+        msg += f"📅 {ahora.strftime('%d/%m/%Y')} | {dias_nombre[ahora.weekday()]}\n\n"
+        msg += "📊 PULSO DE LA COMUNIDAD\n"
+        msg += f"   👥 Miembros activos: {total_miembros}\n"
+        msg += f"   💬 Mensajes ayer: {msgs_ayer}\n"
+        msg += f"   🗣️ Participantes ayer: {users_ayer}\n\n"
+
+        if semana:
+            msg += "📈 ÚLTIMA SEMANA\n"
+            for fecha, msgs in semana[-7:]:
+                try:
+                    dia_dt = datetime.strptime(str(fecha)[:10], "%Y-%m-%d")
+                    d_nom = dias_nombre[dia_dt.weekday()]
+                    barra = "█" * min(int(msgs/3), 15) if msgs > 0 else "░"
+                    msg += f"   {d_nom}: {barra} {msgs}\n"
+                except:
+                    pass
+            msg += "\n"
+
+        msg += "━" * 30 + "\n"
+        msg += "🚀 ¡Que sea un gran día para la Cofradía!\n"
+        msg += "━" * 30
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info("🤖 Agente: gráficos matutinos publicados")
+    except Exception as e:
+        logger.error(f"Error agente gráficos matutino: {e}")
+
+
+async def agente_mensaje_aleatorio_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Envía mensajes aleatorios al grupo para incentivar participación"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        import random as _rnd
+        mensaje = _rnd.choice(_MENSAJES_AGENTE)
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensaje)
+        logger.info("🤖 Agente: mensaje motivacional enviado")
+    except Exception as e:
+        logger.error(f"Error agente mensaje aleatorio: {e}")
+
+
+async def agente_saludo_proactivo_job(context: ContextTypes.DEFAULT_TYPE):
+    """Agente: Saluda proactivamente a usuarios activos recientes en el grupo"""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        import random as _rnd
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+
+        # Obtener usuarios activos en últimas 48h que no sean el bot ni el owner
+        if DATABASE_URL:
+            c.execute("""SELECT DISTINCT user_id, 
+                        MAX(COALESCE(NULLIF(first_name,''), 'Cofrade')) as nombre
+                        FROM mensajes 
+                        WHERE fecha >= CURRENT_DATE - INTERVAL '2 days'
+                        AND first_name NOT IN ('Group','Grupo','Channel','Canal','','Bot')
+                        AND first_name IS NOT NULL
+                        GROUP BY user_id
+                        ORDER BY RANDOM() LIMIT 1""")
+        else:
+            c.execute("""SELECT DISTINCT user_id, 
+                        MAX(COALESCE(NULLIF(first_name,''), 'Cofrade')) as nombre
+                        FROM mensajes 
+                        WHERE fecha >= DATE('now', '-2 days')
+                        AND first_name NOT IN ('Group','Grupo','Channel','Canal','','Bot')
+                        AND first_name IS NOT NULL
+                        GROUP BY user_id
+                        ORDER BY RANDOM() LIMIT 1""")
+        
+        resultado = c.fetchone()
+        conn.close()
+
+        if not resultado:
+            return
+
+        if DATABASE_URL:
+            user_id = resultado['user_id']
+            nombre_raw = resultado['nombre']
+        else:
+            user_id = resultado[0]
+            nombre_raw = resultado[1]
+
+        if user_id == OWNER_ID:
+            return  # No saludar al owner automáticamente
+
+        nombre = limpiar_nombre_display(nombre_raw)
+        plantilla = _rnd.choice(_SALUDOS_PROACTIVOS)
+        mensaje = plantilla.format(nombre=nombre)
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensaje)
+        logger.info(f"🤖 Agente: saludo proactivo a {nombre}")
+    except Exception as e:
+        logger.error(f"Error agente saludo proactivo: {e}")
 
 
 def main():
@@ -17931,6 +18513,80 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter email: {e}")
     
+        # ==================== AGENTES AUTOMÁTICOS ====================
+        
+        # Agente: Resumen semanal automático — Domingos 20:30 Chile
+        try:
+            job_queue.run_daily(
+                agente_resumen_semanal_job,
+                time=dt_time(hour=20, minute=30, tzinfo=chile_tz) if chile_tz else dt_time(hour=23, minute=30),
+                days=(6,),  # Domingo
+                name='agente_resumen_semanal'
+            )
+            logger.info("🤖 Agente resumen semanal: domingos 20:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente resumen semanal: {e}")
+        
+        # Agente: Cumpleaños de la semana — Domingos 09:00 Chile
+        try:
+            job_queue.run_daily(
+                agente_cumpleanos_semana_job,
+                time=dt_time(hour=9, minute=0, tzinfo=chile_tz) if chile_tz else dt_time(hour=12, minute=0),
+                days=(6,),  # Domingo
+                name='agente_cumpleanos_semana'
+            )
+            logger.info("🤖 Agente cumpleaños semana: domingos 09:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente cumpleaños semana: {e}")
+        
+        # Agente: Cumpleaños del mes — Diario 21:00 (solo ejecuta el último día del mes)
+        try:
+            job_queue.run_daily(
+                agente_cumpleanos_mes_job,
+                time=dt_time(hour=21, minute=0, tzinfo=chile_tz) if chile_tz else dt_time(hour=0, minute=0),
+                name='agente_cumpleanos_mes'
+            )
+            logger.info("🤖 Agente cumpleaños mes: último día de cada mes 21:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente cumpleaños mes: {e}")
+        
+        # Agente: Gráficos matutinos — Diario 07:30 Chile
+        try:
+            job_queue.run_daily(
+                agente_graficos_matutino_job,
+                time=dt_time(hour=7, minute=30, tzinfo=chile_tz) if chile_tz else dt_time(hour=10, minute=30),
+                name='agente_graficos_matutino'
+            )
+            logger.info("🤖 Agente gráficos matutino: diario 07:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente gráficos matutino: {e}")
+        
+        # Agente: Mensajes aleatorios motivacionales — cada 3 horas
+        try:
+            job_queue.run_repeating(
+                agente_mensaje_aleatorio_job,
+                interval=10800,  # 3 horas en segundos
+                first=3600,      # Primer envío 1 hora después del inicio
+                name='agente_mensajes_aleatorios'
+            )
+            logger.info("🤖 Agente mensajes aleatorios: cada 3 horas")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente mensajes aleatorios: {e}")
+        
+        # Agente: Saludo proactivo a usuarios — cada 4 horas
+        try:
+            job_queue.run_repeating(
+                agente_saludo_proactivo_job,
+                interval=14400,  # 4 horas en segundos
+                first=7200,      # Primer saludo 2 horas después del inicio
+                name='agente_saludo_proactivo'
+            )
+            logger.info("🤖 Agente saludo proactivo: cada 4 horas")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente saludo proactivo: {e}")
+        
+        logger.info("🤖 Sistema de Agentes Automáticos activado — 6 agentes programados")
+
     logger.info("✅ Bot iniciado!")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
