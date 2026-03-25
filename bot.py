@@ -16091,7 +16091,7 @@ _economia_cache = {'fecha': '', 'html': None}
 
 
 def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia=''):
-    """Genera HTML completo con dashboard ECharts + 3 simuladores financieros interactivos."""
+    """Genera HTML completo con dashboard ECharts + simuladores + calculadora + conversor + modelos."""
     datos = all_data.get('datos_actuales', {})
     hist_12m = all_data.get('hist_12m', {})
     hist_10a = all_data.get('hist_10a', {})
@@ -16102,6 +16102,82 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia=''):
         if d and d.get('valor') is not None:
             return round(float(d['valor']), 4)
         return default
+
+    def _cl(v, dec=2):
+        """Format number to Chilean style: 1.234,56"""
+        if v is None: return 'N/D'
+        try:
+            v = float(v)
+            if dec == 0:
+                formatted = "{:,.0f}".format(v)
+            else:
+                formatted = ("{:,."+str(dec)+"f}").format(v)
+            return formatted.replace(',', 'X').replace('.', '.').replace('X', '.').replace(
+                formatted.split('.')[-1] if '.' in formatted else '', '').rstrip('.')
+        except:
+            return str(v)
+
+    def _clp(v, dec=2):
+        """Chilean format: 1.234,56"""
+        if v is None: return 'N/D'
+        try:
+            v = float(v)
+            neg = '-' if v < 0 else ''
+            v = abs(v)
+            if dec == 0:
+                s = "{:,.0f}".format(v)
+            else:
+                s = ("{:,."+str(dec)+"f}").format(v)
+            parts = s.split('.')
+            integer_part = parts[0].replace(',', '.')
+            if len(parts) > 1:
+                return neg + integer_part + ',' + parts[1]
+            return neg + integer_part
+        except:
+            return str(v)
+
+    # Prepare all values with Chilean format for HTML
+    uf_val = _jval('uf', 38000)
+    dolar_val = _jval('dolar', 950)
+    euro_val = _jval('euro', 1050)
+    utm_val = _jval('utm', 69889)
+    tpm_val = _jval('tpm', 5.0)
+    ipc_val = _jval('ipc')
+    desemp_val = _jval('tasa_desempleo')
+    imacec_val = _jval('imacec')
+    btc_val = _jval('bitcoin')
+    eth_val = _jval('ethereum')
+    sol_val = _jval('solana')
+    cobre_val = _jval('libra_cobre')
+    ipsa_val = _jval('ipsa')
+    ivp_val = _jval('ivp')
+
+    # Chilean formatted strings for display
+    UF_CL = _clp(uf_val, 2)
+    DOLAR_CL = _clp(dolar_val, 2)
+    EURO_CL = _clp(euro_val, 2)
+    UTM_CL = _clp(utm_val, 0)
+    IPC_CL = _clp(ipc_val, 2)
+    TPM_CL = _clp(tpm_val, 2)
+    BTC_CL = _clp(btc_val, 0)
+    DESEMP_CL = _clp(desemp_val, 2)
+    IMACEC_CL = _clp(imacec_val, 2)
+    COBRE_CL = _clp(cobre_val, 2)
+    IPSA_CL = _clp(ipsa_val, 0)
+    SOL_CL = _clp(sol_val, 0)
+    ETH_CL = _clp(eth_val, 0)
+    IVP_CL = _clp(ivp_val, 2)
+
+    # Series 30d stats (min, max, avg) for each indicator
+    def _serie_stats(cod):
+        d = datos.get(cod)
+        if not d: return {'min': 0, 'max': 0, 'avg': 0, 'data': []}
+        serie = d.get('serie30', [])
+        vals = [float(x.get('valor', 0)) for x in serie if x.get('valor') is not None]
+        if not vals: return {'min': 0, 'max': 0, 'avg': 0, 'data': []}
+        return {'min': min(vals), 'max': max(vals), 'avg': sum(vals)/len(vals), 'data': vals}
+
+    stats = {cod: _serie_stats(cod) for cod in ['uf','dolar','euro','utm','bitcoin','libra_cobre','ipsa','ivp','solana','ethereum']}
 
     # TMC data
     tmc_items = (datos_cmf or {}).get('tmc', [])
@@ -16125,179 +16201,303 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia=''):
     h12_dolar = json.dumps(hist_12m.get('dolar', []))
     h12_euro = json.dumps(hist_12m.get('euro', []))
 
-    h5_data = {}
+    # Separate CLP and USD hist5 data (punto 5)
+    h5_clp = {}
+    h5_usd = {}
     for cod, info in hist_10a.items():
-        h5_data[cod] = {'nombre': info.get('nombre', cod), 'color': info.get('color', '#ccc'),
-                        'anios': info.get('anios', []), 'valores': info.get('valores', [])}
+        entry = {'nombre': info.get('nombre', cod), 'color': info.get('color', '#ccc'),
+                 'anios': info.get('anios', []), 'valores': info.get('valores', [])}
+        if cod in ('bitcoin', 'solana', 'ethereum', 'libra_cobre'):
+            h5_usd[cod] = entry
+        else:
+            h5_clp[cod] = entry
 
-    analisis_safe = analisis_ia.replace('`', '').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>') if analisis_ia else ''
+    analisis_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
 
-    uf_val = _jval('uf', 38000)
-    dolar_val = _jval('dolar', 950)
-    tpm_val = _jval('tpm', 5.0)
+    # Build stats JSON for JS
+    stats_js = json.dumps({
+        cod: {'min': round(s['min'],2), 'max': round(s['max'],2), 'avg': round(s['avg'],2), 'data': [round(v,2) for v in s['data'][:30]]}
+        for cod, s in stats.items()
+    })
 
-    # Build HTML (using %s placeholders to avoid f-string brace issues with JS)
-    GAUGE_D = _jval('dolar')
-    GAUGE_U = _jval('uf')
-    IPC_V = _jval('ipc')
-    TPM_V = _jval('tpm')
-    DESEMP_V = _jval('tasa_desempleo')
-    IMACEC_V = _jval('imacec')
-    BTC_V = _jval('bitcoin')
-    ETH_V = _jval('ethereum')
-    SOL_V = _jval('solana')
-    COBRE_V = _jval('libra_cobre')
-    IPSA_V = _jval('ipsa')
+    # Indicator values for JS conversor
+    ind_vals_js = json.dumps({
+        'uf': uf_val, 'dolar': dolar_val, 'euro': euro_val, 'utm': utm_val,
+        'bitcoin': btc_val, 'libra_cobre': cobre_val, 'solana': sol_val, 'ethereum': eth_val
+    })
 
     html = '''<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard Economico Chile - Cofradia</title>
+<title>Dashboard Economico Chile - Cofradia de Networking</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#071828;--bg2:#0c2035;--gold:#c8a84b;--gold-dim:rgba(200,168,75,0.18);--cyan:#00d4ff;--blue:#2a85e0;--white:#d8e8f5;--gray:#6a8aaa;--green:#00e5a0;--red:#ff4757;--purple:#9d71ea;--orange:#ff8c42;--border:rgba(30,107,184,0.25)}
+:root{--navy:#071828;--navy2:#0c2035;--navy3:#112840;--gold:#c8a84b;--gold2:#e0c06a;--gold-dim:rgba(200,168,75,0.18);--gold-glow:rgba(200,168,75,0.35);--cyan:#00d4ff;--cyan-dim:rgba(0,212,255,0.15);--blue:#1e6bb8;--blue2:#2a85e0;--white:#d8e8f5;--gray:#6a8aaa;--gray2:#4a6a8a;--green:#00e5a0;--green-dim:rgba(0,229,160,0.15);--red:#ff4757;--purple:#9d71ea;--orange:#ff8c42;--teal:#00bfa5;--border:rgba(30,107,184,0.25)}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Exo 2',sans-serif;background:var(--bg);color:var(--white);min-height:100vh}
+body{font-family:'Exo 2',sans-serif;background:var(--navy);color:var(--white);min-height:100vh}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(0,212,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
-.wrap{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:20px}
-.hdr{text-align:center;padding:30px 20px 24px;border-bottom:1px solid var(--gold-dim);margin-bottom:24px}
-.hdr h1{font-family:'Rajdhani',sans-serif;font-size:2.6em;font-weight:700;letter-spacing:4px;color:var(--gold);text-shadow:0 0 40px rgba(200,168,75,0.35)}.hdr h1 span{color:var(--cyan)}
-.hdr-sub{color:var(--gray);font-size:0.85em;margin-top:8px;letter-spacing:1px}
-.actions{display:flex;gap:12px;justify-content:center;margin-bottom:20px;flex-wrap:wrap}
-.btn{padding:10px 24px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.95em;letter-spacing:2px;cursor:pointer;transition:all .25s;border:2px solid var(--gold);background:linear-gradient(135deg,rgba(200,168,75,0.2),rgba(200,168,75,0.05));color:var(--gold)}.btn:hover{background:var(--gold);color:var(--bg)}.btn:disabled{opacity:.4;cursor:wait}
-.tabs{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--border);margin-bottom:20px}
+.wrap{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:24px 20px}
+.hdr{text-align:center;padding:36px 20px 28px;position:relative;border-bottom:1px solid var(--gold-dim);margin-bottom:28px}
+.hdr::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:200px;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)}
+.hdr h1{font-family:'Rajdhani',sans-serif;font-size:3em;font-weight:700;letter-spacing:4px;color:var(--gold);text-shadow:0 0 40px var(--gold-glow);line-height:1.1}.hdr h1 span{color:var(--cyan)}
+.hdr-sub{color:var(--gray);font-size:0.88em;margin-top:10px;letter-spacing:1px}
+.hdr-ver{display:inline-block;background:linear-gradient(135deg,var(--blue),#0d3d6e);border:1px solid rgba(42,133,224,0.4);border-radius:20px;padding:4px 16px;font-size:0.75em;color:var(--cyan);font-family:'Share Tech Mono',monospace;margin-top:10px;letter-spacing:2px}
+.actions{display:flex;gap:12px;justify-content:center;margin-bottom:28px;flex-wrap:wrap}
+.btn{padding:11px 28px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:1em;letter-spacing:2px;cursor:pointer;transition:all .25s;border:none}
+.btn-gold{background:linear-gradient(135deg,rgba(200,168,75,0.25),rgba(200,168,75,0.08));border:2px solid var(--gold);color:var(--gold)}.btn-gold:hover{background:var(--gold);color:var(--navy)}.btn-gold:disabled{opacity:.4;cursor:wait}
+.tabs{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--border);margin-bottom:24px}
 .tab{padding:10px 18px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.85em;letter-spacing:1.5px;color:var(--gray);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .2s;white-space:nowrap}.tab:hover{color:var(--white)}.tab.active{color:var(--gold);border-bottom-color:var(--gold)}
 .tc{display:none}.tc.active{display:block}
-.kpi-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:20px}
-.kpi{background:linear-gradient(145deg,rgba(12,32,53,0.9),rgba(7,24,40,0.95));border:1px solid var(--border);border-radius:10px;padding:14px 18px;text-align:center;min-width:105px;position:relative;overflow:hidden}
-.kpi .v{font-family:'Rajdhani',sans-serif;font-size:1.9em;font-weight:800;line-height:1}.kpi .l{font-size:0.6em;color:var(--gray);text-transform:uppercase;letter-spacing:1.5px;margin-top:3px}
+.kpi-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:28px}
+.kpi{background:linear-gradient(145deg,rgba(12,32,53,0.9),rgba(7,24,40,0.95));border:1px solid var(--border);border-radius:10px;padding:16px 20px;text-align:center;min-width:110px;position:relative;overflow:hidden}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.kpi .v{font-family:'Rajdhani',sans-serif;font-size:2em;font-weight:800;line-height:1}.kpi .l{font-size:0.62em;color:var(--gray);text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
+.sec{background:linear-gradient(145deg,rgba(12,32,53,0.7),rgba(7,24,40,0.85));border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:20px;position:relative}
+.sec-t{font-family:'Rajdhani',sans-serif;font-size:1.25em;font-weight:700;letter-spacing:2px;color:var(--gold);margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--gold-dim);display:flex;align-items:center;gap:10px}
+.sec-t::before{content:'';display:inline-block;width:4px;height:20px;background:linear-gradient(to bottom,var(--gold),var(--gold-dim));border-radius:2px;flex-shrink:0}
 .chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
-.chart-box{background:rgba(7,24,40,0.6);border:1px solid var(--border);border-radius:12px;padding:14px}
-.chart-title{font-family:'Rajdhani',sans-serif;color:var(--gold);font-size:0.85em;font-weight:700;letter-spacing:1.5px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--gold-dim)}
-.chart{width:100%;height:280px}
+.chart-box{background:rgba(7,24,40,0.6);border:1px solid var(--border);border-radius:12px;padding:16px}
+.chart-title{font-family:'Rajdhani',sans-serif;color:var(--gold);font-size:0.9em;font-weight:700;letter-spacing:1.5px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--gold-dim)}
+.chart{width:100%;height:300px}
 .sim-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
 .sim-card{background:rgba(7,24,40,0.7);border:1px solid var(--border);border-radius:14px;padding:20px}
 .sim-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:1.05em;letter-spacing:2px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--gold-dim);display:flex;align-items:center;gap:8px}
-.sim-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}.sim-row label{font-size:0.78em;color:var(--gray);min-width:110px}.sim-row input,.sim-row select{background:rgba(7,24,40,0.9);border:1px solid var(--border);border-radius:6px;color:var(--white);padding:8px 12px;font-size:0.85em;flex:1;font-family:'Share Tech Mono',monospace}.sim-row input:focus{border-color:var(--gold);outline:none}
+.sim-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}.sim-row label{font-size:0.78em;color:var(--gray);min-width:110px}.sim-row input,.sim-row select{background:rgba(7,24,40,0.9);border:1px solid var(--border);border-radius:6px;color:var(--white);padding:8px 12px;font-size:0.85em;flex:1;font-family:'Share Tech Mono',monospace}.sim-row input:focus,.sim-row select:focus{border-color:var(--gold);outline:none}
 .sim-btn{padding:10px 20px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;letter-spacing:2px;cursor:pointer;border:2px solid var(--cyan);background:rgba(0,212,255,0.1);color:var(--cyan);width:100%;margin-top:6px;transition:all .2s}.sim-btn:hover{background:rgba(0,212,255,0.25)}
+.sim-pdf{padding:8px 16px;border-radius:5px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.8em;letter-spacing:1px;cursor:pointer;border:1px solid var(--gold-dim);background:rgba(200,168,75,0.08);color:var(--gold);margin-top:8px;transition:all .2s;width:100%}.sim-pdf:hover{background:rgba(200,168,75,0.2)}
 .sim-result{margin-top:14px;padding:14px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:10px;font-size:0.82em;display:none}
 .sim-result .big{font-family:'Rajdhani',sans-serif;font-size:1.8em;font-weight:800;color:var(--green)}.sim-result .detail{color:var(--gray);margin-top:6px;line-height:1.6}
-.sec{background:linear-gradient(145deg,rgba(12,32,53,0.7),rgba(7,24,40,0.85));border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:16px}
-.sec-t{font-family:'Rajdhani',sans-serif;font-size:1.15em;font-weight:700;letter-spacing:2px;color:var(--gold);margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--gold-dim)}
 .ia-box{background:rgba(200,168,75,0.06);border:1px solid var(--gold-dim);border-radius:10px;padding:16px;font-size:0.82em;color:var(--gray);line-height:1.7}
-.footer{text-align:center;padding:20px 0 10px;border-top:1px solid var(--gold-dim);margin-top:20px;font-size:0.75em;color:#4a6a8a;font-family:'Share Tech Mono',monospace}.footer span{color:var(--gold)}
-@media(max-width:768px){.chart-grid,.sim-grid{grid-template-columns:1fr}.hdr h1{font-size:1.8em}.tabs{overflow-x:auto}.tab{font-size:0.75em;padding:8px 12px}}
+.stat-tbl{width:100%;border-collapse:collapse;font-size:0.78em;margin-top:10px}
+.stat-tbl th{background:rgba(200,168,75,0.1);color:var(--gold);padding:8px 10px;text-align:left;font-family:'Rajdhani',sans-serif;letter-spacing:1px;border-bottom:1px solid var(--gold-dim);font-weight:700}
+.stat-tbl td{padding:7px 10px;border-bottom:1px solid var(--border);color:var(--gray)}.stat-tbl td:first-child{color:var(--white);font-weight:600}
+.stat-tbl tr:hover td{background:rgba(0,212,255,0.04)}
+.conv-grid{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:end;margin-bottom:14px}
+.conv-swap{background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.3);border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1.2em;color:var(--cyan);transition:all .2s;margin-bottom:4px}.conv-swap:hover{background:rgba(0,212,255,0.25)}
+.footer{text-align:center;padding:24px 0 12px;border-top:1px solid var(--gold-dim);margin-top:24px;font-size:0.78em;color:var(--gray2);font-family:'Share Tech Mono',monospace;letter-spacing:.5px}.footer span{color:var(--gold)}
+@media(max-width:768px){.chart-grid,.sim-grid{grid-template-columns:1fr}.hdr h1{font-size:1.8em}.tabs{overflow-x:auto}.tab{font-size:0.75em;padding:8px 12px}.conv-grid{grid-template-columns:1fr}}
 </style></head><body>
 <div class="wrap" id="content">
 <div class="hdr">
+<div style="display:inline-block;background:rgba(200,168,75,0.12);border:1px solid var(--gold-dim);border-radius:4px;padding:3px 14px;font-family:'Share Tech Mono',monospace;font-size:0.7em;color:var(--gold);letter-spacing:3px;margin-bottom:14px">&#9875; COFRADIA DE NETWORKING</div>
 <h1>DASHBOARD <span>ECONOMICO</span> CHILE</h1>
-<div class="hdr-sub">Indicadores en tiempo real + Simuladores Financieros + Analisis IA — Cofradia de Networking</div>
-<div style="margin-top:8px;font-family:'Share Tech Mono',monospace;font-size:0.75em;color:var(--cyan);letter-spacing:2px">GENERADO: ''' + generado + '''</div>
+<div class="hdr-sub">Indicadores en Tiempo Real · Simuladores Financieros · Calculadora · Conversor · Analisis IA</div>
+<div class="hdr-ver">''' + generado + '''</div>
 </div>
-<div class="actions"><button class="btn" id="btnPdf" onclick="exportPDF()">DESCARGAR PDF</button></div>
+<div class="actions"><button class="btn btn-gold" id="btnPdf" onclick="exportPDF()">&#128229; DESCARGAR PDF</button></div>
 <div class="kpi-row">
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)"></div><div class="v" style="color:var(--gold)">$''' + f"{uf_val:,.0f}" + '''</div><div class="l">UF</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cyan),transparent)"></div><div class="v" style="color:var(--cyan)">$''' + f"{dolar_val:,.0f}" + '''</div><div class="l">DOLAR USD</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--green),transparent)"></div><div class="v" style="color:var(--green)">''' + f"{IPC_V:.1f}" + '''%</div><div class="l">IPC</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--orange),transparent)"></div><div class="v" style="color:var(--orange)">''' + f"{TPM_V:.1f}" + '''%</div><div class="l">TPM</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--purple),transparent)"></div><div class="v" style="color:var(--purple)">$''' + f"{BTC_V:,.0f}" + '''</div><div class="l">BTC USD</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--red),transparent)"></div><div class="v" style="color:var(--red)">''' + f"{DESEMP_V:.1f}" + '''%</div><div class="l">DESEMPLEO</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#cd7f32,transparent)"></div><div class="v" style="color:#cd7f32">''' + f"{COBRE_V:.3f}" + '''</div><div class="l">COBRE USD/lb</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)"></div><div class="v" style="color:var(--gold)">$''' + UF_CL + '''</div><div class="l">UF</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cyan),transparent)"></div><div class="v" style="color:var(--cyan)">$''' + DOLAR_CL + '''</div><div class="l">DOLAR USD</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--blue2),transparent)"></div><div class="v" style="color:var(--blue2)">$''' + EURO_CL + '''</div><div class="l">EURO</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--green),transparent)"></div><div class="v" style="color:var(--green)">''' + IPC_CL + '''%</div><div class="l">IPC</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--orange),transparent)"></div><div class="v" style="color:var(--orange)">''' + TPM_CL + '''%</div><div class="l">TPM</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--purple),transparent)"></div><div class="v" style="color:var(--purple)">USD ''' + BTC_CL + '''</div><div class="l">BITCOIN</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--red),transparent)"></div><div class="v" style="color:var(--red)">''' + DESEMP_CL + '''%</div><div class="l">DESEMPLEO</div></div>
+<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#cd7f32,transparent)"></div><div class="v" style="color:#cd7f32">USD ''' + COBRE_CL + '''</div><div class="l">COBRE lb</div></div>
 </div>
 <div class="tabs">
-<div class="tab active" onclick="st('ind')">INDICADORES</div>
-<div class="tab" onclick="st('hist')">HISTORICO</div>
-<div class="tab" onclick="st('afp')">AFP & TASAS</div>
-<div class="tab" onclick="st('sim')">SIMULADORES</div>
-<div class="tab" onclick="st('ia')">ANALISIS IA</div>
+<div class="tab active" onclick="st('ind')">&#128202; INDICADORES</div>
+<div class="tab" onclick="st('hist')">&#128200; HISTORICO</div>
+<div class="tab" onclick="st('afp')">&#128020; AFP & TASAS</div>
+<div class="tab" onclick="st('sim')">&#129518; SIMULADORES</div>
+<div class="tab" onclick="st('calc')">&#128290; CALCULADORA</div>
+<div class="tab" onclick="st('ia')">&#129302; ANALISIS IA</div>
 </div>
+
+<!-- TAB: INDICADORES (punto 2: mas graficos, stats, proyeccion) -->
 <div class="tc active" id="tab-ind">
+<div class="sec">
+<div class="sec-t">RESUMEN ESTADISTICO — ULTIMOS 30 DIAS</div>
+<table class="stat-tbl">
+<tr><th>Indicador</th><th>Valor Actual</th><th>Min 30d</th><th>Max 30d</th><th>Promedio 30d</th><th>Variacion</th></tr>
+<tr><td>&#127793; UF</td><td>$''' + UF_CL + '''</td><td id="s_uf_min">-</td><td id="s_uf_max">-</td><td id="s_uf_avg">-</td><td id="s_uf_var">-</td></tr>
+<tr><td>&#128181; Dolar</td><td>$''' + DOLAR_CL + '''</td><td id="s_dl_min">-</td><td id="s_dl_max">-</td><td id="s_dl_avg">-</td><td id="s_dl_var">-</td></tr>
+<tr><td>&#128182; Euro</td><td>$''' + EURO_CL + '''</td><td id="s_eu_min">-</td><td id="s_eu_max">-</td><td id="s_eu_avg">-</td><td id="s_eu_var">-</td></tr>
+<tr><td>&#8383; Bitcoin</td><td>USD ''' + BTC_CL + '''</td><td id="s_bt_min">-</td><td id="s_bt_max">-</td><td id="s_bt_avg">-</td><td id="s_bt_var">-</td></tr>
+<tr><td>&#128296; Cobre</td><td>USD ''' + COBRE_CL + '''</td><td id="s_cb_min">-</td><td id="s_cb_max">-</td><td id="s_cb_avg">-</td><td id="s_cb_var">-</td></tr>
+<tr><td>&#128201; IPSA</td><td>''' + IPSA_CL + ''' pts</td><td id="s_ip_min">-</td><td id="s_ip_max">-</td><td id="s_ip_avg">-</td><td id="s_ip_var">-</td></tr>
+</table></div>
 <div class="chart-grid">
-<div class="chart-box"><div class="chart-title">GAUGE - DOLAR USD/CLP</div><div class="chart" id="cGD"></div></div>
-<div class="chart-box"><div class="chart-title">GAUGE - UF HOY</div><div class="chart" id="cGU"></div></div>
-<div class="chart-box"><div class="chart-title">COMPARATIVA INDICADORES MACRO (%)</div><div class="chart" id="cBar"></div></div>
-<div class="chart-box"><div class="chart-title">CRIPTOMONEDAS (USD)</div><div class="chart" id="cCr"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; GAUGE — DOLAR USD/CLP</div><div class="chart" id="cGD"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; GAUGE — UF HOY</div><div class="chart" id="cGU"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; INDICADORES MACRO (%)</div><div class="chart" id="cBar"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; CRIPTOMONEDAS (USD)</div><div class="chart" id="cCr"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; DOLAR 30 DIAS — MIN / MAX / PROMEDIO</div><div class="chart" id="cSpk"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; RADAR — SALUD ECONOMICA</div><div class="chart" id="cRad"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; PROYECCION DOLAR — TENDENCIA LINEAL IA</div><div class="chart" id="cProj"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; COMPARATIVO UF vs DOLAR vs EURO (30d indexado)</div><div class="chart" id="cComp"></div></div>
 </div></div>
+
+<!-- TAB: HISTORICO (punto 5: separar CLP de USD) -->
 <div class="tc" id="tab-hist">
 <div class="chart-grid">
-<div class="chart-box"><div class="chart-title">DOLAR vs EURO - 12 MESES</div><div class="chart" id="cH12"></div></div>
-<div class="chart-box"><div class="chart-title">INDICADORES MACRO - 5 ANOS</div><div class="chart" id="cH5"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; DOLAR vs EURO — 12 MESES</div><div class="chart" id="cH12"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; INDICADORES EN PESOS (CLP) — 5 ANOS</div><div class="chart" id="cH5clp"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; INDICADORES EN DOLARES (USD) — 5 ANOS</div><div class="chart" id="cH5usd"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; VARIACION ANUAL COMPARADA (%)</div><div class="chart" id="cH5var"></div></div>
 </div></div>
+
+<!-- TAB: AFP & TASAS -->
 <div class="tc" id="tab-afp">
 <div class="chart-grid">
-<div class="chart-box"><div class="chart-title">RENTABILIDAD AFP - FONDO A vs E (6 MESES)</div><div class="chart" id="cAfp"></div></div>
-<div class="chart-box"><div class="chart-title">TASAS CMF - TMC VIGENTES</div><div class="chart" id="cTmc"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; RENTABILIDAD AFP — FONDO A vs E (6 MESES)</div><div class="chart" id="cAfp"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; TASAS CMF — TMC VIGENTES</div><div class="chart" id="cTmc"></div></div>
 </div></div>
+
+<!-- TAB: SIMULADORES (punto 6: PDF per simulacion) -->
 <div class="tc" id="tab-sim">
 <div class="sim-grid">
-<div class="sim-card">
-<div class="sim-title" style="color:var(--cyan)">🏠 CREDITO HIPOTECARIO</div>
+<div class="sim-card" id="sim_h_card">
+<div class="sim-title" style="color:var(--cyan)">&#127968; CREDITO HIPOTECARIO</div>
 <div class="sim-row"><label>Propiedad (UF)</label><input type="number" id="sh_m" value="3000" step="100"></div>
 <div class="sim-row"><label>Pie (%)</label><input type="number" id="sh_p" value="20" min="0" max="80"></div>
 <div class="sim-row"><label>Plazo (anos)</label><input type="number" id="sh_a" value="25" min="1" max="30"></div>
 <div class="sim-row"><label>Tasa anual (%)</label><input type="number" id="sh_t" value="4.5" step="0.1"></div>
 <button class="sim-btn" onclick="simH()">CALCULAR DIVIDENDO</button>
 <div class="sim-result" id="sh_r"><div class="big" id="sh_v"></div><div class="detail" id="sh_d"></div></div>
+<button class="sim-pdf" onclick="printSim('sim_h_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
 </div>
-<div class="sim-card">
-<div class="sim-title" style="color:var(--green)">💰 APV (Ahorro Previsional Voluntario)</div>
+<div class="sim-card" id="sim_a_card">
+<div class="sim-title" style="color:var(--green)">&#128176; APV (Ahorro Previsional Voluntario)</div>
 <div class="sim-row"><label>Aporte mensual ($)</label><input type="number" id="ap_m" value="100000" step="10000"></div>
 <div class="sim-row"><label>Plazo (anos)</label><input type="number" id="ap_a" value="20" min="1" max="40"></div>
 <div class="sim-row"><label>Rentabilidad (%)</label><input type="number" id="ap_r" value="5.0" step="0.5"></div>
 <div class="sim-row"><label>Regimen</label><select id="ap_rg"><option value="A">Regimen A (15% bonificacion)</option><option value="B">Regimen B (descuento tributario)</option></select></div>
 <button class="sim-btn" onclick="simA()">CALCULAR AHORRO</button>
 <div class="sim-result" id="ap_res"><div class="big" id="ap_v"></div><div class="detail" id="ap_d"></div></div>
+<button class="sim-pdf" onclick="printSim('sim_a_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
 </div>
-<div class="sim-card">
-<div class="sim-title" style="color:var(--gold)">📈 SIMULADOR DE INVERSION</div>
+<div class="sim-card" id="sim_i_card">
+<div class="sim-title" style="color:var(--gold)">&#128200; SIMULADOR DE INVERSION</div>
 <div class="sim-row"><label>Capital inicial ($)</label><input type="number" id="iv_c" value="5000000" step="500000"></div>
 <div class="sim-row"><label>Aporte mensual ($)</label><input type="number" id="iv_m" value="200000" step="50000"></div>
 <div class="sim-row"><label>Plazo (anos)</label><input type="number" id="iv_a" value="10" min="1" max="40"></div>
 <div class="sim-row"><label>Rentabilidad (%)</label><input type="number" id="iv_r" value="8.0" step="0.5"></div>
 <button class="sim-btn" onclick="simI()">CALCULAR PROYECCION</button>
 <div class="sim-result" id="iv_res"><div class="big" id="iv_v"></div><div class="detail" id="iv_d"></div></div>
+<button class="sim-pdf" onclick="printSim('sim_i_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
 </div>
 </div>
-<div style="margin-top:14px;padding:10px 14px;background:rgba(200,168,75,0.06);border:1px solid var(--gold-dim);border-radius:8px;font-size:0.73em;color:var(--gray)">
-Los simuladores son referenciales. UF $''' + f"{uf_val:,.0f}" + ''' y USD $''' + f"{dolar_val:,.0f}" + ''' al momento de generar. Consulte a un asesor financiero.
+<div style="margin-top:14px;padding:10px 14px;background:rgba(200,168,75,0.06);border:1px solid var(--gold-dim);border-radius:8px;font-size:0.73em;color:var(--gray)">Los simuladores son referenciales. UF $''' + UF_CL + ''' y USD $''' + DOLAR_CL + ''' al momento de generar. Consulte a un asesor financiero.</div>
+</div>
+
+<!-- TAB: CALCULADORA + CONVERSOR (punto 4) -->
+<div class="tc" id="tab-calc">
+<div class="sim-grid">
+<div class="sim-card">
+<div class="sim-title" style="color:var(--cyan)">&#128290; CALCULADORA DE INDICADORES</div>
+<div class="sim-row"><label>Operacion</label><select id="calc_op"><option value="mul">Multiplicar (x)</option><option value="div">Dividir (/)</option><option value="add">Sumar (+)</option><option value="sub">Restar (-)</option></select></div>
+<div class="sim-row"><label>Indicador</label><select id="calc_ind"><option value="uf">UF ($''' + UF_CL + ''')</option><option value="dolar">Dolar ($''' + DOLAR_CL + ''')</option><option value="euro">Euro ($''' + EURO_CL + ''')</option><option value="utm">UTM ($''' + UTM_CL + ''')</option><option value="bitcoin">Bitcoin (USD ''' + BTC_CL + ''')</option><option value="libra_cobre">Cobre (USD ''' + COBRE_CL + ''')</option></select></div>
+<div class="sim-row"><label>Cantidad</label><input type="number" id="calc_cant" value="1" step="0.01"></div>
+<button class="sim-btn" onclick="calcInd()">CALCULAR</button>
+<div class="sim-result" id="calc_res"><div class="big" id="calc_v"></div><div class="detail" id="calc_d"></div></div>
+</div>
+<div class="sim-card">
+<div class="sim-title" style="color:var(--gold)">&#128257; CONVERSOR DE INDICADORES</div>
+<div class="conv-grid">
+<div><div class="sim-row" style="margin:0"><label style="min-width:auto">Desde</label><select id="cv_from" style="width:100%"><option value="uf">UF</option><option value="dolar">Dolar USD</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre (lb)</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div>
+<div class="sim-row" style="margin:0;margin-top:8px"><label style="min-width:auto">Cantidad</label><input type="number" id="cv_cant" value="1" step="0.01"></div></div>
+<div style="text-align:center"><div class="conv-swap" onclick="swapConv()">&#8646;</div></div>
+<div><div class="sim-row" style="margin:0"><label style="min-width:auto">Hacia</label><select id="cv_to" style="width:100%"><option value="dolar" selected>Dolar USD</option><option value="uf">UF</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre (lb)</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div></div>
+</div>
+<button class="sim-btn" onclick="convertir()">CONVERTIR</button>
+<div class="sim-result" id="cv_res"><div class="big" id="cv_v"></div><div class="detail" id="cv_d"></div></div>
+</div>
 </div></div>
+
+<!-- TAB: ANALISIS IA (punto 7: titulo corregido) -->
 <div class="tc" id="tab-ia">
-<div class="sec"><div class="sec-t">ANALISIS MACROECONOMICO - GROQ IA (LLaMA 3.3 70B)</div>
-<div class="ia-box">''' + (analisis_safe if analisis_safe else 'Analisis no disponible en esta sesion.') + '''</div>
+<div class="sec">
+<div class="sec-t">ANALISIS MACROECONOMICO</div>
+<div class="ia-box">''' + (analisis_safe if analisis_safe else 'Analisis no disponible en esta sesion. Ejecute /economia nuevamente para generar.') + '''</div>
 </div></div>
-<div class="footer">DASHBOARD ECONOMICO <span>COFRADIA DE NETWORKING</span> · Fuentes: Banco Central · CMF · findic.cl · mindicador.cl · CoinGecko · quetalmiafp.cl<br><span>''' + generado + '''</span></div>
+
+<div class="footer">
+&#9875; DASHBOARD ECONOMICO <span>COFRADIA DE NETWORKING</span> · Fuentes: Banco Central · CMF · AFP<br>
+<span>''' + generado + '''</span> · Simuladores · Calculadora · Conversor · Analisis IA
+</div>
 </div>
 <script>
-var bg='#0c2035',gold='#c8a84b',cyan='#00d4ff',green='#00e5a0',blue='#2a85e0',purple='#9d71ea',orange='#ff8c42',red='#ff4757',textC='#d8e8f5',borderC='rgba(30,107,184,0.15)',axisC='rgba(30,107,184,0.3)';
-function st(id){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tc').forEach(function(c){c.classList.remove('active');c.style.display=''});document.getElementById('tab-'+id).classList.add('active');event.target.classList.add('active');setTimeout(function(){Object.values(CH).forEach(function(c){if(c)c.resize()})},100)}
-function fmt(n){return n.toString().replace(/\\B(?=(\\d{3})+(?!\\d))/g,".")}
+var bg='#0c2035',gold='#c8a84b',cyan='#00d4ff',green='#00e5a0',blue='#2a85e0',purple='#9d71ea',orange='#ff8c42',red='#ff4757',textC='#d8e8f5',borderC='rgba(30,107,184,0.15)',axisC='rgba(30,107,184,0.3)',teal='#00bfa5';
+var STATS=''' + stats_js + ''';
+var IND_VALS=''' + ind_vals_js + ''';
+// Chilean number format: 1.234,56
+function fc(n,d){if(n==null||isNaN(n))return'N/D';d=d===undefined?2:d;var neg=n<0?'-':'';n=Math.abs(n);var s=n.toFixed(d);var parts=s.split('.');var intP=parts[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,'.');return neg+intP+(d>0?','+parts[1]:'');}
+function st(id){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tc').forEach(function(c){c.classList.remove('active');c.style.display=''});document.getElementById('tab-'+id).classList.add('active');event.target.classList.add('active');setTimeout(function(){Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()})},100)}
 var CH={};
+// Fill stats table
+(function(){
+var m={uf:['s_uf',2],dolar:['s_dl',2],euro:['s_eu',2],bitcoin:['s_bt',0],libra_cobre:['s_cb',2],ipsa:['s_ip',0]};
+for(var cod in m){var s=STATS[cod];if(!s)continue;var p=m[cod][0],d=m[cod][1];
+var el_min=document.getElementById(p+'_min');var el_max=document.getElementById(p+'_max');var el_avg=document.getElementById(p+'_avg');var el_var=document.getElementById(p+'_var');
+if(el_min)el_min.textContent=fc(s.min,d);if(el_max)el_max.textContent=fc(s.max,d);if(el_avg)el_avg.textContent=fc(s.avg,d);
+if(el_var&&s.data.length>=2){var pct=((s.data[0]-s.data[s.data.length-1])/s.data[s.data.length-1]*100);el_var.innerHTML=(pct>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pct),2)+'%</span>';}}
+})();
+// Gauges
 CH.gd=echarts.init(document.getElementById('cGD'));
-CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.3,green],[0.7,gold],[1,red]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:10},detail:{valueAnimation:true,formatter:'${value} CLP',color:cyan,fontSize:22,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(GAUGE_D) + ''',name:'USD/CLP'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.3,green],[0.7,gold],[1,red]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cyan,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(dolar_val) + ''',name:'USD/CLP'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
 CH.gu=echarts.init(document.getElementById('cGU'));
-CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.4,green],[0.7,gold],[1,orange]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:9,formatter:function(v){return(v/1000)+'k'}},detail:{valueAnimation:true,formatter:'${value}',color:gold,fontSize:22,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(GAUGE_U) + ''',name:'UF Hoy'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.4,green],[0.7,gold],[1,orange]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v/1000,0)+'k'}},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:gold,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(uf_val) + ''',name:'UF Hoy'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
+// Bar macro
 CH.cb=echarts.init(document.getElementById('cBar'));
-CH.cb.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},grid:{left:'5%',right:'5%',bottom:'15%',top:'5%',containLabel:true},xAxis:{type:'category',data:['IPC','TPM','Desempleo','IMACEC'],axisLabel:{color:textC,fontSize:11},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:'{value}%'},splitLine:{lineStyle:{color:borderC}}},series:[{type:'bar',data:[{value:''' + str(IPC_V) + ''',itemStyle:{color:green}},{value:''' + str(TPM_V) + ''',itemStyle:{color:orange}},{value:''' + str(DESEMP_V) + ''',itemStyle:{color:red}},{value:''' + str(IMACEC_V) + ''',itemStyle:{color:gold}}],label:{show:true,position:'top',color:textC,fontWeight:'bold',fontSize:12,formatter:'{c}%'},barWidth:'45%',itemStyle:{borderRadius:[6,6,0,0]}}]});
+CH.cb.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'5%',right:'5%',bottom:'15%',top:'5%',containLabel:true},xAxis:{type:'category',data:['IPC','TPM','Desempleo','IMACEC'],axisLabel:{color:textC,fontSize:11},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'bar',data:[{value:''' + str(ipc_val) + ''',itemStyle:{color:green}},{value:''' + str(tpm_val) + ''',itemStyle:{color:orange}},{value:''' + str(desemp_val) + ''',itemStyle:{color:red}},{value:''' + str(imacec_val) + ''',itemStyle:{color:gold}}],label:{show:true,position:'top',color:textC,fontWeight:'bold',fontSize:12,formatter:function(p){return fc(p.value,2)+'%'}},barWidth:'45%',itemStyle:{borderRadius:[6,6,0,0]}}]});
+// Cripto
 CH.cc=echarts.init(document.getElementById('cCr'));
-CH.cc.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(BTC_V) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(ETH_V) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(SOL_V) + ''',itemStyle:{color:'#9945FF'}}],label:{color:textC,fontSize:11,formatter:'{b}\\n${c} USD'},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
+CH.cc.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p.name+': USD '+fc(p.value,0)}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(btc_val) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(eth_val) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(sol_val) + ''',itemStyle:{color:'#9945FF'}}],label:{color:textC,fontSize:11,formatter:function(p){return p.name+'\\nUSD '+fc(p.value,0)}},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
+// Sparkline dolar 30d with min/max/avg bands
+CH.spk=echarts.init(document.getElementById('cSpk'));
+(function(){var sd=STATS.dolar||{data:[]};var d=sd.data.slice().reverse();var labels=[];for(var i=0;i<d.length;i++)labels.push('D-'+(d.length-i));
+CH.spk.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': $'+fc(p[0].value,2)}},grid:{left:'10%',right:'5%',bottom:'10%',top:'15%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan},markLine:{silent:true,data:[{yAxis:sd.avg,name:'Promedio',lineStyle:{color:gold,type:'dashed'},label:{formatter:function(){return'Prom: $'+fc(sd.avg,2)},color:gold,fontSize:10}},{yAxis:sd.min,name:'Min',lineStyle:{color:green,type:'dotted'},label:{formatter:function(){return'Min: $'+fc(sd.min,2)},color:green,fontSize:9}},{yAxis:sd.max,name:'Max',lineStyle:{color:red,type:'dotted'},label:{formatter:function(){return'Max: $'+fc(sd.max,2)},color:red,fontSize:9}}]}}]})})();
+// Radar salud economica
+CH.rad=echarts.init(document.getElementById('cRad'));
+CH.rad.setOption({backgroundColor:'transparent',radar:{indicator:[{name:'IPC (inv)',max:10},{name:'TPM (inv)',max:12},{name:'Empleo',max:100},{name:'IMACEC',max:10},{name:'IPSA (norm)',max:15000},{name:'Cobre',max:8}],axisName:{color:textC,fontSize:10},splitArea:{areaStyle:{color:['rgba(0,212,255,0.02)','rgba(0,212,255,0.04)']}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'radar',data:[{value:[Math.max(0,10-''' + str(abs(ipc_val)) + '''),Math.max(0,12-''' + str(tpm_val) + '''),Math.max(0,100-''' + str(desemp_val) + '''*10),Math.max(0,''' + str(imacec_val) + '''+5),''' + str(ipsa_val) + ''',''' + str(cobre_val) + '''],name:'Chile Hoy',areaStyle:{color:'rgba(0,212,255,0.15)'},lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}}]}]});
+// Proyeccion dolar (regresion lineal simple)
+CH.proj=echarts.init(document.getElementById('cProj'));
+(function(){var sd=STATS.dolar||{data:[]};var d=sd.data.slice().reverse();var n=d.length;if(n<3)return;var sumX=0,sumY=0,sumXY=0,sumX2=0;for(var i=0;i<n;i++){sumX+=i;sumY+=d[i];sumXY+=i*d[i];sumX2+=i*i;}var slope=(n*sumXY-sumX*sumY)/(n*sumX2-sumX*sumX);var intercept=(sumY-slope*sumX)/n;var labels=[];var actual=[];var trend=[];var proj=[];for(var i=0;i<n;i++){labels.push('D-'+(n-i));actual.push(d[i]);trend.push(Math.round((intercept+slope*i)*100)/100);proj.push(null);}for(var i=0;i<7;i++){labels.push('P+'+(i+1));actual.push(null);trend.push(null);proj.push(Math.round((intercept+slope*(n+i))*100)/100);}
+CH.proj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': $'+fc(i.value,2)+'<br>'});return s}},legend:{data:['Real','Tendencia','Proyeccion 7d'],textStyle:{color:textC},top:5},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Real',type:'line',data:actual,lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}},{name:'Tendencia',type:'line',data:trend,lineStyle:{color:gold,width:1,type:'dashed'},itemStyle:{color:gold},symbol:'none'},{name:'Proyeccion 7d',type:'line',data:proj,lineStyle:{color:green,width:2,type:'dotted'},itemStyle:{color:green},areaStyle:{color:'rgba(0,229,160,0.1)'}}]})})();
+// Comparativo indexado
+CH.comp=echarts.init(document.getElementById('cComp'));
+(function(){var su=STATS.uf||{data:[]};var sd=STATS.dolar||{data:[]};var se=STATS.euro||{data:[]};function idx(arr){if(!arr.length)return[];var base=arr[arr.length-1];return arr.slice().reverse().map(function(v){return Math.round(v/base*10000)/100})}var iu=idx(su.data);var id=idx(sd.data);var ie=idx(se.data);var maxLen=Math.max(iu.length,id.length,ie.length);var labels=[];for(var i=0;i<maxLen;i++)labels.push('D-'+(maxLen-i));
+CH.comp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:['UF','Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'UF',type:'line',data:iu,smooth:true,lineStyle:{color:gold,width:2},itemStyle:{color:gold}},{name:'Dolar',type:'line',data:id,smooth:true,lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}},{name:'Euro',type:'line',data:ie,smooth:true,lineStyle:{color:blue,width:2},itemStyle:{color:blue}}]})})();
+// Hist 12m
 CH.h12=echarts.init(document.getElementById('cH12'));
-CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:['Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:textC,fontSize:9,rotate:30},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:10},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_dolar + ''',lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan}},{name:'Euro',type:'line',smooth:true,data:''' + h12_euro + ''',lineStyle:{color:blue,width:2,type:'dashed'},itemStyle:{color:blue}}]});
-CH.h5=echarts.init(document.getElementById('cH5'));
-(function(){var h5d=''' + json.dumps(h5_data) + ''';var series=[];var legend=[];for(var cod in h5d){var d=h5d[cod];legend.push(d.nombre);series.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var anios=h5d[Object.keys(h5d)[0]]?h5d[Object.keys(h5d)[0]].anios:[];CH.h5.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9},splitLine:{lineStyle:{color:borderC}}},series:series})})();
+CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': $'+fc(i.value,2)+'<br>'});return s}},legend:{data:['Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:textC,fontSize:9,rotate:30},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:10,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_dolar + ''',lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan}},{name:'Euro',type:'line',smooth:true,data:''' + h12_euro + ''',lineStyle:{color:blue,width:2,type:'dashed'},itemStyle:{color:blue}}]});
+// Hist 5y CLP only (punto 5)
+CH.h5clp=echarts.init(document.getElementById('cH5clp'));
+(function(){var h5d=''' + json.dumps(h5_clp) + ''';var series=[];var legend=[];for(var cod in h5d){var d=h5d[cod];legend.push(d.nombre);series.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var anios=h5d[Object.keys(h5d)[0]]?h5d[Object.keys(h5d)[0]].anios:[];CH.h5clp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
+// Hist 5y USD only (punto 5)
+CH.h5usd=echarts.init(document.getElementById('cH5usd'));
+(function(){var h5d=''' + json.dumps(h5_usd) + ''';var series=[];var legend=[];for(var cod in h5d){var d=h5d[cod];legend.push(d.nombre);series.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var anios=h5d[Object.keys(h5d)[0]]?h5d[Object.keys(h5d)[0]].anios:[];CH.h5usd.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'USD '+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
+// Variacion anual
+CH.h5var=echarts.init(document.getElementById('cH5var'));
+(function(){var h5all=''' + json.dumps({**h5_clp, **h5_usd}) + ''';var series=[];var legend=[];for(var cod in h5all){var d=h5all[cod];var vals=d.valores;var pcts=[];for(var i=0;i<vals.length;i++){if(i===0||!vals[i-1]||!vals[i])pcts.push(null);else pcts.push(Math.round((vals[i]-vals[i-1])/vals[i-1]*10000)/100);}legend.push(d.nombre);series.push({name:d.nombre,type:'bar',data:pcts,itemStyle:{color:d.color,borderRadius:[4,4,0,0]}})}var anios=h5all[Object.keys(h5all)[0]]?h5all[Object.keys(h5all)[0]].anios:[];CH.h5var.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
+// AFP
 CH.afp=echarts.init(document.getElementById('cAfp'));
-(function(){var names=''' + afp_names_js + ''';var fondoA=''' + json.dumps(afp_fondos_js.get('A',[])) + ''';var fondoE=''' + json.dumps(afp_fondos_js.get('E',[])) + ''';CH.afp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:textC}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:names,axisLabel:{color:textC,fontSize:10},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:'{value}%'},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Fondo A',type:'bar',data:fondoA,itemStyle:{color:cyan,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cyan,fontSize:9,formatter:'{c}%'}},{name:'Fondo E',type:'bar',data:fondoE,itemStyle:{color:green,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:green,fontSize:9,formatter:'{c}%'}}]})})();
+(function(){var names=''' + afp_names_js + ''';var fondoA=''' + json.dumps(afp_fondos_js.get('A',[])) + ''';var fondoE=''' + json.dumps(afp_fondos_js.get('E',[])) + ''';CH.afp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:textC}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:names,axisLabel:{color:textC,fontSize:10},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Fondo A',type:'bar',data:fondoA,itemStyle:{color:cyan,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cyan,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:fondoE,itemStyle:{color:green,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:green,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]})})();
+// TMC
 CH.tmc=echarts.init(document.getElementById('cTmc'));
-CH.tmc.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:textC,formatter:'{value}%'},splitLine:{lineStyle:{color:borderC}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels + ''',axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},series:[{type:'bar',data:''' + tmc_values + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gold}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gold,fontWeight:'bold',fontSize:11,formatter:'{c}%'}}]});
-window.addEventListener('resize',function(){Object.values(CH).forEach(function(c){if(c)c.resize()})});
+CH.tmc.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels + ''',axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},series:[{type:'bar',data:''' + tmc_values + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gold}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gold,fontWeight:'bold',fontSize:11,formatter:function(p){return fc(p.value,2)+'%'}}}]});
+window.addEventListener('resize',function(){Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()})});
+// Simuladores con formato chileno
 var UF_V=''' + str(uf_val) + ''';
-function simH(){var m=parseFloat(document.getElementById('sh_m').value)||3000;var p=parseFloat(document.getElementById('sh_p').value)||20;var a=parseFloat(document.getElementById('sh_a').value)||25;var t=parseFloat(document.getElementById('sh_t').value)||4.5;var cr=m*(1-p/100);var r=t/100/12;var n=a*12;var div=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1);var tot=div*n;var intT=tot-cr;var divCLP=div*UF_V;document.getElementById('sh_v').textContent=div.toFixed(2)+' UF/mes';document.getElementById('sh_d').innerHTML='Equivale a <strong style="color:var(--cyan)">$'+fmt(Math.round(divCLP))+'</strong> CLP/mes<br>Credito: '+cr.toFixed(0)+' UF (pie: '+p+'% = '+(m*p/100).toFixed(0)+' UF)<br>Total a pagar: '+tot.toFixed(0)+' UF en '+n+' cuotas<br>Intereses: '+intT.toFixed(0)+' UF ('+(intT/cr*100).toFixed(1)+'% del credito)<br>Ingreso minimo recomendado: $'+fmt(Math.round(divCLP/0.25))+' CLP';document.getElementById('sh_r').style.display='block'}
-function simA(){var ap=parseFloat(document.getElementById('ap_m').value)||100000;var a=parseFloat(document.getElementById('ap_a').value)||20;var rt=parseFloat(document.getElementById('ap_r').value)||5;var rg=document.getElementById('ap_rg').value;var r=rt/100/12;var n=a*12;var fut=ap*(Math.pow(1+r,n)-1)/r;var tot=ap*n;var gan=fut-tot;var bon=rg==='A'?tot*0.15:0;document.getElementById('ap_v').textContent='$'+fmt(Math.round(fut));document.getElementById('ap_d').innerHTML='Aporte total: $'+fmt(Math.round(tot))+' ('+n+' meses x $'+fmt(ap)+')<br>Ganancia: <strong style="color:var(--green)">$'+fmt(Math.round(gan))+'</strong><br>'+(rg==='A'?'Bonificacion fiscal (15%): <strong style="color:var(--cyan)">$'+fmt(Math.round(bon))+'</strong> (tope 6 UTM/ano)<br>Total con bonificacion: $'+fmt(Math.round(fut+bon)):'Regimen B: descuento tributario segun tramo impositivo')+'<br>Rentabilidad: '+(gan/tot*100).toFixed(1)+'%';document.getElementById('ap_res').style.display='block'}
-function simI(){var c=parseFloat(document.getElementById('iv_c').value)||5000000;var m=parseFloat(document.getElementById('iv_m').value)||200000;var a=parseFloat(document.getElementById('iv_a').value)||10;var rt=parseFloat(document.getElementById('iv_r').value)||8;var r=rt/100/12;var n=a*12;var fc=c*Math.pow(1+r,n);var fa=m*(Math.pow(1+r,n)-1)/r;var tot=fc+fa;var inv=c+m*n;var gan=tot-inv;document.getElementById('iv_v').textContent='$'+fmt(Math.round(tot));document.getElementById('iv_d').innerHTML='Capital inicial: $'+fmt(c)+'<br>Aportes: $'+fmt(m)+' x '+n+' meses = $'+fmt(Math.round(m*n))+'<br>Total invertido: $'+fmt(Math.round(inv))+'<br>Ganancia: <strong style="color:var(--green)">$'+fmt(Math.round(gan))+'</strong><br>Multiplicador: <strong style="color:var(--gold)">'+(tot/inv).toFixed(2)+'x</strong>';document.getElementById('iv_res').style.display='block'}
-async function exportPDF(){var btn=document.getElementById('btnPdf');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.tc'),tabNav=document.querySelector('.tabs'),actions=document.querySelector('.actions');var orig=[];tabs.forEach(function(t,i){orig.push(t.style.display);t.style.display='block'});tabNav.style.display='none';actions.style.display='none';Object.values(CH).forEach(function(c){if(c)c.resize()});await new Promise(function(r){setTimeout(r,1000)});try{var content=document.getElementById('content');var canvas=await html2canvas(content,{scale:1.3,backgroundColor:'#071828',useCORS:true,logging:false,windowWidth:Math.max(content.scrollWidth,1200),windowHeight:content.scrollHeight});var jsPDF=window.jspdf.jsPDF;var imgW=210,pageH=297;var imgH=canvas.height*imgW/canvas.width;var pdf=new jsPDF('p','mm','a4');var left=imgH,pos=0;pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH;while(left>0){pos=-(imgH-left);pdf.addPage();pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH}pdf.save('Dashboard_Economia_Chile_Cofradia.pdf');btn.textContent='PDF Descargado!'}catch(e){console.error(e);btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=orig[i]||''});tabNav.style.display='';actions.style.display='';document.querySelector('.tc.active')||tabs[0].classList.add('active');Object.values(CH).forEach(function(c){if(c)c.resize()});setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
+function simH(){var m=parseFloat(document.getElementById('sh_m').value)||3000;var p=parseFloat(document.getElementById('sh_p').value)||20;var a=parseFloat(document.getElementById('sh_a').value)||25;var t=parseFloat(document.getElementById('sh_t').value)||4.5;var cr=m*(1-p/100);var r=t/100/12;var n=a*12;var div=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1);var tot=div*n;var intT=tot-cr;var divCLP=div*UF_V;document.getElementById('sh_v').textContent=fc(div,2)+' UF/mes';document.getElementById('sh_d').innerHTML='Equivale a <strong style="color:var(--cyan)">$'+fc(Math.round(divCLP),0)+'</strong> CLP/mes<br>Credito: '+fc(cr,0)+' UF (pie: '+fc(p,0)+'% = '+fc(m*p/100,0)+' UF)<br>Total a pagar: '+fc(tot,0)+' UF en '+n+' cuotas<br>Intereses: '+fc(intT,0)+' UF ('+fc(intT/cr*100,1)+'% del credito)<br>Ingreso minimo recomendado: $'+fc(Math.round(divCLP/0.25),0)+' CLP';document.getElementById('sh_r').style.display='block'}
+function simA(){var ap=parseFloat(document.getElementById('ap_m').value)||100000;var a=parseFloat(document.getElementById('ap_a').value)||20;var rt=parseFloat(document.getElementById('ap_r').value)||5;var rg=document.getElementById('ap_rg').value;var r=rt/100/12;var n=a*12;var fut=ap*(Math.pow(1+r,n)-1)/r;var tot=ap*n;var gan=fut-tot;var bon=rg==='A'?tot*0.15:0;document.getElementById('ap_v').textContent='$'+fc(Math.round(fut),0);document.getElementById('ap_d').innerHTML='Aporte total: $'+fc(Math.round(tot),0)+' ('+n+' meses x $'+fc(ap,0)+')<br>Ganancia: <strong style="color:var(--green)">$'+fc(Math.round(gan),0)+'</strong><br>'+(rg==='A'?'Bonificacion fiscal (15%): <strong style="color:var(--cyan)">$'+fc(Math.round(bon),0)+'</strong> (tope 6 UTM/ano)<br>Total con bonificacion: $'+fc(Math.round(fut+bon),0):'Regimen B: descuento tributario segun tramo impositivo')+'<br>Rentabilidad: '+fc(gan/tot*100,1)+'%';document.getElementById('ap_res').style.display='block'}
+function simI(){var c=parseFloat(document.getElementById('iv_c').value)||5000000;var m=parseFloat(document.getElementById('iv_m').value)||200000;var a=parseFloat(document.getElementById('iv_a').value)||10;var rt=parseFloat(document.getElementById('iv_r').value)||8;var r=rt/100/12;var n=a*12;var fc2=c*Math.pow(1+r,n);var fa=m*(Math.pow(1+r,n)-1)/r;var tot=fc2+fa;var inv=c+m*n;var gan=tot-inv;document.getElementById('iv_v').textContent='$'+fc(Math.round(tot),0);document.getElementById('iv_d').innerHTML='Capital inicial: $'+fc(c,0)+'<br>Aportes: $'+fc(m,0)+' x '+n+' meses = $'+fc(Math.round(m*n),0)+'<br>Total invertido: $'+fc(Math.round(inv),0)+'<br>Ganancia: <strong style="color:var(--green)">$'+fc(Math.round(gan),0)+'</strong><br>Multiplicador: <strong style="color:var(--gold)">'+fc(tot/inv,2)+'x</strong>';document.getElementById('iv_res').style.display='block'}
+// Calculadora (punto 4)
+function calcInd(){var op=document.getElementById('calc_op').value;var ind=document.getElementById('calc_ind').value;var cant=parseFloat(document.getElementById('calc_cant').value)||0;var val=IND_VALS[ind]||0;var result=0;var opStr='';if(op==='mul'){result=val*cant;opStr=fc(val,2)+' x '+fc(cant,2)}else if(op==='div'){result=cant!==0?val/cant:0;opStr=fc(val,2)+' / '+fc(cant,2)}else if(op==='add'){result=val+cant;opStr=fc(val,2)+' + '+fc(cant,2)}else{result=val-cant;opStr=fc(val,2)+' - '+fc(cant,2)}var names={uf:'UF',dolar:'Dolar',euro:'Euro',utm:'UTM',bitcoin:'Bitcoin',libra_cobre:'Cobre'};document.getElementById('calc_v').textContent='$'+fc(result,2);document.getElementById('calc_d').innerHTML=names[ind]+': $'+fc(val,2)+'<br>Operacion: '+opStr+' = $'+fc(result,2);document.getElementById('calc_res').style.display='block'}
+// Conversor (punto 4)
+function convertir(){var from=document.getElementById('cv_from').value;var to=document.getElementById('cv_to').value;var cant=parseFloat(document.getElementById('cv_cant').value)||0;var vf=IND_VALS[from]||0;var vt=IND_VALS[to]||0;if(vt===0){document.getElementById('cv_v').textContent='Error';document.getElementById('cv_res').style.display='block';return}var clp_from=vf*cant;var result=clp_from/vt;var names={uf:'UF',dolar:'Dolar USD',euro:'Euro',utm:'UTM',bitcoin:'Bitcoin',libra_cobre:'Cobre (lb)',solana:'Solana',ethereum:'Ethereum'};document.getElementById('cv_v').textContent=fc(result,4)+' '+names[to];document.getElementById('cv_d').innerHTML=fc(cant,2)+' '+names[from]+' ($'+fc(vf,2)+' c/u) = $'+fc(clp_from,2)+' CLP<br>'+fc(clp_from,2)+' CLP / $'+fc(vt,2)+' = <strong style="color:var(--gold)">'+fc(result,4)+' '+names[to]+'</strong>';document.getElementById('cv_res').style.display='block'}
+function swapConv(){var f=document.getElementById('cv_from');var t=document.getElementById('cv_to');var tmp=f.value;f.value=t.value;t.value=tmp}
+// Print sim card as PDF (punto 6)
+async function printSim(cardId){var card=document.getElementById(cardId);if(!card)return;try{var canvas=await html2canvas(card,{scale:2,backgroundColor:'#071828',useCORS:true});var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','mm','a4');var imgW=190;var imgH=canvas.height*imgW/canvas.width;pdf.addImage(canvas.toDataURL('image/jpeg',0.95),'JPEG',10,10,imgW,imgH);pdf.save('Simulacion_Cofradia_'+new Date().toISOString().slice(0,10)+'.pdf')}catch(e){console.error(e);alert('Error generando PDF')}}
+// PDF Export completo
+async function exportPDF(){var btn=document.getElementById('btnPdf');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.tc'),tabNav=document.querySelector('.tabs'),actions=document.querySelector('.actions');var orig=[];tabs.forEach(function(t,i){orig.push(t.style.display);t.style.display='block'});tabNav.style.display='none';actions.style.display='none';Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()});await new Promise(function(r){setTimeout(r,1000)});try{var content=document.getElementById('content');var canvas=await html2canvas(content,{scale:1.3,backgroundColor:'#071828',useCORS:true,logging:false,windowWidth:Math.max(content.scrollWidth,1200),windowHeight:content.scrollHeight});var jsPDF=window.jspdf.jsPDF;var imgW=210,pageH=297;var imgH=canvas.height*imgW/canvas.width;var pdf=new jsPDF('p','mm','a4');var left=imgH,pos=0;pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH;while(left>0){pos=-(imgH-left);pdf.addPage();pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH}pdf.save('Dashboard_Economia_Chile_Cofradia.pdf');btn.textContent='PDF Descargado!'}catch(e){console.error(e);btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=orig[i]||''});tabNav.style.display='';actions.style.display='';document.querySelector('.tc.active')||tabs[0].classList.add('active');Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()});setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
 </script></body></html>'''
     return html
+
+
 
 
 @requiere_suscripcion
