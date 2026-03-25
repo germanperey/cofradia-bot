@@ -15973,6 +15973,21 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             "",
         ]
         alzas = 0; bajas = 0
+        def _fmt_cl(v, dec=2):
+            """Formato chileno: 1.234,56"""
+            if v is None: return 'N/D'
+            neg = '-' if v < 0 else ''
+            v = abs(v)
+            if dec == 0:
+                s = "{:,.0f}".format(v)
+            else:
+                s = ("{:,." + str(dec) + "f}").format(v)
+            parts = s.split('.')
+            integer_part = parts[0].replace(',', '.')
+            if len(parts) > 1:
+                return neg + integer_part + ',' + parts[1]
+            return neg + integer_part
+
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
@@ -15981,17 +15996,17 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             if v is None:
                 vf = "N/D"
             elif cod in PORCENTAJES:
-                vf = "{:.2f}%".format(v)
+                vf = _fmt_cl(v, 2) + "%"
             elif cod == 'bitcoin':
-                vf = "${:,.0f} USD".format(v).replace(',', '.')
+                vf = "USD " + _fmt_cl(v, 0)
             elif cod == 'libra_cobre':
-                vf = "USD {:.4f}".format(v)
+                vf = "USD " + _fmt_cl(v, 2)
             elif cod == 'ipsa':
-                vf = "{:,.0f} pts".format(v).replace(',', '.')
+                vf = _fmt_cl(v, 0) + " pts"
             elif cod in ('solana', 'ethereum'):
-                vf = "${:,.0f} USD".format(v).replace(',', '.')
+                vf = "USD " + _fmt_cl(v, 0)
             else:
-                vf = "${:,.2f}".format(v).replace(',', 'X').replace('.', ',').replace('X', '.')
+                vf = "$" + _fmt_cl(v, 2)
             serie = d.get('serie30', [])
             tend = ''
             if len(serie) >= 2:
@@ -16000,9 +16015,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if v1:
                     pct = ((v0 - v1) / v1) * 100
                     if pct >= 0:
-                        tend = ' ▲ {:.2f}%'.format(abs(pct)); alzas += 1
+                        tend = ' ▲ ' + _fmt_cl(abs(pct), 2) + '%'; alzas += 1
                     else:
-                        tend = ' ▼ {:.2f}%'.format(abs(pct)); bajas += 1
+                        tend = ' ▼ ' + _fmt_cl(abs(pct), 2) + '%'; bajas += 1
             nombre = d.get('nombre') or cod
             lineas.append(f"{ic} {nombre}: {vf}{tend}")
         lineas += ["", sep, "📋 RESUMEN:", f"  ▲ {alzas} al alza  ▼ {bajas} a la baja"]
@@ -16013,7 +16028,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             lineas += ["", sep, "🏦 Tasas CMF (TMC):", ""]
             for item in tmc_items:
                 v  = item.get('valor')
-                vf = "{:.2f}%".format(v) if v is not None else "N/D"
+                vf = _fmt_cl(v, 2) + "%" if v is not None else "N/D"
                 lineas.append("  " + (item.get('label') or '') + ": " + vf)
 
         # AFP rentabilidad en mensaje (solo fondo A para resumir)
@@ -16024,7 +16039,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             for afp in afp_list_msg:
                 celda = (afp_tabla.get(afp) or {}).get('A') or {}
                 r = celda.get('rent_pct')
-                rf = ("{:+.2f}%".format(r)) if r is not None else "N/D"
+                rf = ("+" + _fmt_cl(r, 2) + "%" if r is not None and r >= 0 else _fmt_cl(r, 2) + "%") if r is not None else "N/D"
                 lineas.append("  " + afp.capitalize() + ": " + rf)
 
         hist_12m = all_data.get('hist_12m', {})
@@ -16033,8 +16048,8 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         if d12l and e12l:
             lineas += ["", sep, "Dólar vs Euro — últimos 12 meses:", ""]
             for label, vd, ve in zip(hist_12m.get('labels', []), d12l, e12l):
-                vds = "${:,.0f}".format(vd).replace(',', '.') if vd else 'N/D'
-                ves = "${:,.0f}".format(ve).replace(',', '.') if ve else 'N/D'
+                vds = "$" + _fmt_cl(vd, 0) if vd else 'N/D'
+                ves = "$" + _fmt_cl(ve, 0) if ve else 'N/D'
                 lineas.append("  " + str(label) + " — USD " + vds + "  |  EUR " + ves)
 
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
@@ -16214,6 +16229,11 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia=''):
 
     analisis_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
 
+    # Inflation data: IPC from hist_10a (punto 5)
+    ipc_hist = hist_10a.get('ipc', {})
+    infla_anios = json.dumps(ipc_hist.get('anios', []))
+    infla_vals = json.dumps(ipc_hist.get('valores', []))
+
     # Build stats JSON for JS
     stats_js = json.dumps({
         cod: {'min': round(s['min'],2), 'max': round(s['max'],2), 'avg': round(s['avg'],2), 'data': [round(v,2) for v in s['data'][:30]]}
@@ -16303,6 +16323,7 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 <div class="tab" onclick="st('afp')">&#128020; AFP & TASAS</div>
 <div class="tab" onclick="st('sim')">&#129518; SIMULADORES</div>
 <div class="tab" onclick="st('calc')">&#128290; CALCULADORA</div>
+<div class="tab" onclick="st('proy')">&#127919; ANALISIS PROYECTADO</div>
 <div class="tab" onclick="st('ia')">&#129302; ANALISIS IA</div>
 </div>
 
@@ -16311,13 +16332,14 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 <div class="sec">
 <div class="sec-t">RESUMEN ESTADISTICO — ULTIMOS 30 DIAS</div>
 <table class="stat-tbl">
-<tr><th>Indicador</th><th>Valor Actual</th><th>Min 30d</th><th>Max 30d</th><th>Promedio 30d</th><th>Variacion</th></tr>
-<tr><td>&#127793; UF</td><td>$''' + UF_CL + '''</td><td id="s_uf_min">-</td><td id="s_uf_max">-</td><td id="s_uf_avg">-</td><td id="s_uf_var">-</td></tr>
-<tr><td>&#128181; Dolar</td><td>$''' + DOLAR_CL + '''</td><td id="s_dl_min">-</td><td id="s_dl_max">-</td><td id="s_dl_avg">-</td><td id="s_dl_var">-</td></tr>
-<tr><td>&#128182; Euro</td><td>$''' + EURO_CL + '''</td><td id="s_eu_min">-</td><td id="s_eu_max">-</td><td id="s_eu_avg">-</td><td id="s_eu_var">-</td></tr>
-<tr><td>&#8383; Bitcoin</td><td>USD ''' + BTC_CL + '''</td><td id="s_bt_min">-</td><td id="s_bt_max">-</td><td id="s_bt_avg">-</td><td id="s_bt_var">-</td></tr>
-<tr><td>&#128296; Cobre</td><td>USD ''' + COBRE_CL + '''</td><td id="s_cb_min">-</td><td id="s_cb_max">-</td><td id="s_cb_avg">-</td><td id="s_cb_var">-</td></tr>
-<tr><td>&#128201; IPSA</td><td>''' + IPSA_CL + ''' pts</td><td id="s_ip_min">-</td><td id="s_ip_max">-</td><td id="s_ip_avg">-</td><td id="s_ip_var">-</td></tr>
+<tr><th>Indicador</th><th>Valor Actual</th><th>Min 30d</th><th>Max 30d</th><th>Promedio 30d</th><th>Variacion</th><th>Proy 7d (reg. lineal)</th></tr>
+<tr><td>&#127793; UF</td><td>$''' + UF_CL + '''</td><td id="s_uf_min">-</td><td id="s_uf_max">-</td><td id="s_uf_avg">-</td><td id="s_uf_var">-</td><td id="s_uf_proy">-</td></tr>
+<tr><td>&#128181; Dolar</td><td>$''' + DOLAR_CL + '''</td><td id="s_dl_min">-</td><td id="s_dl_max">-</td><td id="s_dl_avg">-</td><td id="s_dl_var">-</td><td id="s_dl_proy">-</td></tr>
+<tr><td>&#128182; Euro</td><td>$''' + EURO_CL + '''</td><td id="s_eu_min">-</td><td id="s_eu_max">-</td><td id="s_eu_avg">-</td><td id="s_eu_var">-</td><td id="s_eu_proy">-</td></tr>
+<tr><td>&#8383; Bitcoin</td><td>USD ''' + BTC_CL + '''</td><td id="s_bt_min">-</td><td id="s_bt_max">-</td><td id="s_bt_avg">-</td><td id="s_bt_var">-</td><td id="s_bt_proy">-</td></tr>
+<tr><td>&#128296; Cobre</td><td>USD ''' + COBRE_CL + '''</td><td id="s_cb_min">-</td><td id="s_cb_max">-</td><td id="s_cb_avg">-</td><td id="s_cb_var">-</td><td id="s_cb_proy">-</td></tr>
+<tr><td>&#128201; IPSA</td><td>''' + IPSA_CL + ''' pts</td><td id="s_ip_min">-</td><td id="s_ip_max">-</td><td id="s_ip_avg">-</td><td id="s_ip_var">-</td><td id="s_ip_proy">-</td></tr>
+<tr style="border-top:2px solid var(--gold-dim)"><td style="color:var(--green)">&#128200; IPC (Inflacion)</td><td>''' + IPC_CL + '''%</td><td colspan="5" style="color:var(--gray);font-size:0.9em" id="s_ipc_info">Inflacion actual mensual</td></tr>
 </table></div>
 <div class="chart-grid">
 <div class="chart-box"><div class="chart-title">&#9654; GAUGE — DOLAR USD/CLP</div><div class="chart" id="cGD"></div></div>
@@ -16328,6 +16350,7 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 <div class="chart-box"><div class="chart-title">&#9654; RADAR — SALUD ECONOMICA</div><div class="chart" id="cRad"></div></div>
 <div class="chart-box"><div class="chart-title">&#9654; PROYECCION DOLAR — TENDENCIA LINEAL IA</div><div class="chart" id="cProj"></div></div>
 <div class="chart-box"><div class="chart-title">&#9654; COMPARATIVO UF vs DOLAR vs EURO (30d indexado)</div><div class="chart" id="cComp"></div></div>
+<div class="chart-box"><div class="chart-title">&#9654; INFLACION — IPC ANUALIZADO (10 ANOS)</div><div class="chart" id="cInfla"></div></div>
 </div></div>
 
 <!-- TAB: HISTORICO (punto 5: separar CLP de USD) -->
@@ -16407,6 +16430,13 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 </div>
 </div></div>
 
+<!-- TAB: ANALISIS PROYECTADO (punto 3: recomendaciones ministeriales) -->
+<div class="tc" id="tab-proy">
+<div class="sec">
+<div class="sec-t">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
+<div class="ia-box" id="proy_content">''' + (all_data.get('_analisis_proyectado_safe', '') or 'Analisis proyectado no disponible. Ejecute /economia para generar con IA.') + '''</div>
+</div></div>
+
 <!-- TAB: ANALISIS IA (punto 7: titulo corregido) -->
 <div class="tc" id="tab-ia">
 <div class="sec">
@@ -16433,8 +16463,14 @@ var m={uf:['s_uf',2],dolar:['s_dl',2],euro:['s_eu',2],bitcoin:['s_bt',0],libra_c
 for(var cod in m){var s=STATS[cod];if(!s)continue;var p=m[cod][0],d=m[cod][1];
 var el_min=document.getElementById(p+'_min');var el_max=document.getElementById(p+'_max');var el_avg=document.getElementById(p+'_avg');var el_var=document.getElementById(p+'_var');
 if(el_min)el_min.textContent=fc(s.min,d);if(el_max)el_max.textContent=fc(s.max,d);if(el_avg)el_avg.textContent=fc(s.avg,d);
-if(el_var&&s.data.length>=2){var pct=((s.data[0]-s.data[s.data.length-1])/s.data[s.data.length-1]*100);el_var.innerHTML=(pct>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pct),2)+'%</span>';}}
+if(el_var&&s.data.length>=2){var pct=((s.data[0]-s.data[s.data.length-1])/s.data[s.data.length-1]*100);el_var.innerHTML=(pct>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pct),2)+'%</span>';}
+// Proyeccion 7d con regresion lineal (punto 1)
+var el_proy=document.getElementById(p+'_proy');
+if(el_proy&&s.data.length>=5){var dd=s.data.slice().reverse();var nn=dd.length;var sX=0,sY=0,sXY=0,sX2=0;for(var j=0;j<nn;j++){sX+=j;sY+=dd[j];sXY+=j*dd[j];sX2+=j*j;}var sl=(nn*sXY-sX*sY)/(nn*sX2-sX*sX);var ic2=(sY-sl*sX)/nn;var proy7=ic2+sl*(nn+7);var diff7=proy7-dd[nn-1];var pctP=dd[nn-1]?((proy7-dd[nn-1])/dd[nn-1]*100):0;el_proy.innerHTML=(diff7>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pctP),2)+'% ('+fc(proy7,d)+')</span>';}}
+}
 })();
+// IPC inflation info row (punto 5)
+(function(){var ipcS=STATS.ipc||STATS.uf;var el=document.getElementById('s_ipc_info');if(el){el.textContent='IPC mensual actual: ''' + IPC_CL + '''% — TPM: ''' + TPM_CL + '''% — Desempleo: ''' + DESEMP_CL + '''%';}})();
 // Gauges
 CH.gd=echarts.init(document.getElementById('cGD'));
 CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.3,green],[0.7,gold],[1,red]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cyan,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(dolar_val) + ''',name:'USD/CLP'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
@@ -16461,6 +16497,9 @@ CH.proj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgro
 CH.comp=echarts.init(document.getElementById('cComp'));
 (function(){var su=STATS.uf||{data:[]};var sd=STATS.dolar||{data:[]};var se=STATS.euro||{data:[]};function idx(arr){if(!arr.length)return[];var base=arr[arr.length-1];return arr.slice().reverse().map(function(v){return Math.round(v/base*10000)/100})}var iu=idx(su.data);var id=idx(sd.data);var ie=idx(se.data);var maxLen=Math.max(iu.length,id.length,ie.length);var labels=[];for(var i=0;i<maxLen;i++)labels.push('D-'+(maxLen-i));
 CH.comp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:['UF','Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'UF',type:'line',data:iu,smooth:true,lineStyle:{color:gold,width:2},itemStyle:{color:gold}},{name:'Dolar',type:'line',data:id,smooth:true,lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}},{name:'Euro',type:'line',data:ie,smooth:true,lineStyle:{color:blue,width:2},itemStyle:{color:blue}}]})})();
+// Inflacion IPC anualizado 10 anos (punto 5)
+CH.infla=echarts.init(document.getElementById('cInfla'));
+(function(){var anios=''' + infla_anios + ''';var vals=''' + infla_vals + ''';CH.infla.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'8%',right:'5%',bottom:'12%',top:'15%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC,fontSize:11},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},visualMap:{show:false,pieces:[{gt:0,lte:3,color:green},{gt:3,lte:5,color:gold},{gt:5,color:red},{lte:0,color:cyan}],dimension:1},series:[{type:'bar',data:vals,itemStyle:{borderRadius:[6,6,0,0]},label:{show:true,position:'top',color:textC,fontWeight:'bold',fontSize:11,formatter:function(p){return fc(p.value,2)+'%'}},markLine:{silent:true,data:[{yAxis:3,name:'Meta BC 3%',lineStyle:{color:green,type:'dashed'},label:{formatter:'Meta BC 3%',color:green}}]}}]})})();
 // Hist 12m
 CH.h12=echarts.init(document.getElementById('cH12'));
 CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': $'+fc(i.value,2)+'<br>'});return s}},legend:{data:['Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:textC,fontSize:9,rotate:30},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:10,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_dolar + ''',lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan}},{name:'Euro',type:'line',smooth:true,data:''' + h12_euro + ''',lineStyle:{color:blue,width:2,type:'dashed'},itemStyle:{color:blue}}]});
@@ -16532,6 +16571,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 datos_afp = fut_afp.result() or {}
             await msg.edit_text("✅ Datos completos.\n🤖 IA analizando panorama económico...")
             analisis_ia = ''
+            analisis_proyectado = ''
             if ia_disponible:
                 resumen_vals = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for cod, d in datos.items()])
                 prompt_eco = (
@@ -16546,12 +16586,49 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "6. Proyecciones y recomendaciones para inversores\n\n"
                     "Máximo 400 palabras. Profesional, con datos concretos. Sin asteriscos ni formato markdown."
                 )
+                prompt_proy = (
+                    f"Eres el mejor economista del mundo, asesor directo del Ministro de Hacienda y del Ministro de Economía de Chile. "
+                    f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n\n"
+                    f"Indicadores actuales de Chile:\n{resumen_vals}\n\n"
+                    "TAREA: Elabora un informe de recomendaciones profesionales detallando:\n\n"
+                    "SECCION 1 — DIAGNOSTICO ACTUAL:\n"
+                    "Analiza los indicadores y explica las razones nacionales e internacionales que han originado los valores actuales "
+                    "(guerras, aranceles, política monetaria Fed, conflictos geopolíticos, precio commodities, política fiscal chilena, etc.).\n\n"
+                    "SECCION 2 — PROYECCIONES A 6 Y 12 MESES:\n"
+                    "Proyecta cómo evolucionarán los indicadores principales (dólar, UF, IPC, TPM, desempleo, cobre, IPSA) "
+                    "con escenarios optimista, base y pesimista. Usa fundamentos estadísticos y tendencias históricas.\n\n"
+                    "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas concretas):\n"
+                    "Detalla todas las acciones que aplicarías como Ministro de Hacienda y Economía para:\n"
+                    "- Reducir inflación y desempleo\n"
+                    "- Fortalecer el peso chileno\n"
+                    "- Atraer inversión extranjera\n"
+                    "- Desarrollar industria tecnológica y energías renovables\n"
+                    "- Mejorar productividad y competitividad\n"
+                    "- Transformar a Chile en país desarrollado de primer mundo\n\n"
+                    "SECCION 4 — IMPACTO INTERNACIONAL:\n"
+                    "Analiza cómo las políticas de EE.UU., China, conflictos bélicos y cambio climático "
+                    "afectan a Chile y qué medidas de cobertura implementarías.\n\n"
+                    "Máximo 800 palabras. Tono profesional ministerial. Sin asteriscos ni markdown. "
+                    "Usa datos concretos de los indicadores proporcionados."
+                )
                 try:
-                    analisis_ia = await loop.run_in_executor(
-                        None, lambda: llamar_groq(prompt_eco, max_tokens=800, temperature=0.3)
-                    ) or ''
+                    from concurrent.futures import ThreadPoolExecutor as _TPE_ia2
+                    with _TPE_ia2(max_workers=2) as pool_ia:
+                        fut_ia1 = pool_ia.submit(lambda: llamar_groq(prompt_eco, max_tokens=800, temperature=0.3))
+                        fut_ia2 = pool_ia.submit(lambda: llamar_groq(prompt_proy, max_tokens=1500, temperature=0.4))
+                        analisis_ia = await loop.run_in_executor(None, fut_ia1.result) or ''
+                        analisis_proyectado = await loop.run_in_executor(None, fut_ia2.result) or ''
                 except Exception:
-                    pass
+                    try:
+                        analisis_ia = await loop.run_in_executor(
+                            None, lambda: llamar_groq(prompt_eco, max_tokens=800, temperature=0.3)
+                        ) or ''
+                    except Exception:
+                        pass
+
+            # Pass projected analysis to HTML generator via all_data
+            analisis_proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
+            all_data['_analisis_proyectado_safe'] = analisis_proy_safe
             await msg.edit_text("📊 Generando dashboard HTML con simuladores...")
             html_content = await loop.run_in_executor(
                 None, generar_html_economia, all_data, datos_cmf, datos_afp, analisis_ia
