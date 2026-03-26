@@ -2847,17 +2847,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
-👤 MI CUENTA
-/registrarse - Registrarse en la Cofradía
-/mi_cuenta - Estado de tu suscripción
-/renovar - Renovar suscripción
-/activar [código] - Activar código de acceso
-
 🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Búsqueda con IA
 /buscar_web [consulta] - Búsqueda en Internet 🌐
-/buscar_especialista_sec [esp] - Buscar en CMF/SEC 🏦
 /rag_consulta [pregunta] - Buscar en documentos
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
@@ -2876,7 +2869,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /consultar titulo | desc - Consulta profesional
 /consultas - Ver consultas abiertas
 /responder [ID] [resp] - Responder consulta
-/ver_consulta [ID] - Ver detalle de consulta
 /encuesta pregunta | opc1 | opc2 - Crear encuesta
 
 📅 EVENTOS Y CALENDARIO
@@ -2892,10 +2884,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
 /top_usuarios - Ranking de participación
-/categorias - Categorías de mensajes
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
-/dotacion - Total de integrantes
 
 💰 ASISTENTE FINANCIERO
 /finanzas [consulta] - Asesoría basada en libros (gratis)
@@ -2905,15 +2895,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📊 TU DASHBOARD (GRATIS)
 ⭐ /mi_dashboard - Tu dashboard personal ⭐
-
-🤖 AGENTE INTELIGENTE DE NETWORKING
-/agente - Plan de networking personalizado con IA
-/match - Match inteligente con cofrades compatibles
-/agendar [fecha] [actividad] - Agendar con recordatorio
-/mi_agenda - Ver tu agenda personal
-/tarea [descripción] - Agregar tarea de networking
-/mis_tareas - Ver tus tareas pendientes
-/briefing - Briefing diario de networking
 
 🚨 EMERGENCIA
 /emergencia - Reportar emergencia (4 tipos) 🆘
@@ -2960,23 +2941,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /eliminar_solicitud [ID] - Eliminar usuario
 /buscar_usuario [nombre] - Buscar ID de usuario
 /cobros_admin - Panel de cobros
+/ver_solicitudes - Ver solicitudes pendientes
 /generar_codigo - Generar código de activación
-
-💰 GESTIÓN FINANCIERA
-/precios - Ver precios de servicios
-/set_precios [srv] [pesos] [coins] - Editar precios
-/pagos_pendientes - Ver pagos pendientes
-/vencimientos - Suscripciones por vencer
-/vencimientos_mes - Vencimientos del mes
-/ingresos - Resumen de ingresos
-/crecimiento_mes - Crecimiento mensual
-/crecimiento_anual - Crecimiento anual
-/resumen_usuario [ID] - Resumen de un usuario
-
-📡 GESTIÓN GRUPO
-/ver_topics - Ver topics del grupo
-/set_topic [nombre] - Crear/configurar topic
-/set_topic_emoji [topic] [emoji] - Cambiar emoji topic
 /nuevo_evento fecha | título | lugar | desc - Crear evento
 /dotacion - Ver dotación completa de miembros
 
@@ -2987,12 +2953,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /directorio [búsqueda] - Directorio completo de la Cofradía
 
 🧠 RAG (Base de conocimiento)
-/subir_pdf - Subir PDF a la biblioteca
 /rag_status - Estado del sistema RAG
-/rag_debug - Debug del sistema RAG
 /rag_backup - Verificar integridad datos RAG
 /rag_reindexar - Re-indexar documentos
-/rag_enriquecer - Enriquecer keywords RAG
 /eliminar_pdf [nombre] - Eliminar PDF indexado
 
 💰 PRECIOS Y COINS
@@ -15973,21 +15936,20 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             "",
         ]
         alzas = 0; bajas = 0
-        def _fmt_cl(v, dec=2):
-            """Formato chileno: 1.234,56"""
+        # Función formato chileno: 1.234,56
+        def _fcl(v, dec=2):
             if v is None: return 'N/D'
             neg = '-' if v < 0 else ''
-            v = abs(v)
+            v = abs(float(v))
             if dec == 0:
                 s = "{:,.0f}".format(v)
             else:
                 s = ("{:,." + str(dec) + "f}").format(v)
             parts = s.split('.')
-            integer_part = parts[0].replace(',', '.')
+            entero = parts[0].replace(',', '.')
             if len(parts) > 1:
-                return neg + integer_part + ',' + parts[1]
-            return neg + integer_part
-
+                return neg + entero + ',' + parts[1]
+            return neg + entero
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
@@ -15996,17 +15958,17 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             if v is None:
                 vf = "N/D"
             elif cod in PORCENTAJES:
-                vf = _fmt_cl(v, 2) + "%"
+                vf = _fcl(v, 2) + "%"
             elif cod == 'bitcoin':
-                vf = "USD " + _fmt_cl(v, 0)
+                vf = "USD " + _fcl(v, 0)
             elif cod == 'libra_cobre':
-                vf = "USD " + _fmt_cl(v, 2)
+                vf = "USD " + _fcl(v, 2)
             elif cod == 'ipsa':
-                vf = _fmt_cl(v, 0) + " pts"
+                vf = _fcl(v, 0) + " pts"
             elif cod in ('solana', 'ethereum'):
-                vf = "USD " + _fmt_cl(v, 0)
+                vf = "USD " + _fcl(v, 0)
             else:
-                vf = "$" + _fmt_cl(v, 2)
+                vf = "$" + _fcl(v, 2)
             serie = d.get('serie30', [])
             tend = ''
             if len(serie) >= 2:
@@ -16015,9 +15977,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if v1:
                     pct = ((v0 - v1) / v1) * 100
                     if pct >= 0:
-                        tend = ' ▲ ' + _fmt_cl(abs(pct), 2) + '%'; alzas += 1
+                        tend = ' ▲ ' + _fcl(abs(pct), 2) + '%'; alzas += 1
                     else:
-                        tend = ' ▼ ' + _fmt_cl(abs(pct), 2) + '%'; bajas += 1
+                        tend = ' ▼ ' + _fcl(abs(pct), 2) + '%'; bajas += 1
             nombre = d.get('nombre') or cod
             lineas.append(f"{ic} {nombre}: {vf}{tend}")
         lineas += ["", sep, "📋 RESUMEN:", f"  ▲ {alzas} al alza  ▼ {bajas} a la baja"]
@@ -16028,7 +15990,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             lineas += ["", sep, "🏦 Tasas CMF (TMC):", ""]
             for item in tmc_items:
                 v  = item.get('valor')
-                vf = _fmt_cl(v, 2) + "%" if v is not None else "N/D"
+                vf = (_fcl(v, 2) + "%") if v is not None else "N/D"
                 lineas.append("  " + (item.get('label') or '') + ": " + vf)
 
         # AFP rentabilidad en mensaje (solo fondo A para resumir)
@@ -16039,7 +16001,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             for afp in afp_list_msg:
                 celda = (afp_tabla.get(afp) or {}).get('A') or {}
                 r = celda.get('rent_pct')
-                rf = ("+" + _fmt_cl(r, 2) + "%" if r is not None and r >= 0 else _fmt_cl(r, 2) + "%") if r is not None else "N/D"
+                rf = ("+" + _fcl(r, 2) + "%" if r >= 0 else _fcl(r, 2) + "%") if r is not None else "N/D"
                 lineas.append("  " + afp.capitalize() + ": " + rf)
 
         hist_12m = all_data.get('hist_12m', {})
@@ -16048,8 +16010,8 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
         if d12l and e12l:
             lineas += ["", sep, "Dólar vs Euro — últimos 12 meses:", ""]
             for label, vd, ve in zip(hist_12m.get('labels', []), d12l, e12l):
-                vds = "$" + _fmt_cl(vd, 0) if vd else 'N/D'
-                ves = "$" + _fmt_cl(ve, 0) if ve else 'N/D'
+                vds = "$" + _fcl(vd, 0) if vd else 'N/D'
+                ves = "$" + _fcl(ve, 0) if ve else 'N/D'
                 lineas.append("  " + str(label) + " — USD " + vds + "  |  EUR " + ves)
 
         lineas += ["", sep, "Se adjunta dashboard interactivo completo con análisis IA."]
@@ -16099,578 +16061,377 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# COMANDO /economia - Dashboard Económico Interactivo + Simuladores Financieros
+# COMANDO /economia - Dashboard Económico + Simuladores + Análisis Proyectado
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _economia_cache = {'fecha': '', 'html': None}
 
 
-def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia=''):
-    """Genera HTML completo con dashboard ECharts + simuladores + calculadora + conversor + modelos."""
+def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analisis_proyectado=''):
+    """Genera HTML dashboard ECharts con simuladores, calculadora, conversor, inflación y análisis proyectado."""
     datos = all_data.get('datos_actuales', {})
     hist_12m = all_data.get('hist_12m', {})
     hist_10a = all_data.get('hist_10a', {})
     generado = all_data.get('generado', _ahora_chile().strftime('%d/%m/%Y %H:%M'))
 
-    def _jval(cod, default=0):
+    def _jv(cod, default=0):
         d = datos.get(cod)
-        if d and d.get('valor') is not None:
-            return round(float(d['valor']), 4)
-        return default
+        return round(float(d['valor']), 4) if d and d.get('valor') is not None else default
 
-    def _cl(v, dec=2):
-        """Format number to Chilean style: 1.234,56"""
-        if v is None: return 'N/D'
-        try:
-            v = float(v)
-            if dec == 0:
-                formatted = "{:,.0f}".format(v)
-            else:
-                formatted = ("{:,."+str(dec)+"f}").format(v)
-            return formatted.replace(',', 'X').replace('.', '.').replace('X', '.').replace(
-                formatted.split('.')[-1] if '.' in formatted else '', '').rstrip('.')
-        except:
-            return str(v)
-
-    def _clp(v, dec=2):
+    def _fc(v, dec=2):
         """Chilean format: 1.234,56"""
         if v is None: return 'N/D'
-        try:
-            v = float(v)
-            neg = '-' if v < 0 else ''
-            v = abs(v)
-            if dec == 0:
-                s = "{:,.0f}".format(v)
-            else:
-                s = ("{:,."+str(dec)+"f}").format(v)
-            parts = s.split('.')
-            integer_part = parts[0].replace(',', '.')
-            if len(parts) > 1:
-                return neg + integer_part + ',' + parts[1]
-            return neg + integer_part
-        except:
-            return str(v)
+        neg = '-' if v < 0 else ''
+        v = abs(float(v))
+        s = ("{:,." + str(dec) + "f}").format(v) if dec > 0 else "{:,.0f}".format(v)
+        parts = s.split('.')
+        ent = parts[0].replace(',', '.')
+        return neg + ent + (',' + parts[1] if len(parts) > 1 and dec > 0 else '')
 
-    # Prepare all values with Chilean format for HTML
-    uf_val = _jval('uf', 38000)
-    dolar_val = _jval('dolar', 950)
-    euro_val = _jval('euro', 1050)
-    utm_val = _jval('utm', 69889)
-    tpm_val = _jval('tpm', 5.0)
-    ipc_val = _jval('ipc')
-    desemp_val = _jval('tasa_desempleo')
-    imacec_val = _jval('imacec')
-    btc_val = _jval('bitcoin')
-    eth_val = _jval('ethereum')
-    sol_val = _jval('solana')
-    cobre_val = _jval('libra_cobre')
-    ipsa_val = _jval('ipsa')
-    ivp_val = _jval('ivp')
+    uf = _jv('uf', 38000); dol = _jv('dolar', 950); eur = _jv('euro', 1050)
+    utm = _jv('utm', 69889); ipc = _jv('ipc'); tpm = _jv('tpm', 5.0)
+    des = _jv('tasa_desempleo'); ima = _jv('imacec'); btc = _jv('bitcoin')
+    eth = _jv('ethereum'); sol = _jv('solana'); cob = _jv('libra_cobre')
+    ipsa = _jv('ipsa'); ivp = _jv('ivp')
 
-    # Chilean formatted strings for display
-    UF_CL = _clp(uf_val, 2)
-    DOLAR_CL = _clp(dolar_val, 2)
-    EURO_CL = _clp(euro_val, 2)
-    UTM_CL = _clp(utm_val, 0)
-    IPC_CL = _clp(ipc_val, 2)
-    TPM_CL = _clp(tpm_val, 2)
-    BTC_CL = _clp(btc_val, 0)
-    DESEMP_CL = _clp(desemp_val, 2)
-    IMACEC_CL = _clp(imacec_val, 2)
-    COBRE_CL = _clp(cobre_val, 2)
-    IPSA_CL = _clp(ipsa_val, 0)
-    SOL_CL = _clp(sol_val, 0)
-    ETH_CL = _clp(eth_val, 0)
-    IVP_CL = _clp(ivp_val, 2)
-
-    # Series 30d stats (min, max, avg) for each indicator
-    def _serie_stats(cod):
+    # Stats 30d
+    def _stats(cod):
         d = datos.get(cod)
-        if not d: return {'min': 0, 'max': 0, 'avg': 0, 'data': []}
-        serie = d.get('serie30', [])
-        vals = [float(x.get('valor', 0)) for x in serie if x.get('valor') is not None]
-        if not vals: return {'min': 0, 'max': 0, 'avg': 0, 'data': []}
-        return {'min': min(vals), 'max': max(vals), 'avg': sum(vals)/len(vals), 'data': vals}
+        if not d: return {'min':0,'max':0,'avg':0,'data':[]}
+        vals = [float(x.get('valor',0)) for x in d.get('serie30',[]) if x.get('valor') is not None]
+        if not vals: return {'min':0,'max':0,'avg':0,'data':[]}
+        return {'min':min(vals),'max':max(vals),'avg':sum(vals)/len(vals),'data':vals}
+    stats = {c: _stats(c) for c in ['uf','dolar','euro','bitcoin','libra_cobre','ipsa']}
+    stats_js = json.dumps({c:{'min':round(s['min'],2),'max':round(s['max'],2),'avg':round(s['avg'],2),'data':[round(v,2) for v in s['data'][:30]]} for c,s in stats.items()})
+    ind_vals_js = json.dumps({'uf':uf,'dolar':dol,'euro':eur,'utm':utm,'bitcoin':btc,'libra_cobre':cob,'solana':sol,'ethereum':eth})
 
-    stats = {cod: _serie_stats(cod) for cod in ['uf','dolar','euro','utm','bitcoin','libra_cobre','ipsa','ivp','solana','ethereum']}
-
-    # TMC data
+    # TMC
     tmc_items = (datos_cmf or {}).get('tmc', [])
-    tmc_labels = json.dumps([t.get('label', '') for t in tmc_items[:8]])
-    tmc_values = json.dumps([round(t.get('valor', 0), 2) for t in tmc_items[:8]])
+    tmc_labels_js = json.dumps([t.get('label','') for t in tmc_items[:8]])
+    tmc_values_js = json.dumps([round(t.get('valor',0),2) for t in tmc_items[:8]])
 
-    # AFP data
+    # AFP
     afp_tabla = (datos_afp or {}).get('tabla', {})
     afp_list = (datos_afp or {}).get('afps', [])
-    afp_fondos_js = {}
-    for fondo in 'ABCDE':
-        vals = []
-        for afp in afp_list:
-            celda = (afp_tabla.get(afp) or {}).get(fondo, {})
-            r = celda.get('rent_pct')
-            vals.append(round(r, 2) if r is not None else 0)
-        afp_fondos_js[fondo] = vals
+    afp_a = [round((afp_tabla.get(a) or {}).get('A',{}).get('rent_pct') or 0,2) for a in afp_list]
+    afp_e = [round((afp_tabla.get(a) or {}).get('E',{}).get('rent_pct') or 0,2) for a in afp_list]
     afp_names_js = json.dumps([a.capitalize() for a in afp_list])
 
-    h12_labels = json.dumps(hist_12m.get('labels', []))
-    h12_dolar = json.dumps(hist_12m.get('dolar', []))
-    h12_euro = json.dumps(hist_12m.get('euro', []))
+    h12_labels = json.dumps(hist_12m.get('labels',[])); h12_d = json.dumps(hist_12m.get('dolar',[])); h12_e = json.dumps(hist_12m.get('euro',[]))
 
-    # Separate CLP and USD hist5 data (punto 5)
-    h5_clp = {}
-    h5_usd = {}
-    for cod, info in hist_10a.items():
-        entry = {'nombre': info.get('nombre', cod), 'color': info.get('color', '#ccc'),
-                 'anios': info.get('anios', []), 'valores': info.get('valores', [])}
-        if cod in ('bitcoin', 'solana', 'ethereum', 'libra_cobre'):
-            h5_usd[cod] = entry
-        else:
-            h5_clp[cod] = entry
+    # Separate CLP vs USD hist5
+    h5c={}; h5u={}
+    for cod,info in hist_10a.items():
+        e = {'nombre':info.get('nombre',cod),'color':info.get('color','#ccc'),'anios':info.get('anios',[]),'valores':info.get('valores',[])}
+        (h5u if cod in ('bitcoin','solana','ethereum','libra_cobre') else h5c)[cod] = e
 
-    analisis_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
+    # Inflation 10yr
+    ipc_h = hist_10a.get('ipc',{})
+    infla_a_js = json.dumps(ipc_h.get('anios',[])); infla_v_js = json.dumps(ipc_h.get('valores',[]))
 
-    # Inflation data: IPC from hist_10a (punto 5)
-    ipc_hist = hist_10a.get('ipc', {})
-    infla_anios = json.dumps(ipc_hist.get('anios', []))
-    infla_vals = json.dumps(ipc_hist.get('valores', []))
+    ai_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
+    proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
 
-    # Build stats JSON for JS
-    stats_js = json.dumps({
-        cod: {'min': round(s['min'],2), 'max': round(s['max'],2), 'avg': round(s['avg'],2), 'data': [round(v,2) for v in s['data'][:30]]}
-        for cod, s in stats.items()
-    })
-
-    # Indicator values for JS conversor
-    ind_vals_js = json.dumps({
-        'uf': uf_val, 'dolar': dolar_val, 'euro': euro_val, 'utm': utm_val,
-        'bitcoin': btc_val, 'libra_cobre': cobre_val, 'solana': sol_val, 'ethereum': eth_val
-    })
-
-    html = '''<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard Economico Chile - Cofradia de Networking</title>
+    html = '''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Dashboard Economico Chile - Cofradia</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
-:root{--navy:#071828;--navy2:#0c2035;--navy3:#112840;--gold:#c8a84b;--gold2:#e0c06a;--gold-dim:rgba(200,168,75,0.18);--gold-glow:rgba(200,168,75,0.35);--cyan:#00d4ff;--cyan-dim:rgba(0,212,255,0.15);--blue:#1e6bb8;--blue2:#2a85e0;--white:#d8e8f5;--gray:#6a8aaa;--gray2:#4a6a8a;--green:#00e5a0;--green-dim:rgba(0,229,160,0.15);--red:#ff4757;--purple:#9d71ea;--orange:#ff8c42;--teal:#00bfa5;--border:rgba(30,107,184,0.25)}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Exo 2',sans-serif;background:var(--navy);color:var(--white);min-height:100vh}
-body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(0,212,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
-.wrap{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:24px 20px}
-.hdr{text-align:center;padding:36px 20px 28px;position:relative;border-bottom:1px solid var(--gold-dim);margin-bottom:28px}
-.hdr::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:200px;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)}
-.hdr h1{font-family:'Rajdhani',sans-serif;font-size:3em;font-weight:700;letter-spacing:4px;color:var(--gold);text-shadow:0 0 40px var(--gold-glow);line-height:1.1}.hdr h1 span{color:var(--cyan)}
-.hdr-sub{color:var(--gray);font-size:0.88em;margin-top:10px;letter-spacing:1px}
-.hdr-ver{display:inline-block;background:linear-gradient(135deg,var(--blue),#0d3d6e);border:1px solid rgba(42,133,224,0.4);border-radius:20px;padding:4px 16px;font-size:0.75em;color:var(--cyan);font-family:'Share Tech Mono',monospace;margin-top:10px;letter-spacing:2px}
-.actions{display:flex;gap:12px;justify-content:center;margin-bottom:28px;flex-wrap:wrap}
-.btn{padding:11px 28px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:1em;letter-spacing:2px;cursor:pointer;transition:all .25s;border:none}
-.btn-gold{background:linear-gradient(135deg,rgba(200,168,75,0.25),rgba(200,168,75,0.08));border:2px solid var(--gold);color:var(--gold)}.btn-gold:hover{background:var(--gold);color:var(--navy)}.btn-gold:disabled{opacity:.4;cursor:wait}
-.tabs{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--border);margin-bottom:24px}
-.tab{padding:10px 18px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.85em;letter-spacing:1.5px;color:var(--gray);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .2s;white-space:nowrap}.tab:hover{color:var(--white)}.tab.active{color:var(--gold);border-bottom-color:var(--gold)}
-.tc{display:none}.tc.active{display:block}
-.kpi-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:28px}
-.kpi{background:linear-gradient(145deg,rgba(12,32,53,0.9),rgba(7,24,40,0.95));border:1px solid var(--border);border-radius:10px;padding:16px 20px;text-align:center;min-width:110px;position:relative;overflow:hidden}
-.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
-.kpi .v{font-family:'Rajdhani',sans-serif;font-size:2em;font-weight:800;line-height:1}.kpi .l{font-size:0.62em;color:var(--gray);text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
-.sec{background:linear-gradient(145deg,rgba(12,32,53,0.7),rgba(7,24,40,0.85));border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:20px;position:relative}
-.sec-t{font-family:'Rajdhani',sans-serif;font-size:1.25em;font-weight:700;letter-spacing:2px;color:var(--gold);margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--gold-dim);display:flex;align-items:center;gap:10px}
-.sec-t::before{content:'';display:inline-block;width:4px;height:20px;background:linear-gradient(to bottom,var(--gold),var(--gold-dim));border-radius:2px;flex-shrink:0}
-.chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
-.chart-box{background:rgba(7,24,40,0.6);border:1px solid var(--border);border-radius:12px;padding:16px}
-.chart-title{font-family:'Rajdhani',sans-serif;color:var(--gold);font-size:0.9em;font-weight:700;letter-spacing:1.5px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--gold-dim)}
-.chart{width:100%;height:300px}
-.sim-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
-.sim-card{background:rgba(7,24,40,0.7);border:1px solid var(--border);border-radius:14px;padding:20px}
-.sim-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:1.05em;letter-spacing:2px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--gold-dim);display:flex;align-items:center;gap:8px}
-.sim-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}.sim-row label{font-size:0.78em;color:var(--gray);min-width:110px}.sim-row input,.sim-row select{background:rgba(7,24,40,0.9);border:1px solid var(--border);border-radius:6px;color:var(--white);padding:8px 12px;font-size:0.85em;flex:1;font-family:'Share Tech Mono',monospace}.sim-row input:focus,.sim-row select:focus{border-color:var(--gold);outline:none}
-.sim-btn{padding:10px 20px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;letter-spacing:2px;cursor:pointer;border:2px solid var(--cyan);background:rgba(0,212,255,0.1);color:var(--cyan);width:100%;margin-top:6px;transition:all .2s}.sim-btn:hover{background:rgba(0,212,255,0.25)}
-.sim-pdf{padding:8px 16px;border-radius:5px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.8em;letter-spacing:1px;cursor:pointer;border:1px solid var(--gold-dim);background:rgba(200,168,75,0.08);color:var(--gold);margin-top:8px;transition:all .2s;width:100%}.sim-pdf:hover{background:rgba(200,168,75,0.2)}
-.sim-result{margin-top:14px;padding:14px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:10px;font-size:0.82em;display:none}
-.sim-result .big{font-family:'Rajdhani',sans-serif;font-size:1.8em;font-weight:800;color:var(--green)}.sim-result .detail{color:var(--gray);margin-top:6px;line-height:1.6}
-.ia-box{background:rgba(200,168,75,0.06);border:1px solid var(--gold-dim);border-radius:10px;padding:16px;font-size:0.82em;color:var(--gray);line-height:1.7}
-.stat-tbl{width:100%;border-collapse:collapse;font-size:0.78em;margin-top:10px}
-.stat-tbl th{background:rgba(200,168,75,0.1);color:var(--gold);padding:8px 10px;text-align:left;font-family:'Rajdhani',sans-serif;letter-spacing:1px;border-bottom:1px solid var(--gold-dim);font-weight:700}
-.stat-tbl td{padding:7px 10px;border-bottom:1px solid var(--border);color:var(--gray)}.stat-tbl td:first-child{color:var(--white);font-weight:600}
-.stat-tbl tr:hover td{background:rgba(0,212,255,0.04)}
-.conv-grid{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:end;margin-bottom:14px}
-.conv-swap{background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.3);border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1.2em;color:var(--cyan);transition:all .2s;margin-bottom:4px}.conv-swap:hover{background:rgba(0,212,255,0.25)}
-.footer{text-align:center;padding:24px 0 12px;border-top:1px solid var(--gold-dim);margin-top:24px;font-size:0.78em;color:var(--gray2);font-family:'Share Tech Mono',monospace;letter-spacing:.5px}.footer span{color:var(--gold)}
-@media(max-width:768px){.chart-grid,.sim-grid{grid-template-columns:1fr}.hdr h1{font-size:1.8em}.tabs{overflow-x:auto}.tab{font-size:0.75em;padding:8px 12px}.conv-grid{grid-template-columns:1fr}}
+:root{--n:#071828;--n2:#0c2035;--gd:#c8a84b;--gdd:rgba(200,168,75,0.18);--cy:#00d4ff;--bl:#2a85e0;--w:#d8e8f5;--gr:#6a8aaa;--gn:#00e5a0;--rd:#ff4757;--pu:#9d71ea;--or:#ff8c42;--bd:rgba(30,107,184,0.25)}
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Exo 2',sans-serif;background:var(--n);color:var(--w);min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,212,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+.W{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:24px 20px}
+.H{text-align:center;padding:32px 20px 24px;border-bottom:1px solid var(--gdd);margin-bottom:24px;position:relative}
+.H::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:200px;height:2px;background:linear-gradient(90deg,transparent,var(--gd),transparent)}
+.H h1{font-family:'Rajdhani',sans-serif;font-size:2.8em;font-weight:700;letter-spacing:4px;color:var(--gd);text-shadow:0 0 40px rgba(200,168,75,0.35)}.H h1 b{color:var(--cy)}
+.H p{color:var(--gr);font-size:0.85em;margin-top:8px;letter-spacing:1px}
+.H .v{display:inline-block;background:linear-gradient(135deg,#1e6bb8,#0d3d6e);border:1px solid rgba(42,133,224,0.4);border-radius:20px;padding:4px 16px;font-size:0.72em;color:var(--cy);font-family:'Share Tech Mono',monospace;margin-top:8px;letter-spacing:2px}
+.A{display:flex;gap:12px;justify-content:center;margin-bottom:24px;flex-wrap:wrap}
+.bt{padding:10px 24px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.95em;letter-spacing:2px;cursor:pointer;transition:.25s;border:2px solid var(--gd);background:linear-gradient(135deg,rgba(200,168,75,0.2),rgba(200,168,75,0.05));color:var(--gd)}.bt:hover{background:var(--gd);color:var(--n)}.bt:disabled{opacity:.4;cursor:wait}
+.T{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:20px}
+.t{padding:9px 16px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.82em;letter-spacing:1.5px;color:var(--gr);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:.2s;white-space:nowrap}.t:hover{color:var(--w)}.t.a{color:var(--gd);border-bottom-color:var(--gd)}
+.P{display:none}.P.a{display:block}
+.K{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:24px}
+.k{background:linear-gradient(145deg,rgba(12,32,53,0.9),rgba(7,24,40,0.95));border:1px solid var(--bd);border-radius:10px;padding:14px 18px;text-align:center;min-width:105px;position:relative;overflow:hidden}
+.k .n{font-family:'Rajdhani',sans-serif;font-size:1.9em;font-weight:800;line-height:1}.k .l{font-size:0.6em;color:var(--gr);text-transform:uppercase;letter-spacing:1.5px;margin-top:3px}
+.S{background:linear-gradient(145deg,rgba(12,32,53,0.7),rgba(7,24,40,0.85));border:1px solid var(--bd);border-radius:14px;padding:20px;margin-bottom:16px}
+.ST{font-family:'Rajdhani',sans-serif;font-size:1.15em;font-weight:700;letter-spacing:2px;color:var(--gd);margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--gdd)}
+.CG{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.CB{background:rgba(7,24,40,0.6);border:1px solid var(--bd);border-radius:12px;padding:14px}
+.CT{font-family:'Rajdhani',sans-serif;color:var(--gd);font-size:0.85em;font-weight:700;letter-spacing:1.5px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--gdd)}
+.C{width:100%;height:280px}
+.SG{display:grid;grid-template-columns:repeat(auto-fit,minmax(370px,1fr));gap:16px}
+.SC{background:rgba(7,24,40,0.7);border:1px solid var(--bd);border-radius:14px;padding:18px}
+.Sh{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:1em;letter-spacing:2px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--gdd)}
+.SR{display:flex;align-items:center;gap:10px;margin-bottom:8px}.SR label{font-size:0.76em;color:var(--gr);min-width:100px}.SR input,.SR select{background:rgba(7,24,40,0.9);border:1px solid var(--bd);border-radius:6px;color:var(--w);padding:7px 10px;font-size:0.82em;flex:1;font-family:'Share Tech Mono',monospace}.SR input:focus,.SR select:focus{border-color:var(--gd);outline:none}
+.SB{padding:9px 18px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:700;letter-spacing:2px;cursor:pointer;border:2px solid var(--cy);background:rgba(0,212,255,0.1);color:var(--cy);width:100%;margin-top:4px;transition:.2s}.SB:hover{background:rgba(0,212,255,0.25)}
+.SP{padding:7px 14px;border-radius:5px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:0.78em;letter-spacing:1px;cursor:pointer;border:1px solid var(--gdd);background:rgba(200,168,75,0.08);color:var(--gd);margin-top:6px;width:100%;transition:.2s}.SP:hover{background:rgba(200,168,75,0.2)}
+.RE{margin-top:12px;padding:12px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:10px;font-size:0.8em;display:none}
+.RE .b{font-family:'Rajdhani',sans-serif;font-size:1.7em;font-weight:800;color:var(--gn)}.RE .d{color:var(--gr);margin-top:4px;line-height:1.5}
+.IA{background:rgba(200,168,75,0.06);border:1px solid var(--gdd);border-radius:10px;padding:16px;font-size:0.8em;color:var(--gr);line-height:1.7}
+table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
+.TB th{background:rgba(200,168,75,0.1);color:var(--gd);padding:7px 8px;text-align:left;font-family:'Rajdhani',sans-serif;letter-spacing:1px;border-bottom:1px solid var(--gdd);font-weight:700}
+.TB td{padding:6px 8px;border-bottom:1px solid var(--bd);color:var(--gr)}.TB td:first-child{color:var(--w);font-weight:600}.TB tr:hover td{background:rgba(0,212,255,0.03)}
+.F{text-align:center;padding:20px 0 10px;border-top:1px solid var(--gdd);margin-top:20px;font-size:0.72em;color:#4a6a8a;font-family:'Share Tech Mono',monospace}.F b{color:var(--gd)}
+@media(max-width:768px){.CG,.SG{grid-template-columns:1fr}.H h1{font-size:1.7em}.T{overflow-x:auto}.t{font-size:0.72em;padding:7px 10px}}
 </style></head><body>
-<div class="wrap" id="content">
-<div class="hdr">
-<div style="display:inline-block;background:rgba(200,168,75,0.12);border:1px solid var(--gold-dim);border-radius:4px;padding:3px 14px;font-family:'Share Tech Mono',monospace;font-size:0.7em;color:var(--gold);letter-spacing:3px;margin-bottom:14px">&#9875; COFRADIA DE NETWORKING</div>
-<h1>DASHBOARD <span>ECONOMICO</span> CHILE</h1>
-<div class="hdr-sub">Indicadores en Tiempo Real · Simuladores Financieros · Calculadora · Conversor · Analisis IA</div>
-<div class="hdr-ver">''' + generado + '''</div>
+<div class="W" id="content">
+<div class="H">
+<div style="display:inline-block;background:rgba(200,168,75,0.12);border:1px solid rgba(200,168,75,0.18);border-radius:4px;padding:3px 14px;font-family:'Share Tech Mono',monospace;font-size:0.68em;color:var(--gd);letter-spacing:3px;margin-bottom:12px">&#9875; COFRADIA DE NETWORKING</div>
+<h1>DASHBOARD <b>ECONOMICO</b> CHILE</h1>
+<p>Indicadores · Simuladores · Calculadora · Conversor · Inflacion · Proyecciones IA</p>
+<div class="v">''' + generado + '''</div>
 </div>
-<div class="actions"><button class="btn btn-gold" id="btnPdf" onclick="exportPDF()">&#128229; DESCARGAR PDF</button></div>
-<div class="kpi-row">
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)"></div><div class="v" style="color:var(--gold)">$''' + UF_CL + '''</div><div class="l">UF</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cyan),transparent)"></div><div class="v" style="color:var(--cyan)">$''' + DOLAR_CL + '''</div><div class="l">DOLAR USD</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--blue2),transparent)"></div><div class="v" style="color:var(--blue2)">$''' + EURO_CL + '''</div><div class="l">EURO</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--green),transparent)"></div><div class="v" style="color:var(--green)">''' + IPC_CL + '''%</div><div class="l">IPC</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--orange),transparent)"></div><div class="v" style="color:var(--orange)">''' + TPM_CL + '''%</div><div class="l">TPM</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--purple),transparent)"></div><div class="v" style="color:var(--purple)">USD ''' + BTC_CL + '''</div><div class="l">BITCOIN</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--red),transparent)"></div><div class="v" style="color:var(--red)">''' + DESEMP_CL + '''%</div><div class="l">DESEMPLEO</div></div>
-<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#cd7f32,transparent)"></div><div class="v" style="color:#cd7f32">USD ''' + COBRE_CL + '''</div><div class="l">COBRE lb</div></div>
+<div class="A"><button class="bt" id="btnP" onclick="xPDF()">DESCARGAR PDF</button></div>
+<div class="K">
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gd),transparent)"></div><div class="n" style="color:var(--gd)">$''' + _fc(uf,2) + '''</div><div class="l">UF</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cy),transparent)"></div><div class="n" style="color:var(--cy)">$''' + _fc(dol,2) + '''</div><div class="l">DOLAR</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--bl),transparent)"></div><div class="n" style="color:var(--bl)">$''' + _fc(eur,2) + '''</div><div class="l">EURO</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gn),transparent)"></div><div class="n" style="color:var(--gn)">''' + _fc(ipc,2) + '''%</div><div class="l">IPC</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--or),transparent)"></div><div class="n" style="color:var(--or)">''' + _fc(tpm,2) + '''%</div><div class="l">TPM</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--pu),transparent)"></div><div class="n" style="color:var(--pu)">USD ''' + _fc(btc,0) + '''</div><div class="l">BTC</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--rd),transparent)"></div><div class="n" style="color:var(--rd)">''' + _fc(des,2) + '''%</div><div class="l">DESEMPLEO</div></div>
+<div class="k"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#cd7f32,transparent)"></div><div class="n" style="color:#cd7f32">USD ''' + _fc(cob,2) + '''</div><div class="l">COBRE</div></div>
 </div>
-<div class="tabs">
-<div class="tab active" onclick="st('ind')">&#128202; INDICADORES</div>
-<div class="tab" onclick="st('hist')">&#128200; HISTORICO</div>
-<div class="tab" onclick="st('afp')">&#128020; AFP & TASAS</div>
-<div class="tab" onclick="st('sim')">&#129518; SIMULADORES</div>
-<div class="tab" onclick="st('calc')">&#128290; CALCULADORA</div>
-<div class="tab" onclick="st('proy')">&#127919; ANALISIS PROYECTADO</div>
-<div class="tab" onclick="st('ia')">&#129302; ANALISIS IA</div>
+<div class="T">
+<div class="t a" onclick="st('ind')">INDICADORES</div>
+<div class="t" onclick="st('hist')">HISTORICO</div>
+<div class="t" onclick="st('afp')">AFP & TASAS</div>
+<div class="t" onclick="st('sim')">SIMULADORES</div>
+<div class="t" onclick="st('calc')">CALCULADORA</div>
+<div class="t" onclick="st('proy')">ANALISIS PROYECTADO</div>
+<div class="t" onclick="st('ia')">ANALISIS IA</div>
 </div>
-
-<!-- TAB: INDICADORES (punto 2: mas graficos, stats, proyeccion) -->
-<div class="tc active" id="tab-ind">
-<div class="sec">
-<div class="sec-t">RESUMEN ESTADISTICO — ULTIMOS 30 DIAS</div>
-<table class="stat-tbl">
-<tr><th>Indicador</th><th>Valor Actual</th><th>Min 30d</th><th>Max 30d</th><th>Promedio 30d</th><th>Variacion</th><th>Proy 7d (reg. lineal)</th></tr>
-<tr><td>&#127793; UF</td><td>$''' + UF_CL + '''</td><td id="s_uf_min">-</td><td id="s_uf_max">-</td><td id="s_uf_avg">-</td><td id="s_uf_var">-</td><td id="s_uf_proy">-</td></tr>
-<tr><td>&#128181; Dolar</td><td>$''' + DOLAR_CL + '''</td><td id="s_dl_min">-</td><td id="s_dl_max">-</td><td id="s_dl_avg">-</td><td id="s_dl_var">-</td><td id="s_dl_proy">-</td></tr>
-<tr><td>&#128182; Euro</td><td>$''' + EURO_CL + '''</td><td id="s_eu_min">-</td><td id="s_eu_max">-</td><td id="s_eu_avg">-</td><td id="s_eu_var">-</td><td id="s_eu_proy">-</td></tr>
-<tr><td>&#8383; Bitcoin</td><td>USD ''' + BTC_CL + '''</td><td id="s_bt_min">-</td><td id="s_bt_max">-</td><td id="s_bt_avg">-</td><td id="s_bt_var">-</td><td id="s_bt_proy">-</td></tr>
-<tr><td>&#128296; Cobre</td><td>USD ''' + COBRE_CL + '''</td><td id="s_cb_min">-</td><td id="s_cb_max">-</td><td id="s_cb_avg">-</td><td id="s_cb_var">-</td><td id="s_cb_proy">-</td></tr>
-<tr><td>&#128201; IPSA</td><td>''' + IPSA_CL + ''' pts</td><td id="s_ip_min">-</td><td id="s_ip_max">-</td><td id="s_ip_avg">-</td><td id="s_ip_var">-</td><td id="s_ip_proy">-</td></tr>
-<tr style="border-top:2px solid var(--gold-dim)"><td style="color:var(--green)">&#128200; IPC (Inflacion)</td><td>''' + IPC_CL + '''%</td><td colspan="5" style="color:var(--gray);font-size:0.9em" id="s_ipc_info">Inflacion actual mensual</td></tr>
+<!-- INDICADORES -->
+<div class="P a" id="tab-ind">
+<div class="S"><div class="ST">RESUMEN ESTADISTICO — ULTIMOS 30 DIAS</div>
+<table class="TB"><tr><th>Indicador</th><th>Actual</th><th>Min 30d</th><th>Max 30d</th><th>Prom 30d</th><th>Var 30d</th><th>Proy 7d</th></tr>
+<tr><td>UF</td><td>$''' + _fc(uf,2) + '''</td><td id="su1">-</td><td id="su2">-</td><td id="su3">-</td><td id="su4">-</td><td id="su5">-</td></tr>
+<tr><td>Dolar</td><td>$''' + _fc(dol,2) + '''</td><td id="sd1">-</td><td id="sd2">-</td><td id="sd3">-</td><td id="sd4">-</td><td id="sd5">-</td></tr>
+<tr><td>Euro</td><td>$''' + _fc(eur,2) + '''</td><td id="se1">-</td><td id="se2">-</td><td id="se3">-</td><td id="se4">-</td><td id="se5">-</td></tr>
+<tr><td>Bitcoin</td><td>USD ''' + _fc(btc,0) + '''</td><td id="sb1">-</td><td id="sb2">-</td><td id="sb3">-</td><td id="sb4">-</td><td id="sb5">-</td></tr>
+<tr><td>Cobre</td><td>USD ''' + _fc(cob,2) + '''</td><td id="sc1">-</td><td id="sc2">-</td><td id="sc3">-</td><td id="sc4">-</td><td id="sc5">-</td></tr>
+<tr><td>IPSA</td><td>''' + _fc(ipsa,0) + ''' pts</td><td id="si1">-</td><td id="si2">-</td><td id="si3">-</td><td id="si4">-</td><td id="si5">-</td></tr>
+<tr style="border-top:2px solid var(--gdd)"><td style="color:var(--gn)">IPC (Inflacion)</td><td>''' + _fc(ipc,2) + '''%</td><td colspan="5" style="font-size:0.9em">TPM: ''' + _fc(tpm,2) + '''% — Desempleo: ''' + _fc(des,2) + '''% — IMACEC: ''' + _fc(ima,2) + '''%</td></tr>
 </table></div>
-<div class="chart-grid">
-<div class="chart-box"><div class="chart-title">&#9654; GAUGE — DOLAR USD/CLP</div><div class="chart" id="cGD"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; GAUGE — UF HOY</div><div class="chart" id="cGU"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; INDICADORES MACRO (%)</div><div class="chart" id="cBar"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; CRIPTOMONEDAS (USD)</div><div class="chart" id="cCr"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; DOLAR 30 DIAS — MIN / MAX / PROMEDIO</div><div class="chart" id="cSpk"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; RADAR — SALUD ECONOMICA</div><div class="chart" id="cRad"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; PROYECCION DOLAR — TENDENCIA LINEAL IA</div><div class="chart" id="cProj"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; COMPARATIVO UF vs DOLAR vs EURO (30d indexado)</div><div class="chart" id="cComp"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; INFLACION — IPC ANUALIZADO (10 ANOS)</div><div class="chart" id="cInfla"></div></div>
+<div class="CG">
+<div class="CB"><div class="CT">GAUGE — DOLAR USD/CLP</div><div class="C" id="cGD"></div></div>
+<div class="CB"><div class="CT">GAUGE — UF HOY</div><div class="C" id="cGU"></div></div>
+<div class="CB"><div class="CT">INDICADORES MACRO (%)</div><div class="C" id="cBr"></div></div>
+<div class="CB"><div class="CT">CRIPTOMONEDAS (USD)</div><div class="C" id="cCr"></div></div>
+<div class="CB"><div class="CT">DOLAR 30d — MIN / MAX / PROMEDIO</div><div class="C" id="cSp"></div></div>
+<div class="CB"><div class="CT">PROYECCION DOLAR — TENDENCIA + 7d</div><div class="C" id="cPj"></div></div>
+<div class="CB"><div class="CT">COMPARATIVO UF vs DOLAR vs EURO (30d)</div><div class="C" id="cCm"></div></div>
+<div class="CB"><div class="CT">INFLACION IPC ANUALIZADO (10 ANOS)</div><div class="C" id="cIn"></div></div>
 </div></div>
-
-<!-- TAB: HISTORICO (punto 5: separar CLP de USD) -->
-<div class="tc" id="tab-hist">
-<div class="chart-grid">
-<div class="chart-box"><div class="chart-title">&#9654; DOLAR vs EURO — 12 MESES</div><div class="chart" id="cH12"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; INDICADORES EN PESOS (CLP) — 5 ANOS</div><div class="chart" id="cH5clp"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; INDICADORES EN DOLARES (USD) — 5 ANOS</div><div class="chart" id="cH5usd"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; VARIACION ANUAL COMPARADA (%)</div><div class="chart" id="cH5var"></div></div>
+<!-- HISTORICO -->
+<div class="P" id="tab-hist"><div class="CG">
+<div class="CB"><div class="CT">DOLAR vs EURO — 12 MESES</div><div class="C" id="cH12"></div></div>
+<div class="CB"><div class="CT">INDICADORES EN PESOS (CLP) — 5 ANOS</div><div class="C" id="cH5c"></div></div>
+<div class="CB"><div class="CT">INDICADORES EN USD — 5 ANOS</div><div class="C" id="cH5u"></div></div>
 </div></div>
-
-<!-- TAB: AFP & TASAS -->
-<div class="tc" id="tab-afp">
-<div class="chart-grid">
-<div class="chart-box"><div class="chart-title">&#9654; RENTABILIDAD AFP — FONDO A vs E (6 MESES)</div><div class="chart" id="cAfp"></div></div>
-<div class="chart-box"><div class="chart-title">&#9654; TASAS CMF — TMC VIGENTES</div><div class="chart" id="cTmc"></div></div>
+<!-- AFP -->
+<div class="P" id="tab-afp"><div class="CG">
+<div class="CB"><div class="CT">AFP — FONDO A vs E (6 MESES)</div><div class="C" id="cAf"></div></div>
+<div class="CB"><div class="CT">TASAS CMF — TMC</div><div class="C" id="cTm"></div></div>
 </div></div>
-
-<!-- TAB: SIMULADORES (punto 6: PDF per simulacion) -->
-<div class="tc" id="tab-sim">
-<div class="sim-grid">
-<div class="sim-card" id="sim_h_card">
-<div class="sim-title" style="color:var(--cyan)">&#127968; CREDITO HIPOTECARIO</div>
-<div class="sim-row"><label>Propiedad (UF)</label><input type="number" id="sh_m" value="3000" step="100"></div>
-<div class="sim-row"><label>Pie (%)</label><input type="number" id="sh_p" value="20" min="0" max="80"></div>
-<div class="sim-row"><label>Plazo (anos)</label><input type="number" id="sh_a" value="25" min="1" max="30"></div>
-<div class="sim-row"><label>Tasa anual (%)</label><input type="number" id="sh_t" value="4.5" step="0.1"></div>
-<button class="sim-btn" onclick="simH()">CALCULAR DIVIDENDO</button>
-<div class="sim-result" id="sh_r"><div class="big" id="sh_v"></div><div class="detail" id="sh_d"></div></div>
-<button class="sim-pdf" onclick="printSim('sim_h_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
-</div>
-<div class="sim-card" id="sim_a_card">
-<div class="sim-title" style="color:var(--green)">&#128176; APV (Ahorro Previsional Voluntario)</div>
-<div class="sim-row"><label>Aporte mensual ($)</label><input type="number" id="ap_m" value="100000" step="10000"></div>
-<div class="sim-row"><label>Plazo (anos)</label><input type="number" id="ap_a" value="20" min="1" max="40"></div>
-<div class="sim-row"><label>Rentabilidad (%)</label><input type="number" id="ap_r" value="5.0" step="0.5"></div>
-<div class="sim-row"><label>Regimen</label><select id="ap_rg"><option value="A">Regimen A (15% bonificacion)</option><option value="B">Regimen B (descuento tributario)</option></select></div>
-<button class="sim-btn" onclick="simA()">CALCULAR AHORRO</button>
-<div class="sim-result" id="ap_res"><div class="big" id="ap_v"></div><div class="detail" id="ap_d"></div></div>
-<button class="sim-pdf" onclick="printSim('sim_a_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
-</div>
-<div class="sim-card" id="sim_i_card">
-<div class="sim-title" style="color:var(--gold)">&#128200; SIMULADOR DE INVERSION</div>
-<div class="sim-row"><label>Capital inicial ($)</label><input type="number" id="iv_c" value="5000000" step="500000"></div>
-<div class="sim-row"><label>Aporte mensual ($)</label><input type="number" id="iv_m" value="200000" step="50000"></div>
-<div class="sim-row"><label>Plazo (anos)</label><input type="number" id="iv_a" value="10" min="1" max="40"></div>
-<div class="sim-row"><label>Rentabilidad (%)</label><input type="number" id="iv_r" value="8.0" step="0.5"></div>
-<button class="sim-btn" onclick="simI()">CALCULAR PROYECCION</button>
-<div class="sim-result" id="iv_res"><div class="big" id="iv_v"></div><div class="detail" id="iv_d"></div></div>
-<button class="sim-pdf" onclick="printSim('sim_i_card')">&#128206; IMPRIMIR / PDF ESTA SIMULACION</button>
-</div>
-</div>
-<div style="margin-top:14px;padding:10px 14px;background:rgba(200,168,75,0.06);border:1px solid var(--gold-dim);border-radius:8px;font-size:0.73em;color:var(--gray)">Los simuladores son referenciales. UF $''' + UF_CL + ''' y USD $''' + DOLAR_CL + ''' al momento de generar. Consulte a un asesor financiero.</div>
-</div>
-
-<!-- TAB: CALCULADORA + CONVERSOR (punto 4) -->
-<div class="tc" id="tab-calc">
-<div class="sim-grid">
-<div class="sim-card">
-<div class="sim-title" style="color:var(--cyan)">&#128290; CALCULADORA DE INDICADORES</div>
-<div class="sim-row"><label>Operacion</label><select id="calc_op"><option value="mul">Multiplicar (x)</option><option value="div">Dividir (/)</option><option value="add">Sumar (+)</option><option value="sub">Restar (-)</option></select></div>
-<div class="sim-row"><label>Indicador</label><select id="calc_ind"><option value="uf">UF ($''' + UF_CL + ''')</option><option value="dolar">Dolar ($''' + DOLAR_CL + ''')</option><option value="euro">Euro ($''' + EURO_CL + ''')</option><option value="utm">UTM ($''' + UTM_CL + ''')</option><option value="bitcoin">Bitcoin (USD ''' + BTC_CL + ''')</option><option value="libra_cobre">Cobre (USD ''' + COBRE_CL + ''')</option></select></div>
-<div class="sim-row"><label>Cantidad</label><input type="number" id="calc_cant" value="1" step="0.01"></div>
-<button class="sim-btn" onclick="calcInd()">CALCULAR</button>
-<div class="sim-result" id="calc_res"><div class="big" id="calc_v"></div><div class="detail" id="calc_d"></div></div>
-</div>
-<div class="sim-card">
-<div class="sim-title" style="color:var(--gold)">&#128257; CONVERSOR DE INDICADORES</div>
-<div class="conv-grid">
-<div><div class="sim-row" style="margin:0"><label style="min-width:auto">Desde</label><select id="cv_from" style="width:100%"><option value="uf">UF</option><option value="dolar">Dolar USD</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre (lb)</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div>
-<div class="sim-row" style="margin:0;margin-top:8px"><label style="min-width:auto">Cantidad</label><input type="number" id="cv_cant" value="1" step="0.01"></div></div>
-<div style="text-align:center"><div class="conv-swap" onclick="swapConv()">&#8646;</div></div>
-<div><div class="sim-row" style="margin:0"><label style="min-width:auto">Hacia</label><select id="cv_to" style="width:100%"><option value="dolar" selected>Dolar USD</option><option value="uf">UF</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre (lb)</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div></div>
-</div>
-<button class="sim-btn" onclick="convertir()">CONVERTIR</button>
-<div class="sim-result" id="cv_res"><div class="big" id="cv_v"></div><div class="detail" id="cv_d"></div></div>
-</div>
+<!-- SIMULADORES -->
+<div class="P" id="tab-sim"><div class="SG">
+<div class="SC" id="sH"><div class="Sh" style="color:var(--cy)">CREDITO HIPOTECARIO</div>
+<div class="SR"><label>Propiedad (UF)</label><input type="number" id="hM" value="3000" step="100"></div>
+<div class="SR"><label>Pie (%)</label><input type="number" id="hP" value="20" min="0" max="80"></div>
+<div class="SR"><label>Plazo (anos)</label><input type="number" id="hA" value="25" min="1" max="30"></div>
+<div class="SR"><label>Tasa anual (%)</label><input type="number" id="hT" value="4.5" step="0.1"></div>
+<button class="SB" onclick="sH()">CALCULAR</button>
+<div class="RE" id="hR"><div class="b" id="hV"></div><div class="d" id="hD"></div></div>
+<button class="SP" onclick="pS('sH')">PDF SIMULACION</button></div>
+<div class="SC" id="sA"><div class="Sh" style="color:var(--gn)">APV — AHORRO PREVISIONAL</div>
+<div class="SR"><label>Aporte mes ($)</label><input type="number" id="aM" value="100000" step="10000"></div>
+<div class="SR"><label>Plazo (anos)</label><input type="number" id="aA" value="20" min="1" max="40"></div>
+<div class="SR"><label>Rent. anual (%)</label><input type="number" id="aR" value="5.0" step="0.5"></div>
+<div class="SR"><label>Regimen</label><select id="aG"><option value="A">Regimen A (15%)</option><option value="B">Regimen B (trib.)</option></select></div>
+<button class="SB" onclick="sA()">CALCULAR</button>
+<div class="RE" id="aRe"><div class="b" id="aV"></div><div class="d" id="aD"></div></div>
+<button class="SP" onclick="pS('sA')">PDF SIMULACION</button></div>
+<div class="SC" id="sI"><div class="Sh" style="color:var(--gd)">INVERSION PROYECTADA</div>
+<div class="SR"><label>Capital ($)</label><input type="number" id="iC" value="5000000" step="500000"></div>
+<div class="SR"><label>Aporte mes ($)</label><input type="number" id="iM" value="200000" step="50000"></div>
+<div class="SR"><label>Plazo (anos)</label><input type="number" id="iA" value="10" min="1" max="40"></div>
+<div class="SR"><label>Rent. anual (%)</label><input type="number" id="iR" value="8.0" step="0.5"></div>
+<button class="SB" onclick="sI()">CALCULAR</button>
+<div class="RE" id="iRe"><div class="b" id="iV"></div><div class="d" id="iD"></div></div>
+<button class="SP" onclick="pS('sI')">PDF SIMULACION</button></div>
 </div></div>
-
-<!-- TAB: ANALISIS PROYECTADO (punto 3: recomendaciones ministeriales) -->
-<div class="tc" id="tab-proy">
-<div class="sec">
-<div class="sec-t">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
-<div class="ia-box" id="proy_content">''' + (all_data.get('_analisis_proyectado_safe', '') or 'Analisis proyectado no disponible. Ejecute /economia para generar con IA.') + '''</div>
+<!-- CALCULADORA -->
+<div class="P" id="tab-calc"><div class="SG">
+<div class="SC"><div class="Sh" style="color:var(--cy)">CALCULADORA</div>
+<div class="SR"><label>Operacion</label><select id="cO"><option value="mul">Multiplicar (x)</option><option value="div">Dividir (/)</option><option value="add">Sumar (+)</option><option value="sub">Restar (-)</option></select></div>
+<div class="SR"><label>Indicador</label><select id="cI"><option value="uf">UF</option><option value="dolar">Dolar</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre</option></select></div>
+<div class="SR"><label>Cantidad</label><input type="number" id="cN" value="1" step="0.01"></div>
+<button class="SB" onclick="cCalc()">CALCULAR</button>
+<div class="RE" id="cR"><div class="b" id="cV"></div><div class="d" id="cD"></div></div></div>
+<div class="SC"><div class="Sh" style="color:var(--gd)">CONVERSOR</div>
+<div class="SR"><label>Desde</label><select id="xF"><option value="uf">UF</option><option value="dolar">Dolar</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="libra_cobre">Cobre</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div>
+<div class="SR"><label>Cantidad</label><input type="number" id="xN" value="1" step="0.01"></div>
+<div class="SR"><label>Hacia</label><select id="xT"><option value="dolar">Dolar</option><option value="uf">UF</option><option value="euro">Euro</option><option value="utm">UTM</option><option value="bitcoin">Bitcoin</option><option value="solana">Solana</option><option value="ethereum">Ethereum</option></select></div>
+<button class="SB" onclick="xConv()">CONVERTIR</button>
+<div class="RE" id="xR"><div class="b" id="xV"></div><div class="d" id="xD"></div></div></div>
 </div></div>
-
-<!-- TAB: ANALISIS IA (punto 7: titulo corregido) -->
-<div class="tc" id="tab-ia">
-<div class="sec">
-<div class="sec-t">ANALISIS MACROECONOMICO</div>
-<div class="ia-box">''' + (analisis_safe if analisis_safe else 'Analisis no disponible en esta sesion. Ejecute /economia nuevamente para generar.') + '''</div>
-</div></div>
-
-<div class="footer">
-&#9875; DASHBOARD ECONOMICO <span>COFRADIA DE NETWORKING</span> · Fuentes: Banco Central · CMF · AFP<br>
-<span>''' + generado + '''</span> · Simuladores · Calculadora · Conversor · Analisis IA
-</div>
+<!-- ANALISIS PROYECTADO -->
+<div class="P" id="tab-proy"><div class="S"><div class="ST">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
+<div class="IA">''' + (proy_safe or 'Ejecute /economia para generar analisis proyectado con IA.') + '''</div></div></div>
+<!-- ANALISIS IA -->
+<div class="P" id="tab-ia"><div class="S"><div class="ST">ANALISIS MACROECONOMICO</div>
+<div class="IA">''' + (ai_safe or 'Ejecute /economia para generar analisis IA.') + '''</div></div></div>
+<div class="F">&#9875; DASHBOARD ECONOMICO <b>COFRADIA DE NETWORKING</b> · Fuentes: Banco Central · CMF · AFP<br><b>''' + generado + '''</b></div>
 </div>
 <script>
-var bg='#0c2035',gold='#c8a84b',cyan='#00d4ff',green='#00e5a0',blue='#2a85e0',purple='#9d71ea',orange='#ff8c42',red='#ff4757',textC='#d8e8f5',borderC='rgba(30,107,184,0.15)',axisC='rgba(30,107,184,0.3)',teal='#00bfa5';
-var STATS=''' + stats_js + ''';
-var IND_VALS=''' + ind_vals_js + ''';
-// Chilean number format: 1.234,56
-function fc(n,d){if(n==null||isNaN(n))return'N/D';d=d===undefined?2:d;var neg=n<0?'-':'';n=Math.abs(n);var s=n.toFixed(d);var parts=s.split('.');var intP=parts[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,'.');return neg+intP+(d>0?','+parts[1]:'');}
-function st(id){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tc').forEach(function(c){c.classList.remove('active');c.style.display=''});document.getElementById('tab-'+id).classList.add('active');event.target.classList.add('active');setTimeout(function(){Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()})},100)}
+var bg='#0c2035',gd='#c8a84b',cy='#00d4ff',gn='#00e5a0',bl='#2a85e0',pu='#9d71ea',or2='#ff8c42',rd='#ff4757',tx='#d8e8f5',bc='rgba(30,107,184,0.15)',ac='rgba(30,107,184,0.3)';
+var ST=''' + stats_js + ''',IV=''' + ind_vals_js + ''';
+function fc(n,d){if(n==null||isNaN(n))return'N/D';d=d==null?2:d;var ng=n<0?'-':'';n=Math.abs(n);var s=n.toFixed(d);var p=s.split('.');var e=p[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,'.');return ng+e+(d>0?','+p[1]:'');}
+function st(id){document.querySelectorAll('.t').forEach(function(t){t.classList.remove('a')});document.querySelectorAll('.P').forEach(function(c){c.classList.remove('a');c.style.display=''});document.getElementById('tab-'+id).classList.add('a');event.target.classList.add('a');setTimeout(function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()},100)}
 var CH={};
-// Fill stats table
-(function(){
-var m={uf:['s_uf',2],dolar:['s_dl',2],euro:['s_eu',2],bitcoin:['s_bt',0],libra_cobre:['s_cb',2],ipsa:['s_ip',0]};
-for(var cod in m){var s=STATS[cod];if(!s)continue;var p=m[cod][0],d=m[cod][1];
-var el_min=document.getElementById(p+'_min');var el_max=document.getElementById(p+'_max');var el_avg=document.getElementById(p+'_avg');var el_var=document.getElementById(p+'_var');
-if(el_min)el_min.textContent=fc(s.min,d);if(el_max)el_max.textContent=fc(s.max,d);if(el_avg)el_avg.textContent=fc(s.avg,d);
-if(el_var&&s.data.length>=2){var pct=((s.data[0]-s.data[s.data.length-1])/s.data[s.data.length-1]*100);el_var.innerHTML=(pct>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pct),2)+'%</span>';}
-// Proyeccion 7d con regresion lineal (punto 1)
-var el_proy=document.getElementById(p+'_proy');
-if(el_proy&&s.data.length>=5){var dd=s.data.slice().reverse();var nn=dd.length;var sX=0,sY=0,sXY=0,sX2=0;for(var j=0;j<nn;j++){sX+=j;sY+=dd[j];sXY+=j*dd[j];sX2+=j*j;}var sl=(nn*sXY-sX*sY)/(nn*sX2-sX*sX);var ic2=(sY-sl*sX)/nn;var proy7=ic2+sl*(nn+7);var diff7=proy7-dd[nn-1];var pctP=dd[nn-1]?((proy7-dd[nn-1])/dd[nn-1]*100):0;el_proy.innerHTML=(diff7>=0?'<span style="color:var(--green)">&#9650; ':'<span style="color:var(--red)">&#9660; ')+fc(Math.abs(pctP),2)+'% ('+fc(proy7,d)+')</span>';}}
-}
+// Stats table fill + 7d projection
+(function(){var m={uf:['su',2],dolar:['sd',2],euro:['se',2],bitcoin:['sb',0],libra_cobre:['sc',2],ipsa:['si',0]};
+for(var cod in m){var s=ST[cod];if(!s||!s.data.length)continue;var px=m[cod][0],dc=m[cod][1];
+var e1=document.getElementById(px+'1'),e2=document.getElementById(px+'2'),e3=document.getElementById(px+'3'),e4=document.getElementById(px+'4'),e5=document.getElementById(px+'5');
+if(e1)e1.textContent=fc(s.min,dc);if(e2)e2.textContent=fc(s.max,dc);if(e3)e3.textContent=fc(s.avg,dc);
+if(e4&&s.data.length>=2){var pc=((s.data[0]-s.data[s.data.length-1])/s.data[s.data.length-1]*100);e4.innerHTML=(pc>=0?'<span style="color:var(--gn)">&#9650; ':'<span style="color:var(--rd)">&#9660; ')+fc(Math.abs(pc),2)+'%</span>'}
+if(e5&&s.data.length>=5){var dd=s.data.slice().reverse(),nn=dd.length,sX=0,sY=0,sXY=0,sX2=0;for(var j=0;j<nn;j++){sX+=j;sY+=dd[j];sXY+=j*dd[j];sX2+=j*j}var sl=(nn*sXY-sX*sY)/(nn*sX2-sX*sX),ic2=(sY-sl*sX)/nn,p7=ic2+sl*(nn+7),df=p7-dd[nn-1],pp=dd[nn-1]?((p7-dd[nn-1])/dd[nn-1]*100):0;e5.innerHTML=(df>=0?'<span style="color:var(--gn)">&#9650; ':'<span style="color:var(--rd)">&#9660; ')+fc(Math.abs(pp),2)+'% ('+fc(p7,dc)+')</span>'}}
 })();
-// IPC inflation info row (punto 5)
-(function(){var ipcS=STATS.ipc||STATS.uf;var el=document.getElementById('s_ipc_info');if(el){el.textContent='IPC mensual actual: ''' + IPC_CL + '''% — TPM: ''' + TPM_CL + '''% — Desempleo: ''' + DESEMP_CL + '''%';}})();
 // Gauges
-CH.gd=echarts.init(document.getElementById('cGD'));
-CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.3,green],[0.7,gold],[1,red]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cyan,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(dolar_val) + ''',name:'USD/CLP'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
-CH.gu=echarts.init(document.getElementById('cGU'));
-CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[0.4,green],[0.7,gold],[1,orange]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v/1000,0)+'k'}},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:gold,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(uf_val) + ''',name:'UF Hoy'}],title:{color:textC,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gd=echarts.init(document.getElementById('cGD'));CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.3,gn],[.7,gd],[1,rd]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cy,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(dol) + ''',name:'USD/CLP'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gu=echarts.init(document.getElementById('cGU'));CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.4,gn],[.7,gd],[1,or2]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:9,formatter:function(v){return fc(v/1000,0)+'k'}},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:gd,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(uf) + ''',name:'UF'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
 // Bar macro
-CH.cb=echarts.init(document.getElementById('cBar'));
-CH.cb.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'5%',right:'5%',bottom:'15%',top:'5%',containLabel:true},xAxis:{type:'category',data:['IPC','TPM','Desempleo','IMACEC'],axisLabel:{color:textC,fontSize:11},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'bar',data:[{value:''' + str(ipc_val) + ''',itemStyle:{color:green}},{value:''' + str(tpm_val) + ''',itemStyle:{color:orange}},{value:''' + str(desemp_val) + ''',itemStyle:{color:red}},{value:''' + str(imacec_val) + ''',itemStyle:{color:gold}}],label:{show:true,position:'top',color:textC,fontWeight:'bold',fontSize:12,formatter:function(p){return fc(p.value,2)+'%'}},barWidth:'45%',itemStyle:{borderRadius:[6,6,0,0]}}]});
+CH.br=echarts.init(document.getElementById('cBr'));CH.br.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'5%',right:'5%',bottom:'15%',top:'5%',containLabel:true},xAxis:{type:'category',data:['IPC','TPM','Desempleo','IMACEC'],axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{type:'bar',data:[{value:''' + str(ipc) + ''',itemStyle:{color:gn}},{value:''' + str(tpm) + ''',itemStyle:{color:or2}},{value:''' + str(des) + ''',itemStyle:{color:rd}},{value:''' + str(ima) + ''',itemStyle:{color:gd}}],label:{show:true,position:'top',color:tx,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}},barWidth:'45%',itemStyle:{borderRadius:[6,6,0,0]}}]});
 // Cripto
-CH.cc=echarts.init(document.getElementById('cCr'));
-CH.cc.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p.name+': USD '+fc(p.value,0)}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(btc_val) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(eth_val) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(sol_val) + ''',itemStyle:{color:'#9945FF'}}],label:{color:textC,fontSize:11,formatter:function(p){return p.name+'\\nUSD '+fc(p.value,0)}},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
-// Sparkline dolar 30d with min/max/avg bands
-CH.spk=echarts.init(document.getElementById('cSpk'));
-(function(){var sd=STATS.dolar||{data:[]};var d=sd.data.slice().reverse();var labels=[];for(var i=0;i<d.length;i++)labels.push('D-'+(d.length-i));
-CH.spk.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': $'+fc(p[0].value,2)}},grid:{left:'10%',right:'5%',bottom:'10%',top:'15%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan},markLine:{silent:true,data:[{yAxis:sd.avg,name:'Promedio',lineStyle:{color:gold,type:'dashed'},label:{formatter:function(){return'Prom: $'+fc(sd.avg,2)},color:gold,fontSize:10}},{yAxis:sd.min,name:'Min',lineStyle:{color:green,type:'dotted'},label:{formatter:function(){return'Min: $'+fc(sd.min,2)},color:green,fontSize:9}},{yAxis:sd.max,name:'Max',lineStyle:{color:red,type:'dotted'},label:{formatter:function(){return'Max: $'+fc(sd.max,2)},color:red,fontSize:9}}]}}]})})();
-// Radar salud economica
-CH.rad=echarts.init(document.getElementById('cRad'));
-CH.rad.setOption({backgroundColor:'transparent',radar:{indicator:[{name:'IPC (inv)',max:10},{name:'TPM (inv)',max:12},{name:'Empleo',max:100},{name:'IMACEC',max:10},{name:'IPSA (norm)',max:15000},{name:'Cobre',max:8}],axisName:{color:textC,fontSize:10},splitArea:{areaStyle:{color:['rgba(0,212,255,0.02)','rgba(0,212,255,0.04)']}},splitLine:{lineStyle:{color:borderC}}},series:[{type:'radar',data:[{value:[Math.max(0,10-''' + str(abs(ipc_val)) + '''),Math.max(0,12-''' + str(tpm_val) + '''),Math.max(0,100-''' + str(desemp_val) + '''*10),Math.max(0,''' + str(imacec_val) + '''+5),''' + str(ipsa_val) + ''',''' + str(cobre_val) + '''],name:'Chile Hoy',areaStyle:{color:'rgba(0,212,255,0.15)'},lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}}]}]});
-// Proyeccion dolar (regresion lineal simple)
-CH.proj=echarts.init(document.getElementById('cProj'));
-(function(){var sd=STATS.dolar||{data:[]};var d=sd.data.slice().reverse();var n=d.length;if(n<3)return;var sumX=0,sumY=0,sumXY=0,sumX2=0;for(var i=0;i<n;i++){sumX+=i;sumY+=d[i];sumXY+=i*d[i];sumX2+=i*i;}var slope=(n*sumXY-sumX*sumY)/(n*sumX2-sumX*sumX);var intercept=(sumY-slope*sumX)/n;var labels=[];var actual=[];var trend=[];var proj=[];for(var i=0;i<n;i++){labels.push('D-'+(n-i));actual.push(d[i]);trend.push(Math.round((intercept+slope*i)*100)/100);proj.push(null);}for(var i=0;i<7;i++){labels.push('P+'+(i+1));actual.push(null);trend.push(null);proj.push(Math.round((intercept+slope*(n+i))*100)/100);}
-CH.proj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': $'+fc(i.value,2)+'<br>'});return s}},legend:{data:['Real','Tendencia','Proyeccion 7d'],textStyle:{color:textC},top:5},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Real',type:'line',data:actual,lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}},{name:'Tendencia',type:'line',data:trend,lineStyle:{color:gold,width:1,type:'dashed'},itemStyle:{color:gold},symbol:'none'},{name:'Proyeccion 7d',type:'line',data:proj,lineStyle:{color:green,width:2,type:'dotted'},itemStyle:{color:green},areaStyle:{color:'rgba(0,229,160,0.1)'}}]})})();
+CH.cr=echarts.init(document.getElementById('cCr'));CH.cr.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(btc) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(eth) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(sol) + ''',itemStyle:{color:'#9945FF'}}],label:{color:tx,fontSize:11,formatter:function(p){return p.name+'\\nUSD '+fc(p.value,0)}},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
+// Sparkline dolar
+CH.sp=echarts.init(document.getElementById('cSp'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),lb=[];for(var i=0;i<d.length;i++)lb.push('D-'+(d.length-i));CH.sp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'10%',right:'5%',bottom:'10%',top:'12%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy},markLine:{silent:true,data:[{yAxis:s.avg,lineStyle:{color:gd,type:'dashed'},label:{formatter:function(){return'Prom: $'+fc(s.avg,2)},color:gd}},{yAxis:s.min,lineStyle:{color:gn,type:'dotted'},label:{formatter:function(){return'Min: $'+fc(s.min,2)},color:gn}},{yAxis:s.max,lineStyle:{color:rd,type:'dotted'},label:{formatter:function(){return'Max: $'+fc(s.max,2)},color:rd}}]}}]})})();
+// Proyeccion dolar
+CH.pj=echarts.init(document.getElementById('cPj'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),n=d.length;if(n<3)return;var sX=0,sY=0,sXY=0,sX2=0;for(var i=0;i<n;i++){sX+=i;sY+=d[i];sXY+=i*d[i];sX2+=i*i}var sl=(n*sXY-sX*sY)/(n*sX2-sX*sX),ic=(sY-sl*sX)/n;var lb=[],ac2=[],tr=[],pr=[];for(var i=0;i<n;i++){lb.push('D-'+(n-i));ac2.push(d[i]);tr.push(Math.round((ic+sl*i)*100)/100);pr.push(null)}for(var i=0;i<7;i++){lb.push('P+'+(i+1));ac2.push(null);tr.push(null);pr.push(Math.round((ic+sl*(n+i))*100)/100)}
+CH.pj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Real','Tendencia','Proy 7d'],textStyle:{color:tx},top:5},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:8},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Real',type:'line',data:ac2,lineStyle:{color:cy,width:2},itemStyle:{color:cy}},{name:'Tendencia',type:'line',data:tr,lineStyle:{color:gd,width:1,type:'dashed'},itemStyle:{color:gd},symbol:'none'},{name:'Proy 7d',type:'line',data:pr,lineStyle:{color:gn,width:2,type:'dotted'},itemStyle:{color:gn},areaStyle:{color:'rgba(0,229,160,0.1)'}}]})})();
 // Comparativo indexado
-CH.comp=echarts.init(document.getElementById('cComp'));
-(function(){var su=STATS.uf||{data:[]};var sd=STATS.dolar||{data:[]};var se=STATS.euro||{data:[]};function idx(arr){if(!arr.length)return[];var base=arr[arr.length-1];return arr.slice().reverse().map(function(v){return Math.round(v/base*10000)/100})}var iu=idx(su.data);var id=idx(sd.data);var ie=idx(se.data);var maxLen=Math.max(iu.length,id.length,ie.length);var labels=[];for(var i=0;i<maxLen;i++)labels.push('D-'+(maxLen-i));
-CH.comp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:['UF','Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:labels,axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'UF',type:'line',data:iu,smooth:true,lineStyle:{color:gold,width:2},itemStyle:{color:gold}},{name:'Dolar',type:'line',data:id,smooth:true,lineStyle:{color:cyan,width:2},itemStyle:{color:cyan}},{name:'Euro',type:'line',data:ie,smooth:true,lineStyle:{color:blue,width:2},itemStyle:{color:blue}}]})})();
-// Inflacion IPC anualizado 10 anos (punto 5)
-CH.infla=echarts.init(document.getElementById('cInfla'));
-(function(){var anios=''' + infla_anios + ''';var vals=''' + infla_vals + ''';CH.infla.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'8%',right:'5%',bottom:'12%',top:'15%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC,fontSize:11},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},visualMap:{show:false,pieces:[{gt:0,lte:3,color:green},{gt:3,lte:5,color:gold},{gt:5,color:red},{lte:0,color:cyan}],dimension:1},series:[{type:'bar',data:vals,itemStyle:{borderRadius:[6,6,0,0]},label:{show:true,position:'top',color:textC,fontWeight:'bold',fontSize:11,formatter:function(p){return fc(p.value,2)+'%'}},markLine:{silent:true,data:[{yAxis:3,name:'Meta BC 3%',lineStyle:{color:green,type:'dashed'},label:{formatter:'Meta BC 3%',color:green}}]}}]})})();
+CH.cm=echarts.init(document.getElementById('cCm'));(function(){function ix(a){if(!a.length)return[];var b=a[a.length-1];return a.slice().reverse().map(function(v){return Math.round(v/b*10000)/100})}var iu=ix((ST.uf||{data:[]}).data),id=ix((ST.dolar||{data:[]}).data),ie=ix((ST.euro||{data:[]}).data),ml=Math.max(iu.length,id.length,ie.length),lb=[];for(var i=0;i<ml;i++)lb.push('D-'+(ml-i));
+CH.cm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['UF','Dolar','Euro'],textStyle:{color:tx},top:5},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'UF',type:'line',data:iu,smooth:true,lineStyle:{color:gd,width:2},itemStyle:{color:gd}},{name:'Dolar',type:'line',data:id,smooth:true,lineStyle:{color:cy,width:2},itemStyle:{color:cy}},{name:'Euro',type:'line',data:ie,smooth:true,lineStyle:{color:bl,width:2},itemStyle:{color:bl}}]})})();
+// Inflacion 10yr
+CH.inf=echarts.init(document.getElementById('cIn'));(function(){var a=''' + infla_a_js + ''',v=''' + infla_v_js + ''';CH.inf.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'12%',top:'12%'},xAxis:{type:'category',data:a,axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},visualMap:{show:false,pieces:[{gt:0,lte:3,color:gn},{gt:3,lte:5,color:gd},{gt:5,color:rd},{lte:0,color:cy}],dimension:1},series:[{type:'bar',data:v,itemStyle:{borderRadius:[6,6,0,0]},label:{show:true,position:'top',color:tx,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}},markLine:{silent:true,data:[{yAxis:3,lineStyle:{color:gn,type:'dashed'},label:{formatter:'Meta BC 3%',color:gn}}]}}]})})();
 // Hist 12m
-CH.h12=echarts.init(document.getElementById('cH12'));
-CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': $'+fc(i.value,2)+'<br>'});return s}},legend:{data:['Dolar','Euro'],textStyle:{color:textC},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:textC,fontSize:9,rotate:30},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:10,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_dolar + ''',lineStyle:{color:cyan,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cyan}},{name:'Euro',type:'line',smooth:true,data:''' + h12_euro + ''',lineStyle:{color:blue,width:2,type:'dashed'},itemStyle:{color:blue}}]});
-// Hist 5y CLP only (punto 5)
-CH.h5clp=echarts.init(document.getElementById('cH5clp'));
-(function(){var h5d=''' + json.dumps(h5_clp) + ''';var series=[];var legend=[];for(var cod in h5d){var d=h5d[cod];legend.push(d.nombre);series.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var anios=h5d[Object.keys(h5d)[0]]?h5d[Object.keys(h5d)[0]].anios:[];CH.h5clp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
-// Hist 5y USD only (punto 5)
-CH.h5usd=echarts.init(document.getElementById('cH5usd'));
-(function(){var h5d=''' + json.dumps(h5_usd) + ''';var series=[];var legend=[];for(var cod in h5d){var d=h5d[cod];legend.push(d.nombre);series.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var anios=h5d[Object.keys(h5d)[0]]?h5d[Object.keys(h5d)[0]].anios:[];CH.h5usd.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return'USD '+fc(v,0)}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
-// Variacion anual
-CH.h5var=echarts.init(document.getElementById('cH5var'));
-(function(){var h5all=''' + json.dumps({**h5_clp, **h5_usd}) + ''';var series=[];var legend=[];for(var cod in h5all){var d=h5all[cod];var vals=d.valores;var pcts=[];for(var i=0;i<vals.length;i++){if(i===0||!vals[i-1]||!vals[i])pcts.push(null);else pcts.push(Math.round((vals[i]-vals[i-1])/vals[i-1]*10000)/100);}legend.push(d.nombre);series.push({name:d.nombre,type:'bar',data:pcts,itemStyle:{color:d.color,borderRadius:[4,4,0,0]}})}var anios=h5all[Object.keys(h5all)[0]]?h5all[Object.keys(h5all)[0]].anios:[];CH.h5var.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){if(i.value!=null)s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:legend,textStyle:{color:textC,fontSize:9},top:0,type:'scroll'},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:anios,axisLabel:{color:textC},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:series})})();
+CH.h12=echarts.init(document.getElementById('cH12'));CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Dolar','Euro'],textStyle:{color:tx},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:tx,fontSize:9,rotate:30},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_d + ''',lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy}},{name:'Euro',type:'line',smooth:true,data:''' + h12_e + ''',lineStyle:{color:bl,width:2,type:'dashed'},itemStyle:{color:bl}}]});
+// Hist 5y CLP
+CH.h5c=echarts.init(document.getElementById('cH5c'));(function(){var h=''' + json.dumps(h5c) + ''',sr=[],lg=[];for(var c in h){var d=h[c];lg.push(d.nombre);sr.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var an=h[Object.keys(h)[0]]?h[Object.keys(h)[0]].anios:[];CH.h5c.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:lg,textStyle:{color:tx,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:an,axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:sr})})();
+// Hist 5y USD
+CH.h5u=echarts.init(document.getElementById('cH5u'));(function(){var h=''' + json.dumps(h5u) + ''',sr=[],lg=[];for(var c in h){var d=h[c];lg.push(d.nombre);sr.push({name:d.nombre,type:'line',smooth:true,data:d.valores,lineStyle:{color:d.color,width:2},itemStyle:{color:d.color}})}var an=h[Object.keys(h)[0]]?h[Object.keys(h)[0]].anios:[];CH.h5u.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:lg,textStyle:{color:tx,fontSize:9},top:0,type:'scroll'},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:an,axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'USD '+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:sr})})();
 // AFP
-CH.afp=echarts.init(document.getElementById('cAfp'));
-(function(){var names=''' + afp_names_js + ''';var fondoA=''' + json.dumps(afp_fondos_js.get('A',[])) + ''';var fondoE=''' + json.dumps(afp_fondos_js.get('E',[])) + ''';CH.afp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){var s='';p.forEach(function(i){s+=i.seriesName+': '+fc(i.value,2)+'%<br>'});return s}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:textC}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:names,axisLabel:{color:textC,fontSize:10},axisLine:{lineStyle:{color:axisC}}},yAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:borderC}}},series:[{name:'Fondo A',type:'bar',data:fondoA,itemStyle:{color:cyan,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cyan,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:fondoE,itemStyle:{color:green,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:green,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]})})();
+CH.af=echarts.init(document.getElementById('cAf'));CH.af.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:''' + afp_names_js + ''',axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Fondo A',type:'bar',data:''' + json.dumps(afp_a) + ''',itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:''' + json.dumps(afp_e) + ''',itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]});
 // TMC
-CH.tmc=echarts.init(document.getElementById('cTmc'));
-CH.tmc.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gold,textStyle:{color:textC},formatter:function(p){return p[0].name+': '+fc(p[0].value,2)+'%'}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:textC,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:borderC}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels + ''',axisLabel:{color:textC,fontSize:9},axisLine:{lineStyle:{color:axisC}}},series:[{type:'bar',data:''' + tmc_values + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gold}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gold,fontWeight:'bold',fontSize:11,formatter:function(p){return fc(p.value,2)+'%'}}}]});
-window.addEventListener('resize',function(){Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()})});
-// Simuladores con formato chileno
-var UF_V=''' + str(uf_val) + ''';
-function simH(){var m=parseFloat(document.getElementById('sh_m').value)||3000;var p=parseFloat(document.getElementById('sh_p').value)||20;var a=parseFloat(document.getElementById('sh_a').value)||25;var t=parseFloat(document.getElementById('sh_t').value)||4.5;var cr=m*(1-p/100);var r=t/100/12;var n=a*12;var div=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1);var tot=div*n;var intT=tot-cr;var divCLP=div*UF_V;document.getElementById('sh_v').textContent=fc(div,2)+' UF/mes';document.getElementById('sh_d').innerHTML='Equivale a <strong style="color:var(--cyan)">$'+fc(Math.round(divCLP),0)+'</strong> CLP/mes<br>Credito: '+fc(cr,0)+' UF (pie: '+fc(p,0)+'% = '+fc(m*p/100,0)+' UF)<br>Total a pagar: '+fc(tot,0)+' UF en '+n+' cuotas<br>Intereses: '+fc(intT,0)+' UF ('+fc(intT/cr*100,1)+'% del credito)<br>Ingreso minimo recomendado: $'+fc(Math.round(divCLP/0.25),0)+' CLP';document.getElementById('sh_r').style.display='block'}
-function simA(){var ap=parseFloat(document.getElementById('ap_m').value)||100000;var a=parseFloat(document.getElementById('ap_a').value)||20;var rt=parseFloat(document.getElementById('ap_r').value)||5;var rg=document.getElementById('ap_rg').value;var r=rt/100/12;var n=a*12;var fut=ap*(Math.pow(1+r,n)-1)/r;var tot=ap*n;var gan=fut-tot;var bon=rg==='A'?tot*0.15:0;document.getElementById('ap_v').textContent='$'+fc(Math.round(fut),0);document.getElementById('ap_d').innerHTML='Aporte total: $'+fc(Math.round(tot),0)+' ('+n+' meses x $'+fc(ap,0)+')<br>Ganancia: <strong style="color:var(--green)">$'+fc(Math.round(gan),0)+'</strong><br>'+(rg==='A'?'Bonificacion fiscal (15%): <strong style="color:var(--cyan)">$'+fc(Math.round(bon),0)+'</strong> (tope 6 UTM/ano)<br>Total con bonificacion: $'+fc(Math.round(fut+bon),0):'Regimen B: descuento tributario segun tramo impositivo')+'<br>Rentabilidad: '+fc(gan/tot*100,1)+'%';document.getElementById('ap_res').style.display='block'}
-function simI(){var c=parseFloat(document.getElementById('iv_c').value)||5000000;var m=parseFloat(document.getElementById('iv_m').value)||200000;var a=parseFloat(document.getElementById('iv_a').value)||10;var rt=parseFloat(document.getElementById('iv_r').value)||8;var r=rt/100/12;var n=a*12;var fc2=c*Math.pow(1+r,n);var fa=m*(Math.pow(1+r,n)-1)/r;var tot=fc2+fa;var inv=c+m*n;var gan=tot-inv;document.getElementById('iv_v').textContent='$'+fc(Math.round(tot),0);document.getElementById('iv_d').innerHTML='Capital inicial: $'+fc(c,0)+'<br>Aportes: $'+fc(m,0)+' x '+n+' meses = $'+fc(Math.round(m*n),0)+'<br>Total invertido: $'+fc(Math.round(inv),0)+'<br>Ganancia: <strong style="color:var(--green)">$'+fc(Math.round(gan),0)+'</strong><br>Multiplicador: <strong style="color:var(--gold)">'+fc(tot/inv,2)+'x</strong>';document.getElementById('iv_res').style.display='block'}
-// Calculadora (punto 4)
-function calcInd(){var op=document.getElementById('calc_op').value;var ind=document.getElementById('calc_ind').value;var cant=parseFloat(document.getElementById('calc_cant').value)||0;var val=IND_VALS[ind]||0;var result=0;var opStr='';if(op==='mul'){result=val*cant;opStr=fc(val,2)+' x '+fc(cant,2)}else if(op==='div'){result=cant!==0?val/cant:0;opStr=fc(val,2)+' / '+fc(cant,2)}else if(op==='add'){result=val+cant;opStr=fc(val,2)+' + '+fc(cant,2)}else{result=val-cant;opStr=fc(val,2)+' - '+fc(cant,2)}var names={uf:'UF',dolar:'Dolar',euro:'Euro',utm:'UTM',bitcoin:'Bitcoin',libra_cobre:'Cobre'};document.getElementById('calc_v').textContent='$'+fc(result,2);document.getElementById('calc_d').innerHTML=names[ind]+': $'+fc(val,2)+'<br>Operacion: '+opStr+' = $'+fc(result,2);document.getElementById('calc_res').style.display='block'}
-// Conversor (punto 4)
-function convertir(){var from=document.getElementById('cv_from').value;var to=document.getElementById('cv_to').value;var cant=parseFloat(document.getElementById('cv_cant').value)||0;var vf=IND_VALS[from]||0;var vt=IND_VALS[to]||0;if(vt===0){document.getElementById('cv_v').textContent='Error';document.getElementById('cv_res').style.display='block';return}var clp_from=vf*cant;var result=clp_from/vt;var names={uf:'UF',dolar:'Dolar USD',euro:'Euro',utm:'UTM',bitcoin:'Bitcoin',libra_cobre:'Cobre (lb)',solana:'Solana',ethereum:'Ethereum'};document.getElementById('cv_v').textContent=fc(result,4)+' '+names[to];document.getElementById('cv_d').innerHTML=fc(cant,2)+' '+names[from]+' ($'+fc(vf,2)+' c/u) = $'+fc(clp_from,2)+' CLP<br>'+fc(clp_from,2)+' CLP / $'+fc(vt,2)+' = <strong style="color:var(--gold)">'+fc(result,4)+' '+names[to]+'</strong>';document.getElementById('cv_res').style.display='block'}
-function swapConv(){var f=document.getElementById('cv_from');var t=document.getElementById('cv_to');var tmp=f.value;f.value=t.value;t.value=tmp}
-// Print sim card as PDF (punto 6)
-async function printSim(cardId){var card=document.getElementById(cardId);if(!card)return;try{var canvas=await html2canvas(card,{scale:2,backgroundColor:'#071828',useCORS:true});var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','mm','a4');var imgW=190;var imgH=canvas.height*imgW/canvas.width;pdf.addImage(canvas.toDataURL('image/jpeg',0.95),'JPEG',10,10,imgW,imgH);pdf.save('Simulacion_Cofradia_'+new Date().toISOString().slice(0,10)+'.pdf')}catch(e){console.error(e);alert('Error generando PDF')}}
-// PDF Export completo
-async function exportPDF(){var btn=document.getElementById('btnPdf');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.tc'),tabNav=document.querySelector('.tabs'),actions=document.querySelector('.actions');var orig=[];tabs.forEach(function(t,i){orig.push(t.style.display);t.style.display='block'});tabNav.style.display='none';actions.style.display='none';Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()});await new Promise(function(r){setTimeout(r,1000)});try{var content=document.getElementById('content');var canvas=await html2canvas(content,{scale:1.3,backgroundColor:'#071828',useCORS:true,logging:false,windowWidth:Math.max(content.scrollWidth,1200),windowHeight:content.scrollHeight});var jsPDF=window.jspdf.jsPDF;var imgW=210,pageH=297;var imgH=canvas.height*imgW/canvas.width;var pdf=new jsPDF('p','mm','a4');var left=imgH,pos=0;pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH;while(left>0){pos=-(imgH-left);pdf.addPage();pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,pos,imgW,imgH);left-=pageH}pdf.save('Dashboard_Economia_Chile_Cofradia.pdf');btn.textContent='PDF Descargado!'}catch(e){console.error(e);btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=orig[i]||''});tabNav.style.display='';actions.style.display='';document.querySelector('.tc.active')||tabs[0].classList.add('active');Object.values(CH).forEach(function(c){if(c&&c.resize)c.resize()});setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
+CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels_js + ''',axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:''' + tmc_values_js + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]});
+window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
+// Simuladores
+var UF=''' + str(uf) + ''';
+function sH(){var m=parseFloat(document.getElementById('hM').value)||3000,p=parseFloat(document.getElementById('hP').value)||20,a=parseFloat(document.getElementById('hA').value)||25,t=parseFloat(document.getElementById('hT').value)||4.5,cr=m*(1-p/100),r=t/100/12,n=a*12,dv=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1),tt=dv*n,it=tt-cr,dc=dv*UF;document.getElementById('hV').textContent=fc(dv,2)+' UF/mes';document.getElementById('hD').innerHTML='<b style="color:var(--cy)">$'+fc(Math.round(dc),0)+'</b> CLP/mes<br>Credito: '+fc(cr,0)+' UF · Pie: '+fc(m*p/100,0)+' UF<br>Total: '+fc(tt,0)+' UF en '+n+' cuotas<br>Intereses: '+fc(it,0)+' UF ('+fc(it/cr*100,1)+'%)<br>Ingreso min: $'+fc(Math.round(dc/.25),0);document.getElementById('hR').style.display='block'}
+function sA(){var ap=parseFloat(document.getElementById('aM').value)||100000,a=parseFloat(document.getElementById('aA').value)||20,rt=parseFloat(document.getElementById('aR').value)||5,rg=document.getElementById('aG').value,r=rt/100/12,n=a*12,ft=ap*(Math.pow(1+r,n)-1)/r,tt=ap*n,gn2=ft-tt,bn=rg==='A'?tt*.15:0;document.getElementById('aV').textContent='$'+fc(Math.round(ft),0);document.getElementById('aD').innerHTML='Aporte: $'+fc(Math.round(tt),0)+' ('+n+' meses)<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>'+(rg==='A'?'Bonif. fiscal 15%: <b style="color:var(--cy)">$'+fc(Math.round(bn),0)+'</b><br>Total: $'+fc(Math.round(ft+bn),0):'Reg. B: descuento tributario')+'<br>Rent: '+fc(gn2/tt*100,1)+'%';document.getElementById('aRe').style.display='block'}
+function sI(){var c=parseFloat(document.getElementById('iC').value)||5e6,m=parseFloat(document.getElementById('iM').value)||2e5,a=parseFloat(document.getElementById('iA').value)||10,rt=parseFloat(document.getElementById('iR').value)||8,r=rt/100/12,n=a*12,f1=c*Math.pow(1+r,n),f2=m*(Math.pow(1+r,n)-1)/r,tt=f1+f2,iv=c+m*n,gn2=tt-iv;document.getElementById('iV').textContent='$'+fc(Math.round(tt),0);document.getElementById('iD').innerHTML='Capital: $'+fc(c,0)+' · Aportes: $'+fc(Math.round(m*n),0)+'<br>Invertido: $'+fc(Math.round(iv),0)+'<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>Multiplicador: <b style="color:var(--gd)">'+fc(tt/iv,2)+'x</b>';document.getElementById('iRe').style.display='block'}
+function cCalc(){var op=document.getElementById('cO').value,ind=document.getElementById('cI').value,cn=parseFloat(document.getElementById('cN').value)||0,vl=IV[ind]||0,rs=0;if(op==='mul')rs=vl*cn;else if(op==='div')rs=cn?vl/cn:0;else if(op==='add')rs=vl+cn;else rs=vl-cn;document.getElementById('cV').textContent='$'+fc(rs,2);document.getElementById('cD').innerHTML=ind+': $'+fc(vl,2)+' · Resultado: $'+fc(rs,2);document.getElementById('cR').style.display='block'}
+function xConv(){var f=document.getElementById('xF').value,t=document.getElementById('xT').value,cn=parseFloat(document.getElementById('xN').value)||0,vf=IV[f]||0,vt=IV[t]||0;if(!vt){document.getElementById('xV').textContent='Error';document.getElementById('xR').style.display='block';return}var clp=vf*cn,rs=clp/vt;document.getElementById('xV').textContent=fc(rs,4)+' '+t;document.getElementById('xD').innerHTML=fc(cn,2)+' '+f+' = $'+fc(clp,2)+' CLP = <b style="color:var(--gd)">'+fc(rs,4)+' '+t+'</b>';document.getElementById('xR').style.display='block'}
+async function pS(id){var el=document.getElementById(id);if(!el)return;try{var cv=await html2canvas(el,{scale:2,backgroundColor:'#071828',useCORS:true});var pdf=new window.jspdf.jsPDF('p','mm','a4');var w=190,h=cv.height*w/cv.width;pdf.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',10,10,w,h);pdf.save('Simulacion_Cofradia.pdf')}catch(e){alert('Error PDF')}}
+async function xPDF(){var btn=document.getElementById('btnP');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.P'),tn=document.querySelector('.T'),ac2=document.querySelector('.A'),og=[];tabs.forEach(function(t,i){og.push(t.style.display);t.style.display='block'});tn.style.display='none';ac2.style.display='none';for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();await new Promise(function(r){setTimeout(r,1000)});try{var ct=document.getElementById('content');var cv=await html2canvas(ct,{scale:1.3,backgroundColor:'#071828',useCORS:true,logging:false,windowWidth:Math.max(ct.scrollWidth,1200),windowHeight:ct.scrollHeight});var pdf=new window.jspdf.jsPDF('p','mm','a4');var iW=210,pH=297,iH=cv.height*iW/cv.width,left=iH,pos=0;pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH;while(left>0){pos=-(iH-left);pdf.addPage();pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH}pdf.save('Dashboard_Economia_Chile.pdf');btn.textContent='Descargado!'}catch(e){btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=og[i]||''});tn.style.display='';ac2.style.display='';document.querySelector('.P.a')||tabs[0].classList.add('a');for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
 </script></body></html>'''
     return html
-
-
 
 
 @requiere_suscripcion
 async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /economia — Dashboard Económico Interactivo con Simuladores Financieros.
-    Genera HTML con ECharts: indicadores, histórico, AFP, TMC + simuladores hipotecario, APV, inversión.
-    Cache diario para evitar múltiples fetches.
+    /economia — Dashboard Económico + Simuladores + Análisis Proyectado IA.
+    Cache diario.
     """
     hoy = _ahora_chile().strftime('%Y-%m-%d')
-    msg = await update.message.reply_text(
-        "🏦 Generando Dashboard Económico...\n⏳ Consultando fuentes de datos..."
-    )
+    msg = await update.message.reply_text("🏦 Generando Dashboard Económico...\n⏳ Consultando fuentes de datos...")
     try:
         loop = asyncio.get_running_loop()
         if _economia_cache.get('fecha') == hoy and _economia_cache.get('html'):
             html_content = _economia_cache['html']
             await msg.edit_text("⚡ Dashboard económico (cache del día)")
         else:
-            await msg.edit_text("📈 Descargando indicadores en paralelo...\n⏳ 14 indicadores + CMF + AFP (~30s)")
+            await msg.edit_text("📈 Descargando 14 indicadores + CMF + AFP en paralelo (~30s)...")
             all_data = await loop.run_in_executor(None, obtener_indicadores_chile)
             datos = all_data.get('datos_actuales', {})
             if not datos:
-                await msg.edit_text("❌ Sin conexión a fuentes de datos. Intenta en unos minutos.")
+                await msg.edit_text("❌ Sin conexión a fuentes de datos.")
                 return
-            await msg.edit_text(f"✅ {len(datos)} indicadores.\n🏦 CMF + AFP en paralelo...")
+            await msg.edit_text(f"✅ {len(datos)} indicadores.\n🏦 CMF + AFP...")
             from concurrent.futures import ThreadPoolExecutor as _TPE_eco
             with _TPE_eco(max_workers=2) as pool:
                 fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
                 fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
                 datos_cmf = fut_cmf.result() or {}
                 datos_afp = fut_afp.result() or {}
-            await msg.edit_text("✅ Datos completos.\n🤖 IA analizando panorama económico...")
+            await msg.edit_text("✅ Datos completos.\n🤖 IA generando 2 análisis en paralelo...")
             analisis_ia = ''
-            analisis_proyectado = ''
+            analisis_proy = ''
             if ia_disponible:
-                resumen_vals = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for cod, d in datos.items()])
-                prompt_eco = (
-                    f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
-                    f"Indicadores actuales de Chile:\n{resumen_vals}\n\n"
-                    "Escribe un análisis ejecutivo en 5-7 párrafos cubriendo:\n"
-                    "1. Estado general de la economía chilena\n"
-                    "2. Inflación y política monetaria (IPC, TPM)\n"
-                    "3. Tipo de cambio y comercio exterior (dólar, euro, cobre)\n"
-                    "4. Mercado laboral (desempleo, IMACEC)\n"
-                    "5. Criptomonedas y mercado bursátil (Bitcoin, IPSA)\n"
-                    "6. Proyecciones y recomendaciones para inversores\n\n"
-                    "Máximo 400 palabras. Profesional, con datos concretos. Sin asteriscos ni formato markdown."
-                )
-                prompt_proy = (
-                    f"Eres el mejor economista del mundo, asesor directo del Ministro de Hacienda y del Ministro de Economía de Chile. "
-                    f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n\n"
-                    f"Indicadores actuales de Chile:\n{resumen_vals}\n\n"
-                    "TAREA: Elabora un informe de recomendaciones profesionales detallando:\n\n"
-                    "SECCION 1 — DIAGNOSTICO ACTUAL:\n"
-                    "Analiza los indicadores y explica las razones nacionales e internacionales que han originado los valores actuales "
-                    "(guerras, aranceles, política monetaria Fed, conflictos geopolíticos, precio commodities, política fiscal chilena, etc.).\n\n"
-                    "SECCION 2 — PROYECCIONES A 6 Y 12 MESES:\n"
-                    "Proyecta cómo evolucionarán los indicadores principales (dólar, UF, IPC, TPM, desempleo, cobre, IPSA) "
-                    "con escenarios optimista, base y pesimista. Usa fundamentos estadísticos y tendencias históricas.\n\n"
-                    "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas concretas):\n"
-                    "Detalla todas las acciones que aplicarías como Ministro de Hacienda y Economía para:\n"
-                    "- Reducir inflación y desempleo\n"
-                    "- Fortalecer el peso chileno\n"
-                    "- Atraer inversión extranjera\n"
-                    "- Desarrollar industria tecnológica y energías renovables\n"
-                    "- Mejorar productividad y competitividad\n"
-                    "- Transformar a Chile en país desarrollado de primer mundo\n\n"
-                    "SECCION 4 — IMPACTO INTERNACIONAL:\n"
-                    "Analiza cómo las políticas de EE.UU., China, conflictos bélicos y cambio climático "
-                    "afectan a Chile y qué medidas de cobertura implementarías.\n\n"
-                    "Máximo 800 palabras. Tono profesional ministerial. Sin asteriscos ni markdown. "
-                    "Usa datos concretos de los indicadores proporcionados."
-                )
+                rv = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for _,d in datos.items()])
+                pr1 = (f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
+                       f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
+                       "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
+                       "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
+                pr2 = (f"Eres el mejor economista del mundo, asesor del Ministro de Hacienda y Economía de Chile. "
+                       f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
+                       "ELABORA INFORME PROFESIONAL:\n\n"
+                       "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
+                       "(guerras, aranceles, Fed, geopolítica, commodities, fiscal chilena).\n\n"
+                       "SECCION 2 — PROYECCIONES 6-12 MESES: Escenarios optimista/base/pesimista para "
+                       "dólar, UF, IPC, TPM, desempleo, cobre, IPSA. Fundamentos estadísticos.\n\n"
+                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas): "
+                       "Reducir inflación y desempleo, fortalecer peso, atraer inversión extranjera, "
+                       "industria tecnológica, energías renovables, productividad, "
+                       "transformar Chile en país desarrollado de primer mundo.\n\n"
+                       "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
+                       "cambio climático y medidas de cobertura.\n\n"
+                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.")
                 try:
-                    from concurrent.futures import ThreadPoolExecutor as _TPE_ia2
-                    with _TPE_ia2(max_workers=2) as pool_ia:
-                        fut_ia1 = pool_ia.submit(lambda: llamar_groq(prompt_eco, max_tokens=800, temperature=0.3))
-                        fut_ia2 = pool_ia.submit(lambda: llamar_groq(prompt_proy, max_tokens=1500, temperature=0.4))
-                        analisis_ia = await loop.run_in_executor(None, fut_ia1.result) or ''
-                        analisis_proyectado = await loop.run_in_executor(None, fut_ia2.result) or ''
+                    with _TPE_eco(max_workers=2) as pool_ia:
+                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3))
+                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=1500, temperature=0.4))
+                        analisis_ia = f1.result() or ''
+                        analisis_proy = f2.result() or ''
                 except Exception:
                     try:
-                        analisis_ia = await loop.run_in_executor(
-                            None, lambda: llamar_groq(prompt_eco, max_tokens=800, temperature=0.3)
-                        ) or ''
-                    except Exception:
-                        pass
-
-            # Pass projected analysis to HTML generator via all_data
-            analisis_proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
-            all_data['_analisis_proyectado_safe'] = analisis_proy_safe
-            await msg.edit_text("📊 Generando dashboard HTML con simuladores...")
+                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3)) or ''
+                    except Exception: pass
+            await msg.edit_text("📊 Generando dashboard HTML...")
             html_content = await loop.run_in_executor(
-                None, generar_html_economia, all_data, datos_cmf, datos_afp, analisis_ia
-            )
+                None, generar_html_economia, all_data, datos_cmf, datos_afp, analisis_ia, analisis_proy)
             _economia_cache['fecha'] = hoy
             _economia_cache['html'] = html_content
             logger.info(f"🏦 Cache economía guardado ({len(datos)} indicadores)")
-
         html_path = f"/tmp/eco_{update.effective_user.id}.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(html_content)
         with open(html_path, 'rb') as fh:
-            await update.message.reply_document(
-                document=fh,
+            await update.message.reply_document(document=fh,
                 filename="dashboard_economia_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
-                caption=(
-                    "📊 Dashboard Económico Chile — Cofradía\n\n"
-                    "📈 14 indicadores + 8 gráficos ECharts\n"
-                    "🐔 AFP: 7 AFPs x 5 fondos (6 meses)\n"
-                    "🏦 Tasas CMF vigentes\n"
-                    "💱 Histórico 12 meses y 5 años\n\n"
-                    "🧮 3 SIMULADORES INTERACTIVOS:\n"
-                    "   🏠 Crédito Hipotecario\n"
-                    "   💰 APV Régimen A/B\n"
-                    "   📈 Proyección de Inversión\n\n"
-                    "🤖 Análisis IA macroeconómico\n\n"
-                    "Abre en tu navegador para usar los simuladores."
-                )
-            )
-        try:
-            os.remove(html_path)
-        except Exception:
-            pass
+                caption=("📊 Dashboard Económico Chile — Cofradía\n\n"
+                    "📈 14 indicadores + gráficos ECharts\n"
+                    "🐔 AFP · 🏦 TMC · 💱 Histórico 5 años\n"
+                    "📉 Inflación IPC 10 años\n\n"
+                    "🧮 3 Simuladores: Hipotecario · APV · Inversión\n"
+                    "🔢 Calculadora + Conversor de indicadores\n"
+                    "🎯 Análisis Proyectado (IA ministerial)\n"
+                    "🤖 Análisis Macroeconómico IA\n\n"
+                    "Abre en tu navegador para usar los simuladores."))
+        try: os.remove(html_path)
+        except: pass
         await msg.delete()
         registrar_servicio_usado(update.effective_user.id, 'economia')
     except Exception as e:
         import traceback as _tb
         logger.error("economia_comando: " + str(e) + "\n" + _tb.format_exc())
-        try:
-            await msg.edit_text("❌ Error dashboard economía: " + str(e)[:120])
-        except Exception:
-            pass
+        try: await msg.edit_text("❌ Error: " + str(e)[:120])
+        except: pass
 
 
 
@@ -17494,59 +17255,6 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
             "Copia el número y llama desde tu teléfono."
         )
 
-def _generar_sirena_wav(duracion=3, sample_rate=24000):
-    """Genera un archivo WAV de sirena/alarma en memoria (sin dependencias externas).
-    Produce un sonido de sirena tipo europeo (600Hz↔1200Hz) con volumen alto."""
-    import struct as _struct
-    import math as _math
-    
-    num_samples = int(sample_rate * duracion)
-    samples = []
-    
-    # Sirena: frecuencia oscila entre 600 y 1200 Hz (ciclo completo cada 1s)
-    for i in range(num_samples):
-        t = i / sample_rate
-        # Oscilación de frecuencia tipo sirena
-        freq = 600 + 600 * (0.5 + 0.5 * _math.sin(2 * _math.pi * t * 1.0))  # 1 ciclo/segundo
-        # Generar onda con armónicos para sonido más agresivo
-        phase = 2 * _math.pi * freq * t
-        sample = 0.7 * _math.sin(phase) + 0.2 * _math.sin(2 * phase) + 0.1 * _math.sin(3 * phase)
-        # Modulación de amplitud para efecto pulsante
-        envelope = 0.8 + 0.2 * _math.sin(2 * _math.pi * t * 8)
-        sample *= envelope
-        # Convertir a int16
-        sample_int = int(max(-1, min(1, sample)) * 32000)
-        samples.append(sample_int)
-    
-    # Construir WAV en memoria
-    buf = io.BytesIO()
-    num_channels = 1
-    sample_width = 2  # 16-bit
-    data_size = num_samples * sample_width
-    
-    # WAV header
-    buf.write(b'RIFF')
-    buf.write(_struct.pack('<I', 36 + data_size))
-    buf.write(b'WAVE')
-    buf.write(b'fmt ')
-    buf.write(_struct.pack('<I', 16))  # chunk size
-    buf.write(_struct.pack('<H', 1))   # PCM
-    buf.write(_struct.pack('<H', num_channels))
-    buf.write(_struct.pack('<I', sample_rate))
-    buf.write(_struct.pack('<I', sample_rate * num_channels * sample_width))
-    buf.write(_struct.pack('<H', num_channels * sample_width))
-    buf.write(_struct.pack('<H', sample_width * 8))
-    buf.write(b'data')
-    buf.write(_struct.pack('<I', data_size))
-    
-    for s in samples:
-        buf.write(_struct.pack('<h', s))
-    
-    buf.seek(0)
-    buf.name = "sirena_emergencia.wav"
-    return buf
-
-
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía alerta a grupo + topics + mensaje privado a CADA miembro + owner"""
     user = update.effective_user
@@ -17645,15 +17353,6 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             await context.bot.send_message(
                 chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
             enviados += 1
-            # Enviar sirena al grupo
-            try:
-                sirena_grupo = _generar_sirena_wav(duracion=3)
-                await context.bot.send_audio(
-                    chat_id=COFRADIA_GROUP_ID, audio=sirena_grupo,
-                    title="🚨 SIRENA EMERGENCIA COFRADÍA",
-                    performer="Bot Cofradía Premium")
-            except Exception:
-                pass
         except Exception as _eg:
             logger.warning(f"Emergencia grupo: {_eg}")
         try:
@@ -17682,27 +17381,11 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             await context.bot.send_message(
                 chat_id=OWNER_ID, text=f"🚨 EMERGENCIA REPORTADA\n\n{alerta}",
                 reply_markup=tel_kb)
-            # Enviar sirena al owner
-            try:
-                sirena = _generar_sirena_wav(duracion=3)
-                await context.bot.send_audio(
-                    chat_id=OWNER_ID, audio=sirena,
-                    title="🚨 SIRENA EMERGENCIA",
-                    performer="Cofradía de Networking")
-            except Exception:
-                pass
         except Exception:
             pass
 
-    # 3. Enviar mensaje privado + sirena a CADA miembro activo
+    # 3. Enviar mensaje privado a CADA miembro activo
     miembros_notificados = 0
-    try:
-        # Generar sirena una sola vez para reutilizar
-        sirena_base = _generar_sirena_wav(duracion=3)
-        sirena_bytes = sirena_base.read()
-    except Exception:
-        sirena_bytes = None
-    
     try:
         conn_m = get_db_connection()
         if conn_m:
@@ -17718,17 +17401,6 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                             chat_id=mid,
                             text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
                             reply_markup=tel_kb)
-                        # Enviar sirena adjunta
-                        if sirena_bytes:
-                            try:
-                                sirena_io = io.BytesIO(sirena_bytes)
-                                sirena_io.name = "sirena_emergencia.wav"
-                                await context.bot.send_audio(
-                                    chat_id=mid, audio=sirena_io,
-                                    title="🚨 SIRENA EMERGENCIA",
-                                    performer="Cofradía de Networking")
-                            except Exception:
-                                pass
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
@@ -17765,462 +17437,6 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     # Limpiar estado
     for k in ['emer_tipo','emer_hora','emer_direccion','emer_maps','emer_desc','emer_step']:
         context.user_data.pop(k, None)
-
-
-# ==================== AGENTES AUTOMÁTICOS (job_queue) ====================
-
-# --- Mensajes motivacionales aleatorios para incentivar participación ---
-_MENSAJES_AGENTE = [
-    "💡 ¿Sabías que puedes usar /indicadores para ver el dólar, UF, Bitcoin y más indicadores económicos al instante? ¡Pruébalo!",
-    "🤝 Recuerda que puedes usar /conectar y la IA te sugerirá cofrades ideales para hacer networking. ¡Anímate!",
-    "📇 ¿Ya tienes tu tarjeta profesional? Usa /mi_tarjeta para crearla y que otros cofrades te encuentren.",
-    "💼 ¿Buscas empleo o quieres ayudar a un cofrade? Usa /empleo [cargo] para encontrar ofertas reales.",
-    "📊 Usa /mi_dashboard para ver tu perfil completo: ranking, coins, servicios canjeables y mucho más. ¡Es GRATIS!",
-    "🚀 ¿Conoces a alguien que debería estar en la Cofradía? Invítalo a sumarse. ¡Más Marinos, más fuerza!",
-    "⭐ ¿Un cofrade te ayudó? Usa /recomendar @user [texto] para dejarle una recomendación pública y ganar 5 coins.",
-    "📚 Tenemos +100 libros en la biblioteca digital. Usa /rag_consulta [pregunta] y consulta lo que necesites.",
-    "🔍 ¿Necesitas un abogado, contador o ingeniero? Usa /buscar_profesional [área] y encuentra al cofrade indicado.",
-    "📅 Revisa los próximos eventos de la Cofradía con /eventos y confirma tu asistencia con /asistir [ID].",
-    "💰 Usa /finanzas [consulta] para recibir asesoría financiera gratuita basada en nuestra biblioteca de libros.",
-    "🪙 ¿Cuántos Cofradía Coins tienes? Usa /mis_coins para ver tu balance y en qué puedes canjearlos.",
-    "📈 ¿Quieres saber quiénes son los más activos de la semana? Usa /top_usuarios y mira el ranking.",
-    "🎂 ¿Cuándo es el cumpleaños de tus compañeros? Usa /cumpleanos_mes para ver los del mes actual.",
-    "🤖 Usa /agente para que la IA te arme un plan personalizado de networking. ¡Potencia tus conexiones!",
-    "🎯 Usa /match para encontrar cofrades compatibles con tus intereses y experiencia profesional.",
-    "🗓️ Organiza tu networking con /agendar y /mis_tareas. ¡El éxito es cuestión de hábitos!",
-    "💬 Cada mensaje que envías en el grupo te da 1 Cofradía Coin. ¡Participa y acumula!",
-    "🌐 ¿Necesitas buscar algo en internet? Usa /buscar_web [consulta] directo desde el chat.",
-    "🏦 Busca especialistas financieros regulados con /buscar_especialista_sec [especialidad]. ¡Datos CMF reales!",
-    "📋 Al final del día publicaré el resumen automático. ¿Quieres verlo ahora? Usa /resumen.",
-    "⚓ ¡Somos la red de apoyo más grande de ex-navales en Chile! Invita a tus compañeros de generación.",
-    "🧮 ¿Necesitas calcular un crédito, inversión o sueldo líquido? Usa /calculadora — Suite Económica Pro.",
-    "📰 Cada lunes envío la Newsletter semanal con lo más destacado. ¡No te la pierdas!",
-    "🚨 En caso de emergencia real, usa /emergencia y se notificará a TODOS los cofrades al instante.",
-    "🎤 ¿Sabías que puedo responder mensajes de voz? Envía un audio mencionando 'Bot' y te respondo.",
-    "💡 Tip del día: Completa tu /mi_tarjeta con todos los campos para aparecer en más búsquedas profesionales.",
-    "📊 Usa /resumen_semanal para ver un análisis completo de la actividad de los últimos 7 días.",
-    "🔔 Configura /alertas [palabras] y recibe notificación cuando alguien hable de temas que te interesan.",
-    "⚡ ¿Ya conoces el /briefing? Te arma un resumen diario personalizado de lo que pasa en la Cofradía.",
-]
-
-_SALUDOS_PROACTIVOS = [
-    "👋 ¡Hola {nombre}! ¿Cómo va todo? Recuerda que estoy aquí para lo que necesites. Escribe /ayuda para ver qué puedo hacer por ti.",
-    "⚓ ¡Buenas {nombre}! ¿Necesitas buscar empleo, conectar con cofrades o consultar indicadores? Solo escríbeme.",
-    "🤝 ¡Hola {nombre}! ¿Has revisado tu /mi_dashboard últimamente? Tiene info útil sobre tu actividad.",
-    "💡 ¡Hey {nombre}! ¿Sabías que puedes usar /finanzas para consultas financieras gratuitas? ¡Pruébalo!",
-    "🚀 ¡Qué tal {nombre}! Si necesitas apoyo profesional, usa /buscar_profesional o /conectar. ¡La Cofradía te respalda!",
-]
-
-
-async def agente_resumen_semanal_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Publica resumen semanal automático al grupo cada domingo"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        fecha_inicio = _ahora_chile() - timedelta(days=7)
-        fecha_fin = _ahora_chile()
-
-        if DATABASE_URL:
-            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
-            total = c.fetchone()['total']
-            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'")
-            usuarios = c.fetchone()['total']
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
-                        AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || 
-                        COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo,
-                        COUNT(*) as msgs FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""")
-            top = [((r['nombre_completo'] or 'Usuario').strip(), r['msgs']) for r in c.fetchall()]
-        else:
-            fi = fecha_inicio.strftime("%Y-%m-%d")
-            c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= ?", (fi,))
-            total = c.fetchone()[0]
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE fecha >= ?", (fi,))
-            usuarios = c.fetchone()[0]
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
-                        AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || 
-                        COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo,
-                        COUNT(*) as msgs FROM mensajes WHERE fecha >= ?
-                        GROUP BY user_id ORDER BY msgs DESC LIMIT 10""", (fi,))
-            top = c.fetchall()
-        conn.close()
-
-        if total == 0:
-            return
-
-        msg = "━" * 30 + "\n"
-        msg += "📅 RESUMEN SEMANAL AUTOMÁTICO\n"
-        msg += "━" * 30 + "\n\n"
-        msg += f"📆 {fecha_inicio.strftime('%d/%m')} - {fecha_fin.strftime('%d/%m/%Y')}\n\n"
-        msg += f"💬 Mensajes: {total:,}\n"
-        msg += f"👥 Participantes: {usuarios}\n"
-        msg += f"📈 Promedio diario: {total/7:.1f}\n\n"
-
-        if top:
-            msg += "🏆 TOP 10 MÁS ACTIVOS\n"
-            medallas = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
-            for i, item in enumerate(top[:10]):
-                nombre = item[0] if isinstance(item, tuple) else item.get('nombre_completo', '')
-                msgs = item[1] if isinstance(item, tuple) else item.get('msgs', 0)
-                nombre_l = limpiar_nombre_display(nombre)
-                msg += f"   {medallas[i]} {nombre_l}: {msgs}\n"
-            msg += "\n"
-
-        insights = generar_insights_temas(dias=7)
-        if insights:
-            msg += "🏷️ TEMAS PRINCIPALES\n"
-            for tema in insights:
-                t = tema.replace('*','').replace('_','').strip()
-                if t:
-                    msg += f"   {t}\n"
-            msg += "\n"
-
-        msg += "━" * 30 + "\n"
-        msg += "🤖 Resumen generado automáticamente por Bot Cofradía Premium\n"
-        msg += "━" * 30
-
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
-        logger.info("🤖 Agente: resumen semanal automático publicado")
-    except Exception as e:
-        logger.error(f"Error agente resumen semanal: {e}")
-
-
-async def agente_cumpleanos_semana_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Publica cumpleaños de la semana cada domingo"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        from oauth2client.service_account import ServiceAccountCredentials
-
-        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
-        if not creds_json:
-            return
-        creds_dict = json.loads(creds_json)
-        scope = ['https://www.googleapis.com/auth/drive.readonly']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        access_token = creds.get_access_token().access_token
-        headers = {'Authorization': f'Bearer {access_token}'}
-
-        r_files = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers,
-            params={'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
-                    'fields': 'files(id,name)'}, timeout=30)
-        archivos = r_files.json().get('files', [])
-        if not archivos:
-            return
-
-        r_dl = requests.get(f"https://www.googleapis.com/drive/v3/files/{archivos[0]['id']}?alt=media",
-            headers=headers, timeout=60)
-        if r_dl.status_code != 200:
-            return
-
-        df = pd.read_excel(BytesIO(r_dl.content), engine='openpyxl', header=0)
-
-        hoy = _ahora_chile()
-        MESES = {
-            'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,
-            'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12,
-            'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,
-            'julio':7,'agosto':8,'septiembre':9,'octubre':10,'noviembre':11,'diciembre':12
-        }
-        dias_semana_nombre = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom']
-        cumples_semana = []
-
-        for _, row in df.iterrows():
-            try:
-                fecha_cumple = row.iloc[23] if len(row) > 23 else None
-                if pd.isna(fecha_cumple) or not fecha_cumple:
-                    continue
-                fecha_str = str(fecha_cumple).strip().lower()
-                dia_c = mes_c = None
-                if '-' in fecha_str:
-                    partes = fecha_str.split('-')
-                    if len(partes) >= 2:
-                        try:
-                            dia_c = int(partes[0])
-                            mes_c = MESES.get(partes[1].strip()[:3])
-                        except:
-                            pass
-                elif '/' in fecha_str:
-                    partes = fecha_str.split('/')
-                    if len(partes) >= 2:
-                        try:
-                            dia_c = int(partes[0])
-                            mes_c = int(partes[1])
-                        except:
-                            pass
-                if dia_c and mes_c:
-                    try:
-                        fecha_cumple_dt = datetime(hoy.year, mes_c, dia_c)
-                    except ValueError:
-                        continue
-                    diff = (fecha_cumple_dt - hoy).days
-                    if 0 <= diff <= 7:
-                        nombre = str(row.iloc[2]).strip() if len(row) > 2 else ''
-                        apellido = str(row.iloc[3]).strip() if len(row) > 3 else ''
-                        if nombre and nombre.lower() not in ['nan','none','']:
-                            dia_nombre = dias_semana_nombre[fecha_cumple_dt.weekday()]
-                            cumples_semana.append((diff, f"{nombre} {apellido}".strip(),
-                                f"{dia_c}/{mes_c}", dia_nombre))
-            except Exception:
-                continue
-
-        if not cumples_semana:
-            return
-
-        cumples_semana.sort(key=lambda x: x[0])
-        msg = "🎂🎉 CUMPLEAÑOS DE LA SEMANA 🎉🎂\n"
-        msg += "━" * 30 + "\n"
-        msg += f"📅 Semana del {hoy.strftime('%d/%m')} al {(hoy + timedelta(days=7)).strftime('%d/%m/%Y')}\n\n"
-
-        for diff, nombre, fecha, dia_nom in cumples_semana:
-            if diff == 0:
-                msg += f"🎈 HOY — {nombre}\n"
-            elif diff == 1:
-                msg += f"🎈 Mañana ({dia_nom} {fecha}) — {nombre}\n"
-            else:
-                msg += f"🎈 {dia_nom} {fecha} — {nombre}\n"
-
-        msg += "\n" + "━" * 30 + "\n"
-        msg += "💐 ¡No olvides saludar a los cumpleañeros!\n"
-        msg += "━" * 30
-
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
-        logger.info(f"🤖 Agente: {len(cumples_semana)} cumpleaños de la semana publicados")
-    except Exception as e:
-        logger.error(f"Error agente cumpleaños semana: {e}")
-
-
-async def agente_cumpleanos_mes_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Publica cumpleaños del mes siguiente el último día de cada mes"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        import calendar
-        hoy = _ahora_chile()
-        ultimo_dia = calendar.monthrange(hoy.year, hoy.month)[1]
-        if hoy.day != ultimo_dia:
-            return  # Solo ejecutar el último día del mes
-
-        # Calcular mes siguiente
-        if hoy.month == 12:
-            mes_sig = 1
-            anio_sig = hoy.year + 1
-        else:
-            mes_sig = hoy.month + 1
-            anio_sig = hoy.year
-
-        meses_nombres = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio',
-                         'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
-
-        from oauth2client.service_account import ServiceAccountCredentials
-        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
-        if not creds_json:
-            return
-        creds_dict = json.loads(creds_json)
-        scope = ['https://www.googleapis.com/auth/drive.readonly']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        access_token = creds.get_access_token().access_token
-        headers = {'Authorization': f'Bearer {access_token}'}
-
-        r_files = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers,
-            params={'q': "name contains 'BD Grupo Laboral' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
-                    'fields': 'files(id,name)'}, timeout=30)
-        archivos = r_files.json().get('files', [])
-        if not archivos:
-            return
-
-        r_dl = requests.get(f"https://www.googleapis.com/drive/v3/files/{archivos[0]['id']}?alt=media",
-            headers=headers, timeout=60)
-        if r_dl.status_code != 200:
-            return
-
-        df = pd.read_excel(BytesIO(r_dl.content), engine='openpyxl', header=0)
-        MESES = {
-            'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,
-            'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12
-        }
-        cumples = []
-        for _, row in df.iterrows():
-            try:
-                fc = row.iloc[23] if len(row) > 23 else None
-                if pd.isna(fc) or not fc:
-                    continue
-                fs = str(fc).strip().lower()
-                dia_c = mes_c = None
-                if '-' in fs:
-                    p = fs.split('-')
-                    if len(p) >= 2:
-                        dia_c = int(p[0])
-                        mes_c = MESES.get(p[1].strip()[:3])
-                elif '/' in fs:
-                    p = fs.split('/')
-                    if len(p) >= 2:
-                        dia_c = int(p[0])
-                        mes_c = int(p[1])
-                if mes_c == mes_sig:
-                    nombre = str(row.iloc[2]).strip() if len(row) > 2 else ''
-                    apellido = str(row.iloc[3]).strip() if len(row) > 3 else ''
-                    if nombre and nombre.lower() not in ['nan','none','']:
-                        cumples.append((dia_c, f"{nombre} {apellido}".strip()))
-            except Exception:
-                continue
-
-        if not cumples:
-            return
-
-        cumples.sort(key=lambda x: x[0])
-        msg = f"🎂 CUMPLEAÑOS DE {meses_nombres[mes_sig].upper()} {anio_sig} 🎂\n"
-        msg += "━" * 30 + "\n\n"
-        for dia, nombre in cumples:
-            msg += f"🎈 {dia:02d}/{mes_sig:02d} — {nombre}\n"
-        msg += f"\n🎉 ¡{len(cumples)} cofrades cumplen años en {meses_nombres[mes_sig]}!\n"
-        msg += "━" * 30
-
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
-        logger.info(f"🤖 Agente: cumpleaños de {meses_nombres[mes_sig]} publicados ({len(cumples)})")
-    except Exception as e:
-        logger.error(f"Error agente cumpleaños mes: {e}")
-
-
-async def agente_graficos_matutino_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Publica resumen gráfico matutino breve al grupo"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-
-        if DATABASE_URL:
-            c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'")
-            msgs_ayer = c.fetchone()['total']
-            c.execute("SELECT COUNT(DISTINCT user_id) as total FROM mensajes WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'")
-            users_ayer = c.fetchone()['total']
-            c.execute("SELECT COUNT(*) as total FROM suscripciones WHERE estado = 'activo'")
-            total_miembros = c.fetchone()['total']
-            c.execute("""SELECT DATE(fecha) as dia, COUNT(*) as msgs FROM mensajes
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY DATE(fecha) ORDER BY dia""")
-            semana = [(str(r['dia']), r['msgs']) for r in c.fetchall()]
-        else:
-            c.execute("SELECT COUNT(*) FROM mensajes WHERE DATE(fecha) = DATE('now', '-1 day')")
-            msgs_ayer = c.fetchone()[0]
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE DATE(fecha) = DATE('now', '-1 day')")
-            users_ayer = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado = 'activo'")
-            total_miembros = c.fetchone()[0]
-            c.execute("""SELECT DATE(fecha), COUNT(*) FROM mensajes
-                        WHERE fecha >= DATE('now', '-7 days') GROUP BY DATE(fecha) ORDER BY DATE(fecha)""")
-            semana = c.fetchall()
-        conn.close()
-
-        ahora = _ahora_chile()
-        dias_nombre = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom']
-
-        msg = "☀️ BUENOS DÍAS COFRADÍA\n"
-        msg += "━" * 30 + "\n"
-        msg += f"📅 {ahora.strftime('%d/%m/%Y')} | {dias_nombre[ahora.weekday()]}\n\n"
-        msg += "📊 PULSO DE LA COMUNIDAD\n"
-        msg += f"   👥 Miembros activos: {total_miembros}\n"
-        msg += f"   💬 Mensajes ayer: {msgs_ayer}\n"
-        msg += f"   🗣️ Participantes ayer: {users_ayer}\n\n"
-
-        if semana:
-            msg += "📈 ÚLTIMA SEMANA\n"
-            for fecha, msgs in semana[-7:]:
-                try:
-                    dia_dt = datetime.strptime(str(fecha)[:10], "%Y-%m-%d")
-                    d_nom = dias_nombre[dia_dt.weekday()]
-                    barra = "█" * min(int(msgs/3), 15) if msgs > 0 else "░"
-                    msg += f"   {d_nom}: {barra} {msgs}\n"
-                except:
-                    pass
-            msg += "\n"
-
-        msg += "━" * 30 + "\n"
-        msg += "🚀 ¡Que sea un gran día para la Cofradía!\n"
-        msg += "━" * 30
-
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
-        logger.info("🤖 Agente: gráficos matutinos publicados")
-    except Exception as e:
-        logger.error(f"Error agente gráficos matutino: {e}")
-
-
-async def agente_mensaje_aleatorio_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Envía mensajes aleatorios al grupo para incentivar participación"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        import random as _rnd
-        mensaje = _rnd.choice(_MENSAJES_AGENTE)
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensaje)
-        logger.info("🤖 Agente: mensaje motivacional enviado")
-    except Exception as e:
-        logger.error(f"Error agente mensaje aleatorio: {e}")
-
-
-async def agente_saludo_proactivo_job(context: ContextTypes.DEFAULT_TYPE):
-    """Agente: Saluda proactivamente a usuarios activos recientes en el grupo"""
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        import random as _rnd
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-
-        # Obtener usuarios activos en últimas 48h que no sean el bot ni el owner
-        if DATABASE_URL:
-            c.execute("""SELECT DISTINCT user_id, 
-                        MAX(COALESCE(NULLIF(first_name,''), 'Cofrade')) as nombre
-                        FROM mensajes 
-                        WHERE fecha >= CURRENT_DATE - INTERVAL '2 days'
-                        AND first_name NOT IN ('Group','Grupo','Channel','Canal','','Bot')
-                        AND first_name IS NOT NULL
-                        GROUP BY user_id
-                        ORDER BY RANDOM() LIMIT 1""")
-        else:
-            c.execute("""SELECT DISTINCT user_id, 
-                        MAX(COALESCE(NULLIF(first_name,''), 'Cofrade')) as nombre
-                        FROM mensajes 
-                        WHERE fecha >= DATE('now', '-2 days')
-                        AND first_name NOT IN ('Group','Grupo','Channel','Canal','','Bot')
-                        AND first_name IS NOT NULL
-                        GROUP BY user_id
-                        ORDER BY RANDOM() LIMIT 1""")
-        
-        resultado = c.fetchone()
-        conn.close()
-
-        if not resultado:
-            return
-
-        if DATABASE_URL:
-            user_id = resultado['user_id']
-            nombre_raw = resultado['nombre']
-        else:
-            user_id = resultado[0]
-            nombre_raw = resultado[1]
-
-        if user_id == OWNER_ID:
-            return  # No saludar al owner automáticamente
-
-        nombre = limpiar_nombre_display(nombre_raw)
-        plantilla = _rnd.choice(_SALUDOS_PROACTIVOS)
-        mensaje = plantilla.format(nombre=nombre)
-
-        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensaje)
-        logger.info(f"🤖 Agente: saludo proactivo a {nombre}")
-    except Exception as e:
-        logger.error(f"Error agente saludo proactivo: {e}")
 
 
 def main():
@@ -18343,7 +17559,7 @@ def main():
             BotCommand("mis_tareas", "Ver tus tareas pendientes"),
             BotCommand("briefing", "Briefing diario de networking"),
             BotCommand("indicadores", "Indicadores economicos Chile con analisis IA"),
-            BotCommand("economia", "Dashboard economico + simuladores financieros"),
+            BotCommand("economia", "Dashboard economico + simuladores + IA"),
             BotCommand("emergencia", "🚨 Reportar emergencia"),
             BotCommand("calculadora", "🧮 Suite Económica Pro"),
         ]
@@ -19109,80 +18325,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter email: {e}")
     
-        # ==================== AGENTES AUTOMÁTICOS ====================
-        
-        # Agente: Resumen semanal automático — Domingos 20:30 Chile
-        try:
-            job_queue.run_daily(
-                agente_resumen_semanal_job,
-                time=dt_time(hour=20, minute=30, tzinfo=chile_tz) if chile_tz else dt_time(hour=23, minute=30),
-                days=(6,),  # Domingo
-                name='agente_resumen_semanal'
-            )
-            logger.info("🤖 Agente resumen semanal: domingos 20:30 Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente resumen semanal: {e}")
-        
-        # Agente: Cumpleaños de la semana — Domingos 09:00 Chile
-        try:
-            job_queue.run_daily(
-                agente_cumpleanos_semana_job,
-                time=dt_time(hour=9, minute=0, tzinfo=chile_tz) if chile_tz else dt_time(hour=12, minute=0),
-                days=(6,),  # Domingo
-                name='agente_cumpleanos_semana'
-            )
-            logger.info("🤖 Agente cumpleaños semana: domingos 09:00 Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente cumpleaños semana: {e}")
-        
-        # Agente: Cumpleaños del mes — Diario 21:00 (solo ejecuta el último día del mes)
-        try:
-            job_queue.run_daily(
-                agente_cumpleanos_mes_job,
-                time=dt_time(hour=21, minute=0, tzinfo=chile_tz) if chile_tz else dt_time(hour=0, minute=0),
-                name='agente_cumpleanos_mes'
-            )
-            logger.info("🤖 Agente cumpleaños mes: último día de cada mes 21:00 Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente cumpleaños mes: {e}")
-        
-        # Agente: Gráficos matutinos — Diario 07:30 Chile
-        try:
-            job_queue.run_daily(
-                agente_graficos_matutino_job,
-                time=dt_time(hour=7, minute=30, tzinfo=chile_tz) if chile_tz else dt_time(hour=10, minute=30),
-                name='agente_graficos_matutino'
-            )
-            logger.info("🤖 Agente gráficos matutino: diario 07:30 Chile")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente gráficos matutino: {e}")
-        
-        # Agente: Mensajes aleatorios motivacionales — cada 3 horas
-        try:
-            job_queue.run_repeating(
-                agente_mensaje_aleatorio_job,
-                interval=10800,  # 3 horas en segundos
-                first=3600,      # Primer envío 1 hora después del inicio
-                name='agente_mensajes_aleatorios'
-            )
-            logger.info("🤖 Agente mensajes aleatorios: cada 3 horas")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente mensajes aleatorios: {e}")
-        
-        # Agente: Saludo proactivo a usuarios — cada 4 horas
-        try:
-            job_queue.run_repeating(
-                agente_saludo_proactivo_job,
-                interval=14400,  # 4 horas en segundos
-                first=7200,      # Primer saludo 2 horas después del inicio
-                name='agente_saludo_proactivo'
-            )
-            logger.info("🤖 Agente saludo proactivo: cada 4 horas")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente saludo proactivo: {e}")
-        
-        logger.info("🤖 Sistema de Agentes Automáticos activado — 6 agentes programados")
-
     logger.info("✅ Bot iniciado!")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
