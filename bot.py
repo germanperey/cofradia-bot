@@ -16146,8 +16146,8 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
 .t{padding:10px 16px;font-size:.85em;font-weight:600;color:#8899aa;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:.2s;white-space:nowrap}.t:hover{color:#e0e6ed}.t.a{color:#c3a55a;border-bottom-color:#c3a55a}
 .P{display:none}.P.a{display:block}
 .K{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:24px}
-.k{background:linear-gradient(135deg,rgba(15,47,89,.8),rgba(30,80,140,.4));border:1px solid rgba(195,165,90,.3);border-radius:12px;padding:18px 28px;text-align:center;flex:1;min-width:140px;max-width:200px}
-.k .n{font-size:2em;font-weight:800;color:#c3a55a;text-shadow:0 0 20px rgba(195,165,90,.4)}.k .l{font-size:.78em;color:#8899aa;margin-top:4px;text-transform:uppercase;letter-spacing:1px}
+.k{background:linear-gradient(135deg,rgba(15,47,89,.8),rgba(30,80,140,.4));border:1px solid rgba(195,165,90,.3);border-radius:12px;padding:20px 30px;text-align:center;flex:1;min-width:160px;max-width:220px;cursor:pointer;transition:transform .2s,box-shadow .2s}.k:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.k .n{font-size:2.5em;font-weight:800;color:#c3a55a;text-shadow:0 0 20px rgba(195,165,90,.4)}.k .l{font-size:.85em;color:#8899aa;margin-top:5px;text-transform:uppercase;letter-spacing:1px}
 .S{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:18px;margin-bottom:16px}
 .ST{font-size:1.1em;font-weight:700;color:#c3a55a;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(195,165,90,.2);letter-spacing:.5px}
 .CG{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:20px}
@@ -16167,6 +16167,18 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 .TB th{background:rgba(195,165,90,.1);color:#c3a55a;padding:8px;text-align:left;font-weight:700;border-bottom:1px solid rgba(195,165,90,.2)}
 .TB td{padding:6px 8px;border-bottom:1px solid var(--bd);color:var(--gr)}.TB td:first-child{color:var(--w);font-weight:600}.TB tr:hover td{background:rgba(0,212,255,0.03)}
 .F{text-align:center;padding:20px 0;color:#556677;font-size:.82em;border-top:1px solid rgba(195,165,90,.2);margin-top:20px}.F b{color:#c3a55a}
+
+#defM{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(6,16,30,.92);z-index:9999;overflow-y:auto;padding:20px}
+.mBox{max-width:520px;margin:60px auto;background:rgba(13,27,48,.97);border:1px solid rgba(195,165,90,.35);border-radius:16px;padding:24px;box-shadow:0 12px 48px rgba(0,0,0,.6)}
+.mCl{float:right;font-size:1.5em;color:#8899aa;cursor:pointer;background:none;border:none;padding:4px 10px}.mCl:hover{color:#c3a55a}
+.mTt{font-size:1.2em;font-weight:700;color:#c3a55a;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2)}
+.mDf{font-size:.88em;color:#aed6f1;line-height:1.6;margin-bottom:14px}
+.mSem{display:flex;gap:10px;margin-top:10px}
+.mS{flex:1;padding:10px;border-radius:8px;text-align:center;font-size:.8em;font-weight:700}
+.mS.opt{background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.4);color:#2ecc71}
+.mS.nor{background:rgba(243,156,18,.15);border:1px solid rgba(243,156,18,.4);color:#f39c12}
+.mS.neg{background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.4);color:#e74c3c}
+
 @media(max-width:768px){.CG,.SG{grid-template-columns:1fr}.H h1{font-size:1.7em}.T{overflow-x:auto}.t{font-size:0.72em;padding:7px 10px}}
 </style></head><body>
 <div class="W" id="content">
@@ -16277,6 +16289,13 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <!-- ANALISIS IA -->
 <div class="P" id="tab-ia"><div class="S"><div class="ST">ANALISIS MACROECONOMICO</div>
 <div class="IA">''' + (ai_safe or 'Ejecute /economia para generar analisis IA.') + '''</div></div></div>
+<div id="defM" onclick="if(event.target===this)this.style.display='none'">
+<div class="mBox">
+<button class="mCl" onclick="document.getElementById('defM').style.display='none'">&times;</button>
+<div class="mTt" id="mTt"></div>
+<div class="mDf" id="mDf"></div>
+<div class="mSem" id="mSem"></div>
+</div></div>
 <div class="F">&#9875; DASHBOARD ECONOMICO <b>COFRADIA DE NETWORKING</b> · Fuentes: Banco Central · CMF · AFP<br><b>''' + generado + '''</b></div>
 </div>
 <script>
@@ -16328,8 +16347,37 @@ function sA(){var ap=parseFloat(document.getElementById('aM').value)||100000,a=p
 function sI(){var c=parseFloat(document.getElementById('iC').value)||5e6,m=parseFloat(document.getElementById('iM').value)||2e5,a=parseFloat(document.getElementById('iA').value)||10,rt=parseFloat(document.getElementById('iR').value)||8,r=rt/100/12,n=a*12,f1=c*Math.pow(1+r,n),f2=m*(Math.pow(1+r,n)-1)/r,tt=f1+f2,iv=c+m*n,gn2=tt-iv;document.getElementById('iV').textContent='$'+fc(Math.round(tt),0);document.getElementById('iD').innerHTML='Capital: $'+fc(c,0)+' · Aportes: $'+fc(Math.round(m*n),0)+'<br>Invertido: $'+fc(Math.round(iv),0)+'<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>Multiplicador: <b style="color:var(--gd)">'+fc(tt/iv,2)+'x</b>';document.getElementById('iRe').style.display='block'}
 function cCalc(){var op=document.getElementById('cO').value,ind=document.getElementById('cI').value,cn=parseFloat(document.getElementById('cN').value)||0,vl=IV[ind]||0,rs=0;if(op==='mul')rs=vl*cn;else if(op==='div')rs=cn?vl/cn:0;else if(op==='add')rs=vl+cn;else rs=vl-cn;document.getElementById('cV').textContent='$'+fc(rs,2);document.getElementById('cD').innerHTML=ind+': $'+fc(vl,2)+' · Resultado: $'+fc(rs,2);document.getElementById('cR').style.display='block'}
 function xConv(){var f=document.getElementById('xF').value,t=document.getElementById('xT').value,cn=parseFloat(document.getElementById('xN').value)||0,vf=IV[f]||0,vt=IV[t]||0;if(!vt){document.getElementById('xV').textContent='Error';document.getElementById('xR').style.display='block';return}var clp=vf*cn,rs=clp/vt;document.getElementById('xV').textContent=fc(rs,4)+' '+t;document.getElementById('xD').innerHTML=fc(cn,2)+' '+f+' = $'+fc(clp,2)+' CLP = <b style="color:var(--gd)">'+fc(rs,4)+' '+t+'</b>';document.getElementById('xR').style.display='block'}
-async function pS(id){var el=document.getElementById(id);if(!el)return;try{var cv=await html2canvas(el,{scale:2,backgroundColor:'#0a1628',useCORS:true});var pdf=new window.jspdf.jsPDF('p','mm','a4');var w=190,h=cv.height*w/cv.width;pdf.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',10,10,w,h);pdf.save('Simulacion_Cofradia.pdf')}catch(e){alert('Error PDF')}}
+async function pS(id){var el=document.getElementById(id);if(!el)return;try{var cv=await html2canvas(el,{scale:2,backgroundColor:'#0a1628',useCORS:true});var pdf=new window.jspdf.jsPDF('p','mm','a4');var w=190,h=cv.height*w/cv.width;pdf.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',10,10,w,h);if(id==='sH'&&_lastAmort){var am=_lastAmort,saldo=am.cr,y=h+20,pg=1;pdf.setFontSize(12);pdf.setTextColor(195,165,90);pdf.text('TABLA DE AMORTIZACION',10,y);y+=8;pdf.setFontSize(8);pdf.setTextColor(180,180,180);pdf.text('Cuota',12,y);pdf.text('Dividendo UF',35,y);pdf.text('Interes UF',70,y);pdf.text('Capital UF',105,y);pdf.text('Saldo UF',140,y);y+=5;for(var q=1;q<=am.n;q++){var intQ=saldo*am.r;var capQ=am.dv-intQ;saldo=Math.max(0,saldo-capQ);if(y>280){pdf.addPage();y=15;pg++}pdf.setTextColor(220,220,220);pdf.text(String(q),12,y);pdf.text(fc(am.dv,2),35,y);pdf.text(fc(intQ,2),70,y);pdf.text(fc(capQ,2),105,y);pdf.text(fc(saldo,2),140,y);y+=4}}pdf.save('Simulacion_Cofradia.pdf')}catch(e){alert('Error PDF')}}
 async function xPDF(){var btn=document.getElementById('btnP');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.P'),tn=document.querySelector('.T'),ac2=document.querySelector('.A'),og=[];tabs.forEach(function(t,i){og.push(t.style.display);t.style.display='block'});tn.style.display='none';ac2.style.display='none';for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();await new Promise(function(r){setTimeout(r,1000)});try{var ct=document.getElementById('content');var cv=await html2canvas(ct,{scale:1.3,backgroundColor:'#0a1628',useCORS:true,logging:false,windowWidth:Math.max(ct.scrollWidth,1200),windowHeight:ct.scrollHeight});var pdf=new window.jspdf.jsPDF('p','mm','a4');var iW=210,pH=297,iH=cv.height*iW/cv.width,left=iH,pos=0;pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH;while(left>0){pos=-(iH-left);pdf.addPage();pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH}pdf.save('Dashboard_Economia_Chile.pdf');btn.textContent='Descargado!'}catch(e){btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=og[i]||''});tn.style.display='';ac2.style.display='';document.querySelector('.P.a')||tabs[0].classList.add('a');for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
+
+var DEFS={
+uf:{n:'Unidad de Fomento (UF)',d:'Unidad de cuenta reajustable segun IPC. Se usa para creditos hipotecarios, arriendos y contratos. Refleja la inflacion mensual.',o:'Variacion < 0,3% mensual',no:'0,3% - 0,6%',ne:'> 0,6% mensual'},
+dolar:{n:'Dolar Observado (USD/CLP)',d:'Tipo de cambio del dolar estadounidense respecto al peso chileno. Publicado por el Banco Central. Afecta importaciones, deuda externa y combustibles.',o:'< $850 (peso fuerte)',no:'$850 - $950',ne:'> $950 (peso debil)'},
+euro:{n:'Euro (EUR/CLP)',d:'Tipo de cambio del euro. Relevante para comercio con Europa, turismo e importaciones europeas.',o:'< $950',no:'$950 - $1.100',ne:'> $1.100'},
+ipc:{n:'Indice de Precios al Consumidor',d:'Mide la variacion mensual de precios de una canasta de bienes y servicios. Es la medida oficial de inflacion en Chile. Meta del Banco Central: 3% anual.',o:'< 0,2% mensual (inflacion controlada)',no:'0,2% - 0,5%',ne:'> 0,5% (presion inflacionaria)'},
+tpm:{n:'Tasa de Politica Monetaria',d:'Tasa de interes de referencia fijada por el Banco Central de Chile. Afecta tasas de creditos, depositos e inversiones. Instrumento principal contra la inflacion.',o:'< 4% (estimulo economico)',no:'4% - 7%',ne:'> 7% (politica restrictiva)'},
+bitcoin:{n:'Bitcoin (BTC/USD)',d:'Criptomoneda descentralizada. Indicador de apetito por riesgo global y adopcion de activos digitales. Alta volatilidad.',o:'Tendencia alcista estable',no:'Volatilidad moderada',ne:'Caida > 20% mensual'},
+desempleo:{n:'Tasa de Desempleo',d:'Porcentaje de la fuerza laboral que busca empleo activamente. Publicada por INE. Indicador clave del mercado laboral chileno.',o:'< 7% (pleno empleo tecnico)',no:'7% - 9%',ne:'> 9% (mercado laboral deteriorado)'},
+cobre:{n:'Precio del Cobre (USD/lb)',d:'Chile es el mayor productor mundial. El cobre representa ~50% de las exportaciones. Su precio impacta directamente el tipo de cambio, ingresos fiscales y crecimiento.',o:'> USD 4,50 (boom)',no:'USD 3,50 - 4,50',ne:'< USD 3,50 (presion fiscal)'},
+ipsa:{n:'IPSA - Bolsa de Santiago',d:'Indice de Precio Selectivo de Acciones. Mide las 30 acciones mas transadas de la Bolsa de Santiago. Indicador de confianza empresarial.',o:'> 6.500 pts',no:'5.000 - 6.500',ne:'< 5.000 pts'}
+};
+function showDef(cod){var d=DEFS[cod];if(!d)return;document.getElementById('mTt').textContent=d.n;document.getElementById('mDf').textContent=d.d;document.getElementById('mSem').innerHTML='<div class="mS opt"><div>&#128994; OPTIMO</div><div style="margin-top:4px;font-size:.9em">'+d.o+'</div></div><div class="mS nor"><div>&#128992; NORMAL</div><div style="margin-top:4px;font-size:.9em">'+d.no+'</div></div><div class="mS neg"><div>&#128308; NEGATIVO</div><div style="margin-top:4px;font-size:.9em">'+d.ne+'</div></div>';document.getElementById('defM').style.display='block'}
+
+// Add click handlers to KPIs
+document.querySelectorAll('.k').forEach(function(el){
+var lbl=el.querySelector('.l');if(!lbl)return;
+var map={UF:'uf',DOLAR:'dolar',EURO:'euro',IPC:'ipc',TPM:'tpm',BTC:'bitcoin',DESEMPLEO:'desempleo',COBRE:'cobre'};
+var cod=map[lbl.textContent.trim().toUpperCase()];
+if(cod)el.onclick=function(){showDef(cod)};
+});
+// Add click to stat table rows
+document.querySelectorAll('.TB tr').forEach(function(tr){
+var td=tr.querySelector('td');if(!td)return;
+var map={UF:'uf',Dolar:'dolar',Euro:'euro',Bitcoin:'bitcoin',Cobre:'cobre',IPSA:'ipsa'};
+var cod=map[td.textContent.trim()];
+if(cod)tr.style.cursor='pointer',tr.onclick=function(){showDef(cod)};
+});
+
 </script></body></html>'''
     return html
 
@@ -16370,7 +16418,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
                        "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
                        "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
-                pr2 = (f"Eres el mejor economista del mundo, asesor del Ministro de Hacienda y Economía de Chile. "
+                pr2 = (f"Eres el mejor economista del mundo, asesor del Ministerio de Hacienda de Chile. "
                        f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
                        "ELABORA INFORME PROFESIONAL:\n\n"
                        "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
@@ -16383,13 +16431,27 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "transformar Chile en país desarrollado de primer mundo.\n\n"
                        "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
                        "cambio climático y medidas de cobertura.\n\n"
-                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.")
+                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.\n"
+                       "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
+                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, SECCION 4 - IMPACTO INTERNACIONAL.")
                 try:
                     with _TPE_eco(max_workers=2) as pool_ia:
                         f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3))
                         f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=1500, temperature=0.4))
                         analisis_ia = f1.result() or ''
                         analisis_proy = f2.result() or ''
+                        # P5: Format titles in bold
+                        if analisis_proy:
+                            for _title in ['INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE',
+                                          'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA',
+                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4',
+                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4']:
+                                for _sep in [' - ',' \u2014 ',': ','. ']:
+                                    _full = _title + _sep
+                                    if _full in analisis_proy:
+                                        analisis_proy = analisis_proy.replace(_full, '\n\n' + _full)
+                                        break
+                            analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
                 except Exception:
                     try:
                         analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3)) or ''
