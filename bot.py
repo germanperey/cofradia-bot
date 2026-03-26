@@ -15942,9 +15942,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             neg = '-' if v < 0 else ''
             v = abs(float(v))
             s = ("{:,." + str(dec) + "f}").format(v) if dec > 0 else "{:,.0f}".format(v)
-            parts = s.split('.')
-            ent = parts[0].replace(',', '.')
-            return neg + ent + (',' + parts[1] if len(parts) > 1 and dec > 0 else '')
+            p = s.split('.')
+            e = p[0].replace(',', '.')
+            return neg + e + (',' + p[1] if len(p) > 1 and dec > 0 else '')
         for cod in ORDER_MSG:
             d = datos.get(cod)
             if not d: continue
@@ -16138,41 +16138,40 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
 .W{max-width:1400px;margin:0 auto}
 .H{text-align:center;padding:30px 0 20px;border-bottom:2px solid rgba(195,165,90,.4);margin-bottom:25px}
 .H h1{font-size:2.2em;color:#c3a55a;text-shadow:0 2px 10px rgba(195,165,90,.3);letter-spacing:2px}.H h1 b{color:#8ab4f8}
-.H p{color:#8899aa;font-size:.9em;margin-top:5px}
-.H .v{display:inline-block;background:linear-gradient(135deg,rgba(15,47,89,.8),rgba(30,80,140,.4));border:1px solid rgba(52,120,195,.3);border-radius:20px;padding:4px 16px;font-size:.75em;color:#8899aa;margin-top:6px}
-.A{display:flex;gap:12px;justify-content:center;margin-bottom:20px;flex-wrap:wrap}
+.H p{color:var(--gr);font-size:0.85em;margin-top:8px;letter-spacing:1px}
+.H .v{display:inline-block;font-size:.75em;color:#556677;margin-top:6px}
+.A{display:flex;gap:12px;justify-content:center;margin-bottom:24px;flex-wrap:wrap}
 .bt{padding:10px 24px;border-radius:8px;font-size:.9em;font-weight:700;letter-spacing:1px;cursor:pointer;transition:.25s;border:2px solid #c3a55a;background:rgba(195,165,90,.1);color:#c3a55a}.bt:hover{background:#c3a55a;color:#0a1628}.bt:disabled{opacity:.4}
-.T{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid rgba(52,120,195,.3);margin-bottom:20px}
+.T{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:20px}
 .t{padding:10px 16px;font-size:.85em;font-weight:600;color:#8899aa;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:.2s;white-space:nowrap}.t:hover{color:#e0e6ed}.t.a{color:#c3a55a;border-bottom-color:#c3a55a}
 .P{display:none}.P.a{display:block}
-.K{display:flex;gap:15px;flex-wrap:wrap;justify-content:center;margin-bottom:25px}
+.K{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:24px}
 .k{background:linear-gradient(135deg,rgba(15,47,89,.8),rgba(30,80,140,.4));border:1px solid rgba(195,165,90,.3);border-radius:12px;padding:18px 28px;text-align:center;flex:1;min-width:140px;max-width:200px}
 .k .n{font-size:2em;font-weight:800;color:#c3a55a;text-shadow:0 0 20px rgba(195,165,90,.4)}.k .l{font-size:.78em;color:#8899aa;margin-top:4px;text-transform:uppercase;letter-spacing:1px}
 .S{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:18px;margin-bottom:16px}
-.ST{font-size:1.1em;font-weight:700;letter-spacing:.5px;color:#c3a55a;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(195,165,90,.2)}
-.CG{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px}
+.ST{font-size:1.1em;font-weight:700;color:#c3a55a;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(195,165,90,.2);letter-spacing:.5px}
+.CG{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:20px}
 .CB{background:linear-gradient(145deg,rgba(15,47,89,.6),rgba(10,22,40,.8));border:1px solid rgba(52,120,195,.2);border-radius:14px;padding:15px;box-shadow:0 4px 20px rgba(0,0,0,.3)}
-.CT{font-size:1em;color:#c3a55a;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2);font-weight:600;letter-spacing:.5px}
+.CT{font-size:1.1em;color:#c3a55a;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2);font-weight:600;letter-spacing:.5px}
 .C{width:100%;height:320px}
-.SG{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
+.SG{display:grid;grid-template-columns:repeat(auto-fit,minmax(370px,1fr));gap:16px}
 .SC{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:18px}
 .Sh{font-size:1em;color:#c3a55a;font-weight:700;letter-spacing:1px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(195,165,90,.2)}
-.SR{display:flex;align-items:center;gap:10px;margin-bottom:8px}.SR label{font-size:.8em;color:#8899aa;min-width:110px}.SR input,.SR select{background:rgba(15,47,89,.8);border:1px solid rgba(52,120,195,.3);border-radius:6px;color:#e0e6ed;padding:8px 12px;font-size:.85em;flex:1}.SR input:focus,.SR select:focus{border-color:#c3a55a;outline:none}
+.SR{display:flex;align-items:center;gap:10px;margin-bottom:8px}.SR label{font-size:0.76em;color:var(--gr);min-width:100px}.SR input,.SR select{background:rgba(15,47,89,.8);border:1px solid rgba(52,120,195,.3);border-radius:6px;color:#e0e6ed;padding:8px 12px;font-size:.85em;flex:1}.SR input:focus,.SR select:focus{border-color:#c3a55a;outline:none}
 .SB{padding:10px;border-radius:6px;font-weight:700;cursor:pointer;border:2px solid rgba(52,120,195,.5);background:rgba(52,120,195,.1);color:#8ab4f8;width:100%;margin-top:4px;transition:.2s}.SB:hover{background:rgba(52,120,195,.25)}
 .SP{padding:7px;border-radius:5px;font-size:.78em;cursor:pointer;border:1px solid rgba(195,165,90,.3);background:rgba(195,165,90,.08);color:#c3a55a;margin-top:6px;width:100%}.SP:hover{background:rgba(195,165,90,.2)}
-.RE{margin-top:12px;padding:12px;background:rgba(46,204,113,.08);border:1px solid rgba(46,204,113,.25);border-radius:10px;font-size:.82em;display:none}
+.RE{margin-top:12px;padding:12px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:10px;font-size:0.8em;display:none}
 .RE .b{font-size:1.6em;font-weight:800;color:#2ecc71}.RE .d{color:#8899aa;margin-top:4px;line-height:1.5}
 .IA{background:rgba(13,27,48,.85);border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:16px;font-size:.85em;color:#aed6f1;line-height:1.7}
-table.TB{width:100%;border-collapse:collapse;font-size:.78em;margin-top:8px}
+table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 .TB th{background:rgba(195,165,90,.1);color:#c3a55a;padding:8px;text-align:left;font-weight:700;border-bottom:1px solid rgba(195,165,90,.2)}
-.TB td{padding:7px 8px;border-bottom:1px solid rgba(52,120,195,.1);color:#8899aa}.TB td:first-child{color:#e0e6ed;font-weight:600}.TB tr:hover td{background:rgba(52,120,195,.04)}
-
+.TB td{padding:6px 8px;border-bottom:1px solid var(--bd);color:var(--gr)}.TB td:first-child{color:var(--w);font-weight:600}.TB tr:hover td{background:rgba(0,212,255,0.03)}
 .F{text-align:center;padding:20px 0;color:#556677;font-size:.82em;border-top:1px solid rgba(195,165,90,.2);margin-top:20px}.F b{color:#c3a55a}
 @media(max-width:768px){.CG,.SG{grid-template-columns:1fr}.H h1{font-size:1.7em}.T{overflow-x:auto}.t{font-size:0.72em;padding:7px 10px}}
 </style></head><body>
 <div class="W" id="content">
 <div class="H">
-<div style="display:inline-block;background:rgba(200,168,75,0.12);border:1px solid rgba(200,168,75,0.18);border-radius:4px;padding:3px 14px;font-family:'Share Tech Mono',monospace;font-size:0.68em;color:var(--gd);letter-spacing:3px;margin-bottom:12px">&#9875; COFRADIA DE NETWORKING</div>
+<div style="display:inline-block;background:rgba(200,168,75,0.12);border:1px solid rgba(200,168,75,0.18);border-radius:4px;padding:3px 14px;font-size:.7em;color:#c3a55a;letter-spacing:2px;margin-bottom:12px">&#9875; COFRADIA DE NETWORKING</div>
 <h1>DASHBOARD <b>ECONOMICO</b> CHILE</h1>
 <p>Indicadores · Simuladores · Calculadora · Conversor · Inflacion · Proyecciones IA</p>
 <div class="v">''' + generado + '''</div>
@@ -16295,8 +16294,8 @@ if(e4&&s.data.length>=2){var pc=((s.data[0]-s.data[s.data.length-1])/s.data[s.da
 if(e5&&s.data.length>=5){var dd=s.data.slice().reverse(),nn=dd.length,sX=0,sY=0,sXY=0,sX2=0;for(var j=0;j<nn;j++){sX+=j;sY+=dd[j];sXY+=j*dd[j];sX2+=j*j}var sl=(nn*sXY-sX*sY)/(nn*sX2-sX*sX),ic2=(sY-sl*sX)/nn,p7=ic2+sl*(nn+7),df=p7-dd[nn-1],pp=dd[nn-1]?((p7-dd[nn-1])/dd[nn-1]*100):0;e5.innerHTML=(df>=0?'<span style="color:var(--gn)">&#9650; ':'<span style="color:var(--rd)">&#9660; ')+fc(Math.abs(pp),2)+'% ('+fc(p7,dc)+')</span>'}}
 })();
 // Gauges
-CH.gd=echarts.init(document.getElementById('cGD'));CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.3,gn],[.7,gd],[1,rd]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cy,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(dol) + ''',name:'USD/CLP'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
-CH.gu=echarts.init(document.getElementById('cGU'));CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.4,gn],[.7,gd],[1,or2]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:9,formatter:function(v){return fc(v/1000,0)+'k'}},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:gd,fontSize:20,fontWeight:'bold',fontFamily:'Rajdhani',offsetCenter:[0,'70%']},data:[{value:''' + str(uf) + ''',name:'UF'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gd=echarts.init(document.getElementById('cGD'));CH.gd.setOption({series:[{type:'gauge',min:700,max:1200,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.3,gn],[.7,gd],[1,rd]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:10},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:cy,fontSize:20,fontWeight:'bold',fontWeight:'bold',offsetCenter:[0,'70%']},data:[{value:''' + str(dol) + ''',name:'USD/CLP'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
+CH.gu=echarts.init(document.getElementById('cGU'));CH.gu.setOption({series:[{type:'gauge',min:30000,max:45000,progress:{show:true,width:18},axisLine:{lineStyle:{width:18,color:[[.4,gn],[.7,gd],[1,or2]]}},axisTick:{show:false},splitLine:{length:8,lineStyle:{color:'auto'}},axisLabel:{color:tx,fontSize:9,formatter:function(v){return fc(v/1000,0)+'k'}},detail:{valueAnimation:true,formatter:function(v){return'$'+fc(v,2)},color:gd,fontSize:20,fontWeight:'bold',fontWeight:'bold',offsetCenter:[0,'70%']},data:[{value:''' + str(uf) + ''',name:'UF'}],title:{color:tx,fontSize:12,offsetCenter:[0,'90%']}}]});
 // Bar macro
 CH.br=echarts.init(document.getElementById('cBr'));CH.br.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'5%',right:'5%',bottom:'15%',top:'5%',containLabel:true},xAxis:{type:'category',data:['IPC','TPM','Desempleo','IMACEC'],axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{type:'bar',data:[{value:''' + str(ipc) + ''',itemStyle:{color:gn}},{value:''' + str(tpm) + ''',itemStyle:{color:or2}},{value:''' + str(des) + ''',itemStyle:{color:rd}},{value:''' + str(ima) + ''',itemStyle:{color:gd}}],label:{show:true,position:'top',color:tx,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}},barWidth:'45%',itemStyle:{borderRadius:[6,6,0,0]}}]});
 // Cripto
