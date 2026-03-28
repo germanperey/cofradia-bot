@@ -2847,6 +2847,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = """📚 COMANDOS DISPONIBLES
 ============================
 
+🚀 INICIO
+/start - Iniciar/registrar en el bot
+/registrarse - Registro manual
+/mi_cuenta - Ver estado de tu cuenta
+/renovar - Renovar suscripción
+/activar [código] - Activar código de acceso
+
 🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
 /buscar_ia [consulta] - Búsqueda con IA
@@ -2854,6 +2861,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /rag_consulta [pregunta] - Buscar en documentos
 /buscar_profesional [área] - Buscar profesionales
 /buscar_apoyo [área] - Buscar en bolsa laboral
+/buscar_especialista_sec [área] - Buscar especialistas SEC
 /empleo [cargo] - Buscar empleos
 
 📇 DIRECTORIO PROFESIONAL
@@ -2869,12 +2877,15 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /consultar titulo | desc - Consulta profesional
 /consultas - Ver consultas abiertas
 /responder [ID] [resp] - Responder consulta
+/ver_consulta [ID] - Ver consulta específica
 /encuesta pregunta | opc1 | opc2 - Crear encuesta
 
 📅 EVENTOS Y CALENDARIO
 /eventos - Ver próximos eventos
 /asistir [ID] - Confirmar asistencia
 /feriados [año] - Feriados legales de Chile 📅
+/agendar [fecha] [hora] [desc] - Agendar reunión
+/mi_agenda - Ver tu agenda personal
 
 🔔 ALERTAS
 /alertas - Ver/gestionar alertas
@@ -2886,6 +2897,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
+/categorias - Categorías de conversación
 
 💰 ASISTENTE FINANCIERO
 /finanzas [consulta] - Asesoría basada en libros (gratis)
@@ -2899,6 +2911,20 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🚨 EMERGENCIA
 /emergencia - Reportar emergencia (4 tipos) 🆘
 
+🤖 AGENTE DE NETWORKING
+/agente - Agente IA de networking
+/match - Match inteligente de conexiones
+
+📋 PRODUCTIVIDAD
+/tarea [desc] - Crear nueva tarea
+/mis_tareas - Ver tus tareas pendientes
+/briefing - Briefing diario personalizado
+
+📋 RESÚMENES
+/resumen - Resumen del día
+/resumen_semanal - Resumen de 7 días
+/resumen_mes - Resumen mensual
+
 💎 SERVICIOS PREMIUM (Coins o pesos)
 /generar_cv [orientación] - CV profesional ($2.500 / 25 coins)
 /entrevista [cargo] - Simulador entrevista ($5.000 / 50 coins)
@@ -2908,10 +2934,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🪙 COFRADÍA COINS
 /mis_coins - Balance y servicios canjeables
 
-📋 RESÚMENES
-/resumen - Resumen del día
-/resumen_semanal - Resumen de 7 días
-/resumen_mes - Resumen mensual
+📄 DOCUMENTOS RAG
+/subir_pdf - Subir PDF a la biblioteca
+/rag_consulta [pregunta] - Consultar biblioteca
+/rag_status - Estado del sistema RAG
 
 🎤 VOZ: Envía audio mencionando "Bot" y te respondo!
 
@@ -2959,8 +2985,28 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /eliminar_pdf [nombre] - Eliminar PDF indexado
 
 💰 PRECIOS Y COINS
+/precios - Ver precios actuales
+/set_precios - Configurar precios
 /set_precio [srv] [pesos] [coins] - Editar precios
 /dar_coins [user_id] [cant] - Regalar coins
+/cobros_admin - Panel de cobros
+/pagos_pendientes - Ver pagos pendientes
+/vencimientos - Suscripciones por vencer
+/vencimientos_mes - Vencimientos del mes
+/ingresos - Reporte de ingresos
+/crecimiento_mes - Crecimiento mensual
+/crecimiento_anual - Crecimiento anual
+/resumen_usuario [ID] - Resumen de un usuario
+
+📋 TOPICS
+/ver_topics - Ver topics del grupo
+/set_topic [nombre] - Crear/configurar topic
+/set_topic_emoji [emoji] - Emoji del topic
+
+📧 RAG Avanzado
+/rag_debug - Debug del sistema RAG
+/rag_enriquecer - Enriquecer keywords RAG
+/subir_pdf - Subir PDF al sistema
 """
         await update.message.reply_text(admin_txt)
 
@@ -5565,7 +5611,7 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if dias >= 99999:
                 mensaje += f"\n⏰ Suscripción: ♾️ Sin límite (Owner)\n"
             else:
-                mensaje += f"\n⏰ Días restantes: {dias}\n"
+                mensaje += f"\n⏰ Suscripción: ✅ Activa\n"
         
         # Cofradía Coins
         mensaje += f"\n🪙 COFRADÍA COINS\n"
@@ -9885,7 +9931,9 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
                 await update.message.reply_document(
                     document=vcf_buffer,
                     filename=vcf_buffer.name,
-                    caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda"
+                    caption="📱 Guardar en contactos — toca para agregar a tu agenda\n"
+                            "🍎 Apple Wallet: Abre .vcf > Contactos > Wallet sugerido\n"
+                            "🤖 Android: Abre .vcf > Google Contacts directo"
                 )
             except Exception as e:
                 logger.debug(f"Error enviando vCard: {e}")
@@ -10019,7 +10067,9 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             await update.message.reply_document(
                                 document=vcf_buffer,
                                 filename=vcf_buffer.name,
-                                caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda"
+                                caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda\n"
+                                        "🍎 Apple Wallet: Abre el .vcf > se agrega a Contactos > aparece en Wallet como contacto sugerido\n"
+                                        "🤖 Android: Abre el .vcf y se guarda directo en Google Contacts"
                             )
                         except Exception as e:
                             logger.debug(f"Error enviando vCard: {e}")
@@ -15073,12 +15123,20 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
 
     def fmt(v, cod):
         if v is None: return "N/D"
-        if cod in PORCENTAJES: return "{:.2f}%".format(v)
-        if cod == "bitcoin":   return "${:,.0f} USD".format(v).replace(",", ".")
-        if cod == "libra_cobre": return "USD {:.4f}".format(v)
-        if cod == "ipsa":      return "{:,.0f} pts".format(v).replace(",", ".")
-        if cod in ("solana", "ethereum"): return "${:,.0f} USD".format(v).replace(",", ".")
-        return "${:,.2f}".format(v).replace(",", "X").replace(".", ",").replace("X", ".")
+        def _fmtcl(val, dec=2):
+            """Formato chileno: 1.234,56"""
+            neg = '-' if val < 0 else ''
+            val = abs(float(val))
+            s = ("{:,." + str(dec) + "f}").format(val) if dec > 0 else "{:,.0f}".format(val)
+            parts = s.split('.')
+            ent = parts[0].replace(',', '.')
+            return neg + ent + (',' + parts[1] if len(parts) > 1 and dec > 0 else '')
+        if cod in PORCENTAJES: return _fmtcl(v, 2) + "%"
+        if cod == "bitcoin":   return "USD " + _fmtcl(v, 0)
+        if cod == "libra_cobre": return "USD " + _fmtcl(v, 2)
+        if cod == "ipsa":      return _fmtcl(v, 0) + " pts"
+        if cod in ("solana", "ethereum"): return "USD " + _fmtcl(v, 0)
+        return "$" + _fmtcl(v, 2)
 
     def variacion_html(serie):
         if len(serie) < 2: return ""
@@ -16209,6 +16267,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <div class="t" onclick="st('afp')">AFP & TASAS</div>
 <div class="t" onclick="st('sim')">SIMULADORES</div>
 <div class="t" onclick="st('calc')">CALCULADORA</div>
+<div class="t" onclick="st('ratios')">RATIOS</div>
 <div class="t" onclick="st('proy')">ANALISIS PROYECTADO</div>
 <div class="t" onclick="st('ia')">ANALISIS IA</div>
 </div>
@@ -16287,6 +16346,23 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <button class="SB" onclick="xConv()">CONVERTIR</button>
 <div class="RE" id="xR"><div class="b" id="xV"></div><div class="d" id="xD"></div></div></div>
 </div></div>
+<!-- RATIOS E INDICES -->
+<div class="P" id="tab-ratios"><div class="S"><div class="ST">RATIOS E INDICES ECONOMICOS</div>
+<div style="color:var(--tx);font-size:0.85em;padding:5px 10px">Calculos derivados de los indicadores actuales — inspirado en <a href="https://meleantonio.github.io/awesome-econ-ai-stuff/" style="color:var(--cy)" target="_blank">Awesome Econ AI</a></div>
+<table class="TB"><tr><th>Ratio / Indice</th><th>Valor</th><th>Interpretacion</th></tr>
+<tr><td style="color:var(--gd)">Tasa Real (TPM - IPC)</td><td id="rTR">-</td><td id="rTRi">-</td></tr>
+<tr><td style="color:var(--cy)">Tipo Cambio Real (TCR)</td><td id="rTCR">-</td><td id="rTCRi">-</td></tr>
+<tr><td style="color:var(--gn)">Poder Adquisitivo $1M en 1 ano</td><td id="rPA">-</td><td id="rPAi">-</td></tr>
+<tr><td style="color:var(--or)">Ratio UF/Dolar</td><td id="rUD">-</td><td id="rUDi">-</td></tr>
+<tr><td style="color:var(--pu)">Meses Sueldo x Depto 2000UF</td><td id="rMS">-</td><td id="rMSi">-</td></tr>
+<tr><td style="color:var(--rd)">Spread Hipotecario (TMC-TPM)</td><td id="rSH">-</td><td id="rSHi">-</td></tr>
+<tr><td style="color:#cd7f32">Cobre/Dolar Ratio</td><td id="rCD">-</td><td id="rCDi">-</td></tr>
+<tr><td style="color:var(--cy)">Bitcoin en UF</td><td id="rBU">-</td><td id="rBUi">-</td></tr>
+</table></div>
+<div class="CG">
+<div class="CB"><div class="CT">RETORNO REAL POR INSTRUMENTO (ANUAL)</div><div class="C" id="cRR"></div></div>
+<div class="CB"><div class="CT">PODER ADQUISITIVO $10M A 10 ANOS</div><div class="C" id="cPA"></div></div>
+</div></div>
 <!-- ANALISIS PROYECTADO -->
 <div class="P" id="tab-proy"><div class="S"><div class="ST">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
 <div class="IA">''' + (proy_safe or 'Ejecute /economia para generar analisis proyectado con IA.') + '''</div></div></div>
@@ -16351,14 +16427,31 @@ CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundCo
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
 // Simuladores
 var UF=''' + str(uf) + ''';
-function sH(){var m=parseFloat(document.getElementById('hM').value)||3000,p=parseFloat(document.getElementById('hP').value)||20,a=parseFloat(document.getElementById('hA').value)||25,t=parseFloat(document.getElementById('hT').value)||4.5,cr=m*(1-p/100),r=t/100/12,n=a*12,dv=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1),tt=dv*n,it=tt-cr,dc=dv*UF;document.getElementById('hV').textContent=fc(dv,2)+' UF/mes';document.getElementById('hD').innerHTML='<b style="color:var(--cy)">$'+fc(Math.round(dc),0)+'</b> CLP/mes<br>Credito: '+fc(cr,0)+' UF · Pie: '+fc(m*p/100,0)+' UF<br>Total: '+fc(tt,0)+' UF en '+n+' cuotas<br>Intereses: '+fc(it,0)+' UF ('+fc(it/cr*100,1)+'%)<br>Ingreso min: $'+fc(Math.round(dc/.25),0);document.getElementById('hR').style.display='block'}
-function sA(){var ap=parseFloat(document.getElementById('aM').value)||100000,a=parseFloat(document.getElementById('aA').value)||20,rt=parseFloat(document.getElementById('aR').value)||5,rg=document.getElementById('aG').value,r=rt/100/12,n=a*12,ft=ap*(Math.pow(1+r,n)-1)/r,tt=ap*n,gn2=ft-tt,bn=rg==='A'?tt*.15:0;document.getElementById('aV').textContent='$'+fc(Math.round(ft),0);document.getElementById('aD').innerHTML='Aporte: $'+fc(Math.round(tt),0)+' ('+n+' meses)<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>'+(rg==='A'?'Bonif. fiscal 15%: <b style="color:var(--cy)">$'+fc(Math.round(bn),0)+'</b><br>Total: $'+fc(Math.round(ft+bn),0):'Reg. B: descuento tributario')+'<br>Rent: '+fc(gn2/tt*100,1)+'%';document.getElementById('aRe').style.display='block'}
-function sI(){var c=parseFloat(document.getElementById('iC').value)||5e6,m=parseFloat(document.getElementById('iM').value)||2e5,a=parseFloat(document.getElementById('iA').value)||10,rt=parseFloat(document.getElementById('iR').value)||8,r=rt/100/12,n=a*12,f1=c*Math.pow(1+r,n),f2=m*(Math.pow(1+r,n)-1)/r,tt=f1+f2,iv=c+m*n,gn2=tt-iv;document.getElementById('iV').textContent='$'+fc(Math.round(tt),0);document.getElementById('iD').innerHTML='Capital: $'+fc(c,0)+' · Aportes: $'+fc(Math.round(m*n),0)+'<br>Invertido: $'+fc(Math.round(iv),0)+'<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>Multiplicador: <b style="color:var(--gd)">'+fc(tt/iv,2)+'x</b>';document.getElementById('iRe').style.display='block'}
+var _lastAmort=null,_lastAPV=null,_lastInv=null;
+function sH(){var m=parseFloat(document.getElementById('hM').value)||3000,p=parseFloat(document.getElementById('hP').value)||20,a=parseFloat(document.getElementById('hA').value)||25,t=parseFloat(document.getElementById('hT').value)||4.5,cr=m*(1-p/100),r=t/100/12,n=a*12,dv=cr*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1),tt=dv*n,it=tt-cr,dc=dv*UF;_lastAmort={cr:cr,r:r,n:n,dv:dv,pie:m*p/100,tt:tt,it:it,tasa:t,plazo:a};document.getElementById('hV').textContent=fc(dv,2)+' UF/mes';document.getElementById('hD').innerHTML='<b style="color:var(--cy)">$'+fc(Math.round(dc),0)+'</b> CLP/mes<br>Credito: '+fc(cr,0)+' UF · Pie: '+fc(m*p/100,0)+' UF<br>Total: '+fc(tt,0)+' UF en '+n+' cuotas<br>Intereses: '+fc(it,0)+' UF ('+fc(it/cr*100,1)+'%)<br>Ingreso min: $'+fc(Math.round(dc/.25),0);document.getElementById('hR').style.display='block'}
+function sA(){var ap=parseFloat(document.getElementById('aM').value)||100000,a=parseFloat(document.getElementById('aA').value)||20,rt=parseFloat(document.getElementById('aR').value)||5,rg=document.getElementById('aG').value,r=rt/100/12,n=a*12,ft=ap*(Math.pow(1+r,n)-1)/r,tt=ap*n,gn2=ft-tt,bn=rg==='A'?tt*.15:0;_lastAPV={ap:ap,a:a,rt:rt,rg:rg,r:r,n:n,ft:ft,tt:tt,gn:gn2,bn:bn};document.getElementById('aV').textContent='$'+fc(Math.round(ft),0);document.getElementById('aD').innerHTML='Aporte: $'+fc(Math.round(tt),0)+' ('+n+' meses)<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>'+(rg==='A'?'Bonif. fiscal 15%: <b style="color:var(--cy)">$'+fc(Math.round(bn),0)+'</b><br>Total: $'+fc(Math.round(ft+bn),0):'Reg. B: descuento tributario')+'<br>Rent: '+fc(gn2/tt*100,1)+'%';document.getElementById('aRe').style.display='block'}
+function sI(){var c=parseFloat(document.getElementById('iC').value)||5e6,m=parseFloat(document.getElementById('iM').value)||2e5,a=parseFloat(document.getElementById('iA').value)||10,rt=parseFloat(document.getElementById('iR').value)||8,r=rt/100/12,n=a*12,f1=c*Math.pow(1+r,n),f2=m*(Math.pow(1+r,n)-1)/r,tt=f1+f2,iv=c+m*n,gn2=tt-iv;_lastInv={c:c,m:m,a:a,rt:rt,r:r,n:n,tt:tt,iv:iv,gn:gn2};document.getElementById('iV').textContent='$'+fc(Math.round(tt),0);document.getElementById('iD').innerHTML='Capital: $'+fc(c,0)+' · Aportes: $'+fc(Math.round(m*n),0)+'<br>Invertido: $'+fc(Math.round(iv),0)+'<br>Ganancia: <b style="color:var(--gn)">$'+fc(Math.round(gn2),0)+'</b><br>Multiplicador: <b style="color:var(--gd)">'+fc(tt/iv,2)+'x</b>';document.getElementById('iRe').style.display='block'}
 function cCalc(){var op=document.getElementById('cO').value,ind=document.getElementById('cI').value,cn=parseFloat(document.getElementById('cN').value)||0,vl=IV[ind]||0,rs=0;if(op==='mul')rs=vl*cn;else if(op==='div')rs=cn?vl/cn:0;else if(op==='add')rs=vl+cn;else rs=vl-cn;document.getElementById('cV').textContent='$'+fc(rs,2);document.getElementById('cD').innerHTML=ind+': $'+fc(vl,2)+' · Resultado: $'+fc(rs,2);document.getElementById('cR').style.display='block'}
 function xConv(){var f=document.getElementById('xF').value,t=document.getElementById('xT').value,cn=parseFloat(document.getElementById('xN').value)||0,vf=IV[f]||0,vt=IV[t]||0;if(!vt){document.getElementById('xV').textContent='Error';document.getElementById('xR').style.display='block';return}var clp=vf*cn,rs=clp/vt;document.getElementById('xV').textContent=fc(rs,4)+' '+t;document.getElementById('xD').innerHTML=fc(cn,2)+' '+f+' = $'+fc(clp,2)+' CLP = <b style="color:var(--gd)">'+fc(rs,4)+' '+t+'</b>';document.getElementById('xR').style.display='block'}
-async function pS(id){var el=document.getElementById(id);if(!el)return;try{var cv=await html2canvas(el,{scale:2,backgroundColor:'#0a1628',useCORS:true});var pdf=new window.jspdf.jsPDF('p','mm','a4');var w=190,h=cv.height*w/cv.width;pdf.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',10,10,w,h);if(id==='sH'&&_lastAmort){var am=_lastAmort,saldo=am.cr,y=h+20,pg=1;pdf.setFontSize(12);pdf.setTextColor(195,165,90);pdf.text('TABLA DE AMORTIZACION',10,y);y+=8;pdf.setFontSize(8);pdf.setTextColor(180,180,180);pdf.text('Cuota',12,y);pdf.text('Dividendo UF',35,y);pdf.text('Interes UF',70,y);pdf.text('Capital UF',105,y);pdf.text('Saldo UF',140,y);y+=5;for(var q=1;q<=am.n;q++){var intQ=saldo*am.r;var capQ=am.dv-intQ;saldo=Math.max(0,saldo-capQ);if(y>280){pdf.addPage();y=15;pg++}pdf.setTextColor(220,220,220);pdf.text(String(q),12,y);pdf.text(fc(am.dv,2),35,y);pdf.text(fc(intQ,2),70,y);pdf.text(fc(capQ,2),105,y);pdf.text(fc(saldo,2),140,y);y+=4}}pdf.save('Simulacion_Cofradia.pdf')}catch(e){alert('Error PDF')}}
+async function pS(id){var el=document.getElementById(id);if(!el)return;try{var cv=await html2canvas(el,{scale:2,backgroundColor:'#0a1628',useCORS:true});var pdf=new window.jspdf.jsPDF('p','mm','a4');var w=190,h=cv.height*w/cv.width;pdf.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',10,10,w,h);var y=h+20;function hdr(pdf,txt,y){if(y>275){pdf.addPage();y=15}pdf.setFontSize(12);pdf.setTextColor(195,165,90);pdf.text(txt,10,y);return y+8}function thdr(pdf,cols,y){if(y>275){pdf.addPage();y=15}pdf.setFontSize(8);pdf.setTextColor(180,180,180);for(var i=0;i<cols.length;i++)pdf.text(cols[i][0],cols[i][1],y);return y+5}function trow(pdf,vals,xs,y){if(y>280){pdf.addPage();y=15}pdf.setFontSize(7);pdf.setTextColor(220,220,220);for(var i=0;i<vals.length;i++)pdf.text(String(vals[i]),xs[i],y);return y+4}if(id==='sH'&&_lastAmort){var am=_lastAmort,saldo=am.cr;y=hdr(pdf,'TABLA DE AMORTIZACION — CREDITO HIPOTECARIO',y);y=hdr(pdf,'Credito: '+fc(am.cr,0)+' UF | Tasa: '+fc(am.tasa,2)+'% | Plazo: '+am.plazo+' anos | Dividendo: '+fc(am.dv,2)+' UF',y);var cols=[['Cuota',12],['Dividendo UF',35],['Interes UF',65],['Capital UF',95],['Saldo UF',125],['CLP Cuota',155]];y=thdr(pdf,cols,y);for(var q=1;q<=am.n;q++){var intQ=saldo*am.r,capQ=am.dv-intQ;saldo=Math.max(0,saldo-capQ);y=trow(pdf,[q,fc(am.dv,2),fc(intQ,2),fc(capQ,2),fc(saldo,2),'$'+fc(Math.round(am.dv*UF),0)],[12,35,65,95,125,155],y)}}if(id==='sA'&&_lastAPV){var ap=_lastAPV,bal=0;y=hdr(pdf,'TABLA DE CRECIMIENTO — APV',y);y=hdr(pdf,'Aporte: $'+fc(ap.ap,0)+'/mes | Rent: '+fc(ap.rt,2)+'% anual | Regimen: '+ap.rg,y);var cols2=[['Ano',12],['Aporte Acum',35],['Saldo',65],['Ganancia',95],['Rent %',125],['Bonif A',155]];y=thdr(pdf,cols2,y);for(var yr=1;yr<=ap.a;yr++){var nm=yr*12;bal=ap.ap*(Math.pow(1+ap.r,nm)-1)/ap.r;var acum=ap.ap*nm,gn=bal-acum,bnf=ap.rg==='A'?acum*0.15:0;y=trow(pdf,[yr,'$'+fc(acum,0),'$'+fc(Math.round(bal),0),'$'+fc(Math.round(gn),0),fc(gn/acum*100,1)+'%','$'+fc(Math.round(bnf),0)],[12,35,65,95,125,155],y)}}if(id==='sI'&&_lastInv){var iv=_lastInv,bal2=iv.c;y=hdr(pdf,'TABLA DE CRECIMIENTO — INVERSION PROYECTADA',y);y=hdr(pdf,'Capital: $'+fc(iv.c,0)+' | Aporte: $'+fc(iv.m,0)+'/mes | Rent: '+fc(iv.rt,2)+'%',y);var cols3=[['Ano',12],['Invertido',35],['Saldo',65],['Ganancia',95],['Multiplicador',130]];y=thdr(pdf,cols3,y);for(var yr2=1;yr2<=iv.a;yr2++){var nm2=yr2*12;var f1=iv.c*Math.pow(1+iv.r,nm2),f2=iv.m*(Math.pow(1+iv.r,nm2)-1)/iv.r,tot=f1+f2,inv=iv.c+iv.m*nm2;y=trow(pdf,[yr2,'$'+fc(Math.round(inv),0),'$'+fc(Math.round(tot),0),'$'+fc(Math.round(tot-inv),0),fc(tot/inv,2)+'x'],[12,35,65,95,130],y)}}pdf.save('Simulacion_Cofradia.pdf')}catch(e){alert('Error PDF: '+e.message)}}
 async function xPDF(){var btn=document.getElementById('btnP');btn.disabled=true;btn.textContent='Generando...';var tabs=document.querySelectorAll('.P'),tn=document.querySelector('.T'),ac2=document.querySelector('.A'),og=[];tabs.forEach(function(t,i){og.push(t.style.display);t.style.display='block'});tn.style.display='none';ac2.style.display='none';for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();await new Promise(function(r){setTimeout(r,1000)});try{var ct=document.getElementById('content');var cv=await html2canvas(ct,{scale:1.3,backgroundColor:'#0a1628',useCORS:true,logging:false,windowWidth:Math.max(ct.scrollWidth,1200),windowHeight:ct.scrollHeight});var pdf=new window.jspdf.jsPDF('p','mm','a4');var iW=210,pH=297,iH=cv.height*iW/cv.width,left=iH,pos=0;pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH;while(left>0){pos=-(iH-left);pdf.addPage();pdf.addImage(cv.toDataURL('image/jpeg',.92),'JPEG',0,pos,iW,iH);left-=pH}pdf.save('Dashboard_Economia_Chile.pdf');btn.textContent='Descargado!'}catch(e){btn.textContent='Error'}finally{tabs.forEach(function(t,i){t.style.display=og[i]||''});tn.style.display='';ac2.style.display='';document.querySelector('.P.a')||tabs[0].classList.add('a');for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize();setTimeout(function(){btn.textContent='DESCARGAR PDF';btn.disabled=false},3000)}}
 
+// Ratios e Indices calculados
+(function(){
+var tpm=IV.tpm||5,ipc=IV.ipc||0,dol=IV.dolar||950,eur=IV.euro||1050,uf2=IV.uf||38000,btc2=IV.bitcoin||60000,cob2=IV.libra_cobre||4;
+var tReal=tpm-ipc;document.getElementById('rTR').innerHTML='<b>'+fc(tReal,2)+'%</b>';document.getElementById('rTRi').textContent=tReal>2?'Politica restrictiva':tReal>0?'Levemente restrictiva':'Politica expansiva';
+var tcr=dol/eur*100;document.getElementById('rTCR').innerHTML=fc(tcr,2);document.getElementById('rTCRi').textContent=tcr>90?'Peso relativamente fuerte vs EUR':'Peso debil vs EUR';
+var pa=1000000*(1-ipc/100);document.getElementById('rPA').innerHTML='$'+fc(Math.round(pa),0);document.getElementById('rPAi').textContent='Pierde $'+fc(Math.round(1000000-pa),0)+' por inflacion';
+var rud=uf2/dol;document.getElementById('rUD').innerHTML=fc(rud,2)+' USD';document.getElementById('rUDi').textContent='1 UF = '+fc(rud,2)+' dolares';
+var sueldo=800000;var depto=2000*uf2;var meses=depto/sueldo;document.getElementById('rMS').innerHTML=fc(meses,0)+' meses';document.getElementById('rMSi').textContent=fc(meses/12,1)+' anos con sueldo mediano $800k';
+var tmcH=5.5;document.getElementById('rSH').innerHTML=fc(tmcH-tpm,2)+'%';document.getElementById('rSHi').textContent='Spread entre hipotecario y TPM';
+var rcd=cob2/dol*1000;document.getElementById('rCD').innerHTML=fc(rcd,2);document.getElementById('rCDi').textContent='Cobre(lb) x 1000 / Dolar';
+var btu=btc2*dol/uf2;document.getElementById('rBU').innerHTML=fc(btu,0)+' UF';document.getElementById('rBUi').textContent='1 BTC en UF';
+// Chart retorno real
+CH.rr=echarts.init(document.getElementById('cRR'));CH.rr.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'5%',right:'5%',bottom:'15%',top:'10%',containLabel:true},xAxis:{type:'category',data:['Deposito','APV B','Fondo A','UF','Dolar','BTC','Cobre'],axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{type:'bar',data:[{value:tpm-ipc,itemStyle:{color:gn}},{value:5-ipc,itemStyle:{color:cy}},{value:8-ipc,itemStyle:{color:bl}},{value:0,itemStyle:{color:gd}},{value:-ipc,itemStyle:{color:or2}},{value:50-ipc,itemStyle:{color:'#f7931a'}},{value:10-ipc,itemStyle:{color:'#cd7f32'}}],label:{show:true,position:'top',color:tx,fontSize:9,formatter:function(p){return fc(p.value,1)+'%'}},barWidth:'40%',itemStyle:{borderRadius:[6,6,0,0]}}]});
+// Chart poder adquisitivo
+CH.pa=echarts.init(document.getElementById('cPA'));(function(){var yrs=[],sin=[],dep=[],apv=[];for(var i=0;i<=10;i++){yrs.push('Ano '+i);sin.push(Math.round(10000000*Math.pow(1-ipc/100,i)));dep.push(Math.round(10000000*Math.pow(1+(tpm-ipc)/100,i)));apv.push(Math.round(10000000*Math.pow(1+(5-ipc)/100,i)))}CH.pa.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Sin invertir','Deposito','APV'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:yrs,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v/1000000,1)+'M'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Sin invertir',type:'line',data:sin,lineStyle:{color:rd,width:2,type:'dashed'},itemStyle:{color:rd}},{name:'Deposito',type:'line',data:dep,lineStyle:{color:gn,width:2},itemStyle:{color:gn},areaStyle:{color:'rgba(46,204,113,0.1)'}},{name:'APV',type:'line',data:apv,lineStyle:{color:cy,width:2},itemStyle:{color:cy},areaStyle:{color:'rgba(138,180,248,0.1)'}}]})})();
+})();
 var DEFS={
 uf:{n:'Unidad de Fomento (UF)',d:'Unidad de cuenta reajustable segun IPC. Se usa para creditos hipotecarios, arriendos y contratos. Refleja la inflacion mensual.',o:'Variacion < 0,3% mensual',no:'0,3% - 0,6%',ne:'> 0,6% mensual'},
 dolar:{n:'Dolar Observado (USD/CLP)',d:'Tipo de cambio del dolar estadounidense respecto al peso chileno. Publicado por el Banco Central. Afecta importaciones, deuda externa y combustibles.',o:'< $850 (peso fuerte)',no:'$850 - $950',ne:'> $950 (peso debil)'},
@@ -17329,6 +17422,47 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
             "Copia el número y llama desde tu teléfono."
         )
 
+def _generar_sirena_ogg() -> BytesIO:
+    """Genera un tono de sirena corto como archivo OGG/WAV para nota de voz"""
+    import struct, wave as _wave, math as _math
+    buf = BytesIO()
+    sample_rate = 24000
+    duration = 3  # 3 segundos
+    n_samples = sample_rate * duration
+    w = _wave.open(buf, 'wb')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(sample_rate)
+    frames = []
+    for i in range(n_samples):
+        t = i / sample_rate
+        # Sirena que oscila entre 800Hz y 1400Hz
+        freq = 800 + 600 * _math.sin(2 * _math.pi * 2 * t)  # oscila 2 veces/seg
+        val = int(28000 * _math.sin(2 * _math.pi * freq * t))
+        frames.append(struct.pack('<h', max(-32768, min(32767, val))))
+    w.writeframes(b''.join(frames))
+    w.close()
+    buf.seek(0)
+    # Convertir a OGG si ffmpeg disponible, sino enviar WAV
+    try:
+        import subprocess
+        ogg_buf = BytesIO()
+        proc = subprocess.run(
+            ['ffmpeg', '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', 'pipe:1'],
+            input=buf.read(), capture_output=True, timeout=10
+        )
+        if proc.returncode == 0 and len(proc.stdout) > 100:
+            ogg_buf.write(proc.stdout)
+            ogg_buf.seek(0)
+            ogg_buf.name = "sirena_emergencia.ogg"
+            return ogg_buf
+    except Exception:
+        pass
+    buf.seek(0)
+    buf.name = "sirena_emergencia.wav"
+    return buf
+
+
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía alerta a grupo + topics + mensaje privado a CADA miembro + owner"""
     user = update.effective_user
@@ -17420,6 +17554,14 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     ])
     tel_kb = InlineKeyboardMarkup(botones)
 
+    # 0. Generar sirena de emergencia (nota de voz push-up automático)
+    sirena_buf = None
+    try:
+        sirena_buf = _generar_sirena_ogg()
+        logger.info("🔊 Sirena de emergencia generada")
+    except Exception as _es:
+        logger.warning(f"No se pudo generar sirena: {_es}")
+
     # 1. Enviar al grupo principal + topics
     enviados = 0
     if COFRADIA_GROUP_ID:
@@ -17429,6 +17571,18 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
             enviados += 1
         except Exception as _eg:
             logger.warning(f"Emergencia grupo: {_eg}")
+        # Enviar sirena al grupo (push-up automático)
+        if sirena_buf:
+            try:
+                sirena_buf.seek(0)
+                await context.bot.send_voice(
+                    chat_id=COFRADIA_GROUP_ID,
+                    voice=sirena_buf,
+                    caption="🚨🔊 SIRENA DE EMERGENCIA — " + tipo,
+                    duration=3
+                )
+            except Exception as _sv:
+                logger.debug(f"Sirena grupo: {_sv}")
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -17475,6 +17629,15 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                             chat_id=mid,
                             text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
                             reply_markup=tel_kb)
+                        # Enviar sirena por privado (push-up automático)
+                        if sirena_buf:
+                            try:
+                                sirena_buf.seek(0)
+                                await context.bot.send_voice(
+                                    chat_id=mid, voice=sirena_buf,
+                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=3)
+                            except Exception:
+                                pass
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
@@ -18398,6 +18561,490 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("📧 Newsletter email programado: lunes 10:15 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter email: {e}")
+        
+        # ══════════════════════════════════════════════════════════════
+        # ═══  SISTEMA DE AGENTES AUTOMÁTICOS — COFRADÍA PREMIUM  ═══
+        # ══════════════════════════════════════════════════════════════
+        
+        # --- AGENTE: /resumen diario a las 20:00 Chile ---
+        async def agente_resumen_diario(context: ContextTypes.DEFAULT_TYPE):
+            """Publica /resumen automáticamente a las 20:00 Chile"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                # Construir resumen del día
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                hoy = _ahora_chile().strftime('%Y-%m-%d')
+                if DATABASE_URL:
+                    c.execute("SELECT COUNT(*) as total FROM mensajes WHERE fecha::date = %s::date", (hoy,))
+                    total_hoy = c.fetchone()['total']
+                    c.execute("SELECT COUNT(DISTINCT user_id) as usuarios FROM mensajes WHERE fecha::date = %s::date", (hoy,))
+                    usuarios_hoy = c.fetchone()['usuarios']
+                    c.execute("""SELECT categoria, COUNT(*) as total FROM mensajes 
+                                WHERE fecha::date = %s::date AND categoria IS NOT NULL 
+                                GROUP BY categoria ORDER BY total DESC LIMIT 5""", (hoy,))
+                    cats = [(r['categoria'], r['total']) for r in c.fetchall()]
+                else:
+                    c.execute("SELECT COUNT(*) FROM mensajes WHERE date(fecha) = ?", (hoy,))
+                    total_hoy = c.fetchone()[0]
+                    c.execute("SELECT COUNT(DISTINCT user_id) FROM mensajes WHERE date(fecha) = ?", (hoy,))
+                    usuarios_hoy = c.fetchone()[0]
+                    cats = []
+                conn.close()
+                
+                texto = f"📊 RESUMEN DEL DÍA — {_ahora_chile().strftime('%d/%m/%Y')}\n"
+                texto += "━" * 30 + "\n\n"
+                texto += f"💬 {total_hoy} mensajes\n"
+                texto += f"👥 {usuarios_hoy} cofrades activos\n"
+                if cats:
+                    texto += "\n📌 Temas del día:\n"
+                    for cat, cnt in cats:
+                        texto += f"  • {cat}: {cnt}\n"
+                texto += f"\n⚓ Cofradía de Networking — Resumen automático"
+                
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=texto)
+                logger.info("📊 Resumen diario automático publicado")
+            except Exception as e:
+                logger.debug(f"Error agente resumen diario: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_resumen_diario,
+                    time=dt_time(hour=20, minute=0, second=0, tzinfo=chile_tz),
+                    name='agente_resumen_diario')
+            else:
+                job_queue.run_daily(agente_resumen_diario,
+                    time=dt_time(hour=0, minute=0, second=0),
+                    name='agente_resumen_diario')
+            logger.info("🤖 Agente: /resumen diario programado 20:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente resumen diario: {e}")
+        
+        # --- AGENTE: /resumen_semanal cada domingo 20:00 ---
+        async def agente_resumen_semanal(context: ContextTypes.DEFAULT_TYPE):
+            """Publica resumen semanal cada domingo"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("""SELECT COUNT(*) as total FROM mensajes 
+                                WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+                    total = c.fetchone()['total']
+                    c.execute("""SELECT COUNT(DISTINCT user_id) as u FROM mensajes 
+                                WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'""")
+                    usuarios = c.fetchone()['u']
+                    c.execute("""SELECT u.nombre_display, COUNT(*) as cnt 
+                                FROM mensajes m LEFT JOIN suscripciones u ON m.user_id = u.user_id
+                                WHERE m.fecha >= CURRENT_DATE - INTERVAL '7 days'
+                                GROUP BY u.nombre_display ORDER BY cnt DESC LIMIT 5""")
+                    top_users = c.fetchall()
+                else:
+                    c.execute("SELECT COUNT(*) FROM mensajes WHERE fecha >= date('now','-7 days')")
+                    total = c.fetchone()[0]
+                    usuarios = 0
+                    top_users = []
+                conn.close()
+                
+                texto = f"📈 RESUMEN SEMANAL\n"
+                texto += "━" * 30 + "\n"
+                texto += f"Semana del {(_ahora_chile() - timedelta(days=7)).strftime('%d/%m')} al {_ahora_chile().strftime('%d/%m/%Y')}\n\n"
+                texto += f"💬 {total} mensajes totales\n"
+                texto += f"👥 {usuarios} cofrades participaron\n"
+                if top_users:
+                    texto += "\n🏆 Top participantes:\n"
+                    medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
+                    for i, u in enumerate(top_users):
+                        nom = u['nombre_display'] if DATABASE_URL else 'Cofrade'
+                        cnt = u['cnt'] if DATABASE_URL else 0
+                        texto += f"  {medallas[i]} {nom}: {cnt} msgs\n"
+                texto += f"\n⚓ Cofradía de Networking"
+                
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=texto)
+                logger.info("📈 Resumen semanal automático publicado")
+            except Exception as e:
+                logger.debug(f"Error agente resumen semanal: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_resumen_semanal,
+                    time=dt_time(hour=20, minute=30, second=0, tzinfo=chile_tz),
+                    days=(6,),  # Domingo
+                    name='agente_resumen_semanal')
+            else:
+                job_queue.run_daily(agente_resumen_semanal,
+                    time=dt_time(hour=0, minute=30, second=0),
+                    days=(6,),
+                    name='agente_resumen_semanal')
+            logger.info("🤖 Agente: resumen semanal programado domingos 20:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente resumen semanal: {e}")
+        
+        # --- AGENTE: Cumpleaños de la semana cada domingo ---
+        async def agente_cumpleanos_semana(context: ContextTypes.DEFAULT_TYPE):
+            """Publica próximos cumpleaños de la semana cada domingo"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                hoy = _ahora_chile()
+                cumples = []
+                if DATABASE_URL:
+                    for dia_offset in range(1, 8):
+                        fecha = hoy + timedelta(days=dia_offset)
+                        mm = fecha.month
+                        dd = fecha.day
+                        c.execute("""SELECT nombre_display FROM suscripciones 
+                                    WHERE EXTRACT(MONTH FROM fecha_nacimiento) = %s 
+                                    AND EXTRACT(DAY FROM fecha_nacimiento) = %s 
+                                    AND estado = 'activo'""", (mm, dd))
+                        for r in c.fetchall():
+                            cumples.append((fecha.strftime('%A %d/%m'), r['nombre_display']))
+                conn.close()
+                
+                if cumples:
+                    texto = "🎂 CUMPLEAÑOS DE LA SEMANA\n"
+                    texto += "━" * 30 + "\n\n"
+                    for fecha_str, nombre in cumples:
+                        texto += f"🎉 {fecha_str}: {nombre}\n"
+                    texto += f"\n🎊 Prepara tus saludos, cofrade!\n⚓ Cofradía de Networking"
+                    await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=texto)
+                    logger.info(f"🎂 Cumpleaños semana publicado: {len(cumples)} próximos")
+            except Exception as e:
+                logger.debug(f"Error agente cumpleaños semana: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_cumpleanos_semana,
+                    time=dt_time(hour=10, minute=0, second=0, tzinfo=chile_tz),
+                    days=(6,),
+                    name='agente_cumpleanos_semana')
+            else:
+                job_queue.run_daily(agente_cumpleanos_semana,
+                    time=dt_time(hour=14, minute=0, second=0),
+                    days=(6,),
+                    name='agente_cumpleanos_semana')
+            logger.info("🤖 Agente: cumpleaños semana programado domingos 10:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente cumpleaños semana: {e}")
+        
+        # --- AGENTE: /cumpleanos_mes último día de cada mes ---
+        async def agente_cumpleanos_mes(context: ContextTypes.DEFAULT_TYPE):
+            """Publica cumpleaños del mes siguiente el último día del mes"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                hoy = _ahora_chile()
+                # Verificar que es último día del mes
+                manana = hoy + timedelta(days=1)
+                if manana.month == hoy.month:
+                    return  # No es último día
+                
+                mes_sig = manana.month
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                cumples = []
+                if DATABASE_URL:
+                    c.execute("""SELECT nombre_display, EXTRACT(DAY FROM fecha_nacimiento) as dia 
+                                FROM suscripciones 
+                                WHERE EXTRACT(MONTH FROM fecha_nacimiento) = %s 
+                                AND estado = 'activo'
+                                ORDER BY EXTRACT(DAY FROM fecha_nacimiento)""", (mes_sig,))
+                    cumples = c.fetchall()
+                conn.close()
+                
+                meses = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio',
+                         'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
+                texto = f"🎂 CUMPLEAÑOS DE {meses[mes_sig].upper()}\n"
+                texto += "━" * 30 + "\n\n"
+                if cumples:
+                    for r in cumples:
+                        nom = r['nombre_display'] if DATABASE_URL else 'Cofrade'
+                        dia = int(r['dia']) if DATABASE_URL else 0
+                        texto += f"🎉 {dia}/{mes_sig}: {nom}\n"
+                    texto += f"\n🎊 {len(cumples)} cumpleaños en {meses[mes_sig]}!"
+                else:
+                    texto += "Sin cumpleaños registrados este mes.\n💡 Actualiza tu fecha: /mi_tarjeta"
+                texto += f"\n⚓ Cofradía de Networking"
+                
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=texto)
+                logger.info(f"🎂 Cumpleaños mes {meses[mes_sig]} publicado")
+            except Exception as e:
+                logger.debug(f"Error agente cumpleaños mes: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_cumpleanos_mes,
+                    time=dt_time(hour=9, minute=0, second=0, tzinfo=chile_tz),
+                    name='agente_cumpleanos_mes')
+            else:
+                job_queue.run_daily(agente_cumpleanos_mes,
+                    time=dt_time(hour=13, minute=0, second=0),
+                    name='agente_cumpleanos_mes')
+            logger.info("🤖 Agente: cumpleaños mes programado diario (actúa sólo último día)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente cumpleaños mes: {e}")
+        
+        # --- AGENTE: /graficos, /indicadores, /economia a las 8:00 AM ---
+        async def agente_indicadores_matinal(context: ContextTypes.DEFAULT_TYPE):
+            """Publica indicadores económicos + links a las 8 AM"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                lineas = ["📈 BUENOS DÍAS COFRADES — INDICADORES 8:00 AM", "━" * 30, ""]
+                
+                # Fetch rápido de indicadores principales
+                def _fetch_ind():
+                    try:
+                        r = requests.get('https://mindicador.cl/api', timeout=10)
+                        if r.status_code == 200:
+                            return r.json()
+                    except:
+                        pass
+                    return None
+                
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    fut = ex.submit(_safe_call, _fetch_ind)
+                    data = fut.result()
+                
+                if data:
+                    def _fci(v, dec=2):
+                        if v is None: return 'N/D'
+                        neg = '-' if v < 0 else ''
+                        v = abs(float(v))
+                        s = ("{:,." + str(dec) + "f}").format(v) if dec > 0 else "{:,.0f}".format(v)
+                        p = s.split('.')
+                        e = p[0].replace(',', '.')
+                        return neg + e + (',' + p[1] if len(p) > 1 and dec > 0 else '')
+                    
+                    inds = [
+                        ('🟡', 'UF', 'uf', '$', 2), ('💵', 'Dólar', 'dolar', '$', 2),
+                        ('💶', 'Euro', 'euro', '$', 2), ('🟠', 'UTM', 'utm', '$', 0),
+                        ('₿', 'Bitcoin', 'bitcoin', 'USD ', 0), ('🔶', 'Cobre', 'libra_cobre', 'USD ', 2),
+                    ]
+                    for ico, nom, cod, pref, dec in inds:
+                        d = data.get(cod, {})
+                        v = d.get('valor')
+                        if v:
+                            lineas.append(f"{ico} {nom}: {pref}{_fci(v, dec)}")
+                
+                lineas += ["", "📊 Dashboard completo: /economia", "📈 Todos los indicadores: /indicadores",
+                          "📉 Gráficos: /graficos", "", "⚓ Cofradía de Networking — Agente Matinal"]
+                
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text="\n".join(lineas))
+                logger.info("🌅 Indicadores matinales publicados")
+            except Exception as e:
+                logger.debug(f"Error agente indicadores matinal: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_indicadores_matinal,
+                    time=dt_time(hour=8, minute=0, second=0, tzinfo=chile_tz),
+                    name='agente_indicadores_matinal')
+            else:
+                job_queue.run_daily(agente_indicadores_matinal,
+                    time=dt_time(hour=12, minute=0, second=0),
+                    name='agente_indicadores_matinal')
+            logger.info("🤖 Agente: indicadores matinales programado 8:00 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente indicadores matinal: {e}")
+        
+        # --- AGENTE: Mensajes motivacionales aleatorios durante el día ---
+        async def agente_mensajes_participacion(context: ContextTypes.DEFAULT_TYPE):
+            """Envía mensajes aleatorios para incentivar participación"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                import random
+                hora_actual = _ahora_chile().hour
+                # Solo enviar entre 9:00 y 21:00
+                if hora_actual < 9 or hora_actual > 21:
+                    return
+                
+                mensajes_pool = [
+                    # Invitar a sumar marinos
+                    "⚓ ¿Conoces cofrades que aún no están en el grupo?\n\n"
+                    "🎯 Invítalos con el link: " + COFRADIA_INVITE_LINK + "\n"
+                    "💪 Mientras más seamos, más fuerte nuestra red!",
+                    
+                    # Recordar comandos útiles
+                    "💡 ¿Sabías que puedes usar estos comandos?\n\n"
+                    "📈 /indicadores — Indicadores económicos en tiempo real\n"
+                    "🏦 /economia — Dashboard completo con simuladores\n"
+                    "💼 /empleo [cargo] — Buscar ofertas laborales\n"
+                    "📇 /mi_tarjeta — Tu tarjeta profesional digital\n"
+                    "🔍 /buscar_ia [tema] — Búsqueda inteligente con IA\n\n"
+                    "⚓ Explora y aprovecha tu Cofradía!",
+                    
+                    # Cómo crear tu tarjeta
+                    "📇 ¿Ya creaste tu TARJETA PROFESIONAL?\n\n"
+                    "Es fácil, paso a paso:\n"
+                    "1️⃣ /mi_tarjeta profesion [tu profesión]\n"
+                    "2️⃣ /mi_tarjeta empresa [tu empresa]\n"
+                    "3️⃣ /mi_tarjeta servicios [qué ofreces]\n"
+                    "4️⃣ /mi_tarjeta telefono [+56...]\n"
+                    "5️⃣ /mi_tarjeta email [tu@correo.com]\n\n"
+                    "📥 Recibirás tu tarjeta como imagen + contacto descargable!\n"
+                    "⚓ Cofradía de Networking",
+                    
+                    # Cómo descargar reportes HTML
+                    "📊 ¿Sabías que puedes DESCARGAR reportes interactivos?\n\n"
+                    "📈 /indicadores → Dashboard HTML con gráficos ECharts\n"
+                    "🏦 /economia → Simuladores + Análisis IA completo\n"
+                    "📉 /graficos → Gráficos de actividad PNG\n"
+                    "👤 /mi_dashboard → Tu dashboard personalizado\n\n"
+                    "📱 Ábrelos en tu navegador para verlos completos!\n"
+                    "⚓ Cofradía de Networking",
+                    
+                    # Finanzas personales
+                    "💰 HERRAMIENTAS FINANCIERAS GRATUITAS\n\n"
+                    "🏦 /economia → Simulador Hipotecario, APV e Inversiones\n"
+                    "📊 /indicadores → UF, Dólar, Euro, Bitcoin al día\n"
+                    "💼 /finanzas [pregunta] → Asesoría financiera IA\n"
+                    "🧮 /calculadora → Suite económica completa\n\n"
+                    "Todo sin costo para cofrades activos! 💪",
+                    
+                    # Networking
+                    "🤝 POTENCIA TU NETWORKING\n\n"
+                    "🤖 /agente → Agente IA que te conecta\n"
+                    "🎯 /match → Match inteligente con cofrades\n"
+                    "📇 /directorio → Busca profesionales por área\n"
+                    "⭐ /recomendar @user — Recomienda a un cofrade\n\n"
+                    "La red de contactos más valiosa es la que usas!\n"
+                    "⚓ Cofradía de Networking",
+                    
+                    # Emergencias
+                    "🚨 ¿Sabías que tenemos SISTEMA DE EMERGENCIAS?\n\n"
+                    "/emergencia activa alertas a TODOS los cofrades:\n"
+                    "🚗 Choque vehicular\n"
+                    "🔫 Asalto\n"
+                    "🔥 Incendio\n"
+                    "🚑 Accidente\n\n"
+                    "📍 Con GPS, mapa y números de emergencia.\n"
+                    "🔊 Incluye sirena automática por nota de voz!\n"
+                    "⚓ Tu red de apoyo 24/7",
+                    
+                    # Empleo
+                    "💼 ¿BUSCAS OPORTUNIDADES LABORALES?\n\n"
+                    "/empleo gerente logística\n"
+                    "/empleo ingeniero civil\n"
+                    "/empleo analista financiero\n\n"
+                    "🔍 Busca ofertas reales actualizadas!\n"
+                    "📄 /generar_cv — Genera tu CV con IA\n"
+                    "🎯 /entrevista [cargo] — Simula una entrevista\n"
+                    "⚓ Cofradía de Networking",
+                    
+                    # Biblioteca RAG
+                    "📚 BIBLIOTECA INTELIGENTE\n\n"
+                    "Tenemos +100 libros indexados con IA:\n"
+                    "/rag_consulta ¿qué dice Kiyosaki sobre inversión?\n"
+                    "/rag_consulta estrategias de liderazgo naval\n"
+                    "/rag_consulta finanzas personales para principiantes\n\n"
+                    "📖 Pregunta lo que quieras y la IA busca en toda la biblioteca!\n"
+                    "⚓ Cofradía de Networking",
+                ]
+                
+                # Seleccionar mensaje aleatorio (evitar repetir: usar day como seed parcial)
+                dia = _ahora_chile().day
+                idx = random.randint(0, len(mensajes_pool) - 1)
+                # Variar con hora para no repetir en el mismo día
+                idx = (idx + hora_actual) % len(mensajes_pool)
+                
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensajes_pool[idx])
+                logger.info(f"🤖 Mensaje participación #{idx} enviado")
+            except Exception as e:
+                logger.debug(f"Error agente mensajes participación: {e}")
+        
+        try:
+            # Enviar mensajes 3 veces al día: 10:30, 14:30, 18:30 Chile
+            for h, m, nm in [(10, 30, 'msg_part_1'), (14, 30, 'msg_part_2'), (18, 30, 'msg_part_3')]:
+                if chile_tz:
+                    job_queue.run_daily(agente_mensajes_participacion,
+                        time=dt_time(hour=h, minute=m, second=0, tzinfo=chile_tz),
+                        name=nm)
+                else:
+                    utc_h = (h + 4) % 24  # Chile ~ UTC-4
+                    job_queue.run_daily(agente_mensajes_participacion,
+                        time=dt_time(hour=utc_h, minute=m, second=0),
+                        name=nm)
+            logger.info("🤖 Agente: mensajes participación programados (10:30, 14:30, 18:30 Chile)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente mensajes participación: {e}")
+        
+        # --- AGENTE: Saludo proactivo a usuarios activos ---
+        async def agente_saludo_proactivo(context: ContextTypes.DEFAULT_TYPE):
+            """Saluda proactivamente a un usuario activo del grupo ofreciendo ayuda"""
+            if not COFRADIA_GROUP_ID:
+                return
+            try:
+                import random
+                conn = get_db_connection()
+                if not conn:
+                    return
+                c = conn.cursor()
+                hoy = _ahora_chile().strftime('%Y-%m-%d')
+                if DATABASE_URL:
+                    c.execute("""SELECT DISTINCT m.user_id, s.nombre_display 
+                                FROM mensajes m 
+                                JOIN suscripciones s ON m.user_id = s.user_id
+                                WHERE m.fecha::date = %s::date 
+                                AND s.nombre_display IS NOT NULL
+                                ORDER BY RANDOM() LIMIT 1""", (hoy,))
+                    row = c.fetchone()
+                else:
+                    row = None
+                conn.close()
+                
+                if row:
+                    nombre = row['nombre_display'] if DATABASE_URL else 'Cofrade'
+                    saludos = [
+                        f"👋 ¡Hola {nombre}! ¿Necesitas algo? Recuerda que tienes:\n"
+                        f"📈 /indicadores | 💼 /empleo | 📇 /mi_tarjeta\n"
+                        f"Estoy aquí para ayudarte! 🤖",
+                        
+                        f"⚓ ¡Buen día {nombre}! ¿Sabías que puedes consultar:\n"
+                        f"📚 /rag_consulta [pregunta] — Busca en +100 libros\n"
+                        f"🤖 /buscar_ia [tema] — IA analiza el historial\n"
+                        f"¡Aprovecha tu Cofradía!",
+                        
+                        f"🎯 ¡{nombre}! ¿Ya viste los indicadores de hoy?\n"
+                        f"📊 /economia — Dashboard completo con simuladores\n"
+                        f"💰 /finanzas [consulta] — Asesoría financiera IA gratis\n"
+                        f"⚓ A tu servicio!",
+                    ]
+                    msg = random.choice(saludos)
+                    await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+                    logger.info(f"🤖 Saludo proactivo a {nombre}")
+            except Exception as e:
+                logger.debug(f"Error agente saludo proactivo: {e}")
+        
+        try:
+            # Una vez al día a las 16:00
+            if chile_tz:
+                job_queue.run_daily(agente_saludo_proactivo,
+                    time=dt_time(hour=16, minute=0, second=0, tzinfo=chile_tz),
+                    name='agente_saludo_proactivo')
+            else:
+                job_queue.run_daily(agente_saludo_proactivo,
+                    time=dt_time(hour=20, minute=0, second=0),
+                    name='agente_saludo_proactivo')
+            logger.info("🤖 Agente: saludo proactivo programado 16:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente saludo proactivo: {e}")
+        
+        logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
     logger.info("✅ Bot iniciado!")
     
