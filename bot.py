@@ -156,6 +156,304 @@ _CALC_HTML_GZ = "H4sIAGxstmkC/9S9e3PcWJYn9r8+BUZdKmaSyCeZFCupZC1FUV2c1YOmVGp7FYr
 def _get_calculadora_html():
     return _gzip_calc.decompress(_b64_calc.b64decode(_CALC_HTML_GZ)).decode('utf-8')
 
+# ══════════════════════════════════════════════════════════════════════
+# ═══  SISTEMA MCP (Model Context Protocol) — Tool Registry  ═════════
+# ══════════════════════════════════════════════════════════════════════
+
+class MCPToolRegistry:
+    """Registro de herramientas MCP-compatible para uso con LLMs.
+    Permite al modelo invocar funciones del bot de forma estructurada."""
+    
+    def __init__(self):
+        self._tools = {}
+    
+    def register(self, name: str, description: str, parameters: dict = None, handler=None):
+        """Registra una herramienta en el registro MCP"""
+        self._tools[name] = {
+            'name': name,
+            'description': description,
+            'parameters': parameters or {},
+            'handler': handler,
+        }
+    
+    def get_tools_schema(self) -> list:
+        """Retorna esquema de herramientas en formato MCP/OpenAI tools"""
+        return [
+            {
+                'type': 'function',
+                'function': {
+                    'name': t['name'],
+                    'description': t['description'],
+                    'parameters': t['parameters'],
+                }
+            }
+            for t in self._tools.values()
+        ]
+    
+    def get_tools_prompt(self) -> str:
+        """Genera prompt de herramientas disponibles para el LLM"""
+        lines = ["HERRAMIENTAS DISPONIBLES (puedes sugerirlas al usuario):"]
+        for t in self._tools.values():
+            params_str = ', '.join(t['parameters'].get('properties', {}).keys())
+            lines.append(f"  - {t['name']}({params_str}): {t['description']}")
+        return '\n'.join(lines)
+    
+    async def execute(self, name: str, args: dict, update=None, context=None):
+        """Ejecuta una herramienta registrada"""
+        tool = self._tools.get(name)
+        if not tool or not tool['handler']:
+            return None
+        try:
+            if asyncio.iscoroutinefunction(tool['handler']):
+                return await tool['handler'](update=update, context=context, **args)
+            else:
+                return tool['handler'](**args)
+        except Exception as e:
+            logger.warning(f"MCP execute {name}: {e}")
+            return None
+    
+    def list_tools(self) -> list:
+        """Lista nombres de herramientas registradas"""
+        return list(self._tools.keys())
+
+# Instancia global del registro MCP
+mcp_registry = MCPToolRegistry()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ═══  MEMORIA CONVERSACIONAL DEL GRUPO — Rolling Buffer  ════════════
+# ══════════════════════════════════════════════════════════════════════
+
+class ConversationMemory:
+    """Buffer circular de mensajes del grupo para contexto conversacional.
+    Permite al agente entender temas en curso y decidir cuándo participar."""
+    
+    def __init__(self, max_messages: int = 50, max_age_minutes: int = 120):
+        self._buffer = []  # Lista de dicts: {user, text, timestamp, topic_scores}
+        self._max = max_messages
+        self._max_age = max_age_minutes
+        self._topic_counts = Counter()  # Temas detectados recientemente
+        self._last_bot_msg_time = None  # Evitar spam del bot
+        self._bot_cooldown_minutes = 15  # Mínimo entre participaciones
+    
+    def add_message(self, user_name: str, user_id: int, text: str, topics: list = None):
+        """Agrega un mensaje al buffer con detección de temas"""
+        now = _ahora_chile()
+        self._buffer.append({
+            'user': user_name,
+            'user_id': user_id,
+            'text': text[:500],  # Limitar tamaño
+            'timestamp': now,
+            'topics': topics or [],
+        })
+        # Actualizar conteo de temas
+        for t in (topics or []):
+            self._topic_counts[t] += 1
+        # Limpiar mensajes antiguos
+        self._cleanup()
+    
+    def _cleanup(self):
+        """Elimina mensajes antiguos y mantiene tamaño máximo"""
+        now = _ahora_chile()
+        cutoff = now - timedelta(minutes=self._max_age)
+        self._buffer = [m for m in self._buffer if m['timestamp'] > cutoff]
+        if len(self._buffer) > self._max:
+            self._buffer = self._buffer[-self._max:]
+    
+    def get_recent_context(self, n: int = 15) -> str:
+        """Obtiene últimos N mensajes como contexto legible"""
+        self._cleanup()
+        msgs = self._buffer[-n:]
+        if not msgs:
+            return ""
+        lines = []
+        for m in msgs:
+            time_str = m['timestamp'].strftime('%H:%M')
+            lines.append(f"[{time_str}] {m['user']}: {m['text'][:200]}")
+        return '\n'.join(lines)
+    
+    def get_hot_topics(self, top_n: int = 5) -> list:
+        """Retorna los temas más discutidos recientemente"""
+        self._cleanup()
+        # Re-calcular desde buffer actual
+        counts = Counter()
+        for m in self._buffer:
+            for t in m.get('topics', []):
+                counts[t] += 1
+        return counts.most_common(top_n)
+    
+    def get_active_users(self) -> list:
+        """Retorna usuarios activos recientes con conteo de mensajes"""
+        self._cleanup()
+        users = Counter()
+        for m in self._buffer:
+            users[m['user']] += 1
+        return users.most_common(10)
+    
+    def should_bot_participate(self) -> bool:
+        """Decide si el bot debería participar basado en actividad y cooldown"""
+        now = _ahora_chile()
+        # Respetar cooldown
+        if self._last_bot_msg_time:
+            elapsed = (now - self._last_bot_msg_time).total_seconds() / 60
+            if elapsed < self._bot_cooldown_minutes:
+                return False
+        # Requiere al menos 5 mensajes recientes de al menos 2 usuarios distintos
+        self._cleanup()
+        if len(self._buffer) < 5:
+            return False
+        recent = self._buffer[-10:]
+        unique_users = len(set(m['user_id'] for m in recent))
+        if unique_users < 2:
+            return False
+        return True
+    
+    def mark_bot_participated(self):
+        """Marca que el bot acaba de participar"""
+        self._last_bot_msg_time = _ahora_chile()
+    
+    def get_conversation_summary(self) -> dict:
+        """Resumen de la conversación actual para el agente"""
+        self._cleanup()
+        return {
+            'total_messages': len(self._buffer),
+            'active_users': self.get_active_users(),
+            'hot_topics': self.get_hot_topics(),
+            'recent_context': self.get_recent_context(10),
+        }
+
+# Instancia global de memoria conversacional
+grupo_memory = ConversationMemory(max_messages=50, max_age_minutes=120)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ═══  DETECTOR DE TEMAS — Clasificación rápida sin LLM  ═════════════
+# ══════════════════════════════════════════════════════════════════════
+
+# Diccionario de patrones → temas (detección local, sin API calls)
+_TOPIC_PATTERNS = {
+    'finanzas': [
+        'inversion', 'invertir', 'ahorro', 'ahorrar', 'plata', 'platas', 'lucas', 'dinero',
+        'acciones', 'accion', 'fondos', 'fondo', 'apv', 'afp', 'renta', 'deposito',
+        'credito', 'hipotecario', 'dividendo', 'tasa', 'banco', 'financiero', 'financiera',
+        'presupuesto', 'deuda', 'deudas', 'patrimonio', 'capital', 'bitcoin', 'cripto',
+        'uf ', ' uf', 'dolar', 'dolares', 'euro', 'euros', 'economía', 'economia',
+    ],
+    'empleo': [
+        'trabajo', 'empleo', 'pega', 'cargo', 'puesto', 'sueldo', 'salario', 'renta',
+        'curriculum', 'cv', 'entrevista', 'postular', 'postulacion', 'linkedin',
+        'contratar', 'contratacion', 'vacante', 'oferta laboral', 'jefe', 'gerente',
+        'empresa', 'empresas', 'industria', 'carrera profesional', 'despido', 'desvinculacion',
+    ],
+    'networking': [
+        'contacto', 'contactos', 'red', 'redes', 'networking', 'conexion', 'conexiones',
+        'conocer', 'presentar', 'presentacion', 'reunión', 'reunion', 'junta',
+        'colaborar', 'colaboracion', 'alianza', 'socio', 'partner', 'negocio',
+        'oportunidad', 'recomendar', 'recomendacion', 'referencia',
+    ],
+    'educacion': [
+        'curso', 'cursos', 'diploma', 'diplomado', 'magister', 'master', 'mba',
+        'estudiar', 'estudio', 'universidad', 'academia', 'capacitacion', 'taller',
+        'certificacion', 'aprender', 'formacion', 'postgrado', 'beca',
+    ],
+    'armada': [
+        'armada', 'naval', 'marina', 'buque', 'fragata', 'corbeta', 'submarino',
+        'oficial', 'oficiales', 'cadete', 'escuela naval', 'retiro', 'reserva',
+        'grado', 'capitan', 'almirante', 'teniente', 'comodoro', 'vicealmirante',
+        'navegacion', 'maritimo', 'maritima', 'valparaiso', 'directemar', 'mision',
+    ],
+    'tecnologia': [
+        'inteligencia artificial', 'ia', 'ai', 'chatgpt', 'claude', 'robot', 'bot',
+        'programar', 'programacion', 'software', 'app', 'aplicacion', 'web', 'digital',
+        'automatizar', 'automatizacion', 'datos', 'nube', 'cloud', 'ciberseguridad',
+        'python', 'codigo', 'sistema', 'plataforma', 'tecnologia',
+    ],
+    'bienestar': [
+        'salud', 'medico', 'doctor', 'hospital', 'enfermedad', 'dolor', 'remedio',
+        'deporte', 'ejercicio', 'gym', 'correr', 'maraton', 'futbol', 'tenis',
+        'bienestar', 'mental', 'estres', 'ansiedad', 'meditacion', 'descanso',
+        'familia', 'hijos', 'esposa', 'pareja', 'vacaciones', 'viaje', 'paseo',
+    ],
+}
+
+
+def detectar_temas(texto: str) -> list:
+    """Detecta temas en un texto basado en patrones (sin LLM, rápido)"""
+    texto_lower = texto.lower()
+    # Normalizar tildes comunes
+    for a, b in [('á','a'),('é','e'),('í','i'),('ó','o'),('ú','u'),('ñ','n')]:
+        texto_lower = texto_lower.replace(a, b)
+    
+    temas_detectados = []
+    for tema, patrones in _TOPIC_PATTERNS.items():
+        score = sum(1 for p in patrones if p in texto_lower)
+        if score >= 2:  # Al menos 2 patrones del mismo tema
+            temas_detectados.append(tema)
+        elif score == 1 and len(texto.split()) <= 15:
+            # Para mensajes cortos, 1 patrón basta
+            temas_detectados.append(tema)
+    
+    return temas_detectados
+
+
+# Temas donde el bot puede aportar valor con sus herramientas
+_TEMAS_ACCIONABLES = {
+    'finanzas': {
+        'comandos': ['/indicadores', '/economia', '/finanzas', '/calculadora'],
+        'prompt_extra': 'Tienes acceso a indicadores económicos en tiempo real, simuladores financieros y asesoría basada en +100 libros.',
+    },
+    'empleo': {
+        'comandos': ['/empleo', '/generar_cv', '/entrevista', '/buscar_apoyo'],
+        'prompt_extra': 'Puedes buscar ofertas laborales reales, generar CVs profesionales y simular entrevistas.',
+    },
+    'networking': {
+        'comandos': ['/directorio', '/conectar', '/agente', '/match', '/mi_tarjeta'],
+        'prompt_extra': 'Tienes acceso al directorio completo de la Cofradía, sistema de matching y agente de networking.',
+    },
+    'educacion': {
+        'comandos': ['/rag_consulta', '/finanzas', '/buscar_web'],
+        'prompt_extra': 'Tienes acceso a +100 libros indexados y búsqueda web para recursos educativos.',
+    },
+    'armada': {
+        'comandos': ['/rag_consulta', '/buscar_ia', '/directorio'],
+        'prompt_extra': 'Conoces la historia naval chilena y tienes acceso a la base de datos de la Cofradía.',
+    },
+    'tecnologia': {
+        'comandos': ['/buscar_web', '/rag_consulta'],
+        'prompt_extra': 'Puedes buscar información actualizada sobre tecnología y analizar documentos técnicos.',
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ═══  REGISTRAR HERRAMIENTAS MCP  ═══════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+
+def _registrar_tools_mcp():
+    """Registra las herramientas del bot en el registro MCP"""
+    mcp_registry.register(
+        'buscar_indicadores', 'Obtener indicadores económicos de Chile en tiempo real',
+        {'properties': {}})
+    mcp_registry.register(
+        'buscar_empleo', 'Buscar ofertas laborales reales por cargo',
+        {'properties': {'cargo': {'type': 'string', 'description': 'Cargo a buscar'}}})
+    mcp_registry.register(
+        'consultar_rag', 'Consultar la biblioteca de +100 libros indexados',
+        {'properties': {'pregunta': {'type': 'string', 'description': 'Pregunta para los documentos'}}})
+    mcp_registry.register(
+        'buscar_profesional', 'Buscar profesionales en el directorio de la Cofradía',
+        {'properties': {'area': {'type': 'string', 'description': 'Área profesional'}}})
+    mcp_registry.register(
+        'buscar_web', 'Buscar información actualizada en Internet',
+        {'properties': {'query': {'type': 'string', 'description': 'Búsqueda web'}}})
+    mcp_registry.register(
+        'economia_dashboard', 'Generar dashboard económico completo con simuladores',
+        {'properties': {}})
+    logger.info(f"🔧 MCP: {len(mcp_registry.list_tools())} herramientas registradas")
+
+# Registrar al importar
+_registrar_tools_mcp()
+
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
@@ -4406,18 +4704,44 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         modo = ("✅ Usa el contexto RAG como base principal de tu respuesta." if rag_conf in ('alta','media')
                 else "🔵 El RAG no tiene documentos sobre este tema — responde COMPLETAMENTE desde tu conocimiento como LLM experto (no digas 'no tengo información' si sabes del tema).")
         
+        # Contexto conversacional del grupo para respuesta más inteligente
+        conv_ctx = ""
+        try:
+            recent = grupo_memory.get_recent_context(8)
+            if recent:
+                conv_ctx = f"\nCONVERSACIÓN RECIENTE DEL GRUPO (para contexto):\n{recent}\n"
+        except Exception:
+            pass
+        
+        # MCP tools disponibles
+        mcp_hint = ""
+        try:
+            mcp_hint = "\n" + mcp_registry.get_tools_prompt() + "\n"
+        except Exception:
+            pass
+        
+        # Sugerencia de comandos según temas detectados
+        temas_intent = intencion_mencion.get('temas_detectados', [])
+        cmds_sugeridos = []
+        for t in temas_intent:
+            info = _TEMAS_ACCIONABLES.get(t, {})
+            if info:
+                cmds_sugeridos.extend(info.get('comandos', []))
+        cmds_hint = f"\nCOMANDOS SUGERIDOS PARA ESTE TEMA: {', '.join(set(cmds_sugeridos))}\nAl final de tu respuesta, sugiere 1-2 comandos que le sean útiles." if cmds_sugeridos else ""
+        
         prompt = f"""Eres el asistente IA de la Cofradía de Networking — comunidad profesional chilena de oficiales de la Armada (activos y retirados). Eres un modelo LLaMA 3.3 70B con conocimiento hasta 2024.
 
 MODO ACTUAL: {modo}
 (Confianza RAG: {rag_conf}, score: {rag_score:.1f})
-
+{conv_ctx}{mcp_hint}{cmds_hint}
 REGLAS:
 1. NUNCA digas "no tengo información" sobre temas que conoces (libros, economía, historia, ciencia, tecnología, etc.)
 2. NUNCA inventes nombres de personas de la Cofradía — solo los del contexto
 3. NUNCA modifiques datos de usuarios
-4. Cuando el RAG tiene info relevante → úsala; cuando no → usa tu conocimiento propio sin disculparte
+4. Cuando el RAG tiene info relevante, úsala; cuando no, usa tu conocimiento propio sin disculparte
 5. Responde de forma completa, clara y útil en máximo 3-4 párrafos
 6. Sin asteriscos ni formatos Markdown
+7. Si hay comandos sugeridos relevantes, menciona 1-2 al final de tu respuesta de forma natural
 
 PREGUNTA DE {user_name}: "{pregunta}"
 
@@ -4462,6 +4786,94 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
         except:
             pass
         await update.message.reply_text("❌ Error procesando tu pregunta. Intenta de nuevo.")
+
+
+async def _agente_participar_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                     temas: list, texto_trigger: str, nombre_usuario: str):
+    """Agente conversacional que participa naturalmente en el grupo cuando detecta temas relevantes.
+    Usa RAG + Groq + memoria conversacional para generar respuestas útiles y contextuales."""
+    try:
+        # Obtener contexto conversacional
+        conversacion_reciente = grupo_memory.get_recent_context(12)
+        hot_topics = grupo_memory.get_hot_topics(3)
+        
+        # Construir información de herramientas relevantes
+        herramientas_info = []
+        for tema in temas:
+            info = _TEMAS_ACCIONABLES.get(tema, {})
+            if info:
+                cmds = ' | '.join(info.get('comandos', []))
+                herramientas_info.append(f"Tema '{tema}': {info.get('prompt_extra', '')} Comandos: {cmds}")
+        
+        herramientas_str = '\n'.join(herramientas_info)
+        topics_str = ', '.join([f"{t[0]}({t[1]})" for t in hot_topics]) if hot_topics else 'variados'
+        
+        # MCP tools context
+        mcp_prompt = mcp_registry.get_tools_prompt()
+        
+        # Buscar contexto RAG si el tema es accionable
+        rag_context = ""
+        try:
+            from concurrent.futures import ThreadPoolExecutor as _TPE_agente
+            with _TPE_agente(max_workers=1) as pool:
+                fut = pool.submit(busqueda_unificada, texto_trigger, 5, 10)
+                rag_results = fut.result()
+            if rag_results.get('rag'):
+                rag_context = formatear_contexto_unificado(rag_results, texto_trigger)[:2000]
+        except Exception:
+            pass
+        
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking (comunidad de oficiales navales chilenos).
+Estás observando la conversación del grupo y detectaste que se habla de: {', '.join(temas)}.
+
+CONVERSACIÓN RECIENTE DEL GRUPO:
+{conversacion_reciente}
+
+TEMAS TRENDING: {topics_str}
+
+{herramientas_str}
+
+{mcp_prompt}
+
+{f'CONTEXTO DE BIBLIOTECA (RAG):' + chr(10) + rag_context if rag_context else ''}
+
+INSTRUCCIONES PARA PARTICIPAR:
+1. Responde de forma BREVE (máximo 3-4 líneas), natural y amigable
+2. Dirígete al grupo en general o a {nombre_usuario} si es relevante
+3. Aporta un dato útil, tip, o sugerencia de comando del bot
+4. NO uses asteriscos ni formato Markdown
+5. NO seas invasivo ni repitas info obvia
+6. Sé como un cofrade más que aporta al grupo, no como un bot genérico
+7. Si puedes aportar un dato concreto del RAG, hazlo
+8. Siempre sugiere 1-2 comandos específicos que sean útiles para el tema
+
+MENSAJE QUE DISPARÓ TU PARTICIPACIÓN:
+"{texto_trigger}" — de {nombre_usuario}
+
+Genera UNA respuesta corta y útil:"""
+
+        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.7)
+        if not respuesta:
+            return
+        
+        # Limpiar respuesta
+        respuesta_limpia = respuesta.replace('*', '').replace('_', ' ').strip()
+        
+        # Agregar emoji de bot para identificar
+        respuesta_final = f"🤖 {respuesta_limpia}"
+        
+        # Enviar al grupo
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=respuesta_final
+        )
+        
+        # Marcar participación para cooldown
+        grupo_memory.mark_bot_participated()
+        logger.info(f"🤖 Agente participó en grupo — temas: {temas}")
+        
+    except Exception as e:
+        logger.debug(f"Error agente grupo: {e}")
 
 
 async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4545,6 +4957,35 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         otorgar_coins(user_id, 1, 'Mensaje en grupo')
     except Exception:
         pass
+    
+    # ══════════════════════════════════════════════════════════════════
+    # ═══  AGENTE CONVERSACIONAL: Detectar temas y participar  ═══════
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        texto_msg = update.message.text
+        # 1. Detectar temas del mensaje
+        temas = detectar_temas(texto_msg)
+        
+        # 2. Agregar a memoria conversacional
+        grupo_memory.add_message(
+            user_name=f"{first_name} {last_name}".strip(),
+            user_id=user_id,
+            text=texto_msg,
+            topics=temas
+        )
+        
+        # 3. Evaluar si el bot debería participar
+        if temas and grupo_memory.should_bot_participate() and ia_disponible:
+            # Solo participar si hay temas accionables
+            temas_accionables = [t for t in temas if t in _TEMAS_ACCIONABLES]
+            if temas_accionables:
+                # Verificar que no sea un mensaje muy corto o saludo
+                if len(texto_msg.split()) >= 6:
+                    asyncio.create_task(
+                        _agente_participar_grupo(update, context, temas_accionables, texto_msg, f"{first_name}")
+                    )
+    except Exception as _e_agent:
+        logger.debug(f"Error agente conversacional: {_e_agent}")
 
 
 # ==================== COMANDOS ADMIN ====================
@@ -13376,6 +13817,7 @@ CATALOGO_COMANDOS_INTENCION = {
     'buscar_apoyo': 'Buscar cofrades en búsqueda laboral activa',
     'buscar_especialista_sec': 'Buscar especialistas registrados en la SEC',
     'buscar_ia': 'Búsqueda IA en historial y documentos del grupo',
+    'buscar_web': 'Buscar información actualizada en Internet',
     'rag_consulta': 'Consultar libros, PDFs y documentos indexados',
     'empleo': 'Buscar oportunidades de empleo',
     # Perfil y directorio
@@ -13391,6 +13833,8 @@ CATALOGO_COMANDOS_INTENCION = {
     'consultar': 'Publicar una consulta al grupo',
     'recomendar': 'Recomendar a un cofrade',
     'publicar': 'Publicar un mensaje en el grupo',
+    'encuesta': 'Crear encuesta en el grupo',
+    'feriados': 'Ver feriados legales de Chile',
     # Resúmenes y estadísticas
     'resumen': 'Resumen de actividad reciente del día',
     'resumen_semanal': 'Resumen semanal de actividad',
@@ -13404,17 +13848,24 @@ CATALOGO_COMANDOS_INTENCION = {
     'generar_cv': 'Generar currículum profesional',
     'entrevista': 'Simular entrevista de trabajo',
     'analisis_linkedin': 'Analizar perfil LinkedIn',
-    'finanzas': 'Consultor financiero IA',
+    'finanzas': 'Consultor financiero IA basado en +100 libros',
     'mentor': 'Mentoría personalizada con IA',
     'mi_dashboard': 'Dashboard personal de actividad',
+    # Economía y finanzas
+    'economia': 'Dashboard económico completo con simuladores y análisis IA',
+    'indicadores': 'Dashboard indicadores económicos Chile en tiempo real',
+    'calculadora': 'Suite Económica Pro (calculadora financiera)',
     # Agente inteligente
     'agente': 'Plan de networking personalizado por IA',
     'match': 'Encontrar los mejores matches profesionales',
     'briefing': 'Briefing diario personalizado',
-    'indicadores': 'Dashboard indicadores economicos Chile',
     'mi_agenda': 'Ver agenda personal de networking',
+    'agendar': 'Agendar una reunión o evento personal',
+    'tarea': 'Crear nueva tarea de networking',
     'mis_tareas': 'Ver tareas de networking pendientes',
     'mis_coins': 'Ver saldo de Cofra-Coins',
+    # Emergencia
+    'emergencia': 'Reportar emergencia (4 tipos) con alerta a todos',
     'ayuda': 'Ver todos los comandos disponibles',
 }
 
@@ -13454,27 +13905,49 @@ def mejorar_intencion(mensaje_raw: str, user_name: str, user_id: int,
         # Construir catálogo compacto para el prompt
         catalogo_str = "\n".join([f"  /{cmd}: {desc}" for cmd, desc in CATALOGO_COMANDOS_INTENCION.items()])
         
-        prompt_intencion = f"""Eres el motor de intención del bot de la Cofradía de Networking. Tu tarea es analizar el mensaje de un usuario y devolver SOLO un JSON (sin markdown, sin texto adicional).
+        # Contexto conversacional (si hay mensajes recientes en grupo)
+        conv_context = ""
+        try:
+            hot = grupo_memory.get_hot_topics(3)
+            if hot:
+                conv_context = f"\nTEMAS TRENDING EN EL GRUPO: {', '.join([t[0] for t in hot])}"
+            recent_users = grupo_memory.get_active_users()
+            if recent_users:
+                conv_context += f"\nUSUARIOS ACTIVOS: {', '.join([u[0] for u in recent_users[:5]])}"
+        except Exception:
+            pass
+        
+        # MCP tools disponibles
+        mcp_tools_hint = ""
+        try:
+            tools = mcp_registry.list_tools()
+            if tools:
+                mcp_tools_hint = f"\nHERRAMIENTAS MCP DISPONIBLES: {', '.join(tools)}"
+        except Exception:
+            pass
+        
+        prompt_intencion = f"""Eres el motor de intención del bot de la Cofradía de Networking (comunidad de oficiales navales chilenos). Tu tarea es analizar el mensaje de un usuario y devolver SOLO un JSON (sin markdown, sin texto adicional).
 
 MENSAJE DEL USUARIO ({canal}): "{mensaje}"
-NOMBRE DEL USUARIO: {user_name}
+NOMBRE DEL USUARIO: {user_name}{conv_context}{mcp_tools_hint}
 
 COMANDOS DISPONIBLES DEL BOT:
 {catalogo_str}
 
 INSTRUCCIONES:
-1. "query_mejorada": Reescribe el mensaje en una consulta más específica, técnica y útil para búsqueda semántica. Expande siglas, agrega sinónimos relevantes, clarifica la intención. Mínimo 15 palabras.
-2. "comando": Si el mensaje claramente pide algo que un comando puede resolver mejor, pon el nombre del comando (sin /). Si no aplica, pon null.
+1. "query_mejorada": Reescribe el mensaje en una consulta más específica, técnica y útil para búsqueda semántica. Expande siglas, agrega sinónimos relevantes, clarifica la intención. Mínimo 15 palabras. Usa contexto del grupo si aplica.
+2. "comando": Si el mensaje claramente pide algo que un comando puede resolver mejor, pon el nombre del comando (sin /). Si no aplica, pon null. PRIORIZA comandos económicos (economia, indicadores, finanzas) para consultas financieras y empleo/generar_cv para consultas laborales.
 3. "args": Argumentos para el comando (ej: para /buscar_profesional sería "finanzas" o "ingenieria"). Si no hay args útiles, pon "".
 4. "tipo": "consulta" (quiere información/respuesta), "comando" (claramente quiere ejecutar algo), "ambos" (consulta + usar comando), "saludo" (saludo/chat casual).
 5. "ejecutar_comando": true solo si el usuario CLARAMENTE pide una acción específica que el comando resuelve. Para consultas generales donde el comando complementa, pon false.
 6. "razon": Una frase corta explicando tu razonamiento (solo para logs internos).
+7. "temas_detectados": Lista de temas del mensaje entre: finanzas, empleo, networking, educacion, armada, tecnologia, bienestar. Si no detectas ninguno, lista vacía [].
 
 CRITERIO PARA ejecutar_comando=true: Solo si el usuario dice explícitamente "muéstrame X", "ver X", "buscar X", "quiero saber X" donde X es exactamente lo que hace el comando.
 CRITERIO PARA ejecutar_comando=false: Si el usuario hace una pregunta abierta, consulta general, o quiere una respuesta elaborada (aunque un comando aporte contexto).
 
 RESPONDE SOLO EL JSON, sin bloques de código:
-{{"query_mejorada": "...", "comando": "..." o null, "args": "...", "tipo": "...", "ejecutar_comando": true/false, "razon": "..."}}"""
+{{"query_mejorada": "...", "comando": "..." o null, "args": "...", "tipo": "...", "ejecutar_comando": true/false, "razon": "...", "temas_detectados": [...]}}"""
 
         respuesta_raw = llamar_groq(
             prompt_intencion,
@@ -13558,7 +14031,7 @@ async def ejecutar_comando_desde_intencion(
     """
     Ejecuta un comando detectado por el motor de intención.
     Retorna True si se ejecutó con éxito, False si no.
-    El usuario NO ve ningún mensaje previo — el comando simplemente "sucede".
+    El usuario NO ve ningún mensaje previo - el comando simplemente "sucede".
     """
     try:
         # Mapa de comandos a funciones
