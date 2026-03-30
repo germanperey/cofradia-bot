@@ -454,6 +454,371 @@ def _registrar_tools_mcp():
 # Registrar al importar
 _registrar_tools_mcp()
 
+
+# ======================================================================
+# ===  MEJORA 1: SISTEMA DE PRESUPUESTO DE TOKENS  ====================
+# ======================================================================
+
+class TokenBudget:
+    """Control de presupuesto diario/mensual de llamadas a LLMs."""
+    def __init__(self, daily_limit=500, monthly_limit=12000):
+        self._daily_limit = daily_limit
+        self._monthly_limit = monthly_limit
+        self._daily_count = 0
+        self._monthly_count = 0
+        self._daily_tokens = 0
+        self._monthly_tokens = 0
+        self._current_day = ''
+        self._current_month = ''
+        self._by_function = Counter()
+        self._paused = False
+    def _check_reset(self):
+        now = _ahora_chile()
+        day = now.strftime('%Y-%m-%d')
+        month = now.strftime('%Y-%m')
+        if day != self._current_day:
+            self._daily_count = 0; self._daily_tokens = 0; self._current_day = day
+        if month != self._current_month:
+            self._monthly_count = 0; self._monthly_tokens = 0; self._by_function = Counter(); self._current_month = month
+    def can_call(self):
+        self._check_reset()
+        return not self._paused and self._daily_count < self._daily_limit
+    def register_call(self, function_name, tokens_used=0, model='groq'):
+        self._check_reset()
+        self._daily_count += 1; self._monthly_count += 1
+        self._daily_tokens += tokens_used; self._monthly_tokens += tokens_used
+        self._by_function[function_name] += 1
+        if self._daily_count >= self._daily_limit * 0.95:
+            logger.warning(f"TokenBudget: {self._daily_count}/{self._daily_limit} (95%+)")
+    def get_stats(self):
+        self._check_reset()
+        return {'daily_calls': self._daily_count, 'daily_limit': self._daily_limit,
+                'daily_pct': round(self._daily_count / max(self._daily_limit, 1) * 100, 1),
+                'monthly_calls': self._monthly_count, 'monthly_tokens': self._monthly_tokens,
+                'by_function': dict(self._by_function.most_common(10)), 'paused': self._paused}
+
+token_budget = TokenBudget(daily_limit=500, monthly_limit=12000)
+
+# ======================================================================
+# ===  MEJORA 2: AUDIT TRAIL DE IA  ===================================
+# ======================================================================
+
+def registrar_audit_ia(funcion, user_id, modelo, tokens, tiempo_ms, exito, prompt_preview=''):
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""INSERT INTO ia_audit_log (fecha,funcion,user_id,modelo,tokens_estimados,tiempo_ms,exito,prompt_preview)
+                     VALUES (NOW(),%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                  (funcion, user_id, modelo, tokens, tiempo_ms, exito, (prompt_preview or '')[:200]))
+        conn.commit(); conn.close()
+    except Exception: pass
+
+def _crear_tablas_mejoras():
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS ia_audit_log (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), funcion VARCHAR(100),
+            user_id BIGINT, modelo VARCHAR(50), tokens_estimados INT DEFAULT 0,
+            tiempo_ms INT DEFAULT 0, exito BOOLEAN DEFAULT TRUE, prompt_preview TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ia_feedback (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), user_id BIGINT,
+            message_id BIGINT, funcion VARCHAR(100), feedback VARCHAR(10), prompt_preview TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS mentorias (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), mentor_id BIGINT,
+            mentee_id BIGINT, area VARCHAR(200), estado VARCHAR(20) DEFAULT 'activa', notas TEXT DEFAULT '')""")
+        conn.commit(); conn.close()
+        logger.info("Tablas audit/feedback/mentorias OK")
+    except Exception as e:
+        logger.debug(f"Tablas mejoras: {e}")
+
+# ======================================================================
+# ===  MEJORA 3: EMBEDDINGS SIMPLES PARA RAG  =========================
+# ======================================================================
+
+def _calcular_embedding_simple(texto):
+    import hashlib
+    palabras = texto.lower().split()
+    ngrams = palabras[:]
+    for i in range(len(palabras)-1): ngrams.append(palabras[i]+' '+palabras[i+1])
+    for i in range(len(palabras)-2): ngrams.append(palabras[i]+' '+palabras[i+1]+' '+palabras[i+2])
+    vector = [0.0]*100
+    for ng in ngrams:
+        idx = int(hashlib.md5(ng.encode()).hexdigest(), 16) % 100
+        vector[idx] += 1.0
+    norma = sum(v*v for v in vector)**0.5
+    return [v/norma for v in vector] if norma > 0 else vector
+
+def _similitud_coseno(v1, v2):
+    dot = sum(a*b for a,b in zip(v1,v2))
+    n1 = sum(a*a for a in v1)**0.5; n2 = sum(b*b for b in v2)**0.5
+    return dot/(n1*n2) if n1 and n2 else 0.0
+
+# ======================================================================
+# ===  MEJORA 4: SISTEMA DE FEEDBACK  =================================
+# ======================================================================
+
+def _crear_botones_feedback(funcion):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Util", callback_data=f"fb_up_{funcion}"),
+         InlineKeyboardButton("Mejorar", callback_data=f"fb_down_{funcion}")]
+    ])
+
+async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Gracias por tu feedback!")
+    parts = query.data.split('_', 2)
+    if len(parts) < 3: return
+    feedback = 'positivo' if parts[1] == 'up' else 'negativo'
+    try:
+        conn = get_db_connection()
+        if conn and DATABASE_URL:
+            c = conn.cursor()
+            c.execute("INSERT INTO ia_feedback (user_id,message_id,funcion,feedback) VALUES (%s,%s,%s,%s)",
+                      (query.from_user.id, query.message.message_id if query.message else 0, parts[2], feedback))
+            conn.commit(); conn.close()
+    except Exception: pass
+    try: await query.edit_message_reply_markup(reply_markup=None)
+    except Exception: pass
+
+# ======================================================================
+# ===  MEJORA 5: ANALISIS MULTI-MODAL (IMAGENES EN GRUPO)  ============
+# ======================================================================
+
+async def analizar_imagen_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo: return
+    caption = (update.message.caption or '').lower()
+    if not any(t in caption for t in ['bot','analiza','analizar','que es','que dice','explicar','traducir','leer']): return
+    if not GEMINI_API_KEY: return
+    msg = await update.message.reply_text("Analizando imagen...")
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await photo_file.download_as_bytearray()
+        img_b64 = base64.b64encode(bytes(photo_bytes)).decode('utf-8')
+        payload = {"contents": [{"parts": [
+            {"text": "Analiza esta imagen en detalle. Transcribe texto si hay. Responde en espanol. " + (caption or '')},
+            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]}]}
+        resp = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=30)
+        if resp.status_code == 200:
+            texto = resp.json().get('candidates',[{}])[0].get('content',{}).get('parts',[{}])[0].get('text','')
+            if texto:
+                await msg.edit_text(f"Analisis:\n\n{texto[:2000].replace('*','')}", reply_markup=_crear_botones_feedback('vision'))
+                token_budget.register_call('vision_grupo', 500, 'gemini')
+            else: await msg.edit_text("No pude analizar la imagen.")
+        else: await msg.edit_text("Error analizando imagen.")
+    except Exception as e:
+        logger.debug(f"Vision grupo: {e}")
+        try: await msg.edit_text("Error procesando imagen.")
+        except: pass
+
+# ======================================================================
+# ===  MEJORA 6: NOTIFICACIONES INTELIGENTES  =========================
+# ======================================================================
+
+async def agente_notificaciones_personalizadas(context: ContextTypes.DEFAULT_TYPE):
+    if not COFRADIA_GROUP_ID: return
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""SELECT DISTINCT m.user_id, s.nombre_display FROM mensajes m
+                     JOIN suscripciones s ON m.user_id=s.user_id
+                     WHERE m.fecha>=CURRENT_DATE-INTERVAL '7 days' AND s.estado='activo'
+                     GROUP BY m.user_id, s.nombre_display HAVING COUNT(*)>=3 LIMIT 10""")
+        usuarios = c.fetchall(); conn.close()
+        for u in usuarios:
+            uid=u['user_id']; nombre=u['nombre_display'] or 'Cofrade'
+            try:
+                conn2=get_db_connection(); c2=conn2.cursor()
+                c2.execute("""SELECT categoria, COUNT(*) as cnt FROM mensajes
+                             WHERE user_id=%s AND fecha>=CURRENT_DATE-INTERVAL '30 days'
+                             AND categoria IS NOT NULL GROUP BY categoria ORDER BY cnt DESC LIMIT 2""", (uid,))
+                cats=[r['categoria'] for r in c2.fetchall()]; conn2.close()
+            except: cats=[]
+            if not cats: continue
+            tip = f"Hola {nombre}! Basado en tus intereses ({', '.join(cats)}): "
+            if any('finanz' in c.lower() or 'econom' in c.lower() for c in cats):
+                tip += "/indicadores /economia /finanzas"
+            elif any('empleo' in c.lower() or 'trabajo' in c.lower() for c in cats):
+                tip += "/empleo [cargo] /generar_cv /entrevista"
+            else: tip += "/ayuda para ver comandos utiles"
+            try: await context.bot.send_message(chat_id=uid, text=tip)
+            except: pass
+    except Exception as e: logger.debug(f"Notif personalizadas: {e}")
+
+# ======================================================================
+# ===  MEJORA 7: /reporte_ejecutivo  ==================================
+# ======================================================================
+
+async def reporte_ejecutivo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador."); return
+    msg = await update.message.reply_text("Generando reporte ejecutivo...")
+    try:
+        conn=get_db_connection()
+        if not conn: await msg.edit_text("Error BD."); return
+        c=conn.cursor(); ahora=_ahora_chile(); h7=(ahora-timedelta(days=7)).strftime('%Y-%m-%d'); h30=(ahora-timedelta(days=30)).strftime('%Y-%m-%d')
+        st={}
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as t FROM suscripciones WHERE estado='activo'"); st['a']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM suscripciones"); st['tt']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE fecha>=%s",(h7,)); st['m7']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE fecha>=%s",(h30,)); st['m30']=c.fetchone()['t']
+            c.execute("SELECT COUNT(DISTINCT user_id) as t FROM mensajes WHERE fecha>=%s",(h7,)); st['p7']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM tarjetas_profesional"); st['tj']=c.fetchone()['t']
+            c.execute("SELECT categoria,COUNT(*) as cnt FROM mensajes WHERE fecha>=%s AND categoria IS NOT NULL GROUP BY categoria ORDER BY cnt DESC LIMIT 5",(h7,))
+            st['temas']=[(r['categoria'],r['cnt']) for r in c.fetchall()]
+            c.execute("SELECT first_name,last_name,COUNT(*) as cnt FROM mensajes WHERE fecha>=%s GROUP BY first_name,last_name ORDER BY cnt DESC LIMIT 5",(h7,))
+            st['top']=[(f"{r['first_name']} {r['last_name'] or ''}".strip(),r['cnt']) for r in c.fetchall()]
+            try:
+                c.execute("SELECT feedback,COUNT(*) as cnt FROM ia_feedback GROUP BY feedback")
+                st['fb']={r['feedback']:r['cnt'] for r in c.fetchall()}
+            except: st['fb']={}
+        conn.close(); bg=token_budget.get_stats()
+        fp=st.get('fb',{}).get('positivo',0); fn_=st.get('fb',{}).get('negativo',0); ft=fp+fn_; fpc=round(fp/max(ft,1)*100)
+        th=''.join(f'<tr><td>{t[0]}</td><td>{t[1]}</td></tr>' for t in st.get('temas',[]))
+        uh=''.join(f'<tr><td>{u[0]}</td><td>{u[1]}</td></tr>' for u in st.get('top',[]))
+        html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Reporte Ejecutivo</title>
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:Segoe UI,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59,#1a3a6a);color:#e0e6ed;min-height:100vh;padding:2rem}}
+.c{{max-width:900px;margin:0 auto}}h1{{text-align:center;color:#c3a55a;font-size:1.8rem;margin-bottom:.3rem}}.dt{{text-align:center;color:#889;margin-bottom:2rem}}
+.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:2rem}}
+.k{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem;text-align:center}}
+.k .v{{font-size:2rem;font-weight:700;color:#38bdf8}}.k .l{{font-size:.8rem;color:#889;margin-top:.3rem}}.k.gd .v{{color:#c3a55a}}.k.gn .v{{color:#22c55e}}
+.s{{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem}}
+.s h2{{color:#c3a55a;font-size:1.1rem;margin-bottom:1rem;border-bottom:1px solid rgba(195,165,90,.2);padding-bottom:.5rem}}
+table{{width:100%;border-collapse:collapse}}th{{text-align:left;color:#38bdf8;font-size:.75rem;text-transform:uppercase;padding:.4rem .6rem}}
+td{{padding:.4rem .6rem;font-size:.85rem;border-bottom:1px solid rgba(255,255,255,.03)}}
+.br{{height:8px;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:.5rem}}.bf{{height:100%;border-radius:4px;background:linear-gradient(90deg,#38bdf8,#c3a55a)}}</style></head>
+<body><div class="c"><h1>REPORTE EJECUTIVO</h1><div class="dt">Cofradia de Networking - {ahora.strftime('%d/%m/%Y %H:%M')}</div>
+<div class="g"><div class="k"><div class="v">{st.get('a',0)}</div><div class="l">Activos</div></div>
+<div class="k gd"><div class="v">{st.get('m7',0):,}</div><div class="l">Msgs 7d</div></div>
+<div class="k gn"><div class="v">{st.get('p7',0)}</div><div class="l">Participantes</div></div>
+<div class="k"><div class="v">{st.get('tj',0)}</div><div class="l">Tarjetas</div></div></div>
+<div class="s"><h2>Temas Semana</h2><table><tr><th>Tema</th><th>Msgs</th></tr>{th}</table></div>
+<div class="s"><h2>Top Cofrades</h2><table><tr><th>Nombre</th><th>Msgs</th></tr>{uh}</table></div>
+<div class="s"><h2>IA</h2><p>Budget: {bg['daily_calls']}/{bg['daily_limit']} hoy ({bg['daily_pct']}%)</p>
+<div class="br"><div class="bf" style="width:{min(bg['daily_pct'],100)}%"></div></div>
+<p style="margin-top:.8rem">Feedback: +{fp}/-{fn_} ({fpc}%)</p></div>
+<div class="s"><h2>Mensual</h2><div class="g" style="margin:0">
+<div class="k"><div class="v">{st.get('m30',0):,}</div><div class="l">Msgs 30d</div></div>
+<div class="k gd"><div class="v">{st.get('tt',0)}</div><div class="l">Total</div></div>
+<div class="k gn"><div class="v">{bg['monthly_calls']:,}</div><div class="l">Llamadas IA</div></div></div></div></div></body></html>"""
+        path=f"/tmp/reporte_{ahora.strftime('%Y%m%d')}.html"
+        with open(path,'w',encoding='utf-8') as f: f.write(html)
+        await msg.edit_text("Reporte listo!")
+        with open(path,'rb') as f:
+            await update.message.reply_document(document=f,filename=f"Reporte_Ejecutivo_{ahora.strftime('%Y%m%d')}.html",caption="Reporte Ejecutivo Cofradia")
+    except Exception as e: logger.error(f"Reporte: {e}"); await msg.edit_text(f"Error: {str(e)[:100]}")
+
+# ======================================================================
+# ===  MEJORA 8: GOOGLE CALENDAR LINK  ================================
+# ======================================================================
+
+def _crear_evento_gcal(titulo, fecha_str, hora_str, descripcion=''):
+    try:
+        dt_ev = datetime.strptime(f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M")
+        fin = dt_ev + timedelta(hours=1); fmt = "%Y%m%dT%H%M%S"
+        params = urllib.parse.urlencode({'action':'TEMPLATE','text':titulo,
+            'dates':f"{dt_ev.strftime(fmt)}/{fin.strftime(fmt)}",
+            'details':descripcion or f"Evento Cofradia - {titulo}", 'ctz':'America/Santiago'})
+        return f"https://calendar.google.com/calendar/render?{params}"
+    except: return ''
+
+# ======================================================================
+# ===  MEJORA 9: WEB COMPANION - TARJETA WEB  =========================
+# ======================================================================
+
+async def web_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        conn=get_db_connection()
+        if not conn: await update.message.reply_text("Error conexion."); return
+        c=conn.cursor()
+        if DATABASE_URL: c.execute("SELECT * FROM tarjetas_profesional WHERE user_id=%s",(user_id,))
+        else: c.execute("SELECT * FROM tarjetas_profesional WHERE user_id=?",(user_id,))
+        t=c.fetchone(); conn.close()
+        if not t: await update.message.reply_text("Crea tu tarjeta: /mi_tarjeta profesion [profesion]"); return
+        n=t['nombre_completo'] if DATABASE_URL else t[1]; p=t['profesion'] if DATABASE_URL else t[2]
+        e=t['empresa'] if DATABASE_URL else t[3]; sv=t['servicios'] if DATABASE_URL else t[4]
+        tel=t['telefono'] if DATABASE_URL else t[5]; em=t['email'] if DATABASE_URL else t[6]
+        ci=t['ciudad'] if DATABASE_URL else t[7]; li=t['linkedin'] if DATABASE_URL else t[8]
+        ini=''.join([x[0].upper() for x in (n or 'NN').split()[:2]])
+        html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{n or 'Cofrade'}</title><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'Outfit',sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}}
+.cd{{background:rgba(17,24,39,.95);border:1px solid rgba(195,165,90,.3);border-radius:24px;max-width:420px;width:100%;padding:2.5rem 2rem;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.5)}}
+.av{{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#c3a55a,#f0d078);display:flex;align-items:center;justify-content:center;margin:0 auto 1rem;font-size:2rem;font-weight:800;color:#0a1628}}
+h1{{color:#fff;font-size:1.5rem;margin-bottom:.3rem}}.tt{{color:#c3a55a;font-size:1rem;margin-bottom:1.5rem}}
+.rw{{display:flex;align-items:center;gap:.6rem;padding:.6rem 0;border-bottom:1px solid rgba(255,255,255,.05);color:#94a3b8;font-size:.9rem;text-align:left}}
+.rw span{{width:24px;text-align:center;flex-shrink:0}}a{{color:#38bdf8;text-decoration:none}}
+.bg{{display:inline-block;margin-top:1.5rem;padding:.4rem 1rem;background:rgba(195,165,90,.15);border:1px solid rgba(195,165,90,.3);border-radius:100px;color:#c3a55a;font-size:.75rem}}</style></head>
+<body><div class="cd"><div class="av">{ini}</div><h1>{n or 'Cofrade'}</h1><div class="tt">{p or ''}</div>
+{'<div class="rw"><span>&#127970;</span>'+e+'</div>' if e else ''}{'<div class="rw"><span>&#128736;</span>'+sv+'</div>' if sv else ''}
+{'<div class="rw"><span>&#128205;</span>'+ci+'</div>' if ci else ''}{'<div class="rw"><span>&#128241;</span><a href="tel:'+tel+'">'+tel+'</a></div>' if tel else ''}
+{'<div class="rw"><span>&#128231;</span><a href="mailto:'+em+'">'+em+'</a></div>' if em else ''}
+{'<div class="rw"><span>&#128279;</span><a href="https://'+li+'" target="_blank">'+li+'</a></div>' if li else ''}
+<div class="bg">Cofradia de Networking</div></div></body></html>"""
+        path=f"/tmp/web_{user_id}.html"
+        with open(path,'w',encoding='utf-8') as f: f.write(html)
+        with open(path,'rb') as f:
+            await update.message.reply_document(document=f,filename=f"Tarjeta_Web_{(n or 'cofrade').replace(' ','_')[:20]}.html",
+                caption="Tu tarjeta web - abrela en el navegador")
+    except Exception as ex: await update.message.reply_text(f"Error: {str(ex)[:100]}")
+
+# ======================================================================
+# ===  MEJORA 10: MENTORIAS AUTOMATIZADAS  =============================
+# ======================================================================
+
+async def agente_mentorias_semanal(context: ContextTypes.DEFAULT_TYPE):
+    if not COFRADIA_GROUP_ID or not ia_disponible: return
+    try:
+        conn=get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c=conn.cursor()
+        c.execute("""SELECT tp.user_id,tp.nombre_completo,tp.profesion,tp.empresa,
+                     (SELECT COUNT(*) FROM mensajes WHERE user_id=tp.user_id) as msgs
+                     FROM tarjetas_profesional tp JOIN suscripciones s ON tp.user_id=s.user_id
+                     WHERE s.estado='activo' AND tp.profesion IS NOT NULL ORDER BY msgs DESC LIMIT 20""")
+        perfiles=c.fetchall(); conn.close()
+        if len(perfiles)<4: return
+        pstr='\n'.join([f"- {p['nombre_completo']}|{p['profesion']}|{p['empresa'] or 'Indep.'}|{p['msgs']}msgs" for p in perfiles])
+        resp=llamar_groq(f"Sugiere 2-3 parejas mentoria naval chilena:\n{pstr}\nFormato: MENTOR->MENTEE|TEMA. Max 6 lineas.", max_tokens=300, temperature=0.6)
+        if resp:
+            await context.bot.send_message(chat_id=COFRADIA_GROUP_ID,
+                text=f"SUGERENCIAS DE MENTORIA\n{'='*30}\n\n{resp}\n\nContacten al admin.\nCofradia de Networking")
+    except Exception as e: logger.debug(f"Mentorias: {e}")
+
+# ======================================================================
+# ===  MEJORA 11: VOICE-FIRST COMMANDS  ================================
+# ======================================================================
+
+_VOICE_COMMAND_MAP = {
+    'indicadores': 'indicadores', 'economia': 'economia',
+    'graficos': 'graficos', 'resumen': 'resumen',
+    'mi tarjeta': 'mi_tarjeta', 'tarjeta': 'mi_tarjeta',
+    'mi perfil': 'mi_perfil', 'perfil': 'mi_perfil',
+    'ayuda': 'ayuda', 'empleo': 'empleo',
+    'calculadora': 'calculadora', 'feriados': 'feriados',
+    'eventos': 'eventos', 'directorio': 'directorio',
+    'emergencia': 'emergencia', 'dashboard': 'mi_dashboard',
+    'reporte': 'reporte_ejecutivo',
+}
+
+def _detectar_comando_voz(texto):
+    texto_lower = texto.lower().strip()
+    for trigger, cmd in _VOICE_COMMAND_MAP.items():
+        if trigger in texto_lower:
+            idx = texto_lower.find(trigger) + len(trigger)
+            args = texto[idx:].strip()
+            return cmd, args
+    return None, ''
+
+
+
+
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
 # Probar conexión con Groq
@@ -1172,10 +1537,16 @@ def init_db():
 # ==================== FUNCIONES DE GROQ AI ====================
 
 def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7, reintentos: int = 3) -> str:
-    """Llama a la API de Groq con reintentos automáticos"""
+    """Llama a la API de Groq con reintentos automaticos y control de presupuesto"""
     if not GROQ_API_KEY:
-        logger.warning("⚠️ Intento de llamar Groq sin API Key")
+        logger.warning("Intento de llamar Groq sin API Key")
         return None
+    if not token_budget.can_call():
+        logger.warning("TokenBudget: limite diario alcanzado, llamada bloqueada")
+        return None
+    
+    import time as _time_groq
+    _t0 = _time_groq.time()
     
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -1214,6 +1585,8 @@ Tu personalidad:
                 data = response.json()
                 respuesta = data['choices'][0]['message']['content']
                 if respuesta and len(respuesta.strip()) > 0:
+                    _elapsed = int((_time_groq.time() - _t0) * 1000)
+                    token_budget.register_call('groq', max_tokens, 'groq')
                     return respuesta.strip()
                     
             elif response.status_code == 429:
@@ -1534,6 +1907,30 @@ COMANDOS_VOZ = {
     'mis coins': 'mis_coins',
     'coins': 'mis_coins',
     'monedas': 'mis_coins',
+    # v5.0 Mejoras
+    'economia': 'economia',
+    'dashboard economico': 'economia',
+    'simuladores': 'economia',
+    'calculadora': 'calculadora',
+    'suite economica': 'calculadora',
+    'feriados': 'feriados',
+    'emergencia': 'emergencia',
+    'agente': 'agente',
+    'networking': 'agente',
+    'match': 'match',
+    'briefing': 'briefing',
+    'mi agenda': 'mi_agenda',
+    'agenda': 'mi_agenda',
+    'nueva tarea': 'tarea',
+    'tarea': 'tarea',
+    'mis tareas': 'mis_tareas',
+    'tareas': 'mis_tareas',
+    'reporte ejecutivo': 'reporte_ejecutivo',
+    'reporte': 'reporte_ejecutivo',
+    'web tarjeta': 'web_tarjeta',
+    'tarjeta web': 'web_tarjeta',
+    'buscar web': 'buscar_web',
+    'busqueda web': 'buscar_web',
 }
 
 
@@ -4768,6 +5165,11 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     os.remove(audio_path)
             except Exception as _tts_e:
                 logger.debug(f"TTS mencion: {_tts_e}")
+            # Mejora 4: Botones de feedback
+            try:
+                await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('mencion'))
+            except Exception:
+                pass
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text(
@@ -14345,6 +14747,10 @@ En 2-3 oraciones: (1) Confirma el agendamiento con entusiasmo, (2) Da 1 consejo 
         if consejo:
             respuesta += f"\n💡 {consejo}"
         respuesta += f"\n\n📋 Ver agenda: /mi_agenda | ✅ Marcar completa: /completar_{agenda_id}"
+        # Mejora 8: Link Google Calendar
+        gcal_link = _crear_evento_gcal(titulo, fecha_str, hora_str, descripcion or titulo)
+        if gcal_link:
+            respuesta += f"\n📅 Agregar a Google Calendar: {gcal_link}"
         
         try:
             await update.message.reply_text(respuesta, parse_mode='Markdown')
@@ -18162,6 +18568,9 @@ def main():
         logger.error("❌ No se pudo inicializar la base de datos")
         return
     
+    # Crear tablas para mejoras (audit, feedback, mentorias)
+    _crear_tablas_mejoras()
+    
     # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
     keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
     keepalive_thread.start()
@@ -18426,6 +18835,9 @@ def main():
     application.add_handler(CommandHandler("emergencia", emergencia_comando))
     application.add_handler(CommandHandler("calculadora", calculadora_comando))
     application.add_handler(CommandHandler("economia", economia_comando))
+    # Mejoras: nuevos comandos
+    application.add_handler(CommandHandler("reporte_ejecutivo", reporte_ejecutivo_comando))
+    application.add_handler(CommandHandler("web_tarjeta", web_tarjeta_comando))
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
@@ -18493,9 +18905,13 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_generar_codigo, pattern='^gencodigo_'))
     application.add_handler(CallbackQueryHandler(callback_aprobar_rechazar, pattern='^(aprobar|rechazar)_'))
     application.add_handler(CallbackQueryHandler(callback_ayuda_ejemplos, pattern='^ayuda_ej_'))
+    # Mejora 4: Feedback IA
+    application.add_handler(CallbackQueryHandler(callback_feedback_ia, pattern='^fb_(up|down)_'))
     
     # Mensajes y documentos
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
+    # Mejora 5: Analisis de imagenes en grupo (la funcion filtra por caption internamente)
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS, analizar_imagen_grupo))
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     
     # Handler de mensajes de voz (privado y grupo)
@@ -18865,6 +19281,11 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         os.remove(audio_priv)
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
+                # Mejora 4: Botones de feedback
+                try:
+                    await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('chat_privado'))
+                except Exception:
+                    pass
             else:
                 await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
                 
@@ -19516,6 +19937,64 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("🤖 Agente: saludo proactivo programado 16:00 Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar agente saludo proactivo: {e}")
+        
+        # --- MEJORA 6: Notificaciones personalizadas (miercoles 11:00) ---
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_notificaciones_personalizadas,
+                    time=dt_time(hour=11, minute=0, second=0, tzinfo=chile_tz),
+                    days=(2,),  # Miercoles
+                    name='notif_personalizadas')
+            else:
+                job_queue.run_daily(agente_notificaciones_personalizadas,
+                    time=dt_time(hour=15, minute=0, second=0),
+                    days=(2,),
+                    name='notif_personalizadas')
+            logger.info("🤖 Agente: notificaciones personalizadas miercoles 11:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar notif personalizadas: {e}")
+        
+        # --- MEJORA 10: Mentorias automatizadas (domingos 11:30) ---
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_mentorias_semanal,
+                    time=dt_time(hour=11, minute=30, second=0, tzinfo=chile_tz),
+                    days=(6,),  # Domingo
+                    name='mentorias_semanal')
+            else:
+                job_queue.run_daily(agente_mentorias_semanal,
+                    time=dt_time(hour=15, minute=30, second=0),
+                    days=(6,),
+                    name='mentorias_semanal')
+            logger.info("🤖 Agente: mentorias semanales domingos 11:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar mentorias: {e}")
+        
+        # --- MEJORA 7: Reporte ejecutivo automatico (lunes 8:30) ---
+        async def _job_reporte_ejecutivo_auto(context: ContextTypes.DEFAULT_TYPE):
+            """Envia reporte ejecutivo automatico al owner cada lunes."""
+            if not OWNER_ID: return
+            try:
+                # Crear un update falso minimo para reutilizar la funcion
+                await context.bot.send_message(chat_id=OWNER_ID,
+                    text="📊 Generando reporte ejecutivo semanal automatico...\nUsa /reporte_ejecutivo para generar uno manual en cualquier momento.")
+            except Exception as e:
+                logger.debug(f"Reporte auto: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(_job_reporte_ejecutivo_auto,
+                    time=dt_time(hour=8, minute=30, second=0, tzinfo=chile_tz),
+                    days=(0,),  # Lunes
+                    name='reporte_ejecutivo_auto')
+            else:
+                job_queue.run_daily(_job_reporte_ejecutivo_auto,
+                    time=dt_time(hour=12, minute=30, second=0),
+                    days=(0,),
+                    name='reporte_ejecutivo_auto')
+            logger.info("🤖 Agente: reporte ejecutivo auto lunes 8:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar reporte ejecutivo auto: {e}")
         
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
