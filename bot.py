@@ -3561,6 +3561,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
+/web_tarjeta - Tarjeta web descargable HTML
 /directorio [búsqueda] - Buscar en directorio
 /conectar - Conexiones inteligentes sugeridas
 /recomendar @user [texto] - Recomendar cofrade
@@ -3629,10 +3630,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🪙 COFRADÍA COINS
 /mis_coins - Balance y servicios canjeables
 
-📄 DOCUMENTOS RAG
-/subir_pdf - Subir PDF a la biblioteca
-/rag_consulta [pregunta] - Consultar biblioteca
-/rag_status - Estado del sistema RAG
+📄 DOCUMENTOS
+/rag_consulta [pregunta] - Consultar biblioteca de documentos
 
 🎤 VOZ: Envía audio mencionando "Bot" y te respondo!
 
@@ -3702,6 +3701,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /rag_debug - Debug del sistema RAG
 /rag_enriquecer - Enriquecer keywords RAG
 /subir_pdf - Subir PDF al sistema
+
+📊 REPORTES ADMIN
+/reporte_ejecutivo - Dashboard ejecutivo HTML
+/web_tarjeta - Tarjeta web publica (todos)
 """
         await update.message.reply_text(admin_txt)
 
@@ -7948,8 +7951,7 @@ async def subir_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje += "⚖️ Contratos modelo\n"
     mensaje += "💵 Estudios de remuneraciones\n\n"
     mensaje += "━" * 30 + "\n"
-    mensaje += "💡 Usa /rag_status para ver PDFs indexados\n"
-    mensaje += "💡 Usa /rag_consulta [pregunta] para consultar\n"
+    mensaje += "💡 Usa /rag_consulta [pregunta] para consultar documentos\n"
     mensaje += "📏 Limite: 15 GB gratuitos en Google Drive"
     
     await update.message.reply_text(mensaje)
@@ -16769,46 +16771,61 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             await msg.edit_text("✅ CMF + AFP + BCCH.\n📚 RAG + 🤖 IA en paralelo...")
 
-            # PASO 3: RAG QUERIES EN PARALELO (antes 14 secuenciales = 2-4 min)
-            queries_rag = {
-                'uf': 'unidad de fomento inflacion reajuste Chile',
-                'dolar': 'tipo de cambio dolar peso chileno politica cambiaria',
-                'euro': 'tipo de cambio euro moneda extranjera',
-                'utm': 'unidad tributaria mensual impuestos Chile',
-                'ipc': 'indice de precios al consumidor inflacion',
-                'tpm': 'tasa de politica monetaria banco central tasas de interes',
-                'bitcoin': 'bitcoin criptomoneda volatilidad mercado digital',
-                'tasa_desempleo': 'desempleo mercado laboral Chile',
-                'imacec': 'IMACEC actividad economica Chile PIB',
-                'libra_cobre': 'precio cobre Chile exportaciones materias primas',
-                'ivp': 'indice valor promedio creditos hipotecarios',
-                'ipsa': 'IPSA bolsa de valores Santiago Chile',
-                'solana': 'Solana criptomoneda blockchain escalabilidad',
-                'ethereum': 'Ethereum blockchain contratos inteligentes DeFi',
-            }
-            fragmentos_rag = {}
-            with _TPE_ind(max_workers=6) as pool:
-                rag_futures = {}
-                for cod in datos:
-                    q = queries_rag.get(cod, f'indicador {cod} Chile')
-                    rag_futures[cod] = pool.submit(lambda _q=q: _safe_call(consultar_rag_economia, _q))
-                for cod, fut in rag_futures.items():
-                    fragmentos_rag[cod] = fut.result() or ''
-
-            # PASO 4: EXPLICACIONES IA EN PARALELO (antes 14 secuenciales = 4-8 min)
-            await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores en paralelo...")
+            # PASO 3+4 OPTIMIZADO: UNA sola llamada Groq con TODOS los indicadores
+            # (antes: 14 RAG queries + 14 Groq calls = 28 API calls, 5-15 min)
+            # (ahora: 1 sola llamada Groq = 3-8 segundos)
+            await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores...")
             explicaciones = {}
-            with _TPE_ind(max_workers=4) as pool:
-                ia_futures = {}
-                for cod, d in datos.items():
-                    ia_futures[cod] = pool.submit(
-                        lambda _c=cod, _d=d: _safe_call(
-                            generar_explicacion_indicador,
-                            _c, _d, contexto_bcch, fragmentos_rag.get(_c, '')
-                        )
-                    )
-                for cod, fut in ia_futures.items():
-                    explicaciones[cod] = fut.result() or ''
+            
+            # Preparar resumen de todos los indicadores para un solo prompt
+            indicadores_txt = ""
+            for cod, d in datos.items():
+                val_act = d['valor']
+                serie = d.get('serie30', [])
+                val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
+                tendencia = 'subio' if var_pct > 0 else ('bajo' if var_pct < 0 else 'estable')
+                indicadores_txt += f"- {d['nombre']} ({cod}): {val_ant:.2f} -> {val_act:.2f} ({var_pct:+.3f}%, {tendencia})\n"
+            
+            contexto_extra = ""
+            if noticias_bcch:
+                contexto_extra = "\nNoticias Banco Central:\n" + "\n".join(str(n) for n in noticias_bcch[:3])
+            
+            prompt_batch = (
+                f"Eres economista chileno senior. Hoy {_ahora_chile().strftime('%d/%m/%Y')}.\n"
+                f"Para CADA indicador, escribe EXACTAMENTE una linea con formato:\n"
+                f"CODIGO: explicacion breve de 1-2 oraciones sobre por que vario.\n\n"
+                f"INDICADORES:\n{indicadores_txt}\n{contexto_extra}\n\n"
+                f"Responde SOLO las lineas CODIGO: explicacion. Sin emojis ni asteriscos."
+            )
+            
+            resp_batch = llamar_groq(prompt_batch, max_tokens=2000, temperature=0.3)
+            if resp_batch:
+                for linea in resp_batch.strip().split('\n'):
+                    linea = linea.strip()
+                    if ':' in linea:
+                        parts = linea.split(':', 1)
+                        cod_limpio = parts[0].strip().lower().replace(' ', '_').replace('-', '_')
+                        # Buscar match con codigos reales
+                        for cod_real in datos:
+                            if cod_limpio == cod_real or cod_limpio in cod_real or cod_real in cod_limpio:
+                                explicaciones[cod_real] = parts[1].strip()
+                                break
+            
+            # Fallback para indicadores sin explicacion
+            for cod, d in datos.items():
+                if cod not in explicaciones:
+                    val_act = d['valor']
+                    serie = d.get('serie30', [])
+                    val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                    var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
+                    if var_pct > 0:
+                        explicaciones[cod] = f"{d['nombre']} aumento {abs(var_pct):.3f}% respecto al periodo anterior."
+                    elif var_pct < 0:
+                        explicaciones[cod] = f"{d['nombre']} disminuyo {abs(var_pct):.3f}% respecto al periodo anterior."
+                    else:
+                        explicaciones[cod] = f"{d['nombre']} se mantuvo estable respecto al periodo anterior."
+
 
             # PASO 5: Noticias HTML con análisis IA completo
             noticias_html = ""
@@ -18825,6 +18842,7 @@ def main():
     
     # Onboarding: Aprobar solicitudes
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
+    application.add_handler(CommandHandler("ver_solicitudes", aprobar_solicitud_comando))
     application.add_handler(CommandHandler("editar_usuario", editar_usuario_comando))
     application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
     application.add_handler(CommandHandler("buscar_usuario", buscar_usuario_comando))
