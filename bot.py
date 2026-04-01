@@ -16826,14 +16826,22 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 contexto_extra = "\nNoticias Banco Central:\n" + "\n".join(str(n) for n in noticias_bcch[:3])
             
             prompt_batch = (
-                f"Eres economista chileno senior. Hoy {_ahora_chile().strftime('%d/%m/%Y')}.\n"
-                f"Para CADA indicador, escribe EXACTAMENTE una linea con formato:\n"
-                f"CODIGO: explicacion breve de 1-2 oraciones sobre por que vario.\n\n"
+                f"Eres economista chileno senior con 20 anos de experiencia en Banco Central y mercados. "
+                f"Hoy {_ahora_chile().strftime('%d/%m/%Y')}.\n\n"
+                f"Para CADA indicador escribe un parrafo de analisis COMPLETO (4-6 oraciones) con este formato:\n"
+                f"CODIGO: [Parrafo de analisis detallado]\n\n"
+                f"Cada parrafo DEBE incluir:\n"
+                f"1. Por que vario (causa directa: politica monetaria, tipo de cambio, demanda, oferta, etc.)\n"
+                f"2. Factor internacional relevante (Fed, guerra comercial, China, petroleo, geopolitica)\n"
+                f"3. Tendencia reciente: si viene subiendo/bajando las ultimas semanas y por que\n"
+                f"4. Impacto practico: como afecta al ciudadano chileno (creditos, arriendos, compras, ahorro)\n"
+                f"5. Proyeccion corta: hacia donde se dirige en las proximas 2-4 semanas segun consenso\n\n"
                 f"INDICADORES:\n{indicadores_txt}\n{contexto_extra}\n\n"
-                f"Responde SOLO las lineas CODIGO: explicacion. Sin emojis ni asteriscos."
+                f"IMPORTANTE: Cada indicador debe tener su propio parrafo de 4-6 oraciones. "
+                f"No uses emojis, asteriscos ni markdown. Usa datos concretos, no generalidades."
             )
             
-            resp_batch = llamar_groq(prompt_batch, max_tokens=2000, temperature=0.3)
+            resp_batch = llamar_groq(prompt_batch, max_tokens=4000, temperature=0.3)
             if resp_batch:
                 for linea in resp_batch.strip().split('\n'):
                     linea = linea.strip()
@@ -17115,6 +17123,27 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
     ai_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
     proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
 
+    # Extraer datos de tabla de proyecciones para grafico ECharts
+    proy_chart_data = '[]'
+    try:
+        if analisis_proyectado and 'TABLA_PROYECCIONES' in analisis_proyectado:
+            _lines = analisis_proyectado.split('TABLA_PROYECCIONES')[1].split('FIN_TABLA')[0].strip().split('\n')
+            _chart_items = []
+            for _ln in _lines:
+                _parts = [p.strip() for p in _ln.split('|')]
+                if len(_parts) >= 5 and _parts[0] and not _parts[0].startswith('Indicador'):
+                    try:
+                        _name = _parts[0]
+                        _opt = float(''.join(c for c in _parts[2] if c in '0123456789.') or '0')
+                        _base = float(''.join(c for c in _parts[3] if c in '0123456789.') or '0')
+                        _pes = float(''.join(c for c in _parts[4] if c in '0123456789.') or '0')
+                        if _opt > 0 or _base > 0 or _pes > 0:
+                            _chart_items.append({'name': _name, 'opt': _opt, 'base': _base, 'pes': _pes})
+                    except: pass
+            if _chart_items:
+                proy_chart_data = json.dumps(_chart_items)
+    except: pass
+
     html = '''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Dashboard Economico Chile - Cofradia</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -17295,6 +17324,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 </div></div>
 <!-- ANALISIS PROYECTADO -->
 <div class="P" id="tab-proy"><div class="S"><div class="ST">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
+<div id="chartProy" style="width:100%;height:350px;margin:12px 0;border-radius:12px;background:rgba(0,0,0,.2)"></div>
 <div class="IA">''' + (proy_safe or 'Ejecute /economia para generar analisis proyectado con IA.') + '''</div></div></div>
 <!-- ANALISIS IA -->
 <div class="P" id="tab-ia"><div class="S"><div class="ST">ANALISIS MACROECONOMICO</div>
@@ -17354,6 +17384,8 @@ CH.h5u=echarts.init(document.getElementById('cH5u'));(function(){var h=''' + jso
 CH.af=echarts.init(document.getElementById('cAf'));CH.af.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:''' + afp_names_js + ''',axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Fondo A',type:'bar',data:''' + json.dumps(afp_a) + ''',itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:''' + json.dumps(afp_e) + ''',itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]});
 // TMC
 CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels_js + ''',axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:''' + tmc_values_js + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]});
+// Grafico de Proyecciones (3 escenarios)
+try{var pData=''' + proy_chart_data + ''';if(pData.length>0){CH.pry=echarts.init(document.getElementById('chartProy'));var pN=pData.map(function(d){return d.name});var pO=pData.map(function(d){return d.opt});var pB=pData.map(function(d){return d.base});var pP=pData.map(function(d){return d.pes});CH.pry.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Optimista','Base','Pesimista'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'15%',top:'18%'},xAxis:{type:'category',data:pN,axisLabel:{color:tx,fontSize:9,rotate:20},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:[{name:'Optimista',type:'bar',data:pO,itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:8}},{name:'Base',type:'bar',data:pB,itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:8}},{name:'Pesimista',type:'bar',data:pP,itemStyle:{color:rd,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:rd,fontSize:8}}]})}}catch(e){}
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
 // Simuladores
 var UF=''' + str(uf) + ''';
@@ -17479,36 +17511,56 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "- Factores externos: aranceles EE.UU. (Trump), guerra comercial, Fed (tasas), BCE, conflictos (Ucrania, Medio Oriente), "
                        "precio petroleo, demanda China por cobre/litio, cadenas de suministro globales.\n"
                        "- Comparacion con paises OCDE y Latam (Mexico, Brasil, Colombia, Peru).\n\n"
-                       "SECCION 2 — PROYECCIONES 6-18 MESES (minimo 3 parrafos):\n"
-                       "- Escenario OPTIMISTA: supuestos, valores esperados para dolar, UF, IPC, TPM, desempleo, cobre, IPSA, BTC.\n"
-                       "- Escenario BASE: el mas probable segun consenso de mercado y encuestas del BCCH.\n"
-                       "- Escenario PESIMISTA: riesgos de cola, que podria salir mal.\n"
-                       "- Probabilidades estimadas de cada escenario.\n"
+                       "SECCION 2 — PROYECCIONES 6-18 MESES (minimo 4 parrafos):\n"
+                       "OBLIGATORIO incluir una TABLA con valores numericos proyectados:\n"
+                       "TABLA_PROYECCIONES:\n"
+                       "Indicador | Actual | Optimista | Base | Pesimista\n"
+                       "Dolar | [actual] | [valor] | [valor] | [valor]\n"
+                       "UF | [actual] | [valor] | [valor] | [valor]\n"
+                       "IPC | [actual] | [valor] | [valor] | [valor]\n"
+                       "TPM | [actual] | [valor] | [valor] | [valor]\n"
+                       "Cobre | [actual] | [valor] | [valor] | [valor]\n"
+                       "Desempleo | [actual] | [valor] | [valor] | [valor]\n"
+                       "IPSA | [actual] | [valor] | [valor] | [valor]\n"
+                       "Bitcoin | [actual] | [valor] | [valor] | [valor]\n"
+                       "FIN_TABLA\n"
+                       "- Despues de la tabla, explicar supuestos de cada escenario.\n"
+                       "- Probabilidades: Optimista X%, Base Y%, Pesimista Z%.\n"
                        "- Proyeccion de crecimiento PIB Chile 2026-2027.\n\n"
-                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (25 medidas concretas):\n"
-                       "Organizadas en 5 ejes: (A) Estabilidad macroeconomica y control inflacion, "
-                       "(B) Empleo y productividad, (C) Inversion extranjera y competitividad, "
-                       "(D) Transformacion tecnologica e innovacion, (E) Sustentabilidad y energia.\n"
-                       "Cada medida con: accion concreta, plazo, impacto esperado.\n"
-                       "Objetivo: transformar Chile en economia desarrollada de primer mundo.\n\n"
+                       "SECCION 3 — PLAN DE ACCION MINISTERIAL:\n"
+                       "Escribe EXACTAMENTE una lista numerada de 20 medidas concretas y efectivas. "
+                       "Cada medida debe ser UNA oracion especifica y accionable. Formato:\n"
+                       "1. [Medida concreta]\n"
+                       "2. [Medida concreta]\n"
+                       "... hasta 20.\n\n"
+                       "Las medidas DEBEN cubrir estos ejes:\n"
+                       "A) BUROCRACIA Y EFICIENCIA: Reducir tramites, agilizar creacion de empresas.\n"
+                       "B) EDUCACION Y CAPITAL HUMANO: Capacitacion, productividad laboral, formacion tecnica.\n"
+                       "C) INVERSION EXTRANJERA: Atraer capitales en tecnologia, energias renovables, data centers.\n"
+                       "D) ESTABILIDAD MACRO: Reducir inflacion, fortalecer el peso, politica fiscal responsable.\n"
+                       "E) INFRAESTRUCTURA: Conectividad, logistica, puertos, carreteras, fibra optica.\n"
+                       "F) SEGURIDAD SOCIAL: Proteccion trabajadores, pensiones, salud publica.\n"
+                       "G) EMPRENDIMIENTO E INNOVACION: I+D, startups, transferencia tecnologica.\n"
+                       "H) COMERCIO INTERNACIONAL: Acceso mercados, tratados, diversificacion exportaciones.\n"
+                       "I) IGUALDAD Y DISTRIBUCION: Reducir brecha ingresos, movilidad social.\n"
+                       "J) MEDIO AMBIENTE: Desarrollo sostenible, hidrogeno verde, electromovilidad.\n\n"
                        "SECCION 4 — IMPACTO INTERNACIONAL Y COBERTURA (minimo 2 parrafos):\n"
                        "- Como afectan las politicas de EE.UU., China, UE a Chile especificamente.\n"
                        "- Estrategias de cobertura cambiaria y comercial.\n"
-                       "- Oportunidades en nearshoring, litio, hidrogeno verde, data centers.\n"
-                       "- Cambio climatico: riesgos para agricultura, mineria, agua.\n\n"
+                       "- Oportunidades en nearshoring, litio, hidrogeno verde, data centers.\n\n"
                        "SECCION 5 — RECOMENDACIONES PARA INVERSIONISTAS CHILENOS:\n"
                        "- Asset allocation sugerido: renta fija, variable local, internacional, alternativos.\n"
                        "- Sectores con mayor potencial en Chile para los proximos 12 meses.\n"
                        "- APV: fondo A vs E segun perfil y horizonte.\n"
                        "- Cripto: porcentaje razonable del portafolio.\n\n"
-                       "Maximo 1200 palabras. Tono ministerial profesional. Sin asteriscos ni markdown.\n"
+                       "Maximo 1800 palabras. Tono ministerial profesional. Sin asteriscos ni markdown.\n"
                        "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
                        "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, "
                        "SECCION 4 - IMPACTO INTERNACIONAL, SECCION 5 - RECOMENDACIONES INVERSIONISTAS.")
                 try:
                     with _TPE_eco(max_workers=2) as pool_ia:
                         f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3))
-                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=2500, temperature=0.4))
+                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=3500, temperature=0.4))
                         analisis_ia = f1.result() or ''
                         analisis_proy = f2.result() or ''
                         # P5: Format titles in bold
@@ -18381,11 +18433,11 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 def _generar_sirena_ogg() -> BytesIO:
-    """Genera un tono de sirena corto como archivo OGG/WAV para nota de voz"""
+    """Genera sirena de emergencia potente (5s, max volumen, oscilacion rapida)"""
     import struct, wave as _wave, math as _math
     buf = BytesIO()
     sample_rate = 24000
-    duration = 3  # 3 segundos
+    duration = 5  # 5 segundos para maxima atencion
     n_samples = sample_rate * duration
     w = _wave.open(buf, 'wb')
     w.setnchannels(1)
@@ -18394,19 +18446,26 @@ def _generar_sirena_ogg() -> BytesIO:
     frames = []
     for i in range(n_samples):
         t = i / sample_rate
-        # Sirena que oscila entre 800Hz y 1400Hz
-        freq = 800 + 600 * _math.sin(2 * _math.pi * 2 * t)  # oscila 2 veces/seg
-        val = int(28000 * _math.sin(2 * _math.pi * freq * t))
-        frames.append(struct.pack('<h', max(-32768, min(32767, val))))
+        # Sirena urgente: oscila rapido entre 600Hz y 1600Hz (3 ciclos/seg)
+        freq = 1100 + 500 * _math.sin(2 * _math.pi * 3 * t)
+        # Segundo tono superpuesto para mas urgencia
+        freq2 = 800 + 300 * _math.sin(2 * _math.pi * 5 * t)
+        # Combinar ambos tonos a MAXIMO volumen
+        val1 = _math.sin(2 * _math.pi * freq * t)
+        val2 = 0.4 * _math.sin(2 * _math.pi * freq2 * t)
+        # Envelope: sube rapido, se mantiene fuerte
+        env = min(1.0, t * 4) if t < 0.25 else 1.0
+        combined = int(32000 * env * (val1 + val2) / 1.4)
+        frames.append(struct.pack('<h', max(-32768, min(32767, combined))))
     w.writeframes(b''.join(frames))
     w.close()
     buf.seek(0)
-    # Convertir a OGG si ffmpeg disponible, sino enviar WAV
+    # Convertir a OGG OPUS (Telegram reproduce automaticamente las notas de voz)
     try:
         import subprocess
         ogg_buf = BytesIO()
         proc = subprocess.run(
-            ['ffmpeg', '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', 'pipe:1'],
+            ['ffmpeg', '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '48k', '-f', 'ogg', 'pipe:1'],
             input=buf.read(), capture_output=True, timeout=10
         )
         if proc.returncode == 0 and len(proc.stdout) > 100:
@@ -18523,13 +18582,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     # 1. Enviar al grupo principal + topics
     enviados = 0
     if COFRADIA_GROUP_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
-            enviados += 1
-        except Exception as _eg:
-            logger.warning(f"Emergencia grupo: {_eg}")
-        # Enviar sirena al grupo (push-up automático)
+        # SIRENA PRIMERO (push-up automatico — el sonido llega antes que el texto)
         if sirena_buf:
             try:
                 sirena_buf.seek(0)
@@ -18537,10 +18590,17 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                     chat_id=COFRADIA_GROUP_ID,
                     voice=sirena_buf,
                     caption="🚨🔊 SIRENA DE EMERGENCIA — " + tipo,
-                    duration=3
+                    duration=5
                 )
             except Exception as _sv:
                 logger.debug(f"Sirena grupo: {_sv}")
+        # Texto de alerta despues
+        try:
+            await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
+            enviados += 1
+        except Exception as _eg:
+            logger.warning(f"Emergencia grupo: {_eg}")
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -18583,19 +18643,20 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                 mid = m['user_id'] if DATABASE_URL else m[0]
                 if mid and mid != user.id and mid != OWNER_ID:
                     try:
-                        await context.bot.send_message(
-                            chat_id=mid,
-                            text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
-                            reply_markup=tel_kb)
-                        # Enviar sirena por privado (push-up automático)
+                        # SIRENA PRIMERO al privado (push-up automatico)
                         if sirena_buf:
                             try:
                                 sirena_buf.seek(0)
                                 await context.bot.send_voice(
                                     chat_id=mid, voice=sirena_buf,
-                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=3)
+                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=5)
                             except Exception:
                                 pass
+                        # Texto despues
+                        await context.bot.send_message(
+                            chat_id=mid,
+                            text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
+                            reply_markup=tel_kb)
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
