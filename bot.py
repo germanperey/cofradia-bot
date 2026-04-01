@@ -1774,9 +1774,9 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
         communicate = edge_tts.Communicate(
             texto_voz,
             VOZ_TTS,
-            rate  = "-12%",   # más pausada y natural
-            pitch = "-4Hz",   # tono más grave y humano
-            volume = "+8%"    # más presencia
+            rate  = "-18%",   # mas pausada, ritmo humano conversacional
+            pitch = "+2Hz",   # ligeramente mas agudo, voz femenina calida
+            volume = "+10%"   # presencia clara
         )
         await communicate.save(filename)
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
@@ -3341,6 +3341,30 @@ async def enviar_mensaje_largo(update: Update, texto: str, parse_mode=None):
                     await update.message.reply_text(parte)
                 except Exception as e:
                     logger.error(f"Error enviando parte: {e}")
+
+
+async def _enviar_respuesta_ia(update, context, texto, msg_status=None, con_audio=True, funcion='ia'):
+    """Helper: envia respuesta IA como texto largo + audio TTS + feedback buttons.
+    Previene Message_too_long y siempre incluye audio."""
+    if msg_status:
+        try: await msg_status.delete()
+        except: pass
+    texto_limpio = texto.replace('*', '').replace('_', ' ')
+    await enviar_mensaje_largo(update, texto_limpio)
+    # Audio TTS
+    if con_audio:
+        try:
+            audio_path = await generar_audio_tts(texto_limpio[:1500], f"/tmp/{funcion}_{update.effective_user.id}.mp3")
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, 'rb') as af:
+                    await update.message.reply_voice(voice=af)
+                os.remove(audio_path)
+        except Exception as _tts_err:
+            logger.debug(f"TTS {funcion}: {_tts_err}")
+    # Feedback buttons
+    try:
+        await update.message.reply_text("Te fue util?", reply_markup=_crear_botones_feedback(funcion))
+    except: pass
 
 
 def registrar_servicio_usado(user_id, servicio):
@@ -10563,11 +10587,27 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             draw.text((42, y_info), f"{labels_d[label]}:", fill=GRIS_SUTIL, font=font_label)
             draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
             y_info += 24
-    # --- QR principal (tarjeta compartible, lado derecho) ---
+    # --- QR principal (datos de contacto vCard para guardar en telefono) ---
     qr_x, qr_y = 640, 155
     qr_size = 150
-    qr_url = f"https://t.me/Cofradia_Premium_Bot?start=tarjeta_{user_id}" if user_id else "https://t.me/Cofradia_Premium_Bot"
-    qr_img = generar_qr_simple(qr_url, size=qr_size)
+    # Generar vCard para el QR (al escanear se guarda el contacto)
+    _nombre = datos.get('nombre_completo', 'Cofrade')
+    _parts = _nombre.split(' ', 1)
+    _fn = _parts[0] if _parts else _nombre
+    _ln = _parts[1] if len(_parts) > 1 else ''
+    _tel = datos.get('telefono', '')
+    _em = datos.get('email', '')
+    _emp = datos.get('empresa', '')
+    _prof = datos.get('profesion', '')
+    _city = datos.get('ciudad', '')
+    vcard = f"BEGIN:VCARD\nVERSION:3.0\nN:{_ln};{_fn}\nFN:{_nombre}\n"
+    if _prof: vcard += f"TITLE:{_prof}\n"
+    if _emp: vcard += f"ORG:{_emp}\n"
+    if _tel: vcard += f"TEL;TYPE=CELL:{_tel}\n"
+    if _em: vcard += f"EMAIL:{_em}\n"
+    if _city: vcard += f"ADR;TYPE=WORK:;;{_city};;;;\n"
+    vcard += "NOTE:Miembro Cofradia de Networking\nEND:VCARD"
+    qr_img = generar_qr_simple(vcard, size=qr_size)
     if qr_img:
         try:
             img.paste(qr_img, (qr_x, qr_y))
@@ -11414,7 +11454,9 @@ Responde en español, de forma concisa. No uses asteriscos ni formatos."""
         if not respuesta:
             respuesta = "No pude generar sugerencias en este momento."
         
-        await msg.edit_text(f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n{respuesta}\n\n💡 /directorio para ver el directorio completo")
+        header = f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n"
+        footer = "\n\n💡 /directorio para ver el directorio completo"
+        await _enviar_respuesta_ia(update, context, header + respuesta + footer, msg, con_audio=True, funcion='conectar')
         registrar_servicio_usado(user_id, 'conectar')
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)[:100]}")
@@ -12549,7 +12591,7 @@ Consulta de {nombre}: {consulta}"""
         respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.5)
         if not respuesta:
             respuesta = "No pude generar una respuesta en este momento."
-        await msg.edit_text(f"💰 CONSULTA FINANCIERA\n{'━' * 28}\n\n{respuesta}")
+        await _enviar_respuesta_ia(update, context, f"💰 CONSULTA FINANCIERA\n{'━' * 28}\n\n{respuesta}", msg, con_audio=True, funcion='finanzas')
         otorgar_coins(update.effective_user.id, 1, 'Consulta financiera')
         registrar_servicio_usado(update.effective_user.id, 'finanzas')
     except Exception as e:
@@ -14634,11 +14676,8 @@ Sé específico, motivador y con lenguaje profesional pero cercano. Tutéalo com
             respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.6)
         
         if respuesta:
-            header = f"🤖 *AGENTE DE NETWORKING - Plan para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n\n{respuesta}")
+            header = f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n{'━'*35}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='agente')
         else:
             await msg.edit_text("❌ No pude generar el plan en este momento. Intenta de nuevo.")
         
@@ -15118,17 +15157,14 @@ TAREA: Identifica los TOP 5 cofrades más valiosos para hacer networking con {us
 Sé específico y estratégico. Piensa en sinergias de negocio, intercambio de expertise, oportunidades laborales mutuas."""
         
         await msg.edit_text("🤝 Calculando compatibilidades y sinergias...")
-        respuesta = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
+        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.6)
         
         if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.6)
         
         if respuesta:
-            header = f"🤝 *MATCH DE NETWORKING para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤝 MATCH para {user.first_name}\n\n{respuesta}")
+            header = f"🤝 MATCH DE NETWORKING para {user.first_name}\n{'━'*35}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='match')
         else:
             await msg.edit_text("❌ No pude generar el análisis. Intenta de nuevo.")
         
@@ -15259,10 +15295,8 @@ Sé conciso pero impactante. Tono energético, profesional y de camaradería."""
             respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
         
         if respuesta:
-            try:
-                await msg.edit_text(f"☀️ *BRIEFING {hoy_str.upper()}*\n{'━'*30}\n\n{respuesta}", parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"☀️ BRIEFING {hoy_str}\n\n{respuesta}")
+            header = f"☀️ BRIEFING {hoy_str.upper()}\n{'━'*30}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='briefing')
         else:
             await msg.edit_text("❌ No pude generar el briefing. Intenta de nuevo.")
         
@@ -17423,38 +17457,66 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analisis_proy = ''
             if ia_disponible:
                 rv = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for _,d in datos.items()])
-                pr1 = (f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
-                       f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
-                       "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
-                       "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
+                pr1 = (f"Eres analista macroeconomico senior chileno con 20 anos de experiencia. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
+                       f"Indicadores Chile:\n{rv}\n\n"
+                       "Escribe un ANALISIS EJECUTIVO COMPLETO en 7-9 parrafos cubriendo OBLIGATORIAMENTE:\n\n"
+                       "1. PANORAMA GENERAL: Estado actual de la economia chilena en contexto global. PIB, crecimiento, confianza empresarial.\n"
+                       "2. INFLACION Y POLITICA MONETARIA: IPC actual, trayectoria, decisiones TPM del Banco Central, comparacion con metas.\n"
+                       "3. TIPO DE CAMBIO: Dolar/peso, factores internos (cuenta corriente, flujos) y externos (Fed, DXY, diferencial tasas).\n"
+                       "4. COMMODITIES: Cobre (precio, produccion, demanda China), litio, celulosa. Impacto en balanza comercial.\n"
+                       "5. MERCADO LABORAL: Desempleo, creacion de empleo, informalidad, IMACEC como proxy de actividad.\n"
+                       "6. MERCADOS FINANCIEROS: IPSA (valuacion, flujos), renta fija, spread soberano, cripto (BTC/ETH/SOL).\n"
+                       "7. RIESGOS PRINCIPALES: Aranceles EE.UU., desaceleracion China, conflictos geopoliticos, riesgo fiscal interno.\n"
+                       "8. PROYECCION TRIMESTRAL: Hacia donde van los indicadores clave en los proximos 90 dias.\n\n"
+                       "FUENTES a considerar: Banco Central, INE, CMF, FMI, Banco Mundial, Fed, BCE, Bloomberg, Reuters.\n"
+                       "Maximo 600 palabras. Profesional y concreto. Sin asteriscos ni markdown.")
                 pr2 = (f"Eres el mejor economista del mundo, asesor del Ministerio de Hacienda de Chile. "
                        f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
-                       "ELABORA INFORME PROFESIONAL:\n\n"
-                       "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
-                       "(guerras, aranceles, Fed, geopolítica, commodities, fiscal chilena).\n\n"
-                       "SECCION 2 — PROYECCIONES 6-12 MESES: Escenarios optimista/base/pesimista para "
-                       "dólar, UF, IPC, TPM, desempleo, cobre, IPSA. Fundamentos estadísticos.\n\n"
-                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas): "
-                       "Reducir inflación y desempleo, fortalecer peso, atraer inversión extranjera, "
-                       "industria tecnológica, energías renovables, productividad, "
-                       "transformar Chile en país desarrollado de primer mundo.\n\n"
-                       "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
-                       "cambio climático y medidas de cobertura.\n\n"
-                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.\n"
+                       "ELABORA INFORME PROFESIONAL EXHAUSTIVO:\n\n"
+                       "SECCION 1 — DIAGNOSTICO MACROECONOMICO (minimo 3 parrafos):\n"
+                       "- Analisis profundo de CADA indicador: por que esta en ese nivel, tendencia de 6 meses, comparacion historica.\n"
+                       "- Factores internos: politica fiscal, gasto publico, reforma tributaria, deuda soberana, confianza consumidor.\n"
+                       "- Factores externos: aranceles EE.UU. (Trump), guerra comercial, Fed (tasas), BCE, conflictos (Ucrania, Medio Oriente), "
+                       "precio petroleo, demanda China por cobre/litio, cadenas de suministro globales.\n"
+                       "- Comparacion con paises OCDE y Latam (Mexico, Brasil, Colombia, Peru).\n\n"
+                       "SECCION 2 — PROYECCIONES 6-18 MESES (minimo 3 parrafos):\n"
+                       "- Escenario OPTIMISTA: supuestos, valores esperados para dolar, UF, IPC, TPM, desempleo, cobre, IPSA, BTC.\n"
+                       "- Escenario BASE: el mas probable segun consenso de mercado y encuestas del BCCH.\n"
+                       "- Escenario PESIMISTA: riesgos de cola, que podria salir mal.\n"
+                       "- Probabilidades estimadas de cada escenario.\n"
+                       "- Proyeccion de crecimiento PIB Chile 2026-2027.\n\n"
+                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (25 medidas concretas):\n"
+                       "Organizadas en 5 ejes: (A) Estabilidad macroeconomica y control inflacion, "
+                       "(B) Empleo y productividad, (C) Inversion extranjera y competitividad, "
+                       "(D) Transformacion tecnologica e innovacion, (E) Sustentabilidad y energia.\n"
+                       "Cada medida con: accion concreta, plazo, impacto esperado.\n"
+                       "Objetivo: transformar Chile en economia desarrollada de primer mundo.\n\n"
+                       "SECCION 4 — IMPACTO INTERNACIONAL Y COBERTURA (minimo 2 parrafos):\n"
+                       "- Como afectan las politicas de EE.UU., China, UE a Chile especificamente.\n"
+                       "- Estrategias de cobertura cambiaria y comercial.\n"
+                       "- Oportunidades en nearshoring, litio, hidrogeno verde, data centers.\n"
+                       "- Cambio climatico: riesgos para agricultura, mineria, agua.\n\n"
+                       "SECCION 5 — RECOMENDACIONES PARA INVERSIONISTAS CHILENOS:\n"
+                       "- Asset allocation sugerido: renta fija, variable local, internacional, alternativos.\n"
+                       "- Sectores con mayor potencial en Chile para los proximos 12 meses.\n"
+                       "- APV: fondo A vs E segun perfil y horizonte.\n"
+                       "- Cripto: porcentaje razonable del portafolio.\n\n"
+                       "Maximo 1200 palabras. Tono ministerial profesional. Sin asteriscos ni markdown.\n"
                        "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
-                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, SECCION 4 - IMPACTO INTERNACIONAL.")
+                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, "
+                       "SECCION 4 - IMPACTO INTERNACIONAL, SECCION 5 - RECOMENDACIONES INVERSIONISTAS.")
                 try:
                     with _TPE_eco(max_workers=2) as pool_ia:
-                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3))
-                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=1500, temperature=0.4))
+                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3))
+                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=2500, temperature=0.4))
                         analisis_ia = f1.result() or ''
                         analisis_proy = f2.result() or ''
                         # P5: Format titles in bold
                         if analisis_proy:
                             for _title in ['INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE',
                                           'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA',
-                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4',
-                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4']:
+                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4','SECCION 5',
+                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4','SECCI\u00d3N 5']:
                                 for _sep in [' - ',' \u2014 ',': ','. ']:
                                     _full = _title + _sep
                                     if _full in analisis_proy:
@@ -17463,7 +17525,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
                 except Exception:
                     try:
-                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3)) or ''
+                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3)) or ''
                     except Exception: pass
             await msg.edit_text("📊 Generando dashboard HTML...")
             html_content = await loop.run_in_executor(
@@ -19284,13 +19346,13 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             if respuesta:
                 # Agregar footer con fuentes consultadas
-                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}"
-                respuesta_final = respuesta + footer
+                footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
+                respuesta_completa = respuesta + footer
                 try:
-                    await msg.edit_text(respuesta_final, parse_mode='Markdown')
-                except Exception:
-                    await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
-                # Enviar también como audio (TTS)
+                    await msg.delete()
+                except: pass
+                await enviar_mensaje_largo(update, respuesta_completa.replace('*', '').replace('_', ' '))
+                # Enviar tambien como audio (TTS)
                 try:
                     audio_priv = await generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3")
                     if audio_priv and os.path.exists(audio_priv):
