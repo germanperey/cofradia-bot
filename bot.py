@@ -2197,87 +2197,66 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 registrar_servicio_usado(user_id, 'voz_comando')
                 return
         
-        resultados = busqueda_unificada(texto_para_busqueda, limit_historial=15, limit_rag=40)
-        contexto = formatear_contexto_unificado(resultados, texto_para_busqueda)
-        
-        # Generar también contexto de tarjetas profesionales si hay nombres relevantes
-        contexto_tarjetas = ""
-        try:
-            conn_tc = get_db_connection()
-            if conn_tc:
-                c_tc = conn_tc.cursor()
-                # Usar query mejorada para mejor búsqueda de tarjetas
-                palabras_busq = [p for p in texto_para_busqueda.lower().split() if len(p) > 3][:5]
-                if palabras_busq:
-                    cond_tc = []
-                    params_tc = []
-                    for p in palabras_busq:
-                        if DATABASE_URL:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
-                        else:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
-                    if cond_tc:
-                        wh = " OR ".join(cond_tc)
-                        if DATABASE_URL:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        else:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        tarjetas = c_tc.fetchall()
-                        if tarjetas:
-                            ctx_list = []
-                            for t in tarjetas:
-                                if DATABASE_URL:
-                                    ctx_list.append(f"{t['nombre_completo']} - {t['profesion']} en {t['empresa']} ({t['ciudad']}): {t['servicios']}")
-                                else:
-                                    ctx_list.append(f"{t[0]} - {t[1]} en {t[2]} ({t[3]}): {t[4]}")
-                            contexto_tarjetas = "\n=== PROFESIONALES COFRADÍA (Tarjetas) ===\n" + "\n".join(ctx_list)
-                conn_tc.close()
-        except Exception as e_tc:
-            logger.debug(f"No se pudo buscar tarjetas para audio: {e_tc}")
+        # PASO 3: Búsqueda multi-agente (5 motores en paralelo: RAG, historial,
+        #         directorio, web DDG, conocimiento LLM)
+        resultados = busqueda_multiagente_paralela(
+            texto_para_busqueda, limit_rag=60, limit_hist=20)
+        contexto = formatear_contexto_multiagente(resultados, texto_para_busqueda)
         
         fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
-        rag_conf = resultados.get('rag_confianza', 'ninguna')
+        rag_conf     = resultados.get('rag_confianza', 'ninguna')
+        rag_tema     = resultados.get('rag_tematica',  'desconocida')
+        agentes_ok   = resultados.get('agentes_ok', [])
         
-        modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
-                      else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
+        # Modo de respuesta segun confianza combinada
+        if rag_conf in ('alta', 'media') and rag_tema in ('relevante', 'posible'):
+            modo_audio = ("MODO DOCUMENTOS: Basa tu respuesta principalmente en los "
+                          "fragmentos RAG -- tienen la informacion exacta solicitada.")
+        elif resultados.get('web'):
+            modo_audio = ("MODO WEB+LLM: No hay docs internos directamente relevantes. "
+                          "Usa los resultados web y tu conocimiento propio.")
+        else:
+            modo_audio = ("MODO LLM: No hay docs ni web relevante. Responde desde tu "
+                          "conocimiento experto sin decir 'no tengo informacion'.")
         
-        # Contexto de intención para el prompt
         intent_audio_hint = ""
         if texto_para_busqueda != texto_transcrito:
-            intent_audio_hint = f"\n(La búsqueda usó la consulta enriquecida: \"{texto_para_busqueda[:100]}\")"
+            intent_audio_hint = (f"\n(Consulta enriquecida usada: "
+                                 f"\"{texto_para_busqueda[:100]}\")")
         
-        prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
+        prompt = f"""Eres el asistente inteligente de la Cofradia de Networking, comunidad de oficiales navales chilenos. Respondes como un ser humano calido, claro y bien informado. Tu respuesta sera convertida a audio.
 
-{user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
-Empieza directamente: "{user.first_name}, [respuesta]..."
+INSTRUCCIONES:
+- Dirigete a {user.first_name} por su nombre al comenzar.
+- Responde de forma conversacional y natural, como si hablaras con el/ella en persona.
+- Maximo 5 oraciones fluidas. Sin listas, sin emojis, sin asteriscos.
+- {modo_audio}
+- Si los documentos tienen la informacion, extraela con detalle y citala naturalmente.
+- Si NO hay docs relevantes pero sabes del tema como LLM experto, responde con confianza.
+- NUNCA inventes datos sobre personas de la Cofradia.
 
-MODO: {modo_audio}
-NUNCA digas "no tengo información" si sabes del tema como LLM.
-NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
-
-He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
+MOTORES CONSULTADOS ({len(agentes_ok)}/5): {', '.join(agentes_ok) or 'conocimiento propio'}{intent_audio_hint}
+Fuentes: {fuentes_info} | Confianza RAG: {rag_conf}
 
 {contexto}
-{contexto_tarjetas}
 
-{user.first_name} pregunta (audio): {texto_transcrito}"""
+{user.first_name} pregunta (mensaje de voz): {texto_transcrito}"""
 
-        respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
+        respuesta_texto = llamar_groq(prompt, max_tokens=1000, temperature=0.65)
         
         if not respuesta_texto:
-            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=700, temperature=0.65)
         
         if not respuesta_texto:
-            respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
+            respuesta_texto = (f"Recibi tu mensaje: \"{texto_transcrito}\". "
+                               f"Lamentablemente no pude generar una respuesta en este momento.")
         
         # PASO 4: Enviar respuesta en texto
-        texto_respuesta_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}"
+        texto_respuesta_display = f"\U0001f3a4 *Tu mensaje:*\n_{texto_transcrito}_\n\n\U0001f4ac *Respuesta:*\n{respuesta_texto}"
         try:
             await msg.edit_text(texto_respuesta_display, parse_mode='Markdown')
         except Exception:
-            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}")
+            await msg.edit_text(f"\U0001f3a4 Tu mensaje:\n{texto_transcrito}\n\n\U0001f4ac Respuesta:\n{respuesta_texto}")
         
         # PASO 5: Generar y enviar audio de respuesta
         try:
@@ -2286,7 +2265,7 @@ He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
                 with open(audio_file, 'rb') as f:
                     await update.message.reply_voice(
                         voice=f,
-                        caption="🔊 Respuesta de voz"
+                        caption="\U0001f50a Respuesta de voz"
                     )
                 # Limpiar archivo temporal
                 try:
@@ -9386,60 +9365,80 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
                 t = _ud.normalize('NFKD', t.lower())
                 return ''.join(c for c in t if not _ud.combining(c))
             
+            # STOPWORDS_TEMA: NO incluir 'libro','libros' ni verbos temáticos —
+            # esas palabras son señales útiles para detectar relevancia de contenido
             STOPWORDS_TEMA = {
                 'de','la','el','en','los','las','del','al','un','una','por','con','para',
                 'que','es','se','no','su','lo','como','mas','pero','sus','le','ya','este',
                 'si','ha','son','muy','hay','fue','ser','han','esta','tan','sin','sobre',
-                'trata','libro','libros','acerca','habla','dice','cual','que','como','esto',
-                'a','y','o','e','u','the','of','and','to','in','me','te','le','nos'
+                'cual','como','esto','a','y','o','e','u','the','of','and','to','in','me','te','le','nos'
             }
             
-            # Términos clave del query (palabras significativas de 4+ letras)
-            query_norm = _norm(query)
-            terminos_query = set(
-                w for w in _re.findall(r'\b\w{4,}\b', query_norm)
-                if w not in STOPWORDS_TEMA
-            )
-            
-            # Términos del contenido de los chunks retornados
-            texto_chunks = ' '.join(
-                (item[0] if isinstance(item, tuple) else item)
-                for item in chunks_rag[:10]  # Analizar primeros 10 chunks
-            )
-            terminos_chunks = set(
-                w for w in _re.findall(r'\b\w{4,}\b', _norm(texto_chunks))
-                if w not in STOPWORDS_TEMA
-            )
-            
-            # Nombres de documentos retornados (también como señal de relevancia)
-            sources_retornados = set()
-            for item in chunks_rag:
-                src = (item[1] if isinstance(item, tuple) else '')
-                src_norm = _norm(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
-                sources_retornados.update(w for w in src_norm.split() if len(w) >= 4)
-            
-            # Calcular overlap: cuántos términos del query aparecen en chunks O en nombres de docs
-            terminos_en_contenido = terminos_query & terminos_chunks
-            terminos_en_sources = terminos_query & sources_retornados
-            overlap_total = terminos_en_contenido | terminos_en_sources
-            
-            ratio_overlap = len(overlap_total) / max(len(terminos_query), 1)
-            
-            if ratio_overlap >= 0.4 or len(terminos_en_contenido) >= 2:
+            # Si score_max >= 45 es un hit de Fase 1 (documento encontrado por nombre)
+            # → SIEMPRE relevante, sin necesidad de calcular overlap
+            if score_max >= 45.0:
                 resultados['rag_tematica'] = 'relevante'
-            elif ratio_overlap >= 0.2 or len(terminos_en_sources) >= 1:
-                resultados['rag_tematica'] = 'posible'
+                logger.info(f"✅ RAG temática AUTO-RELEVANTE (Fase 1 hit, score={score_max:.1f})")
             else:
-                resultados['rag_tematica'] = 'irrelevante'
-                # Si los docs son irrelevantes, degradar confianza para que LLM use su conocimiento
-                resultados['rag_confianza'] = 'irrelevante'
-                logger.info(f"⚠️ RAG temática IRRELEVANTE para '{query[:50]}': "
-                           f"overlap={ratio_overlap:.0%}, términos_query={terminos_query}, "
-                           f"en_chunks={terminos_en_contenido}, en_sources={terminos_en_sources}")
-            
-            logger.info(f"📊 RAG temática: {resultados['rag_tematica']} "
-                       f"(overlap={ratio_overlap:.0%}, query_terms={terminos_query}, "
-                       f"en_contenido={terminos_en_contenido})")
+                # Términos clave del query (palabras significativas de 3+ letras)
+                query_norm = _norm(query)
+                terminos_query = set(
+                    w for w in _re.findall(r'\b\w{3,}\b', query_norm)
+                    if w not in STOPWORDS_TEMA
+                )
+                
+                # Términos del contenido de los chunks retornados
+                texto_chunks = ' '.join(
+                    (item[0] if isinstance(item, tuple) else item)
+                    for item in chunks_rag[:10]
+                )
+                terminos_chunks = set(
+                    w for w in _re.findall(r'\b\w{3,}\b', _norm(texto_chunks))
+                    if w not in STOPWORDS_TEMA
+                )
+                
+                # Nombres de documentos retornados
+                sources_retornados = set()
+                for item in chunks_rag:
+                    src = (item[1] if isinstance(item, tuple) else '')
+                    src_norm = _norm(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+                    sources_retornados.update(w for w in src_norm.split() if len(w) >= 3)
+                
+                # ── Match EXACTO + FUZZY (prefijo 4 chars) ──────────────────────────
+                # Cubre: "milley"↔"milei", "kiyosk"↔"kiyosaki", abreviaturas, etc.
+                def _fuzzy_overlap(a_set, b_set):
+                    matches = set()
+                    for a in a_set:
+                        for b in b_set:
+                            if a == b:
+                                matches.add(a)
+                                break
+                            if len(a) >= 4 and len(b) >= 4:
+                                if a.startswith(b[:4]) or b.startswith(a[:4]):
+                                    matches.add(a)
+                                    break
+                    return matches
+                
+                terminos_en_contenido = _fuzzy_overlap(terminos_query, terminos_chunks)
+                terminos_en_sources   = _fuzzy_overlap(terminos_query, sources_retornados)
+                overlap_total = terminos_en_contenido | terminos_en_sources
+                
+                ratio_overlap = len(overlap_total) / max(len(terminos_query), 1)
+                
+                if ratio_overlap >= 0.3 or len(terminos_en_contenido) >= 2:
+                    resultados['rag_tematica'] = 'relevante'
+                elif ratio_overlap >= 0.1 or len(terminos_en_sources) >= 1:
+                    resultados['rag_tematica'] = 'posible'
+                else:
+                    resultados['rag_tematica'] = 'irrelevante'
+                    resultados['rag_confianza'] = 'irrelevante'
+                    logger.info(f"⚠️ RAG temática IRRELEVANTE para '{query[:50]}': "
+                               f"overlap={ratio_overlap:.0%}, términos_query={terminos_query}, "
+                               f"en_chunks={terminos_en_contenido}, en_sources={terminos_en_sources}")
+                
+                logger.info(f"📊 RAG temática: {resultados['rag_tematica']} "
+                           f"(overlap={ratio_overlap:.0%}, query_terms={terminos_query}, "
+                           f"en_contenido={terminos_en_contenido})")
             # ── FIN VERIFICACIÓN ──────────────────────────────────────────────────
             
             resultados['rag'] = chunks_rag
@@ -9510,6 +9509,266 @@ def formatear_contexto_unificado(resultados, query):
             contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:350]}\n"
     
     return contexto
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BÚSQUEDA MULTI-AGENTE PARALELA — 5 motores simultáneos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _scrape_ddg_sync(q: str, n: int = 5) -> list:
+    """Scraping DuckDuckGo HTML sincrónico para uso en ThreadPoolExecutor."""
+    try:
+        from bs4 import BeautifulSoup as _BS4
+        import urllib.parse as _up
+        r = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": q, "kl": "cl-es"},
+            headers={
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0.0.0 Safari/537.36"),
+                "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+                "Referer": "https://duckduckgo.com/",
+            },
+            timeout=12, allow_redirects=True,
+        )
+        if r.status_code != 200:
+            return []
+        soup = _BS4(r.text, "html.parser")
+        resultados = []
+        for div in soup.select(".result, .web-result")[:n]:
+            a_tag = div.select_one(".result__a, a.result__url, h2 a")
+            if not a_tag:
+                continue
+            titulo = a_tag.get_text(strip=True)
+            snip_tag = div.select_one(".result__snippet")
+            snippet = snip_tag.get_text(strip=True) if snip_tag else ""
+            if titulo and len(titulo) > 3:
+                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350]})
+        return resultados
+    except Exception as _e:
+        logger.debug(f"DDG sync scrape: {_e}")
+        return []
+
+
+def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 60,
+                                   limit_hist: int = 20) -> dict:
+    """
+    Ejecuta 5 motores de búsqueda en PARALELO (ThreadPoolExecutor) y combina
+    los resultados en un dict enriquecido compatible con formatear_contexto_unificado.
+
+    Motor 1 — RAG/vectorial  : documentos e‑books indexados en BD
+    Motor 2 — Historial       : conversaciones del grupo
+    Motor 3 — Directorio      : tarjetas profesionales Cofradía
+    Motor 4 — Web DDG         : DuckDuckGo sin API key
+    Motor 5 — LLM‑knowledge   : micro‑consulta Groq para anclar conocimiento propio
+    """
+    from concurrent.futures import ThreadPoolExecutor as _TPE_ma
+
+    resultado = {
+        'historial': [], 'rag': [], 'tarjetas': [], 'web': [], 'llm_hint': '',
+        'fuentes_usadas': [], 'rag_score_max': 0.0,
+        'rag_confianza': 'ninguna', 'rag_tematica': 'desconocida',
+        'agentes_ok': [],
+    }
+
+    # ── Motor 3: tarjetas profesionales (función interna) ──────────────────
+    def _motor_tarjetas(q: str) -> list:
+        try:
+            conn_t = get_db_connection()
+            if not conn_t:
+                return []
+            ct = conn_t.cursor()
+            palabras = [p for p in q.lower().split() if len(p) > 3][:5]
+            if not palabras:
+                conn_t.close()
+                return []
+            partes_cond, params_t = [], []
+            for p in palabras:
+                if DATABASE_URL:
+                    partes_cond.append(
+                        "(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s "
+                        "OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
+                    params_t.extend([f'%{p}%'] * 4)
+                else:
+                    partes_cond.append(
+                        "(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? "
+                        "OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
+                    params_t.extend([f'%{p}%'] * 4)
+            ct.execute(
+                f"SELECT nombre_completo, profesion, empresa, ciudad, servicios "
+                f"FROM tarjetas_profesional WHERE {' OR '.join(partes_cond)} LIMIT 6",
+                params_t)
+            filas = ct.fetchall()
+            conn_t.close()
+            out = []
+            for f in filas:
+                if DATABASE_URL:
+                    out.append(f"{f['nombre_completo']} — {f['profesion']} en "
+                               f"{f['empresa']} ({f['ciudad']}): {f['servicios']}")
+                else:
+                    out.append(f"{f[0]} — {f[1]} en {f[2]} ({f[3]}): {f[4]}")
+            return out
+        except Exception as _e:
+            logger.debug(f"Motor tarjetas MA: {_e}")
+            return []
+
+    # ── Motor 5: micro‑consulta LLM (ancla conocimiento propio) ───────────
+    def _motor_llm_hint(q: str) -> str:
+        try:
+            if not GROQ_API_KEY:
+                return ''
+            p = (f'En UNA sola oración compacta (máx 80 palabras) indica qué sabes '
+                 f'sobre: "{q}". Si no sabes responde solo: sin_conocimiento.')
+            hint = llamar_groq(p, max_tokens=160, temperature=0.15)
+            if hint and 'sin_conocimiento' not in hint.lower() and len(hint) > 10:
+                return hint.strip()
+        except Exception as _e:
+            logger.debug(f"Motor LLM hint MA: {_e}")
+        return ''
+
+    # ── Lanzar los 5 motores en paralelo ──────────────────────────────────
+    with _TPE_ma(max_workers=5) as pool:
+        fut_rag  = pool.submit(buscar_rag, query, limit_rag)
+        fut_hist = pool.submit(buscar_en_historial, query, limit=limit_hist)
+        fut_tar  = pool.submit(_motor_tarjetas, query)
+        fut_web  = pool.submit(_scrape_ddg_sync, query, 5)
+        fut_hint = pool.submit(_motor_llm_hint, query)
+
+        # Recolectar — cada motor tiene su propio timeout
+        try:
+            chunks_rag, score_max = fut_rag.result(timeout=14)
+            resultado['rag'] = chunks_rag
+            resultado['rag_score_max'] = score_max
+            if chunks_rag:
+                resultado['agentes_ok'].append('RAG')
+        except Exception as _e:
+            logger.debug(f"Motor RAG MA: {_e}")
+
+        try:
+            hist = fut_hist.result(timeout=10)
+            if hist:
+                resultado['historial'] = hist
+                resultado['agentes_ok'].append('Historial')
+        except Exception as _e:
+            logger.debug(f"Motor Historial MA: {_e}")
+
+        try:
+            tar = fut_tar.result(timeout=8)
+            if tar:
+                resultado['tarjetas'] = tar
+                resultado['agentes_ok'].append('Directorio')
+        except Exception as _e:
+            logger.debug(f"Motor Directorio MA: {_e}")
+
+        try:
+            web = fut_web.result(timeout=16)
+            if web:
+                resultado['web'] = web
+                resultado['agentes_ok'].append('Web')
+        except Exception as _e:
+            logger.debug(f"Motor Web MA: {_e}")
+
+        try:
+            hint = fut_hint.result(timeout=12)
+            if hint:
+                resultado['llm_hint'] = hint
+                resultado['agentes_ok'].append('LLM-knowledge')
+        except Exception as _e:
+            logger.debug(f"Motor LLM hint MA: {_e}")
+
+    # ── Calcular confianza RAG ─────────────────────────────────────────────
+    sm = resultado['rag_score_max']
+    if sm >= 45.0:
+        resultado['rag_confianza'] = 'alta'
+        resultado['rag_tematica']  = 'relevante'   # Fase 1 hit → siempre relevante
+    elif sm >= 8.0:
+        resultado['rag_confianza'] = 'alta'
+    elif sm >= 4.0:
+        resultado['rag_confianza'] = 'media'
+    elif sm >= 1.5:
+        resultado['rag_confianza'] = 'baja'
+
+    # Verificación temática con fuzzy matching (solo si Fase 1 no ya determinó)
+    if resultado['rag'] and resultado['rag_tematica'] == 'desconocida':
+        import unicodedata as _ud_ma, re as _re_ma
+        def _n(t):
+            t = _ud_ma.normalize('NFKD', t.lower())
+            return ''.join(c for c in t if not _ud_ma.combining(c))
+        SW = {'de','la','el','en','los','las','del','al','un','una','por','con','para',
+              'que','es','se','no','su','lo','como','mas','pero','sus','le','ya','este',
+              'si','ha','son','muy','hay','fue','ser','han','esta','tan','sin','sobre',
+              'cual','como','esto','a','y','o','e','u','the','of','and','to','in','me','te','nos'}
+        terms_q = set(w for w in _re_ma.findall(r'\b\w{3,}\b', _n(query)) if w not in SW)
+        txt_c = ' '.join((i[0] if isinstance(i, tuple) else i) for i in resultado['rag'][:10])
+        terms_c = set(w for w in _re_ma.findall(r'\b\w{3,}\b', _n(txt_c)) if w not in SW)
+        src_set = set()
+        for item in resultado['rag']:
+            src = (item[1] if isinstance(item, tuple) else '')
+            src_n = _n(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+            src_set.update(w for w in src_n.split() if len(w) >= 3)
+
+        def _fm(a_set, b_set):
+            m = set()
+            for a in a_set:
+                for b in b_set:
+                    if a == b or (len(a) >= 4 and len(b) >= 4 and
+                                  (a.startswith(b[:4]) or b.startswith(a[:4]))):
+                        m.add(a); break
+            return m
+
+        mc = _fm(terms_q, terms_c)
+        ms = _fm(terms_q, src_set)
+        ratio = len(mc | ms) / max(len(terms_q), 1)
+        if ratio >= 0.3 or len(mc) >= 2:
+            resultado['rag_tematica'] = 'relevante'
+        elif ratio >= 0.1 or len(ms) >= 1:
+            resultado['rag_tematica'] = 'posible'
+        else:
+            resultado['rag_tematica'] = 'irrelevante'
+            resultado['rag_confianza'] = 'irrelevante'
+
+    # ── Construir fuentes_usadas ───────────────────────────────────────────
+    if resultado['historial']:
+        resultado['fuentes_usadas'].append(f"Historial ({len(resultado['historial'])} msgs)")
+    if resultado['rag']:
+        resultado['fuentes_usadas'].append(
+            f"RAG ({len(resultado['rag'])} fragmentos, confianza: {resultado['rag_confianza']})")
+    if resultado['tarjetas']:
+        resultado['fuentes_usadas'].append(f"Directorio ({len(resultado['tarjetas'])} profesionales)")
+    if resultado['web']:
+        resultado['fuentes_usadas'].append(f"Web DDG ({len(resultado['web'])} resultados)")
+    if resultado['llm_hint']:
+        resultado['fuentes_usadas'].append("Conocimiento LLM")
+
+    logger.info(f"🤖 Multi-agente '{query[:45]}': motores={resultado['agentes_ok']}, "
+                f"rag_conf={resultado['rag_confianza']}, rag_tema={resultado['rag_tematica']}")
+    return resultado
+
+
+def formatear_contexto_multiagente(res: dict, query: str) -> str:
+    """
+    Formatea el resultado de busqueda_multiagente_paralela en un bloque de contexto
+    amplio y estructurado para el LLM. Incluye RAG, historial, tarjetas, web y hint.
+    """
+    ctx = formatear_contexto_unificado(res, query)  # RAG + historial base
+
+    if res.get('tarjetas'):
+        ctx += "\n\n── DIRECTORIO COFRADÍA (profesionales relacionados) ──\n"
+        for t in res['tarjetas'][:5]:
+            ctx += f"  • {t}\n"
+
+    if res.get('web'):
+        ctx += "\n\n── RESULTADOS WEB (DuckDuckGo) ──\n"
+        for i, w in enumerate(res['web'][:4], 1):
+            ctx += f"  [{i}] {w['titulo']}\n"
+            if w.get('snippet'):
+                ctx += f"      {w['snippet'][:280]}\n"
+
+    if res.get('llm_hint'):
+        ctx += f"\n\n── CONOCIMIENTO PROPIO LLM ──\n{res['llm_hint']}\n"
+
+    return ctx
 
 
 async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
@@ -18433,8 +18692,11 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 def _generar_sirena_ogg() -> BytesIO:
-    """Genera sirena de emergencia potente (5s, max volumen, oscilacion rapida)"""
-    import struct, wave as _wave, math as _math
+    """Genera sirena de emergencia potente (5s, max volumen, oscilacion rapida).
+    Intenta convertir a OGG OPUS via ffmpeg (requerido para push-up Telegram).
+    Fallback: WAV valido si ffmpeg no esta disponible.
+    """
+    import struct, wave as _wave, math as _math, shutil as _shutil
     buf = BytesIO()
     sample_rate = 24000
     duration = 5  # 5 segundos para maxima atencion
@@ -18460,24 +18722,60 @@ def _generar_sirena_ogg() -> BytesIO:
     w.writeframes(b''.join(frames))
     w.close()
     buf.seek(0)
-    # Convertir a OGG OPUS (Telegram reproduce automaticamente las notas de voz)
+    wav_bytes = buf.read()
+
+    # ── Intentar conversión a OGG OPUS (necesario para voice note Telegram) ──
+    # Buscar ffmpeg en paths comunes de Linux/Render
+    _ffmpeg_paths = [
+        _shutil.which('ffmpeg'),          # PATH del sistema
+        '/usr/bin/ffmpeg',
+        '/usr/local/bin/ffmpeg',
+        '/opt/render/project/bin/ffmpeg',
+    ]
+    ffmpeg_cmd = next((p for p in _ffmpeg_paths if p and __import__('os').path.isfile(p)), None)
+
+    if ffmpeg_cmd:
+        try:
+            import subprocess as _sp
+            ogg_buf = BytesIO()
+            proc = _sp.run(
+                [ffmpeg_cmd, '-y', '-i', 'pipe:0',
+                 '-c:a', 'libopus', '-b:a', '48k',
+                 '-ar', '48000', '-f', 'ogg', 'pipe:1'],
+                input=wav_bytes, capture_output=True, timeout=12
+            )
+            if proc.returncode == 0 and len(proc.stdout) > 200:
+                ogg_buf.write(proc.stdout)
+                ogg_buf.seek(0)
+                ogg_buf.name = "sirena_emergencia.ogg"
+                logger.info(f"✅ Sirena OGG OPUS generada ({len(proc.stdout)} bytes) via {ffmpeg_cmd}")
+                return ogg_buf
+            else:
+                logger.warning(f"ffmpeg retorno {proc.returncode}: {proc.stderr[:200]}")
+        except Exception as _fe:
+            logger.warning(f"ffmpeg sirena: {_fe}")
+
+    # ── Fallback: intentar con pydub si esta disponible ───────────────────
     try:
-        import subprocess
-        ogg_buf = BytesIO()
-        proc = subprocess.run(
-            ['ffmpeg', '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '48k', '-f', 'ogg', 'pipe:1'],
-            input=buf.read(), capture_output=True, timeout=10
-        )
-        if proc.returncode == 0 and len(proc.stdout) > 100:
-            ogg_buf.write(proc.stdout)
-            ogg_buf.seek(0)
-            ogg_buf.name = "sirena_emergencia.ogg"
-            return ogg_buf
-    except Exception:
-        pass
-    buf.seek(0)
-    buf.name = "sirena_emergencia.wav"
-    return buf
+        from pydub import AudioSegment as _AS
+        buf2 = BytesIO(wav_bytes)
+        seg = _AS.from_wav(buf2)
+        ogg_buf2 = BytesIO()
+        seg.export(ogg_buf2, format='ogg', codec='libopus', bitrate='48k')
+        ogg_buf2.seek(0)
+        if ogg_buf2.getbuffer().nbytes > 200:
+            ogg_buf2.name = "sirena_emergencia.ogg"
+            logger.info("✅ Sirena OGG generada via pydub")
+            return ogg_buf2
+    except Exception as _pe:
+        logger.debug(f"pydub sirena: {_pe}")
+
+    # ── Ultimo fallback: WAV (Telegram lo acepta como voice note) ─────────
+    wav_buf = BytesIO(wav_bytes)
+    wav_buf.name = "sirena_emergencia.ogg"   # nombre .ogg fuerza tratamiento como voice
+    logger.warning("⚠️ Sirena: usando WAV como fallback (instalar ffmpeg en Render)")
+    return wav_buf
+
 
 
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
