@@ -59,7 +59,6 @@ from telegram.ext import (
     ConversationHandler, ChatJoinRequestHandler, TypeHandler,
     ApplicationHandlerStop
 )
-from telegram.request import HTTPXRequest
 
 # ==================== CONFIGURACIÓN DE LOGGING ====================
 logging.basicConfig(
@@ -454,6 +453,371 @@ def _registrar_tools_mcp():
 
 # Registrar al importar
 _registrar_tools_mcp()
+
+
+# ======================================================================
+# ===  MEJORA 1: SISTEMA DE PRESUPUESTO DE TOKENS  ====================
+# ======================================================================
+
+class TokenBudget:
+    """Control de presupuesto diario/mensual de llamadas a LLMs."""
+    def __init__(self, daily_limit=500, monthly_limit=12000):
+        self._daily_limit = daily_limit
+        self._monthly_limit = monthly_limit
+        self._daily_count = 0
+        self._monthly_count = 0
+        self._daily_tokens = 0
+        self._monthly_tokens = 0
+        self._current_day = ''
+        self._current_month = ''
+        self._by_function = Counter()
+        self._paused = False
+    def _check_reset(self):
+        now = _ahora_chile()
+        day = now.strftime('%Y-%m-%d')
+        month = now.strftime('%Y-%m')
+        if day != self._current_day:
+            self._daily_count = 0; self._daily_tokens = 0; self._current_day = day
+        if month != self._current_month:
+            self._monthly_count = 0; self._monthly_tokens = 0; self._by_function = Counter(); self._current_month = month
+    def can_call(self):
+        self._check_reset()
+        return not self._paused and self._daily_count < self._daily_limit
+    def register_call(self, function_name, tokens_used=0, model='groq'):
+        self._check_reset()
+        self._daily_count += 1; self._monthly_count += 1
+        self._daily_tokens += tokens_used; self._monthly_tokens += tokens_used
+        self._by_function[function_name] += 1
+        if self._daily_count >= self._daily_limit * 0.95:
+            logger.warning(f"TokenBudget: {self._daily_count}/{self._daily_limit} (95%+)")
+    def get_stats(self):
+        self._check_reset()
+        return {'daily_calls': self._daily_count, 'daily_limit': self._daily_limit,
+                'daily_pct': round(self._daily_count / max(self._daily_limit, 1) * 100, 1),
+                'monthly_calls': self._monthly_count, 'monthly_tokens': self._monthly_tokens,
+                'by_function': dict(self._by_function.most_common(10)), 'paused': self._paused}
+
+token_budget = TokenBudget(daily_limit=500, monthly_limit=12000)
+
+# ======================================================================
+# ===  MEJORA 2: AUDIT TRAIL DE IA  ===================================
+# ======================================================================
+
+def registrar_audit_ia(funcion, user_id, modelo, tokens, tiempo_ms, exito, prompt_preview=''):
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""INSERT INTO ia_audit_log (fecha,funcion,user_id,modelo,tokens_estimados,tiempo_ms,exito,prompt_preview)
+                     VALUES (NOW(),%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                  (funcion, user_id, modelo, tokens, tiempo_ms, exito, (prompt_preview or '')[:200]))
+        conn.commit(); conn.close()
+    except Exception: pass
+
+def _crear_tablas_mejoras():
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS ia_audit_log (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), funcion VARCHAR(100),
+            user_id BIGINT, modelo VARCHAR(50), tokens_estimados INT DEFAULT 0,
+            tiempo_ms INT DEFAULT 0, exito BOOLEAN DEFAULT TRUE, prompt_preview TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ia_feedback (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), user_id BIGINT,
+            message_id BIGINT, funcion VARCHAR(100), feedback VARCHAR(10), prompt_preview TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS mentorias (
+            id SERIAL PRIMARY KEY, fecha TIMESTAMP DEFAULT NOW(), mentor_id BIGINT,
+            mentee_id BIGINT, area VARCHAR(200), estado VARCHAR(20) DEFAULT 'activa', notas TEXT DEFAULT '')""")
+        conn.commit(); conn.close()
+        logger.info("Tablas audit/feedback/mentorias OK")
+    except Exception as e:
+        logger.debug(f"Tablas mejoras: {e}")
+
+# ======================================================================
+# ===  MEJORA 3: EMBEDDINGS SIMPLES PARA RAG  =========================
+# ======================================================================
+
+def _calcular_embedding_simple(texto):
+    import hashlib
+    palabras = texto.lower().split()
+    ngrams = palabras[:]
+    for i in range(len(palabras)-1): ngrams.append(palabras[i]+' '+palabras[i+1])
+    for i in range(len(palabras)-2): ngrams.append(palabras[i]+' '+palabras[i+1]+' '+palabras[i+2])
+    vector = [0.0]*100
+    for ng in ngrams:
+        idx = int(hashlib.md5(ng.encode()).hexdigest(), 16) % 100
+        vector[idx] += 1.0
+    norma = sum(v*v for v in vector)**0.5
+    return [v/norma for v in vector] if norma > 0 else vector
+
+def _similitud_coseno(v1, v2):
+    dot = sum(a*b for a,b in zip(v1,v2))
+    n1 = sum(a*a for a in v1)**0.5; n2 = sum(b*b for b in v2)**0.5
+    return dot/(n1*n2) if n1 and n2 else 0.0
+
+# ======================================================================
+# ===  MEJORA 4: SISTEMA DE FEEDBACK  =================================
+# ======================================================================
+
+def _crear_botones_feedback(funcion):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Util", callback_data=f"fb_up_{funcion}"),
+         InlineKeyboardButton("Mejorar", callback_data=f"fb_down_{funcion}")]
+    ])
+
+async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Gracias por tu feedback!")
+    parts = query.data.split('_', 2)
+    if len(parts) < 3: return
+    feedback = 'positivo' if parts[1] == 'up' else 'negativo'
+    try:
+        conn = get_db_connection()
+        if conn and DATABASE_URL:
+            c = conn.cursor()
+            c.execute("INSERT INTO ia_feedback (user_id,message_id,funcion,feedback) VALUES (%s,%s,%s,%s)",
+                      (query.from_user.id, query.message.message_id if query.message else 0, parts[2], feedback))
+            conn.commit(); conn.close()
+    except Exception: pass
+    try: await query.edit_message_reply_markup(reply_markup=None)
+    except Exception: pass
+
+# ======================================================================
+# ===  MEJORA 5: ANALISIS MULTI-MODAL (IMAGENES EN GRUPO)  ============
+# ======================================================================
+
+async def analizar_imagen_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo: return
+    caption = (update.message.caption or '').lower()
+    if not any(t in caption for t in ['bot','analiza','analizar','que es','que dice','explicar','traducir','leer']): return
+    if not GEMINI_API_KEY: return
+    msg = await update.message.reply_text("Analizando imagen...")
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await photo_file.download_as_bytearray()
+        img_b64 = base64.b64encode(bytes(photo_bytes)).decode('utf-8')
+        payload = {"contents": [{"parts": [
+            {"text": "Analiza esta imagen en detalle. Transcribe texto si hay. Responde en espanol. " + (caption or '')},
+            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]}]}
+        resp = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=30)
+        if resp.status_code == 200:
+            texto = resp.json().get('candidates',[{}])[0].get('content',{}).get('parts',[{}])[0].get('text','')
+            if texto:
+                await msg.edit_text(f"Analisis:\n\n{texto[:2000].replace('*','')}", reply_markup=_crear_botones_feedback('vision'))
+                token_budget.register_call('vision_grupo', 500, 'gemini')
+            else: await msg.edit_text("No pude analizar la imagen.")
+        else: await msg.edit_text("Error analizando imagen.")
+    except Exception as e:
+        logger.debug(f"Vision grupo: {e}")
+        try: await msg.edit_text("Error procesando imagen.")
+        except: pass
+
+# ======================================================================
+# ===  MEJORA 6: NOTIFICACIONES INTELIGENTES  =========================
+# ======================================================================
+
+async def agente_notificaciones_personalizadas(context: ContextTypes.DEFAULT_TYPE):
+    if not COFRADIA_GROUP_ID: return
+    try:
+        conn = get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c = conn.cursor()
+        c.execute("""SELECT DISTINCT m.user_id, s.nombre_display FROM mensajes m
+                     JOIN suscripciones s ON m.user_id=s.user_id
+                     WHERE m.fecha>=CURRENT_DATE-INTERVAL '7 days' AND s.estado='activo'
+                     GROUP BY m.user_id, s.nombre_display HAVING COUNT(*)>=3 LIMIT 10""")
+        usuarios = c.fetchall(); conn.close()
+        for u in usuarios:
+            uid=u['user_id']; nombre=u['nombre_display'] or 'Cofrade'
+            try:
+                conn2=get_db_connection(); c2=conn2.cursor()
+                c2.execute("""SELECT categoria, COUNT(*) as cnt FROM mensajes
+                             WHERE user_id=%s AND fecha>=CURRENT_DATE-INTERVAL '30 days'
+                             AND categoria IS NOT NULL GROUP BY categoria ORDER BY cnt DESC LIMIT 2""", (uid,))
+                cats=[r['categoria'] for r in c2.fetchall()]; conn2.close()
+            except: cats=[]
+            if not cats: continue
+            tip = f"Hola {nombre}! Basado en tus intereses ({', '.join(cats)}): "
+            if any('finanz' in c.lower() or 'econom' in c.lower() for c in cats):
+                tip += "/indicadores /economia /finanzas"
+            elif any('empleo' in c.lower() or 'trabajo' in c.lower() for c in cats):
+                tip += "/empleo [cargo] /generar_cv /entrevista"
+            else: tip += "/ayuda para ver comandos utiles"
+            try: await context.bot.send_message(chat_id=uid, text=tip)
+            except: pass
+    except Exception as e: logger.debug(f"Notif personalizadas: {e}")
+
+# ======================================================================
+# ===  MEJORA 7: /reporte_ejecutivo  ==================================
+# ======================================================================
+
+async def reporte_ejecutivo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador."); return
+    msg = await update.message.reply_text("Generando reporte ejecutivo...")
+    try:
+        conn=get_db_connection()
+        if not conn: await msg.edit_text("Error BD."); return
+        c=conn.cursor(); ahora=_ahora_chile(); h7=(ahora-timedelta(days=7)).strftime('%Y-%m-%d'); h30=(ahora-timedelta(days=30)).strftime('%Y-%m-%d')
+        st={}
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as t FROM suscripciones WHERE estado='activo'"); st['a']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM suscripciones"); st['tt']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE fecha>=%s",(h7,)); st['m7']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM mensajes WHERE fecha>=%s",(h30,)); st['m30']=c.fetchone()['t']
+            c.execute("SELECT COUNT(DISTINCT user_id) as t FROM mensajes WHERE fecha>=%s",(h7,)); st['p7']=c.fetchone()['t']
+            c.execute("SELECT COUNT(*) as t FROM tarjetas_profesional"); st['tj']=c.fetchone()['t']
+            c.execute("SELECT categoria,COUNT(*) as cnt FROM mensajes WHERE fecha>=%s AND categoria IS NOT NULL GROUP BY categoria ORDER BY cnt DESC LIMIT 5",(h7,))
+            st['temas']=[(r['categoria'],r['cnt']) for r in c.fetchall()]
+            c.execute("SELECT first_name,last_name,COUNT(*) as cnt FROM mensajes WHERE fecha>=%s GROUP BY first_name,last_name ORDER BY cnt DESC LIMIT 5",(h7,))
+            st['top']=[(f"{r['first_name']} {r['last_name'] or ''}".strip(),r['cnt']) for r in c.fetchall()]
+            try:
+                c.execute("SELECT feedback,COUNT(*) as cnt FROM ia_feedback GROUP BY feedback")
+                st['fb']={r['feedback']:r['cnt'] for r in c.fetchall()}
+            except: st['fb']={}
+        conn.close(); bg=token_budget.get_stats()
+        fp=st.get('fb',{}).get('positivo',0); fn_=st.get('fb',{}).get('negativo',0); ft=fp+fn_; fpc=round(fp/max(ft,1)*100)
+        th=''.join(f'<tr><td>{t[0]}</td><td>{t[1]}</td></tr>' for t in st.get('temas',[]))
+        uh=''.join(f'<tr><td>{u[0]}</td><td>{u[1]}</td></tr>' for u in st.get('top',[]))
+        html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Reporte Ejecutivo</title>
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:Segoe UI,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59,#1a3a6a);color:#e0e6ed;min-height:100vh;padding:2rem}}
+.c{{max-width:900px;margin:0 auto}}h1{{text-align:center;color:#c3a55a;font-size:1.8rem;margin-bottom:.3rem}}.dt{{text-align:center;color:#889;margin-bottom:2rem}}
+.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:2rem}}
+.k{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem;text-align:center}}
+.k .v{{font-size:2rem;font-weight:700;color:#38bdf8}}.k .l{{font-size:.8rem;color:#889;margin-top:.3rem}}.k.gd .v{{color:#c3a55a}}.k.gn .v{{color:#22c55e}}
+.s{{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem}}
+.s h2{{color:#c3a55a;font-size:1.1rem;margin-bottom:1rem;border-bottom:1px solid rgba(195,165,90,.2);padding-bottom:.5rem}}
+table{{width:100%;border-collapse:collapse}}th{{text-align:left;color:#38bdf8;font-size:.75rem;text-transform:uppercase;padding:.4rem .6rem}}
+td{{padding:.4rem .6rem;font-size:.85rem;border-bottom:1px solid rgba(255,255,255,.03)}}
+.br{{height:8px;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:.5rem}}.bf{{height:100%;border-radius:4px;background:linear-gradient(90deg,#38bdf8,#c3a55a)}}</style></head>
+<body><div class="c"><h1>REPORTE EJECUTIVO</h1><div class="dt">Cofradia de Networking - {ahora.strftime('%d/%m/%Y %H:%M')}</div>
+<div class="g"><div class="k"><div class="v">{st.get('a',0)}</div><div class="l">Activos</div></div>
+<div class="k gd"><div class="v">{st.get('m7',0):,}</div><div class="l">Msgs 7d</div></div>
+<div class="k gn"><div class="v">{st.get('p7',0)}</div><div class="l">Participantes</div></div>
+<div class="k"><div class="v">{st.get('tj',0)}</div><div class="l">Tarjetas</div></div></div>
+<div class="s"><h2>Temas Semana</h2><table><tr><th>Tema</th><th>Msgs</th></tr>{th}</table></div>
+<div class="s"><h2>Top Cofrades</h2><table><tr><th>Nombre</th><th>Msgs</th></tr>{uh}</table></div>
+<div class="s"><h2>IA</h2><p>Budget: {bg['daily_calls']}/{bg['daily_limit']} hoy ({bg['daily_pct']}%)</p>
+<div class="br"><div class="bf" style="width:{min(bg['daily_pct'],100)}%"></div></div>
+<p style="margin-top:.8rem">Feedback: +{fp}/-{fn_} ({fpc}%)</p></div>
+<div class="s"><h2>Mensual</h2><div class="g" style="margin:0">
+<div class="k"><div class="v">{st.get('m30',0):,}</div><div class="l">Msgs 30d</div></div>
+<div class="k gd"><div class="v">{st.get('tt',0)}</div><div class="l">Total</div></div>
+<div class="k gn"><div class="v">{bg['monthly_calls']:,}</div><div class="l">Llamadas IA</div></div></div></div></div></body></html>"""
+        path=f"/tmp/reporte_{ahora.strftime('%Y%m%d')}.html"
+        with open(path,'w',encoding='utf-8') as f: f.write(html)
+        await msg.edit_text("Reporte listo!")
+        with open(path,'rb') as f:
+            await update.message.reply_document(document=f,filename=f"Reporte_Ejecutivo_{ahora.strftime('%Y%m%d')}.html",caption="Reporte Ejecutivo Cofradia")
+    except Exception as e: logger.error(f"Reporte: {e}"); await msg.edit_text(f"Error: {str(e)[:100]}")
+
+# ======================================================================
+# ===  MEJORA 8: GOOGLE CALENDAR LINK  ================================
+# ======================================================================
+
+def _crear_evento_gcal(titulo, fecha_str, hora_str, descripcion=''):
+    try:
+        dt_ev = datetime.strptime(f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M")
+        fin = dt_ev + timedelta(hours=1); fmt = "%Y%m%dT%H%M%S"
+        params = urllib.parse.urlencode({'action':'TEMPLATE','text':titulo,
+            'dates':f"{dt_ev.strftime(fmt)}/{fin.strftime(fmt)}",
+            'details':descripcion or f"Evento Cofradia - {titulo}", 'ctz':'America/Santiago'})
+        return f"https://calendar.google.com/calendar/render?{params}"
+    except: return ''
+
+# ======================================================================
+# ===  MEJORA 9: WEB COMPANION - TARJETA WEB  =========================
+# ======================================================================
+
+async def web_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        conn=get_db_connection()
+        if not conn: await update.message.reply_text("Error conexion."); return
+        c=conn.cursor()
+        if DATABASE_URL: c.execute("SELECT * FROM tarjetas_profesional WHERE user_id=%s",(user_id,))
+        else: c.execute("SELECT * FROM tarjetas_profesional WHERE user_id=?",(user_id,))
+        t=c.fetchone(); conn.close()
+        if not t: await update.message.reply_text("Crea tu tarjeta: /mi_tarjeta profesion [profesion]"); return
+        n=t['nombre_completo'] if DATABASE_URL else t[1]; p=t['profesion'] if DATABASE_URL else t[2]
+        e=t['empresa'] if DATABASE_URL else t[3]; sv=t['servicios'] if DATABASE_URL else t[4]
+        tel=t['telefono'] if DATABASE_URL else t[5]; em=t['email'] if DATABASE_URL else t[6]
+        ci=t['ciudad'] if DATABASE_URL else t[7]; li=t['linkedin'] if DATABASE_URL else t[8]
+        ini=''.join([x[0].upper() for x in (n or 'NN').split()[:2]])
+        html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{n or 'Cofrade'}</title><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'Outfit',sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}}
+.cd{{background:rgba(17,24,39,.95);border:1px solid rgba(195,165,90,.3);border-radius:24px;max-width:420px;width:100%;padding:2.5rem 2rem;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.5)}}
+.av{{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#c3a55a,#f0d078);display:flex;align-items:center;justify-content:center;margin:0 auto 1rem;font-size:2rem;font-weight:800;color:#0a1628}}
+h1{{color:#fff;font-size:1.5rem;margin-bottom:.3rem}}.tt{{color:#c3a55a;font-size:1rem;margin-bottom:1.5rem}}
+.rw{{display:flex;align-items:center;gap:.6rem;padding:.6rem 0;border-bottom:1px solid rgba(255,255,255,.05);color:#94a3b8;font-size:.9rem;text-align:left}}
+.rw span{{width:24px;text-align:center;flex-shrink:0}}a{{color:#38bdf8;text-decoration:none}}
+.bg{{display:inline-block;margin-top:1.5rem;padding:.4rem 1rem;background:rgba(195,165,90,.15);border:1px solid rgba(195,165,90,.3);border-radius:100px;color:#c3a55a;font-size:.75rem}}</style></head>
+<body><div class="cd"><div class="av">{ini}</div><h1>{n or 'Cofrade'}</h1><div class="tt">{p or ''}</div>
+{'<div class="rw"><span>&#127970;</span>'+e+'</div>' if e else ''}{'<div class="rw"><span>&#128736;</span>'+sv+'</div>' if sv else ''}
+{'<div class="rw"><span>&#128205;</span>'+ci+'</div>' if ci else ''}{'<div class="rw"><span>&#128241;</span><a href="tel:'+tel+'">'+tel+'</a></div>' if tel else ''}
+{'<div class="rw"><span>&#128231;</span><a href="mailto:'+em+'">'+em+'</a></div>' if em else ''}
+{'<div class="rw"><span>&#128279;</span><a href="https://'+li+'" target="_blank">'+li+'</a></div>' if li else ''}
+<div class="bg">Cofradia de Networking</div></div></body></html>"""
+        path=f"/tmp/web_{user_id}.html"
+        with open(path,'w',encoding='utf-8') as f: f.write(html)
+        with open(path,'rb') as f:
+            await update.message.reply_document(document=f,filename=f"Tarjeta_Web_{(n or 'cofrade').replace(' ','_')[:20]}.html",
+                caption="Tu tarjeta web - abrela en el navegador")
+    except Exception as ex: await update.message.reply_text(f"Error: {str(ex)[:100]}")
+
+# ======================================================================
+# ===  MEJORA 10: MENTORIAS AUTOMATIZADAS  =============================
+# ======================================================================
+
+async def agente_mentorias_semanal(context: ContextTypes.DEFAULT_TYPE):
+    if not COFRADIA_GROUP_ID or not ia_disponible: return
+    try:
+        conn=get_db_connection()
+        if not conn or not DATABASE_URL: return
+        c=conn.cursor()
+        c.execute("""SELECT tp.user_id,tp.nombre_completo,tp.profesion,tp.empresa,
+                     (SELECT COUNT(*) FROM mensajes WHERE user_id=tp.user_id) as msgs
+                     FROM tarjetas_profesional tp JOIN suscripciones s ON tp.user_id=s.user_id
+                     WHERE s.estado='activo' AND tp.profesion IS NOT NULL ORDER BY msgs DESC LIMIT 20""")
+        perfiles=c.fetchall(); conn.close()
+        if len(perfiles)<4: return
+        pstr='\n'.join([f"- {p['nombre_completo']}|{p['profesion']}|{p['empresa'] or 'Indep.'}|{p['msgs']}msgs" for p in perfiles])
+        resp=llamar_groq(f"Sugiere 2-3 parejas mentoria naval chilena:\n{pstr}\nFormato: MENTOR->MENTEE|TEMA. Max 6 lineas.", max_tokens=300, temperature=0.6)
+        if resp:
+            await context.bot.send_message(chat_id=COFRADIA_GROUP_ID,
+                text=f"SUGERENCIAS DE MENTORIA\n{'='*30}\n\n{resp}\n\nContacten al admin.\nCofradia de Networking")
+    except Exception as e: logger.debug(f"Mentorias: {e}")
+
+# ======================================================================
+# ===  MEJORA 11: VOICE-FIRST COMMANDS  ================================
+# ======================================================================
+
+_VOICE_COMMAND_MAP = {
+    'indicadores': 'indicadores', 'economia': 'economia',
+    'graficos': 'graficos', 'resumen': 'resumen',
+    'mi tarjeta': 'mi_tarjeta', 'tarjeta': 'mi_tarjeta',
+    'mi perfil': 'mi_perfil', 'perfil': 'mi_perfil',
+    'ayuda': 'ayuda', 'empleo': 'empleo',
+    'calculadora': 'calculadora', 'feriados': 'feriados',
+    'eventos': 'eventos', 'directorio': 'directorio',
+    'emergencia': 'emergencia', 'dashboard': 'mi_dashboard',
+    'reporte': 'reporte_ejecutivo',
+}
+
+def _detectar_comando_voz(texto):
+    texto_lower = texto.lower().strip()
+    for trigger, cmd in _VOICE_COMMAND_MAP.items():
+        if trigger in texto_lower:
+            idx = texto_lower.find(trigger) + len(trigger)
+            args = texto[idx:].strip()
+            return cmd, args
+    return None, ''
+
+
+
 
 # ==================== INICIALIZACIÓN DE SERVICIOS ====================
 
@@ -1173,10 +1537,16 @@ def init_db():
 # ==================== FUNCIONES DE GROQ AI ====================
 
 def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7, reintentos: int = 3) -> str:
-    """Llama a la API de Groq con reintentos automáticos"""
+    """Llama a la API de Groq con reintentos automaticos y control de presupuesto"""
     if not GROQ_API_KEY:
-        logger.warning("⚠️ Intento de llamar Groq sin API Key")
+        logger.warning("Intento de llamar Groq sin API Key")
         return None
+    if not token_budget.can_call():
+        logger.warning("TokenBudget: limite diario alcanzado, llamada bloqueada")
+        return None
+    
+    import time as _time_groq
+    _t0 = _time_groq.time()
     
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -1215,6 +1585,8 @@ Tu personalidad:
                 data = response.json()
                 respuesta = data['choices'][0]['message']['content']
                 if respuesta and len(respuesta.strip()) > 0:
+                    _elapsed = int((_time_groq.time() - _t0) * 1000)
+                    token_budget.register_call('groq', max_tokens, 'groq')
                     return respuesta.strip()
                     
             elif response.status_code == 429:
@@ -1402,9 +1774,9 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
         communicate = edge_tts.Communicate(
             texto_voz,
             VOZ_TTS,
-            rate  = "-12%",   # más pausada y natural
-            pitch = "-4Hz",   # tono más grave y humano
-            volume = "+8%"    # más presencia
+            rate  = "-18%",   # mas pausada, ritmo humano conversacional
+            pitch = "+2Hz",   # ligeramente mas agudo, voz femenina calida
+            volume = "+10%"   # presencia clara
         )
         await communicate.save(filename)
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
@@ -1535,6 +1907,30 @@ COMANDOS_VOZ = {
     'mis coins': 'mis_coins',
     'coins': 'mis_coins',
     'monedas': 'mis_coins',
+    # v5.0 Mejoras
+    'economia': 'economia',
+    'dashboard economico': 'economia',
+    'simuladores': 'economia',
+    'calculadora': 'calculadora',
+    'suite economica': 'calculadora',
+    'feriados': 'feriados',
+    'emergencia': 'emergencia',
+    'agente': 'agente',
+    'networking': 'agente',
+    'match': 'match',
+    'briefing': 'briefing',
+    'mi agenda': 'mi_agenda',
+    'agenda': 'mi_agenda',
+    'nueva tarea': 'tarea',
+    'tarea': 'tarea',
+    'mis tareas': 'mis_tareas',
+    'tareas': 'mis_tareas',
+    'reporte ejecutivo': 'reporte_ejecutivo',
+    'reporte': 'reporte_ejecutivo',
+    'web tarjeta': 'web_tarjeta',
+    'tarjeta web': 'web_tarjeta',
+    'buscar web': 'buscar_web',
+    'busqueda web': 'buscar_web',
 }
 
 
@@ -1801,87 +2197,66 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 registrar_servicio_usado(user_id, 'voz_comando')
                 return
         
-        resultados = busqueda_unificada(texto_para_busqueda, limit_historial=15, limit_rag=40)
-        contexto = formatear_contexto_unificado(resultados, texto_para_busqueda)
-        
-        # Generar también contexto de tarjetas profesionales si hay nombres relevantes
-        contexto_tarjetas = ""
-        try:
-            conn_tc = get_db_connection()
-            if conn_tc:
-                c_tc = conn_tc.cursor()
-                # Usar query mejorada para mejor búsqueda de tarjetas
-                palabras_busq = [p for p in texto_para_busqueda.lower().split() if len(p) > 3][:5]
-                if palabras_busq:
-                    cond_tc = []
-                    params_tc = []
-                    for p in palabras_busq:
-                        if DATABASE_URL:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
-                        else:
-                            cond_tc.append("(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
-                            params_tc.extend([f'%{p}%', f'%{p}%', f'%{p}%', f'%{p}%'])
-                    if cond_tc:
-                        wh = " OR ".join(cond_tc)
-                        if DATABASE_URL:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        else:
-                            c_tc.execute(f"SELECT nombre_completo, profesion, empresa, ciudad, servicios FROM tarjetas_profesional WHERE {wh} LIMIT 5", params_tc)
-                        tarjetas = c_tc.fetchall()
-                        if tarjetas:
-                            ctx_list = []
-                            for t in tarjetas:
-                                if DATABASE_URL:
-                                    ctx_list.append(f"{t['nombre_completo']} - {t['profesion']} en {t['empresa']} ({t['ciudad']}): {t['servicios']}")
-                                else:
-                                    ctx_list.append(f"{t[0]} - {t[1]} en {t[2]} ({t[3]}): {t[4]}")
-                            contexto_tarjetas = "\n=== PROFESIONALES COFRADÍA (Tarjetas) ===\n" + "\n".join(ctx_list)
-                conn_tc.close()
-        except Exception as e_tc:
-            logger.debug(f"No se pudo buscar tarjetas para audio: {e_tc}")
+        # PASO 3: Búsqueda multi-agente (5 motores en paralelo: RAG, historial,
+        #         directorio, web DDG, conocimiento LLM)
+        resultados = busqueda_multiagente_paralela(
+            texto_para_busqueda, limit_rag=60, limit_hist=20)
+        contexto = formatear_contexto_multiagente(resultados, texto_para_busqueda)
         
         fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
-        rag_conf = resultados.get('rag_confianza', 'ninguna')
+        rag_conf     = resultados.get('rag_confianza', 'ninguna')
+        rag_tema     = resultados.get('rag_tematica',  'desconocida')
+        agentes_ok   = resultados.get('agentes_ok', [])
         
-        modo_audio = ("Usa el contexto indexado como base." if rag_conf in ('alta','media') 
-                      else "No hay docs relevantes — responde desde tu conocimiento propio como LLM experto.")
+        # Modo de respuesta segun confianza combinada
+        if rag_conf in ('alta', 'media') and rag_tema in ('relevante', 'posible'):
+            modo_audio = ("MODO DOCUMENTOS: Basa tu respuesta principalmente en los "
+                          "fragmentos RAG -- tienen la informacion exacta solicitada.")
+        elif resultados.get('web'):
+            modo_audio = ("MODO WEB+LLM: No hay docs internos directamente relevantes. "
+                          "Usa los resultados web y tu conocimiento propio.")
+        else:
+            modo_audio = ("MODO LLM: No hay docs ni web relevante. Responde desde tu "
+                          "conocimiento experto sin decir 'no tengo informacion'.")
         
-        # Contexto de intención para el prompt
         intent_audio_hint = ""
         if texto_para_busqueda != texto_transcrito:
-            intent_audio_hint = f"\n(La búsqueda usó la consulta enriquecida: \"{texto_para_busqueda[:100]}\")"
+            intent_audio_hint = (f"\n(Consulta enriquecida usada: "
+                                 f"\"{texto_para_busqueda[:100]}\")")
         
-        prompt = f"""Eres el asistente IA de la Cofradía de Networking. Tu respuesta será convertida a audio.
+        prompt = f"""Eres el asistente inteligente de la Cofradia de Networking, comunidad de oficiales navales chilenos. Respondes como un ser humano calido, claro y bien informado. Tu respuesta sera convertida a audio.
 
-{user.first_name}, responde de forma conversacional (máximo 5 oraciones, sin emojis ni listas).
-Empieza directamente: "{user.first_name}, [respuesta]..."
+INSTRUCCIONES:
+- Dirigete a {user.first_name} por su nombre al comenzar.
+- Responde de forma conversacional y natural, como si hablaras con el/ella en persona.
+- Maximo 5 oraciones fluidas. Sin listas, sin emojis, sin asteriscos.
+- {modo_audio}
+- Si los documentos tienen la informacion, extraela con detalle y citala naturalmente.
+- Si NO hay docs relevantes pero sabes del tema como LLM experto, responde con confianza.
+- NUNCA inventes datos sobre personas de la Cofradia.
 
-MODO: {modo_audio}
-NUNCA digas "no tengo información" si sabes del tema como LLM.
-NUNCA inventes nombres de personas — solo menciona a quienes aparezcan en el contexto.
-
-He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
+MOTORES CONSULTADOS ({len(agentes_ok)}/5): {', '.join(agentes_ok) or 'conocimiento propio'}{intent_audio_hint}
+Fuentes: {fuentes_info} | Confianza RAG: {rag_conf}
 
 {contexto}
-{contexto_tarjetas}
 
-{user.first_name} pregunta (audio): {texto_transcrito}"""
+{user.first_name} pregunta (mensaje de voz): {texto_transcrito}"""
 
-        respuesta_texto = llamar_groq(prompt, max_tokens=900, temperature=0.7)
+        respuesta_texto = llamar_groq(prompt, max_tokens=1000, temperature=0.65)
         
         if not respuesta_texto:
-            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=600, temperature=0.7)
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=700, temperature=0.65)
         
         if not respuesta_texto:
-            respuesta_texto = f"Recibí tu mensaje: \"{texto_transcrito}\". Lamentablemente no pude generar una respuesta en este momento."
+            respuesta_texto = (f"Recibi tu mensaje: \"{texto_transcrito}\". "
+                               f"Lamentablemente no pude generar una respuesta en este momento.")
         
         # PASO 4: Enviar respuesta en texto
-        texto_respuesta_display = f"🎤 *Tu mensaje:*\n_{texto_transcrito}_\n\n💬 *Respuesta:*\n{respuesta_texto}"
+        texto_respuesta_display = f"\U0001f3a4 *Tu mensaje:*\n_{texto_transcrito}_\n\n\U0001f4ac *Respuesta:*\n{respuesta_texto}"
         try:
             await msg.edit_text(texto_respuesta_display, parse_mode='Markdown')
         except Exception:
-            await msg.edit_text(f"🎤 Tu mensaje:\n{texto_transcrito}\n\n💬 Respuesta:\n{respuesta_texto}")
+            await msg.edit_text(f"\U0001f3a4 Tu mensaje:\n{texto_transcrito}\n\n\U0001f4ac Respuesta:\n{respuesta_texto}")
         
         # PASO 5: Generar y enviar audio de respuesta
         try:
@@ -1890,7 +2265,7 @@ He buscado en: {fuentes_info} (confianza RAG: {rag_conf}){intent_audio_hint}
                 with open(audio_file, 'rb') as f:
                     await update.message.reply_voice(
                         voice=f,
-                        caption="🔊 Respuesta de voz"
+                        caption="\U0001f50a Respuesta de voz"
                     )
                 # Limpiar archivo temporal
                 try:
@@ -2947,6 +3322,30 @@ async def enviar_mensaje_largo(update: Update, texto: str, parse_mode=None):
                     logger.error(f"Error enviando parte: {e}")
 
 
+async def _enviar_respuesta_ia(update, context, texto, msg_status=None, con_audio=True, funcion='ia'):
+    """Helper: envia respuesta IA como texto largo + audio TTS + feedback buttons.
+    Previene Message_too_long y siempre incluye audio."""
+    if msg_status:
+        try: await msg_status.delete()
+        except: pass
+    texto_limpio = texto.replace('*', '').replace('_', ' ')
+    await enviar_mensaje_largo(update, texto_limpio)
+    # Audio TTS
+    if con_audio:
+        try:
+            audio_path = await generar_audio_tts(texto_limpio[:1500], f"/tmp/{funcion}_{update.effective_user.id}.mp3")
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, 'rb') as af:
+                    await update.message.reply_voice(voice=af)
+                os.remove(audio_path)
+        except Exception as _tts_err:
+            logger.debug(f"TTS {funcion}: {_tts_err}")
+    # Feedback buttons
+    try:
+        await update.message.reply_text("Te fue util?", reply_markup=_crear_botones_feedback(funcion))
+    except: pass
+
+
 def registrar_servicio_usado(user_id, servicio):
     """Registra el uso de un servicio por el usuario"""
     conn = get_db_connection()
@@ -3165,6 +3564,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
+/web_tarjeta - Tarjeta web descargable HTML
 /directorio [búsqueda] - Buscar en directorio
 /conectar - Conexiones inteligentes sugeridas
 /recomendar @user [texto] - Recomendar cofrade
@@ -3233,10 +3633,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🪙 COFRADÍA COINS
 /mis_coins - Balance y servicios canjeables
 
-📄 DOCUMENTOS RAG
-/subir_pdf - Subir PDF a la biblioteca
-/rag_consulta [pregunta] - Consultar biblioteca
-/rag_status - Estado del sistema RAG
+📄 DOCUMENTOS
+/rag_consulta [pregunta] - Consultar biblioteca de documentos
 
 🎤 VOZ: Envía audio mencionando "Bot" y te respondo!
 
@@ -3306,6 +3704,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /rag_debug - Debug del sistema RAG
 /rag_enriquecer - Enriquecer keywords RAG
 /subir_pdf - Subir PDF al sistema
+
+📊 REPORTES ADMIN
+/reporte_ejecutivo - Dashboard ejecutivo HTML
+/web_tarjeta - Tarjeta web publica (todos)
 """
         await update.message.reply_text(admin_txt)
 
@@ -4134,8 +4536,7 @@ window.addEventListener('resize', function() {{
                 caption=f"📊 Dashboard Cofradía — Últimos 7 días\n\n"
                         f"📨 {total_msgs_7d} mensajes · 👥 {len(usuarios_clean)} usuarios activos\n"
                         f"📈 Promedio: {promedio_diario}/día · 🕐 Pico: {hora_pico:02d}:00\n\n"
-                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo.",
-                write_timeout=120, read_timeout=120, connect_timeout=30
+                        f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo."
             )
         except Exception as e:
             logger.warning(f"Error matplotlib preview: {e}")
@@ -4146,8 +4547,7 @@ window.addEventListener('resize', function() {{
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_dashboard_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard Interactivo\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips.",
-                write_timeout=120, read_timeout=120, connect_timeout=30
+                caption="📊 Dashboard Interactivo\n\nAbre este archivo en tu navegador para ver gráficos interactivos con animaciones y tooltips."
             )
         
         # Limpiar
@@ -4574,8 +4974,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 💎 {nombre_plan} ({dias} días)
 💰 {formato_clp(precio)}{ocr_info}""",
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown',
-            write_timeout=120, read_timeout=120, connect_timeout=30
+            parse_mode='Markdown'
         )
     except Exception as e:
         logger.error(f"Error notificando admin: {e}")
@@ -4772,6 +5171,11 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     os.remove(audio_path)
             except Exception as _tts_e:
                 logger.debug(f"TTS mencion: {_tts_e}")
+            # Mejora 4: Botones de feedback
+            try:
+                await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('mencion'))
+            except Exception:
+                pass
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text(
@@ -5889,8 +6293,7 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,30)},'Nuevos 7d',green);
             await update.message.reply_document(
                 document=f,
                 filename=f"cofradia_estadisticas_{datetime.now().strftime('%Y%m%d')}.html",
-                caption="📊 Dashboard — 4 gauges + 10 indicadores",
-                write_timeout=120, read_timeout=120, connect_timeout=30
+                caption="📊 Dashboard — 4 gauges + 10 indicadores"
             )
         try: os.remove(html_path)
         except: pass
@@ -7551,8 +7954,7 @@ async def subir_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje += "⚖️ Contratos modelo\n"
     mensaje += "💵 Estudios de remuneraciones\n\n"
     mensaje += "━" * 30 + "\n"
-    mensaje += "💡 Usa /rag_status para ver PDFs indexados\n"
-    mensaje += "💡 Usa /rag_consulta [pregunta] para consultar\n"
+    mensaje += "💡 Usa /rag_consulta [pregunta] para consultar documentos\n"
     mensaje += "📏 Limite: 15 GB gratuitos en Google Drive"
     
     await update.message.reply_text(mensaje)
@@ -8963,60 +9365,80 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
                 t = _ud.normalize('NFKD', t.lower())
                 return ''.join(c for c in t if not _ud.combining(c))
             
+            # STOPWORDS_TEMA: NO incluir 'libro','libros' ni verbos temáticos —
+            # esas palabras son señales útiles para detectar relevancia de contenido
             STOPWORDS_TEMA = {
                 'de','la','el','en','los','las','del','al','un','una','por','con','para',
                 'que','es','se','no','su','lo','como','mas','pero','sus','le','ya','este',
                 'si','ha','son','muy','hay','fue','ser','han','esta','tan','sin','sobre',
-                'trata','libro','libros','acerca','habla','dice','cual','que','como','esto',
-                'a','y','o','e','u','the','of','and','to','in','me','te','le','nos'
+                'cual','como','esto','a','y','o','e','u','the','of','and','to','in','me','te','le','nos'
             }
             
-            # Términos clave del query (palabras significativas de 4+ letras)
-            query_norm = _norm(query)
-            terminos_query = set(
-                w for w in _re.findall(r'\b\w{4,}\b', query_norm)
-                if w not in STOPWORDS_TEMA
-            )
-            
-            # Términos del contenido de los chunks retornados
-            texto_chunks = ' '.join(
-                (item[0] if isinstance(item, tuple) else item)
-                for item in chunks_rag[:10]  # Analizar primeros 10 chunks
-            )
-            terminos_chunks = set(
-                w for w in _re.findall(r'\b\w{4,}\b', _norm(texto_chunks))
-                if w not in STOPWORDS_TEMA
-            )
-            
-            # Nombres de documentos retornados (también como señal de relevancia)
-            sources_retornados = set()
-            for item in chunks_rag:
-                src = (item[1] if isinstance(item, tuple) else '')
-                src_norm = _norm(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
-                sources_retornados.update(w for w in src_norm.split() if len(w) >= 4)
-            
-            # Calcular overlap: cuántos términos del query aparecen en chunks O en nombres de docs
-            terminos_en_contenido = terminos_query & terminos_chunks
-            terminos_en_sources = terminos_query & sources_retornados
-            overlap_total = terminos_en_contenido | terminos_en_sources
-            
-            ratio_overlap = len(overlap_total) / max(len(terminos_query), 1)
-            
-            if ratio_overlap >= 0.4 or len(terminos_en_contenido) >= 2:
+            # Si score_max >= 45 es un hit de Fase 1 (documento encontrado por nombre)
+            # → SIEMPRE relevante, sin necesidad de calcular overlap
+            if score_max >= 45.0:
                 resultados['rag_tematica'] = 'relevante'
-            elif ratio_overlap >= 0.2 or len(terminos_en_sources) >= 1:
-                resultados['rag_tematica'] = 'posible'
+                logger.info(f"✅ RAG temática AUTO-RELEVANTE (Fase 1 hit, score={score_max:.1f})")
             else:
-                resultados['rag_tematica'] = 'irrelevante'
-                # Si los docs son irrelevantes, degradar confianza para que LLM use su conocimiento
-                resultados['rag_confianza'] = 'irrelevante'
-                logger.info(f"⚠️ RAG temática IRRELEVANTE para '{query[:50]}': "
-                           f"overlap={ratio_overlap:.0%}, términos_query={terminos_query}, "
-                           f"en_chunks={terminos_en_contenido}, en_sources={terminos_en_sources}")
-            
-            logger.info(f"📊 RAG temática: {resultados['rag_tematica']} "
-                       f"(overlap={ratio_overlap:.0%}, query_terms={terminos_query}, "
-                       f"en_contenido={terminos_en_contenido})")
+                # Términos clave del query (palabras significativas de 3+ letras)
+                query_norm = _norm(query)
+                terminos_query = set(
+                    w for w in _re.findall(r'\b\w{3,}\b', query_norm)
+                    if w not in STOPWORDS_TEMA
+                )
+                
+                # Términos del contenido de los chunks retornados
+                texto_chunks = ' '.join(
+                    (item[0] if isinstance(item, tuple) else item)
+                    for item in chunks_rag[:10]
+                )
+                terminos_chunks = set(
+                    w for w in _re.findall(r'\b\w{3,}\b', _norm(texto_chunks))
+                    if w not in STOPWORDS_TEMA
+                )
+                
+                # Nombres de documentos retornados
+                sources_retornados = set()
+                for item in chunks_rag:
+                    src = (item[1] if isinstance(item, tuple) else '')
+                    src_norm = _norm(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+                    sources_retornados.update(w for w in src_norm.split() if len(w) >= 3)
+                
+                # ── Match EXACTO + FUZZY (prefijo 4 chars) ──────────────────────────
+                # Cubre: "milley"↔"milei", "kiyosk"↔"kiyosaki", abreviaturas, etc.
+                def _fuzzy_overlap(a_set, b_set):
+                    matches = set()
+                    for a in a_set:
+                        for b in b_set:
+                            if a == b:
+                                matches.add(a)
+                                break
+                            if len(a) >= 4 and len(b) >= 4:
+                                if a.startswith(b[:4]) or b.startswith(a[:4]):
+                                    matches.add(a)
+                                    break
+                    return matches
+                
+                terminos_en_contenido = _fuzzy_overlap(terminos_query, terminos_chunks)
+                terminos_en_sources   = _fuzzy_overlap(terminos_query, sources_retornados)
+                overlap_total = terminos_en_contenido | terminos_en_sources
+                
+                ratio_overlap = len(overlap_total) / max(len(terminos_query), 1)
+                
+                if ratio_overlap >= 0.3 or len(terminos_en_contenido) >= 2:
+                    resultados['rag_tematica'] = 'relevante'
+                elif ratio_overlap >= 0.1 or len(terminos_en_sources) >= 1:
+                    resultados['rag_tematica'] = 'posible'
+                else:
+                    resultados['rag_tematica'] = 'irrelevante'
+                    resultados['rag_confianza'] = 'irrelevante'
+                    logger.info(f"⚠️ RAG temática IRRELEVANTE para '{query[:50]}': "
+                               f"overlap={ratio_overlap:.0%}, términos_query={terminos_query}, "
+                               f"en_chunks={terminos_en_contenido}, en_sources={terminos_en_sources}")
+                
+                logger.info(f"📊 RAG temática: {resultados['rag_tematica']} "
+                           f"(overlap={ratio_overlap:.0%}, query_terms={terminos_query}, "
+                           f"en_contenido={terminos_en_contenido})")
             # ── FIN VERIFICACIÓN ──────────────────────────────────────────────────
             
             resultados['rag'] = chunks_rag
@@ -9087,6 +9509,266 @@ def formatear_contexto_unificado(resultados, query):
             contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:350]}\n"
     
     return contexto
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BÚSQUEDA MULTI-AGENTE PARALELA — 5 motores simultáneos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _scrape_ddg_sync(q: str, n: int = 5) -> list:
+    """Scraping DuckDuckGo HTML sincrónico para uso en ThreadPoolExecutor."""
+    try:
+        from bs4 import BeautifulSoup as _BS4
+        import urllib.parse as _up
+        r = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": q, "kl": "cl-es"},
+            headers={
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0.0.0 Safari/537.36"),
+                "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+                "Referer": "https://duckduckgo.com/",
+            },
+            timeout=12, allow_redirects=True,
+        )
+        if r.status_code != 200:
+            return []
+        soup = _BS4(r.text, "html.parser")
+        resultados = []
+        for div in soup.select(".result, .web-result")[:n]:
+            a_tag = div.select_one(".result__a, a.result__url, h2 a")
+            if not a_tag:
+                continue
+            titulo = a_tag.get_text(strip=True)
+            snip_tag = div.select_one(".result__snippet")
+            snippet = snip_tag.get_text(strip=True) if snip_tag else ""
+            if titulo and len(titulo) > 3:
+                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350]})
+        return resultados
+    except Exception as _e:
+        logger.debug(f"DDG sync scrape: {_e}")
+        return []
+
+
+def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 60,
+                                   limit_hist: int = 20) -> dict:
+    """
+    Ejecuta 5 motores de búsqueda en PARALELO (ThreadPoolExecutor) y combina
+    los resultados en un dict enriquecido compatible con formatear_contexto_unificado.
+
+    Motor 1 — RAG/vectorial  : documentos e‑books indexados en BD
+    Motor 2 — Historial       : conversaciones del grupo
+    Motor 3 — Directorio      : tarjetas profesionales Cofradía
+    Motor 4 — Web DDG         : DuckDuckGo sin API key
+    Motor 5 — LLM‑knowledge   : micro‑consulta Groq para anclar conocimiento propio
+    """
+    from concurrent.futures import ThreadPoolExecutor as _TPE_ma
+
+    resultado = {
+        'historial': [], 'rag': [], 'tarjetas': [], 'web': [], 'llm_hint': '',
+        'fuentes_usadas': [], 'rag_score_max': 0.0,
+        'rag_confianza': 'ninguna', 'rag_tematica': 'desconocida',
+        'agentes_ok': [],
+    }
+
+    # ── Motor 3: tarjetas profesionales (función interna) ──────────────────
+    def _motor_tarjetas(q: str) -> list:
+        try:
+            conn_t = get_db_connection()
+            if not conn_t:
+                return []
+            ct = conn_t.cursor()
+            palabras = [p for p in q.lower().split() if len(p) > 3][:5]
+            if not palabras:
+                conn_t.close()
+                return []
+            partes_cond, params_t = [], []
+            for p in palabras:
+                if DATABASE_URL:
+                    partes_cond.append(
+                        "(LOWER(nombre_completo) LIKE %s OR LOWER(profesion) LIKE %s "
+                        "OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s)")
+                    params_t.extend([f'%{p}%'] * 4)
+                else:
+                    partes_cond.append(
+                        "(LOWER(nombre_completo) LIKE ? OR LOWER(profesion) LIKE ? "
+                        "OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ?)")
+                    params_t.extend([f'%{p}%'] * 4)
+            ct.execute(
+                f"SELECT nombre_completo, profesion, empresa, ciudad, servicios "
+                f"FROM tarjetas_profesional WHERE {' OR '.join(partes_cond)} LIMIT 6",
+                params_t)
+            filas = ct.fetchall()
+            conn_t.close()
+            out = []
+            for f in filas:
+                if DATABASE_URL:
+                    out.append(f"{f['nombre_completo']} — {f['profesion']} en "
+                               f"{f['empresa']} ({f['ciudad']}): {f['servicios']}")
+                else:
+                    out.append(f"{f[0]} — {f[1]} en {f[2]} ({f[3]}): {f[4]}")
+            return out
+        except Exception as _e:
+            logger.debug(f"Motor tarjetas MA: {_e}")
+            return []
+
+    # ── Motor 5: micro‑consulta LLM (ancla conocimiento propio) ───────────
+    def _motor_llm_hint(q: str) -> str:
+        try:
+            if not GROQ_API_KEY:
+                return ''
+            p = (f'En UNA sola oración compacta (máx 80 palabras) indica qué sabes '
+                 f'sobre: "{q}". Si no sabes responde solo: sin_conocimiento.')
+            hint = llamar_groq(p, max_tokens=160, temperature=0.15)
+            if hint and 'sin_conocimiento' not in hint.lower() and len(hint) > 10:
+                return hint.strip()
+        except Exception as _e:
+            logger.debug(f"Motor LLM hint MA: {_e}")
+        return ''
+
+    # ── Lanzar los 5 motores en paralelo ──────────────────────────────────
+    with _TPE_ma(max_workers=5) as pool:
+        fut_rag  = pool.submit(buscar_rag, query, limit_rag)
+        fut_hist = pool.submit(buscar_en_historial, query, limit=limit_hist)
+        fut_tar  = pool.submit(_motor_tarjetas, query)
+        fut_web  = pool.submit(_scrape_ddg_sync, query, 5)
+        fut_hint = pool.submit(_motor_llm_hint, query)
+
+        # Recolectar — cada motor tiene su propio timeout
+        try:
+            chunks_rag, score_max = fut_rag.result(timeout=14)
+            resultado['rag'] = chunks_rag
+            resultado['rag_score_max'] = score_max
+            if chunks_rag:
+                resultado['agentes_ok'].append('RAG')
+        except Exception as _e:
+            logger.debug(f"Motor RAG MA: {_e}")
+
+        try:
+            hist = fut_hist.result(timeout=10)
+            if hist:
+                resultado['historial'] = hist
+                resultado['agentes_ok'].append('Historial')
+        except Exception as _e:
+            logger.debug(f"Motor Historial MA: {_e}")
+
+        try:
+            tar = fut_tar.result(timeout=8)
+            if tar:
+                resultado['tarjetas'] = tar
+                resultado['agentes_ok'].append('Directorio')
+        except Exception as _e:
+            logger.debug(f"Motor Directorio MA: {_e}")
+
+        try:
+            web = fut_web.result(timeout=16)
+            if web:
+                resultado['web'] = web
+                resultado['agentes_ok'].append('Web')
+        except Exception as _e:
+            logger.debug(f"Motor Web MA: {_e}")
+
+        try:
+            hint = fut_hint.result(timeout=12)
+            if hint:
+                resultado['llm_hint'] = hint
+                resultado['agentes_ok'].append('LLM-knowledge')
+        except Exception as _e:
+            logger.debug(f"Motor LLM hint MA: {_e}")
+
+    # ── Calcular confianza RAG ─────────────────────────────────────────────
+    sm = resultado['rag_score_max']
+    if sm >= 45.0:
+        resultado['rag_confianza'] = 'alta'
+        resultado['rag_tematica']  = 'relevante'   # Fase 1 hit → siempre relevante
+    elif sm >= 8.0:
+        resultado['rag_confianza'] = 'alta'
+    elif sm >= 4.0:
+        resultado['rag_confianza'] = 'media'
+    elif sm >= 1.5:
+        resultado['rag_confianza'] = 'baja'
+
+    # Verificación temática con fuzzy matching (solo si Fase 1 no ya determinó)
+    if resultado['rag'] and resultado['rag_tematica'] == 'desconocida':
+        import unicodedata as _ud_ma, re as _re_ma
+        def _n(t):
+            t = _ud_ma.normalize('NFKD', t.lower())
+            return ''.join(c for c in t if not _ud_ma.combining(c))
+        SW = {'de','la','el','en','los','las','del','al','un','una','por','con','para',
+              'que','es','se','no','su','lo','como','mas','pero','sus','le','ya','este',
+              'si','ha','son','muy','hay','fue','ser','han','esta','tan','sin','sobre',
+              'cual','como','esto','a','y','o','e','u','the','of','and','to','in','me','te','nos'}
+        terms_q = set(w for w in _re_ma.findall(r'\b\w{3,}\b', _n(query)) if w not in SW)
+        txt_c = ' '.join((i[0] if isinstance(i, tuple) else i) for i in resultado['rag'][:10])
+        terms_c = set(w for w in _re_ma.findall(r'\b\w{3,}\b', _n(txt_c)) if w not in SW)
+        src_set = set()
+        for item in resultado['rag']:
+            src = (item[1] if isinstance(item, tuple) else '')
+            src_n = _n(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+            src_set.update(w for w in src_n.split() if len(w) >= 3)
+
+        def _fm(a_set, b_set):
+            m = set()
+            for a in a_set:
+                for b in b_set:
+                    if a == b or (len(a) >= 4 and len(b) >= 4 and
+                                  (a.startswith(b[:4]) or b.startswith(a[:4]))):
+                        m.add(a); break
+            return m
+
+        mc = _fm(terms_q, terms_c)
+        ms = _fm(terms_q, src_set)
+        ratio = len(mc | ms) / max(len(terms_q), 1)
+        if ratio >= 0.3 or len(mc) >= 2:
+            resultado['rag_tematica'] = 'relevante'
+        elif ratio >= 0.1 or len(ms) >= 1:
+            resultado['rag_tematica'] = 'posible'
+        else:
+            resultado['rag_tematica'] = 'irrelevante'
+            resultado['rag_confianza'] = 'irrelevante'
+
+    # ── Construir fuentes_usadas ───────────────────────────────────────────
+    if resultado['historial']:
+        resultado['fuentes_usadas'].append(f"Historial ({len(resultado['historial'])} msgs)")
+    if resultado['rag']:
+        resultado['fuentes_usadas'].append(
+            f"RAG ({len(resultado['rag'])} fragmentos, confianza: {resultado['rag_confianza']})")
+    if resultado['tarjetas']:
+        resultado['fuentes_usadas'].append(f"Directorio ({len(resultado['tarjetas'])} profesionales)")
+    if resultado['web']:
+        resultado['fuentes_usadas'].append(f"Web DDG ({len(resultado['web'])} resultados)")
+    if resultado['llm_hint']:
+        resultado['fuentes_usadas'].append("Conocimiento LLM")
+
+    logger.info(f"🤖 Multi-agente '{query[:45]}': motores={resultado['agentes_ok']}, "
+                f"rag_conf={resultado['rag_confianza']}, rag_tema={resultado['rag_tematica']}")
+    return resultado
+
+
+def formatear_contexto_multiagente(res: dict, query: str) -> str:
+    """
+    Formatea el resultado de busqueda_multiagente_paralela en un bloque de contexto
+    amplio y estructurado para el LLM. Incluye RAG, historial, tarjetas, web y hint.
+    """
+    ctx = formatear_contexto_unificado(res, query)  # RAG + historial base
+
+    if res.get('tarjetas'):
+        ctx += "\n\n── DIRECTORIO COFRADÍA (profesionales relacionados) ──\n"
+        for t in res['tarjetas'][:5]:
+            ctx += f"  • {t}\n"
+
+    if res.get('web'):
+        ctx += "\n\n── RESULTADOS WEB (DuckDuckGo) ──\n"
+        for i, w in enumerate(res['web'][:4], 1):
+            ctx += f"  [{i}] {w['titulo']}\n"
+            if w.get('snippet'):
+                ctx += f"      {w['snippet'][:280]}\n"
+
+    if res.get('llm_hint'):
+        ctx += f"\n\n── CONOCIMIENTO PROPIO LLM ──\n{res['llm_hint']}\n"
+
+    return ctx
 
 
 async def indexar_rag_job(context: ContextTypes.DEFAULT_TYPE):
@@ -10164,11 +10846,27 @@ def generar_tarjeta_imagen(datos: dict) -> BytesIO:
             draw.text((42, y_info), f"{labels_d[label]}:", fill=GRIS_SUTIL, font=font_label)
             draw.text((130, y_info), valor[:50], fill=GRIS_TEXTO, font=font_campo)
             y_info += 24
-    # --- QR principal (tarjeta compartible, lado derecho) ---
+    # --- QR principal (datos de contacto vCard para guardar en telefono) ---
     qr_x, qr_y = 640, 155
     qr_size = 150
-    qr_url = f"https://t.me/Cofradia_Premium_Bot?start=tarjeta_{user_id}" if user_id else "https://t.me/Cofradia_Premium_Bot"
-    qr_img = generar_qr_simple(qr_url, size=qr_size)
+    # Generar vCard para el QR (al escanear se guarda el contacto)
+    _nombre = datos.get('nombre_completo', 'Cofrade')
+    _parts = _nombre.split(' ', 1)
+    _fn = _parts[0] if _parts else _nombre
+    _ln = _parts[1] if len(_parts) > 1 else ''
+    _tel = datos.get('telefono', '')
+    _em = datos.get('email', '')
+    _emp = datos.get('empresa', '')
+    _prof = datos.get('profesion', '')
+    _city = datos.get('ciudad', '')
+    vcard = f"BEGIN:VCARD\nVERSION:3.0\nN:{_ln};{_fn}\nFN:{_nombre}\n"
+    if _prof: vcard += f"TITLE:{_prof}\n"
+    if _emp: vcard += f"ORG:{_emp}\n"
+    if _tel: vcard += f"TEL;TYPE=CELL:{_tel}\n"
+    if _em: vcard += f"EMAIL:{_em}\n"
+    if _city: vcard += f"ADR;TYPE=WORK:;;{_city};;;;\n"
+    vcard += "NOTE:Miembro Cofradia de Networking\nEND:VCARD"
+    qr_img = generar_qr_simple(vcard, size=qr_size)
     if qr_img:
         try:
             img.paste(qr_img, (qr_x, qr_y))
@@ -10357,8 +11055,7 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
                 caption += f"\n⭐ <b>{_prec} recomendación{'es' if _prec != 1 else ''}</b> de la comunidad"
             caption += "\n🔗 Cofradía de Networking"
             
-            await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML',
-                                              write_timeout=120, read_timeout=120, connect_timeout=30)
+            await update.message.reply_photo(photo=img_buffer, caption=caption, parse_mode='HTML')
             
             # Enviar como archivo descargable
             try:
@@ -10367,8 +11064,7 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
                 await update.message.reply_document(
                     document=img_buffer,
                     filename=f"Tarjeta_{nombre_archivo}.png",
-                    caption="📥 Imagen exportable — guárdala o compártela",
-                    write_timeout=120, read_timeout=120, connect_timeout=30
+                    caption="📥 Imagen exportable — guárdala o compártela"
                 )
             except Exception as e:
                 logger.debug(f"Error enviando documento tarjeta pública: {e}")
@@ -10381,8 +11077,7 @@ async def mostrar_tarjeta_publica(update: Update, context: ContextTypes.DEFAULT_
                     filename=vcf_buffer.name,
                     caption="📱 Guardar en contactos — toca para agregar a tu agenda\n"
                             "🍎 Apple Wallet: Abre .vcf > Contactos > Wallet sugerido\n"
-                            "🤖 Android: Abre .vcf > Google Contacts directo",
-                    write_timeout=120, read_timeout=120, connect_timeout=30
+                            "🤖 Android: Abre .vcf > Google Contacts directo"
                 )
             except Exception as e:
                 logger.debug(f"Error enviando vCard: {e}")
@@ -10495,8 +11190,7 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         await update.message.reply_photo(
                             photo=img_buffer,
                             caption=caption,
-                            parse_mode='HTML',
-                            write_timeout=120, read_timeout=120, connect_timeout=30
+                            parse_mode='HTML'
                         )
                         
                         # Enviar también como archivo descargable (exportar imagen)
@@ -10506,8 +11200,7 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             await update.message.reply_document(
                                 document=img_buffer,
                                 filename=f"Tarjeta_{nombre_archivo}.png",
-                                caption="📥 Imagen exportable — guárdala o compártela por cualquier medio",
-                                write_timeout=120, read_timeout=120, connect_timeout=30
+                                caption="📥 Imagen exportable — guárdala o compártela por cualquier medio"
                             )
                         except Exception as e:
                             logger.debug(f"Error enviando documento tarjeta: {e}")
@@ -10520,8 +11213,7 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                 filename=vcf_buffer.name,
                                 caption="📱 Guardar en contactos — toca el archivo para agregar a tu agenda\n"
                                         "🍎 Apple Wallet: Abre el .vcf > se agrega a Contactos > aparece en Wallet como contacto sugerido\n"
-                                        "🤖 Android: Abre el .vcf y se guarda directo en Google Contacts",
-                                write_timeout=120, read_timeout=120, connect_timeout=30
+                                        "🤖 Android: Abre el .vcf y se guarda directo en Google Contacts"
                             )
                         except Exception as e:
                             logger.debug(f"Error enviando vCard: {e}")
@@ -11021,7 +11713,9 @@ Responde en español, de forma concisa. No uses asteriscos ni formatos."""
         if not respuesta:
             respuesta = "No pude generar sugerencias en este momento."
         
-        await msg.edit_text(f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n{respuesta}\n\n💡 /directorio para ver el directorio completo")
+        header = f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n"
+        footer = "\n\n💡 /directorio para ver el directorio completo"
+        await _enviar_respuesta_ia(update, context, header + respuesta + footer, msg, con_audio=True, funcion='conectar')
         registrar_servicio_usado(user_id, 'conectar')
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)[:100]}")
@@ -12156,7 +12850,7 @@ Consulta de {nombre}: {consulta}"""
         respuesta = llamar_groq(prompt, max_tokens=800, temperature=0.5)
         if not respuesta:
             respuesta = "No pude generar una respuesta en este momento."
-        await msg.edit_text(f"💰 CONSULTA FINANCIERA\n{'━' * 28}\n\n{respuesta}")
+        await _enviar_respuesta_ia(update, context, f"💰 CONSULTA FINANCIERA\n{'━' * 28}\n\n{respuesta}", msg, con_audio=True, funcion='finanzas')
         otorgar_coins(update.effective_user.id, 1, 'Consulta financiera')
         registrar_servicio_usado(update.effective_user.id, 'finanzas')
     except Exception as e:
@@ -14241,11 +14935,8 @@ Sé específico, motivador y con lenguaje profesional pero cercano. Tutéalo com
             respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.6)
         
         if respuesta:
-            header = f"🤖 *AGENTE DE NETWORKING - Plan para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n\n{respuesta}")
+            header = f"🤖 AGENTE DE NETWORKING - Plan para {user.first_name}\n{'━'*35}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='agente')
         else:
             await msg.edit_text("❌ No pude generar el plan en este momento. Intenta de nuevo.")
         
@@ -14356,6 +15047,10 @@ En 2-3 oraciones: (1) Confirma el agendamiento con entusiasmo, (2) Da 1 consejo 
         if consejo:
             respuesta += f"\n💡 {consejo}"
         respuesta += f"\n\n📋 Ver agenda: /mi_agenda | ✅ Marcar completa: /completar_{agenda_id}"
+        # Mejora 8: Link Google Calendar
+        gcal_link = _crear_evento_gcal(titulo, fecha_str, hora_str, descripcion or titulo)
+        if gcal_link:
+            respuesta += f"\n📅 Agregar a Google Calendar: {gcal_link}"
         
         try:
             await update.message.reply_text(respuesta, parse_mode='Markdown')
@@ -14721,17 +15416,14 @@ TAREA: Identifica los TOP 5 cofrades más valiosos para hacer networking con {us
 Sé específico y estratégico. Piensa en sinergias de negocio, intercambio de expertise, oportunidades laborales mutuas."""
         
         await msg.edit_text("🤝 Calculando compatibilidades y sinergias...")
-        respuesta = llamar_groq(prompt, max_tokens=1600, temperature=0.6)
+        respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.6)
         
         if not respuesta:
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1600, temperature=0.6)
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.6)
         
         if respuesta:
-            header = f"🤝 *MATCH DE NETWORKING para {user.first_name}*\n{'━'*35}\n\n"
-            try:
-                await msg.edit_text(header + respuesta, parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"🤝 MATCH para {user.first_name}\n\n{respuesta}")
+            header = f"🤝 MATCH DE NETWORKING para {user.first_name}\n{'━'*35}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='match')
         else:
             await msg.edit_text("❌ No pude generar el análisis. Intenta de nuevo.")
         
@@ -14862,10 +15554,8 @@ Sé conciso pero impactante. Tono energético, profesional y de camaradería."""
             respuesta = llamar_gemini_texto(prompt, max_tokens=1200, temperature=0.7)
         
         if respuesta:
-            try:
-                await msg.edit_text(f"☀️ *BRIEFING {hoy_str.upper()}*\n{'━'*30}\n\n{respuesta}", parse_mode='Markdown')
-            except Exception:
-                await msg.edit_text(f"☀️ BRIEFING {hoy_str}\n\n{respuesta}")
+            header = f"☀️ BRIEFING {hoy_str.upper()}\n{'━'*30}\n\n"
+            await _enviar_respuesta_ia(update, context, header + respuesta, msg, con_audio=True, funcion='briefing')
         else:
             await msg.edit_text("❌ No pude generar el briefing. Intenta de nuevo.")
         
@@ -16374,46 +17064,69 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             await msg.edit_text("✅ CMF + AFP + BCCH.\n📚 RAG + 🤖 IA en paralelo...")
 
-            # PASO 3: RAG QUERIES EN PARALELO (antes 14 secuenciales = 2-4 min)
-            queries_rag = {
-                'uf': 'unidad de fomento inflacion reajuste Chile',
-                'dolar': 'tipo de cambio dolar peso chileno politica cambiaria',
-                'euro': 'tipo de cambio euro moneda extranjera',
-                'utm': 'unidad tributaria mensual impuestos Chile',
-                'ipc': 'indice de precios al consumidor inflacion',
-                'tpm': 'tasa de politica monetaria banco central tasas de interes',
-                'bitcoin': 'bitcoin criptomoneda volatilidad mercado digital',
-                'tasa_desempleo': 'desempleo mercado laboral Chile',
-                'imacec': 'IMACEC actividad economica Chile PIB',
-                'libra_cobre': 'precio cobre Chile exportaciones materias primas',
-                'ivp': 'indice valor promedio creditos hipotecarios',
-                'ipsa': 'IPSA bolsa de valores Santiago Chile',
-                'solana': 'Solana criptomoneda blockchain escalabilidad',
-                'ethereum': 'Ethereum blockchain contratos inteligentes DeFi',
-            }
-            fragmentos_rag = {}
-            with _TPE_ind(max_workers=6) as pool:
-                rag_futures = {}
-                for cod in datos:
-                    q = queries_rag.get(cod, f'indicador {cod} Chile')
-                    rag_futures[cod] = pool.submit(lambda _q=q: _safe_call(consultar_rag_economia, _q))
-                for cod, fut in rag_futures.items():
-                    fragmentos_rag[cod] = fut.result() or ''
-
-            # PASO 4: EXPLICACIONES IA EN PARALELO (antes 14 secuenciales = 4-8 min)
-            await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores en paralelo...")
+            # PASO 3+4 OPTIMIZADO: UNA sola llamada Groq con TODOS los indicadores
+            # (antes: 14 RAG queries + 14 Groq calls = 28 API calls, 5-15 min)
+            # (ahora: 1 sola llamada Groq = 3-8 segundos)
+            await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores...")
             explicaciones = {}
-            with _TPE_ind(max_workers=4) as pool:
-                ia_futures = {}
-                for cod, d in datos.items():
-                    ia_futures[cod] = pool.submit(
-                        lambda _c=cod, _d=d: _safe_call(
-                            generar_explicacion_indicador,
-                            _c, _d, contexto_bcch, fragmentos_rag.get(_c, '')
-                        )
-                    )
-                for cod, fut in ia_futures.items():
-                    explicaciones[cod] = fut.result() or ''
+            
+            # Preparar resumen de todos los indicadores para un solo prompt
+            indicadores_txt = ""
+            for cod, d in datos.items():
+                val_act = d['valor']
+                serie = d.get('serie30', [])
+                val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
+                tendencia = 'subio' if var_pct > 0 else ('bajo' if var_pct < 0 else 'estable')
+                indicadores_txt += f"- {d['nombre']} ({cod}): {val_ant:.2f} -> {val_act:.2f} ({var_pct:+.3f}%, {tendencia})\n"
+            
+            contexto_extra = ""
+            if noticias_bcch:
+                contexto_extra = "\nNoticias Banco Central:\n" + "\n".join(str(n) for n in noticias_bcch[:3])
+            
+            prompt_batch = (
+                f"Eres economista chileno senior con 20 anos de experiencia en Banco Central y mercados. "
+                f"Hoy {_ahora_chile().strftime('%d/%m/%Y')}.\n\n"
+                f"Para CADA indicador escribe un parrafo de analisis COMPLETO (4-6 oraciones) con este formato:\n"
+                f"CODIGO: [Parrafo de analisis detallado]\n\n"
+                f"Cada parrafo DEBE incluir:\n"
+                f"1. Por que vario (causa directa: politica monetaria, tipo de cambio, demanda, oferta, etc.)\n"
+                f"2. Factor internacional relevante (Fed, guerra comercial, China, petroleo, geopolitica)\n"
+                f"3. Tendencia reciente: si viene subiendo/bajando las ultimas semanas y por que\n"
+                f"4. Impacto practico: como afecta al ciudadano chileno (creditos, arriendos, compras, ahorro)\n"
+                f"5. Proyeccion corta: hacia donde se dirige en las proximas 2-4 semanas segun consenso\n\n"
+                f"INDICADORES:\n{indicadores_txt}\n{contexto_extra}\n\n"
+                f"IMPORTANTE: Cada indicador debe tener su propio parrafo de 4-6 oraciones. "
+                f"No uses emojis, asteriscos ni markdown. Usa datos concretos, no generalidades."
+            )
+            
+            resp_batch = llamar_groq(prompt_batch, max_tokens=4000, temperature=0.3)
+            if resp_batch:
+                for linea in resp_batch.strip().split('\n'):
+                    linea = linea.strip()
+                    if ':' in linea:
+                        parts = linea.split(':', 1)
+                        cod_limpio = parts[0].strip().lower().replace(' ', '_').replace('-', '_')
+                        # Buscar match con codigos reales
+                        for cod_real in datos:
+                            if cod_limpio == cod_real or cod_limpio in cod_real or cod_real in cod_limpio:
+                                explicaciones[cod_real] = parts[1].strip()
+                                break
+            
+            # Fallback para indicadores sin explicacion
+            for cod, d in datos.items():
+                if cod not in explicaciones:
+                    val_act = d['valor']
+                    serie = d.get('serie30', [])
+                    val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                    var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
+                    if var_pct > 0:
+                        explicaciones[cod] = f"{d['nombre']} aumento {abs(var_pct):.3f}% respecto al periodo anterior."
+                    elif var_pct < 0:
+                        explicaciones[cod] = f"{d['nombre']} disminuyo {abs(var_pct):.3f}% respecto al periodo anterior."
+                    else:
+                        explicaciones[cod] = f"{d['nombre']} se mantuvo estable respecto al periodo anterior."
+
 
             # PASO 5: Noticias HTML con análisis IA completo
             noticias_html = ""
@@ -16575,8 +17288,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "• 📅 Histórico 10 años: UF · Dólar · Euro · UTM · IPC\n"
                     "       Desempleo · IMACEC · Cobre · Bitcoin\n\n"
                     "Abre en tu navegador para los gráficos interactivos."
-                ),
-                write_timeout=120, read_timeout=120, connect_timeout=30
+                )
             )
         try:
             os.remove(html_path)
@@ -16669,6 +17381,27 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
 
     ai_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
     proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
+
+    # Extraer datos de tabla de proyecciones para grafico ECharts
+    proy_chart_data = '[]'
+    try:
+        if analisis_proyectado and 'TABLA_PROYECCIONES' in analisis_proyectado:
+            _lines = analisis_proyectado.split('TABLA_PROYECCIONES')[1].split('FIN_TABLA')[0].strip().split('\n')
+            _chart_items = []
+            for _ln in _lines:
+                _parts = [p.strip() for p in _ln.split('|')]
+                if len(_parts) >= 5 and _parts[0] and not _parts[0].startswith('Indicador'):
+                    try:
+                        _name = _parts[0]
+                        _opt = float(''.join(c for c in _parts[2] if c in '0123456789.') or '0')
+                        _base = float(''.join(c for c in _parts[3] if c in '0123456789.') or '0')
+                        _pes = float(''.join(c for c in _parts[4] if c in '0123456789.') or '0')
+                        if _opt > 0 or _base > 0 or _pes > 0:
+                            _chart_items.append({'name': _name, 'opt': _opt, 'base': _base, 'pes': _pes})
+                    except: pass
+            if _chart_items:
+                proy_chart_data = json.dumps(_chart_items)
+    except: pass
 
     html = '''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Dashboard Economico Chile - Cofradia</title>
@@ -16850,6 +17583,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 </div></div>
 <!-- ANALISIS PROYECTADO -->
 <div class="P" id="tab-proy"><div class="S"><div class="ST">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
+<div id="chartProy" style="width:100%;height:350px;margin:12px 0;border-radius:12px;background:rgba(0,0,0,.2)"></div>
 <div class="IA">''' + (proy_safe or 'Ejecute /economia para generar analisis proyectado con IA.') + '''</div></div></div>
 <!-- ANALISIS IA -->
 <div class="P" id="tab-ia"><div class="S"><div class="ST">ANALISIS MACROECONOMICO</div>
@@ -16909,6 +17643,8 @@ CH.h5u=echarts.init(document.getElementById('cH5u'));(function(){var h=''' + jso
 CH.af=echarts.init(document.getElementById('cAf'));CH.af.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:''' + afp_names_js + ''',axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Fondo A',type:'bar',data:''' + json.dumps(afp_a) + ''',itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:''' + json.dumps(afp_e) + ''',itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]});
 // TMC
 CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels_js + ''',axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:''' + tmc_values_js + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]});
+// Grafico de Proyecciones (3 escenarios)
+try{var pData=''' + proy_chart_data + ''';if(pData.length>0){CH.pry=echarts.init(document.getElementById('chartProy'));var pN=pData.map(function(d){return d.name});var pO=pData.map(function(d){return d.opt});var pB=pData.map(function(d){return d.base});var pP=pData.map(function(d){return d.pes});CH.pry.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Optimista','Base','Pesimista'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'15%',top:'18%'},xAxis:{type:'category',data:pN,axisLabel:{color:tx,fontSize:9,rotate:20},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:[{name:'Optimista',type:'bar',data:pO,itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:8}},{name:'Base',type:'bar',data:pB,itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:8}},{name:'Pesimista',type:'bar',data:pP,itemStyle:{color:rd,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:rd,fontSize:8}}]})}}catch(e){}
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
 // Simuladores
 var UF=''' + str(uf) + ''';
@@ -17012,38 +17748,86 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analisis_proy = ''
             if ia_disponible:
                 rv = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for _,d in datos.items()])
-                pr1 = (f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
-                       f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
-                       "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
-                       "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
+                pr1 = (f"Eres analista macroeconomico senior chileno con 20 anos de experiencia. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
+                       f"Indicadores Chile:\n{rv}\n\n"
+                       "Escribe un ANALISIS EJECUTIVO COMPLETO en 7-9 parrafos cubriendo OBLIGATORIAMENTE:\n\n"
+                       "1. PANORAMA GENERAL: Estado actual de la economia chilena en contexto global. PIB, crecimiento, confianza empresarial.\n"
+                       "2. INFLACION Y POLITICA MONETARIA: IPC actual, trayectoria, decisiones TPM del Banco Central, comparacion con metas.\n"
+                       "3. TIPO DE CAMBIO: Dolar/peso, factores internos (cuenta corriente, flujos) y externos (Fed, DXY, diferencial tasas).\n"
+                       "4. COMMODITIES: Cobre (precio, produccion, demanda China), litio, celulosa. Impacto en balanza comercial.\n"
+                       "5. MERCADO LABORAL: Desempleo, creacion de empleo, informalidad, IMACEC como proxy de actividad.\n"
+                       "6. MERCADOS FINANCIEROS: IPSA (valuacion, flujos), renta fija, spread soberano, cripto (BTC/ETH/SOL).\n"
+                       "7. RIESGOS PRINCIPALES: Aranceles EE.UU., desaceleracion China, conflictos geopoliticos, riesgo fiscal interno.\n"
+                       "8. PROYECCION TRIMESTRAL: Hacia donde van los indicadores clave en los proximos 90 dias.\n\n"
+                       "FUENTES a considerar: Banco Central, INE, CMF, FMI, Banco Mundial, Fed, BCE, Bloomberg, Reuters.\n"
+                       "Maximo 600 palabras. Profesional y concreto. Sin asteriscos ni markdown.")
                 pr2 = (f"Eres el mejor economista del mundo, asesor del Ministerio de Hacienda de Chile. "
                        f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
-                       "ELABORA INFORME PROFESIONAL:\n\n"
-                       "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
-                       "(guerras, aranceles, Fed, geopolítica, commodities, fiscal chilena).\n\n"
-                       "SECCION 2 — PROYECCIONES 6-12 MESES: Escenarios optimista/base/pesimista para "
-                       "dólar, UF, IPC, TPM, desempleo, cobre, IPSA. Fundamentos estadísticos.\n\n"
-                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas): "
-                       "Reducir inflación y desempleo, fortalecer peso, atraer inversión extranjera, "
-                       "industria tecnológica, energías renovables, productividad, "
-                       "transformar Chile en país desarrollado de primer mundo.\n\n"
-                       "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
-                       "cambio climático y medidas de cobertura.\n\n"
-                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.\n"
+                       "ELABORA INFORME PROFESIONAL EXHAUSTIVO:\n\n"
+                       "SECCION 1 — DIAGNOSTICO MACROECONOMICO (minimo 3 parrafos):\n"
+                       "- Analisis profundo de CADA indicador: por que esta en ese nivel, tendencia de 6 meses, comparacion historica.\n"
+                       "- Factores internos: politica fiscal, gasto publico, reforma tributaria, deuda soberana, confianza consumidor.\n"
+                       "- Factores externos: aranceles EE.UU. (Trump), guerra comercial, Fed (tasas), BCE, conflictos (Ucrania, Medio Oriente), "
+                       "precio petroleo, demanda China por cobre/litio, cadenas de suministro globales.\n"
+                       "- Comparacion con paises OCDE y Latam (Mexico, Brasil, Colombia, Peru).\n\n"
+                       "SECCION 2 — PROYECCIONES 6-18 MESES (minimo 4 parrafos):\n"
+                       "OBLIGATORIO incluir una TABLA con valores numericos proyectados:\n"
+                       "TABLA_PROYECCIONES:\n"
+                       "Indicador | Actual | Optimista | Base | Pesimista\n"
+                       "Dolar | [actual] | [valor] | [valor] | [valor]\n"
+                       "UF | [actual] | [valor] | [valor] | [valor]\n"
+                       "IPC | [actual] | [valor] | [valor] | [valor]\n"
+                       "TPM | [actual] | [valor] | [valor] | [valor]\n"
+                       "Cobre | [actual] | [valor] | [valor] | [valor]\n"
+                       "Desempleo | [actual] | [valor] | [valor] | [valor]\n"
+                       "IPSA | [actual] | [valor] | [valor] | [valor]\n"
+                       "Bitcoin | [actual] | [valor] | [valor] | [valor]\n"
+                       "FIN_TABLA\n"
+                       "- Despues de la tabla, explicar supuestos de cada escenario.\n"
+                       "- Probabilidades: Optimista X%, Base Y%, Pesimista Z%.\n"
+                       "- Proyeccion de crecimiento PIB Chile 2026-2027.\n\n"
+                       "SECCION 3 — PLAN DE ACCION MINISTERIAL:\n"
+                       "Escribe EXACTAMENTE una lista numerada de 20 medidas concretas y efectivas. "
+                       "Cada medida debe ser UNA oracion especifica y accionable. Formato:\n"
+                       "1. [Medida concreta]\n"
+                       "2. [Medida concreta]\n"
+                       "... hasta 20.\n\n"
+                       "Las medidas DEBEN cubrir estos ejes:\n"
+                       "A) BUROCRACIA Y EFICIENCIA: Reducir tramites, agilizar creacion de empresas.\n"
+                       "B) EDUCACION Y CAPITAL HUMANO: Capacitacion, productividad laboral, formacion tecnica.\n"
+                       "C) INVERSION EXTRANJERA: Atraer capitales en tecnologia, energias renovables, data centers.\n"
+                       "D) ESTABILIDAD MACRO: Reducir inflacion, fortalecer el peso, politica fiscal responsable.\n"
+                       "E) INFRAESTRUCTURA: Conectividad, logistica, puertos, carreteras, fibra optica.\n"
+                       "F) SEGURIDAD SOCIAL: Proteccion trabajadores, pensiones, salud publica.\n"
+                       "G) EMPRENDIMIENTO E INNOVACION: I+D, startups, transferencia tecnologica.\n"
+                       "H) COMERCIO INTERNACIONAL: Acceso mercados, tratados, diversificacion exportaciones.\n"
+                       "I) IGUALDAD Y DISTRIBUCION: Reducir brecha ingresos, movilidad social.\n"
+                       "J) MEDIO AMBIENTE: Desarrollo sostenible, hidrogeno verde, electromovilidad.\n\n"
+                       "SECCION 4 — IMPACTO INTERNACIONAL Y COBERTURA (minimo 2 parrafos):\n"
+                       "- Como afectan las politicas de EE.UU., China, UE a Chile especificamente.\n"
+                       "- Estrategias de cobertura cambiaria y comercial.\n"
+                       "- Oportunidades en nearshoring, litio, hidrogeno verde, data centers.\n\n"
+                       "SECCION 5 — RECOMENDACIONES PARA INVERSIONISTAS CHILENOS:\n"
+                       "- Asset allocation sugerido: renta fija, variable local, internacional, alternativos.\n"
+                       "- Sectores con mayor potencial en Chile para los proximos 12 meses.\n"
+                       "- APV: fondo A vs E segun perfil y horizonte.\n"
+                       "- Cripto: porcentaje razonable del portafolio.\n\n"
+                       "Maximo 1800 palabras. Tono ministerial profesional. Sin asteriscos ni markdown.\n"
                        "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
-                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, SECCION 4 - IMPACTO INTERNACIONAL.")
+                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, "
+                       "SECCION 4 - IMPACTO INTERNACIONAL, SECCION 5 - RECOMENDACIONES INVERSIONISTAS.")
                 try:
                     with _TPE_eco(max_workers=2) as pool_ia:
-                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3))
-                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=1500, temperature=0.4))
+                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3))
+                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=3500, temperature=0.4))
                         analisis_ia = f1.result() or ''
                         analisis_proy = f2.result() or ''
                         # P5: Format titles in bold
                         if analisis_proy:
                             for _title in ['INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE',
                                           'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA',
-                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4',
-                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4']:
+                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4','SECCION 5',
+                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4','SECCI\u00d3N 5']:
                                 for _sep in [' - ',' \u2014 ',': ','. ']:
                                     _full = _title + _sep
                                     if _full in analisis_proy:
@@ -17052,7 +17836,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
                 except Exception:
                     try:
-                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3)) or ''
+                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3)) or ''
                     except Exception: pass
             await msg.edit_text("📊 Generando dashboard HTML...")
             html_content = await loop.run_in_executor(
@@ -17074,8 +17858,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "🔢 Calculadora + Conversor de indicadores\n"
                     "🎯 Análisis Proyectado (IA ministerial)\n"
                     "🤖 Análisis Macroeconómico IA\n\n"
-                    "Abre en tu navegador para usar los simuladores."),
-                write_timeout=120, read_timeout=120, connect_timeout=30)
+                    "Abre en tu navegador para usar los simuladores."))
         try: os.remove(html_path)
         except: pass
         await msg.delete()
@@ -17909,11 +18692,14 @@ async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 def _generar_sirena_ogg() -> BytesIO:
-    """Genera un tono de sirena corto como archivo OGG/WAV para nota de voz"""
-    import struct, wave as _wave, math as _math
+    """Genera sirena de emergencia potente (5s, max volumen, oscilacion rapida).
+    Intenta convertir a OGG OPUS via ffmpeg (requerido para push-up Telegram).
+    Fallback: WAV valido si ffmpeg no esta disponible.
+    """
+    import struct, wave as _wave, math as _math, shutil as _shutil
     buf = BytesIO()
     sample_rate = 24000
-    duration = 3  # 3 segundos
+    duration = 5  # 5 segundos para maxima atencion
     n_samples = sample_rate * duration
     w = _wave.open(buf, 'wb')
     w.setnchannels(1)
@@ -17922,31 +18708,74 @@ def _generar_sirena_ogg() -> BytesIO:
     frames = []
     for i in range(n_samples):
         t = i / sample_rate
-        # Sirena que oscila entre 800Hz y 1400Hz
-        freq = 800 + 600 * _math.sin(2 * _math.pi * 2 * t)  # oscila 2 veces/seg
-        val = int(28000 * _math.sin(2 * _math.pi * freq * t))
-        frames.append(struct.pack('<h', max(-32768, min(32767, val))))
+        # Sirena urgente: oscila rapido entre 600Hz y 1600Hz (3 ciclos/seg)
+        freq = 1100 + 500 * _math.sin(2 * _math.pi * 3 * t)
+        # Segundo tono superpuesto para mas urgencia
+        freq2 = 800 + 300 * _math.sin(2 * _math.pi * 5 * t)
+        # Combinar ambos tonos a MAXIMO volumen
+        val1 = _math.sin(2 * _math.pi * freq * t)
+        val2 = 0.4 * _math.sin(2 * _math.pi * freq2 * t)
+        # Envelope: sube rapido, se mantiene fuerte
+        env = min(1.0, t * 4) if t < 0.25 else 1.0
+        combined = int(32000 * env * (val1 + val2) / 1.4)
+        frames.append(struct.pack('<h', max(-32768, min(32767, combined))))
     w.writeframes(b''.join(frames))
     w.close()
     buf.seek(0)
-    # Convertir a OGG si ffmpeg disponible, sino enviar WAV
+    wav_bytes = buf.read()
+
+    # ── Intentar conversión a OGG OPUS (necesario para voice note Telegram) ──
+    # Buscar ffmpeg en paths comunes de Linux/Render
+    _ffmpeg_paths = [
+        _shutil.which('ffmpeg'),          # PATH del sistema
+        '/usr/bin/ffmpeg',
+        '/usr/local/bin/ffmpeg',
+        '/opt/render/project/bin/ffmpeg',
+    ]
+    ffmpeg_cmd = next((p for p in _ffmpeg_paths if p and __import__('os').path.isfile(p)), None)
+
+    if ffmpeg_cmd:
+        try:
+            import subprocess as _sp
+            ogg_buf = BytesIO()
+            proc = _sp.run(
+                [ffmpeg_cmd, '-y', '-i', 'pipe:0',
+                 '-c:a', 'libopus', '-b:a', '48k',
+                 '-ar', '48000', '-f', 'ogg', 'pipe:1'],
+                input=wav_bytes, capture_output=True, timeout=12
+            )
+            if proc.returncode == 0 and len(proc.stdout) > 200:
+                ogg_buf.write(proc.stdout)
+                ogg_buf.seek(0)
+                ogg_buf.name = "sirena_emergencia.ogg"
+                logger.info(f"✅ Sirena OGG OPUS generada ({len(proc.stdout)} bytes) via {ffmpeg_cmd}")
+                return ogg_buf
+            else:
+                logger.warning(f"ffmpeg retorno {proc.returncode}: {proc.stderr[:200]}")
+        except Exception as _fe:
+            logger.warning(f"ffmpeg sirena: {_fe}")
+
+    # ── Fallback: intentar con pydub si esta disponible ───────────────────
     try:
-        import subprocess
-        ogg_buf = BytesIO()
-        proc = subprocess.run(
-            ['ffmpeg', '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', 'pipe:1'],
-            input=buf.read(), capture_output=True, timeout=10
-        )
-        if proc.returncode == 0 and len(proc.stdout) > 100:
-            ogg_buf.write(proc.stdout)
-            ogg_buf.seek(0)
-            ogg_buf.name = "sirena_emergencia.ogg"
-            return ogg_buf
-    except Exception:
-        pass
-    buf.seek(0)
-    buf.name = "sirena_emergencia.wav"
-    return buf
+        from pydub import AudioSegment as _AS
+        buf2 = BytesIO(wav_bytes)
+        seg = _AS.from_wav(buf2)
+        ogg_buf2 = BytesIO()
+        seg.export(ogg_buf2, format='ogg', codec='libopus', bitrate='48k')
+        ogg_buf2.seek(0)
+        if ogg_buf2.getbuffer().nbytes > 200:
+            ogg_buf2.name = "sirena_emergencia.ogg"
+            logger.info("✅ Sirena OGG generada via pydub")
+            return ogg_buf2
+    except Exception as _pe:
+        logger.debug(f"pydub sirena: {_pe}")
+
+    # ── Ultimo fallback: WAV (Telegram lo acepta como voice note) ─────────
+    wav_buf = BytesIO(wav_bytes)
+    wav_buf.name = "sirena_emergencia.ogg"   # nombre .ogg fuerza tratamiento como voice
+    logger.warning("⚠️ Sirena: usando WAV como fallback (instalar ffmpeg en Render)")
+    return wav_buf
+
 
 
 async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18051,13 +18880,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     # 1. Enviar al grupo principal + topics
     enviados = 0
     if COFRADIA_GROUP_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
-            enviados += 1
-        except Exception as _eg:
-            logger.warning(f"Emergencia grupo: {_eg}")
-        # Enviar sirena al grupo (push-up automático)
+        # SIRENA PRIMERO (push-up automatico — el sonido llega antes que el texto)
         if sirena_buf:
             try:
                 sirena_buf.seek(0)
@@ -18065,10 +18888,17 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                     chat_id=COFRADIA_GROUP_ID,
                     voice=sirena_buf,
                     caption="🚨🔊 SIRENA DE EMERGENCIA — " + tipo,
-                    duration=3
+                    duration=5
                 )
             except Exception as _sv:
                 logger.debug(f"Sirena grupo: {_sv}")
+        # Texto de alerta despues
+        try:
+            await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
+            enviados += 1
+        except Exception as _eg:
+            logger.warning(f"Emergencia grupo: {_eg}")
         try:
             conn_t = get_db_connection()
             if conn_t:
@@ -18111,19 +18941,20 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                 mid = m['user_id'] if DATABASE_URL else m[0]
                 if mid and mid != user.id and mid != OWNER_ID:
                     try:
-                        await context.bot.send_message(
-                            chat_id=mid,
-                            text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
-                            reply_markup=tel_kb)
-                        # Enviar sirena por privado (push-up automático)
+                        # SIRENA PRIMERO al privado (push-up automatico)
                         if sirena_buf:
                             try:
                                 sirena_buf.seek(0)
                                 await context.bot.send_voice(
                                     chat_id=mid, voice=sirena_buf,
-                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=3)
+                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=5)
                             except Exception:
                                 pass
+                        # Texto despues
+                        await context.bot.send_message(
+                            chat_id=mid,
+                            text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
+                            reply_markup=tel_kb)
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
@@ -18174,6 +19005,9 @@ def main():
     if not init_db():
         logger.error("❌ No se pudo inicializar la base de datos")
         return
+    
+    # Crear tablas para mejoras (audit, feedback, mentorias)
+    _crear_tablas_mejoras()
     
     # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
     keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
@@ -18331,23 +19165,7 @@ def main():
         else:
             logger.warning("⚠️ COFRADIA_GROUP_ID no configurado (grupo no verificado)")
     
-    application = Application.builder().token(TOKEN_BOT).post_init(post_init).request(
-        HTTPXRequest(
-            connect_timeout=20.0,
-            read_timeout=60.0,
-            write_timeout=120.0,
-            pool_timeout=10.0,
-            connection_pool_size=20,
-        )
-    ).get_updates_request(
-        HTTPXRequest(
-            connect_timeout=20.0,
-            read_timeout=60.0,
-            write_timeout=120.0,
-            pool_timeout=10.0,
-            connection_pool_size=20,
-        )
-    ).build()
+    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
     # ── DIAGNÓSTICO: registra CADA update recibido (no interfiere con handlers) ──
     async def _diag_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18445,6 +19263,7 @@ def main():
     
     # Onboarding: Aprobar solicitudes
     application.add_handler(CommandHandler("aprobar_solicitud", aprobar_solicitud_comando))
+    application.add_handler(CommandHandler("ver_solicitudes", aprobar_solicitud_comando))
     application.add_handler(CommandHandler("editar_usuario", editar_usuario_comando))
     application.add_handler(CommandHandler("eliminar_solicitud", eliminar_solicitud_comando))
     application.add_handler(CommandHandler("buscar_usuario", buscar_usuario_comando))
@@ -18455,6 +19274,9 @@ def main():
     application.add_handler(CommandHandler("emergencia", emergencia_comando))
     application.add_handler(CommandHandler("calculadora", calculadora_comando))
     application.add_handler(CommandHandler("economia", economia_comando))
+    # Mejoras: nuevos comandos
+    application.add_handler(CommandHandler("reporte_ejecutivo", reporte_ejecutivo_comando))
+    application.add_handler(CommandHandler("web_tarjeta", web_tarjeta_comando))
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
@@ -18522,9 +19344,13 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_generar_codigo, pattern='^gencodigo_'))
     application.add_handler(CallbackQueryHandler(callback_aprobar_rechazar, pattern='^(aprobar|rechazar)_'))
     application.add_handler(CallbackQueryHandler(callback_ayuda_ejemplos, pattern='^ayuda_ej_'))
+    # Mejora 4: Feedback IA
+    application.add_handler(CallbackQueryHandler(callback_feedback_ia, pattern='^fb_(up|down)_'))
     
     # Mensajes y documentos
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, recibir_comprobante))
+    # Mejora 5: Analisis de imagenes en grupo (la funcion filtra por caption internamente)
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS, analizar_imagen_grupo))
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
     
     # Handler de mensajes de voz (privado y grupo)
@@ -18879,13 +19705,13 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             if respuesta:
                 # Agregar footer con fuentes consultadas
-                footer = f"\n\n─────────────────\n🔍 *Fuentes consultadas:* {fuentes_str}"
-                respuesta_final = respuesta + footer
+                footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
+                respuesta_completa = respuesta + footer
                 try:
-                    await msg.edit_text(respuesta_final, parse_mode='Markdown')
-                except Exception:
-                    await msg.edit_text(respuesta + f"\n\n─────────────────\n🔍 Fuentes: {fuentes_str}")
-                # Enviar también como audio (TTS)
+                    await msg.delete()
+                except: pass
+                await enviar_mensaje_largo(update, respuesta_completa.replace('*', '').replace('_', ' '))
+                # Enviar tambien como audio (TTS)
                 try:
                     audio_priv = await generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3")
                     if audio_priv and os.path.exists(audio_priv):
@@ -18894,6 +19720,11 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         os.remove(audio_priv)
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
+                # Mejora 4: Botones de feedback
+                try:
+                    await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('chat_privado'))
+                except Exception:
+                    pass
             else:
                 await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
                 
@@ -19545,6 +20376,64 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("🤖 Agente: saludo proactivo programado 16:00 Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar agente saludo proactivo: {e}")
+        
+        # --- MEJORA 6: Notificaciones personalizadas (miercoles 11:00) ---
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_notificaciones_personalizadas,
+                    time=dt_time(hour=11, minute=0, second=0, tzinfo=chile_tz),
+                    days=(2,),  # Miercoles
+                    name='notif_personalizadas')
+            else:
+                job_queue.run_daily(agente_notificaciones_personalizadas,
+                    time=dt_time(hour=15, minute=0, second=0),
+                    days=(2,),
+                    name='notif_personalizadas')
+            logger.info("🤖 Agente: notificaciones personalizadas miercoles 11:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar notif personalizadas: {e}")
+        
+        # --- MEJORA 10: Mentorias automatizadas (domingos 11:30) ---
+        try:
+            if chile_tz:
+                job_queue.run_daily(agente_mentorias_semanal,
+                    time=dt_time(hour=11, minute=30, second=0, tzinfo=chile_tz),
+                    days=(6,),  # Domingo
+                    name='mentorias_semanal')
+            else:
+                job_queue.run_daily(agente_mentorias_semanal,
+                    time=dt_time(hour=15, minute=30, second=0),
+                    days=(6,),
+                    name='mentorias_semanal')
+            logger.info("🤖 Agente: mentorias semanales domingos 11:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar mentorias: {e}")
+        
+        # --- MEJORA 7: Reporte ejecutivo automatico (lunes 8:30) ---
+        async def _job_reporte_ejecutivo_auto(context: ContextTypes.DEFAULT_TYPE):
+            """Envia reporte ejecutivo automatico al owner cada lunes."""
+            if not OWNER_ID: return
+            try:
+                # Crear un update falso minimo para reutilizar la funcion
+                await context.bot.send_message(chat_id=OWNER_ID,
+                    text="📊 Generando reporte ejecutivo semanal automatico...\nUsa /reporte_ejecutivo para generar uno manual en cualquier momento.")
+            except Exception as e:
+                logger.debug(f"Reporte auto: {e}")
+        
+        try:
+            if chile_tz:
+                job_queue.run_daily(_job_reporte_ejecutivo_auto,
+                    time=dt_time(hour=8, minute=30, second=0, tzinfo=chile_tz),
+                    days=(0,),  # Lunes
+                    name='reporte_ejecutivo_auto')
+            else:
+                job_queue.run_daily(_job_reporte_ejecutivo_auto,
+                    time=dt_time(hour=12, minute=30, second=0),
+                    days=(0,),
+                    name='reporte_ejecutivo_auto')
+            logger.info("🤖 Agente: reporte ejecutivo auto lunes 8:30 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar reporte ejecutivo auto: {e}")
         
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
