@@ -16357,24 +16357,10 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await msg.edit_text("❌ Sin conexión a mindicador.cl. Intenta en unos minutos.")
                 return
 
-            await msg.edit_text(f"✅ {len(datos)} indicadores.\n🏦 CMF + AFP + BCCH en paralelo...")
+            await msg.edit_text(f"✅ {len(datos)} indicadores.\n⚡ CMF + AFP + RAG + Noticias en paralelo...")
 
-            # PASO 2: CMF + AFP + BCCH EN PARALELO (antes eran secuenciales)
+            # MEGA-PASO 2: CMF + AFP + BCCH + 14 RAG + Noticias IA — TODO en paralelo (18 tareas)
             from concurrent.futures import ThreadPoolExecutor as _TPE_ind
-            with _TPE_ind(max_workers=3) as pool:
-                fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
-                fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
-                fut_bcch = pool.submit(lambda: _safe_call(scraping_bcentral_noticias))
-                datos_cmf = fut_cmf.result() or {}
-                datos_afp = fut_afp.result() or {}
-                noticias_bcch = fut_bcch.result() or []
-            all_data['datos_cmf'] = datos_cmf
-            all_data['datos_afp'] = datos_afp
-            contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
-
-            await msg.edit_text("✅ CMF + AFP + BCCH.\n📚 RAG + 🤖 IA en paralelo...")
-
-            # PASO 3: RAG QUERIES EN PARALELO (antes 14 secuenciales = 2-4 min)
             queries_rag = {
                 'uf': 'unidad de fomento inflacion reajuste Chile',
                 'dolar': 'tipo de cambio dolar peso chileno politica cambiaria',
@@ -16391,19 +16377,54 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 'solana': 'Solana criptomoneda blockchain escalabilidad',
                 'ethereum': 'Ethereum blockchain contratos inteligentes DeFi',
             }
+            _anio_n = _ahora_chile().strftime('%Y')
+            _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
+            prompt_news = (
+                f"Eres analista economico senior. HOY es {_fecha_n} ({_anio_n}).\n"
+                f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
+                "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
+                "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
+                "CADA noticia DEBE tener 3 lineas minimo:\n"
+                "Linea 1: TITULO de la noticia\n"
+                "Linea 2: Descripcion detallada con datos concretos\n"
+                "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
+                f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
+            )
+
             fragmentos_rag = {}
-            with _TPE_ind(max_workers=6) as pool:
+            datos_cmf = {}
+            datos_afp = {}
+            noticias_bcch = []
+            news_ia = ''
+
+            with _TPE_ind(max_workers=20) as pool:
+                # Lanzar TODAS las tareas al mismo tiempo
+                fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
+                fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
+                fut_bcch = pool.submit(lambda: _safe_call(scraping_bcentral_noticias))
+                fut_news = pool.submit(lambda: _safe_call(llamar_groq, prompt_news, 2000, 0.3))
                 rag_futures = {}
                 for cod in datos:
                     q = queries_rag.get(cod, f'indicador {cod} Chile')
                     rag_futures[cod] = pool.submit(lambda _q=q: _safe_call(consultar_rag_economia, _q))
+
+                # Recoger resultados
+                datos_cmf = fut_cmf.result() or {}
+                datos_afp = fut_afp.result() or {}
+                noticias_bcch = fut_bcch.result() or []
+                news_ia = fut_news.result() or ''
                 for cod, fut in rag_futures.items():
                     fragmentos_rag[cod] = fut.result() or ''
 
-            # PASO 4: EXPLICACIONES IA EN PARALELO (antes 14 secuenciales = 4-8 min)
+            all_data['datos_cmf'] = datos_cmf
+            all_data['datos_afp'] = datos_afp
+            contexto_bcch = "\n".join(noticias_bcch) if noticias_bcch else ""
+
             await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores en paralelo...")
+
+            # MEGA-PASO 3: 14 explicaciones IA — TODAS en paralelo (14 workers)
             explicaciones = {}
-            with _TPE_ind(max_workers=4) as pool:
+            with _TPE_ind(max_workers=14) as pool:
                 ia_futures = {}
                 for cod, d in datos.items():
                     ia_futures[cod] = pool.submit(
@@ -16415,31 +16436,16 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 for cod, fut in ia_futures.items():
                     explicaciones[cod] = fut.result() or ''
 
-            # PASO 5: Noticias HTML con análisis IA completo
+            # Noticias HTML
             noticias_html = ""
             if noticias_bcch:
                 for n in noticias_bcch[:5]:
                     noticias_html += '<div class="news-item">&#128196; ' + str(n).replace('<','&lt;').replace('>','&gt;') + '</div>'
             try:
-                _anio_n = _ahora_chile().strftime('%Y')
-                _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
-                prompt_news = (
-                    f"Eres analista economico senior. HOY es {_fecha_n} ({_anio_n}).\n"
-                    f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
-                    "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
-                    "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
-                    "CADA noticia DEBE tener 3 lineas minimo:\n"
-                    "Linea 1: TITULO de la noticia\n"
-                    "Linea 2: Descripcion detallada con datos concretos\n"
-                    "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
-                    f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
-                )
-                news_ia = llamar_groq(prompt_news, max_tokens=2000, temperature=0.3)
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
                         if len(line) > 15:
-                            # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
                             noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
             except Exception:
@@ -16670,6 +16676,38 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
     ai_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
     proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
 
+    # Parsear TABLA_PROYECCIONES del texto IA para gráfico de 3 escenarios
+    proy_chart_data = []
+    if analisis_proyectado:
+        try:
+            import re as _re_proy
+            lineas_proy = analisis_proyectado.split('\n')
+            en_tabla = False
+            for linea in lineas_proy:
+                linea_strip = linea.strip()
+                if 'TABLA_PROYECCIONES' in linea_strip or ('Indicador' in linea_strip and 'Optimista' in linea_strip):
+                    en_tabla = True
+                    continue
+                if en_tabla and '|' in linea_strip:
+                    partes = [p.strip() for p in linea_strip.split('|')]
+                    if len(partes) >= 5:
+                        nombre = partes[0].strip()
+                        if nombre.lower() in ('indicador', '', '-'): continue
+                        def _parse_num(s):
+                            s = s.strip().replace('.', '').replace(',', '.')
+                            try: return float(s)
+                            except: return None
+                        opt_v = _parse_num(partes[2])
+                        base_v = _parse_num(partes[3])
+                        pes_v = _parse_num(partes[4])
+                        if opt_v is not None and base_v is not None and pes_v is not None:
+                            proy_chart_data.append({'name': nombre, 'opt': opt_v, 'base': base_v, 'pes': pes_v})
+                elif en_tabla and linea_strip and '|' not in linea_strip and not linea_strip.startswith('-'):
+                    en_tabla = False
+        except Exception:
+            pass
+    proy_chart_js = json.dumps(proy_chart_data)
+
     html = '''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Dashboard Economico Chile - Cofradia</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -16850,6 +16888,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 </div></div>
 <!-- ANALISIS PROYECTADO -->
 <div class="P" id="tab-proy"><div class="S"><div class="ST">ANALISIS PROYECTADO — RECOMENDACIONES DE POLITICA ECONOMICA</div>
+<div id="chartProy" style="width:100%;height:350px;margin:12px 0;border-radius:12px;background:rgba(0,0,0,.2)"></div>
 <div class="IA">''' + (proy_safe or 'Ejecute /economia para generar analisis proyectado con IA.') + '''</div></div></div>
 <!-- ANALISIS IA -->
 <div class="P" id="tab-ia"><div class="S"><div class="ST">ANALISIS MACROECONOMICO</div>
@@ -16909,6 +16948,8 @@ CH.h5u=echarts.init(document.getElementById('cH5u'));(function(){var h=''' + jso
 CH.af=echarts.init(document.getElementById('cAf'));CH.af.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:''' + afp_names_js + ''',axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Fondo A',type:'bar',data:''' + json.dumps(afp_a) + ''',itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:''' + json.dumps(afp_e) + ''',itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]});
 // TMC
 CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels_js + ''',axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:''' + tmc_values_js + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]});
+// Grafico de Proyecciones (3 escenarios)
+try{var pData=''' + proy_chart_js + ''';if(pData.length>0){CH.pry=echarts.init(document.getElementById('chartProy'));var pN=pData.map(function(d){return d.name});var pO=pData.map(function(d){return d.opt});var pB=pData.map(function(d){return d.base});var pP=pData.map(function(d){return d.pes});CH.pry.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Optimista','Base','Pesimista'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'15%',top:'18%'},xAxis:{type:'category',data:pN,axisLabel:{color:tx,fontSize:9,rotate:20},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:[{name:'Optimista',type:'bar',data:pO,itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:8}},{name:'Base',type:'bar',data:pB,itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:8}},{name:'Pesimista',type:'bar',data:pP,itemStyle:{color:rd,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:rd,fontSize:8}}]})}}catch(e){}
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
 // Simuladores
 var UF=''' + str(uf) + ''';
@@ -17000,60 +17041,55 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not datos:
                 await msg.edit_text("❌ Sin conexión a fuentes de datos.")
                 return
-            await msg.edit_text(f"✅ {len(datos)} indicadores.\n🏦 CMF + AFP...")
+            await msg.edit_text(f"✅ {len(datos)} indicadores.\n⚡ CMF + AFP + IA en paralelo...")
             from concurrent.futures import ThreadPoolExecutor as _TPE_eco
-            with _TPE_eco(max_workers=2) as pool:
-                fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
-                fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
-                datos_cmf = fut_cmf.result() or {}
-                datos_afp = fut_afp.result() or {}
-            await msg.edit_text("✅ Datos completos.\n🤖 IA generando 2 análisis en paralelo...")
             analisis_ia = ''
             analisis_proy = ''
-            if ia_disponible:
-                rv = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for _,d in datos.items()])
-                pr1 = (f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
-                       f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
-                       "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
-                       "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
-                pr2 = (f"Eres el mejor economista del mundo, asesor del Ministerio de Hacienda de Chile. "
-                       f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
-                       "ELABORA INFORME PROFESIONAL:\n\n"
-                       "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
-                       "(guerras, aranceles, Fed, geopolítica, commodities, fiscal chilena).\n\n"
-                       "SECCION 2 — PROYECCIONES 6-12 MESES: Escenarios optimista/base/pesimista para "
-                       "dólar, UF, IPC, TPM, desempleo, cobre, IPSA. Fundamentos estadísticos.\n\n"
-                       "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas): "
-                       "Reducir inflación y desempleo, fortalecer peso, atraer inversión extranjera, "
-                       "industria tecnológica, energías renovables, productividad, "
-                       "transformar Chile en país desarrollado de primer mundo.\n\n"
-                       "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
-                       "cambio climático y medidas de cobertura.\n\n"
-                       "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.\n"
-                       "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
-                       "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, SECCION 4 - IMPACTO INTERNACIONAL.")
+            rv = "; ".join([f"{d.get('nombre','')}: {d.get('valor','N/D')}" for _,d in datos.items()])
+            pr1 = (f"Eres analista macroeconómico senior chileno. Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\n"
+                   f"Indicadores Chile:\n{rv}\n\nEscribe análisis ejecutivo 5-7 párrafos: economía general, "
+                   "inflación/TPM, tipo cambio/cobre, empleo/IMACEC, cripto/IPSA, proyecciones inversores.\n"
+                   "Máximo 400 palabras. Profesional. Sin asteriscos ni markdown.")
+            pr2 = (f"Eres el mejor economista del mundo, asesor del Ministerio de Hacienda de Chile. "
+                   f"Fecha: {_ahora_chile().strftime('%d/%m/%Y')}.\nIndicadores Chile:\n{rv}\n\n"
+                   "ELABORA INFORME PROFESIONAL:\n\n"
+                   "SECCION 1 — DIAGNOSTICO: Analiza razones nacionales e internacionales de los valores actuales "
+                   "(guerras, aranceles, Fed, geopolítica, commodities, fiscal chilena).\n\n"
+                   "SECCION 2 — PROYECCIONES 6-12 MESES: Escenarios optimista/base/pesimista para "
+                   "dólar, UF, IPC, TPM, desempleo, cobre, IPSA. Fundamentos estadísticos.\n\n"
+                   "SECCION 3 — PLAN DE ACCION MINISTERIAL (20 medidas): "
+                   "Reducir inflación y desempleo, fortalecer peso, atraer inversión extranjera, "
+                   "industria tecnológica, energías renovables, productividad, "
+                   "transformar Chile en país desarrollado de primer mundo.\n\n"
+                   "SECCION 4 — IMPACTO INTERNACIONAL: Políticas EE.UU., China, conflictos, "
+                   "cambio climático y medidas de cobertura.\n\n"
+                   "Máximo 800 palabras. Tono ministerial. Sin asteriscos ni markdown.\n"
+                   "El titulo principal DEBE ser: INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA.\n"
+                   "Cada seccion: SECCION 1 - DIAGNOSTICO, SECCION 2 - PROYECCIONES, SECCION 3 - PLAN DE ACCION, SECCION 4 - IMPACTO INTERNACIONAL.")
+            # CMF + AFP + 2 análisis IA — TODO en paralelo (4 tareas simultáneas)
+            with _TPE_eco(max_workers=4) as pool:
+                fut_cmf = pool.submit(lambda: _safe_call(obtener_indicadores_cmf))
+                fut_afp = pool.submit(lambda: _safe_call(obtener_rentabilidad_afp))
+                f1 = pool.submit(lambda: _safe_call(llamar_groq, pr1, 800, 0.3)) if ia_disponible else None
+                f2 = pool.submit(lambda: _safe_call(llamar_groq, pr2, 1500, 0.4)) if ia_disponible else None
+                datos_cmf = fut_cmf.result() or {}
+                datos_afp = fut_afp.result() or {}
+                if f1: analisis_ia = f1.result() or ''
+                if f2: analisis_proy = f2.result() or ''
+            if analisis_proy:
                 try:
-                    with _TPE_eco(max_workers=2) as pool_ia:
-                        f1 = pool_ia.submit(lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3))
-                        f2 = pool_ia.submit(lambda: llamar_groq(pr2, max_tokens=1500, temperature=0.4))
-                        analisis_ia = f1.result() or ''
-                        analisis_proy = f2.result() or ''
-                        # P5: Format titles in bold
-                        if analisis_proy:
-                            for _title in ['INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE',
-                                          'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA',
-                                          'SECCION 1','SECCION 2','SECCION 3','SECCION 4',
-                                          'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4']:
-                                for _sep in [' - ',' \u2014 ',': ','. ']:
-                                    _full = _title + _sep
-                                    if _full in analisis_proy:
-                                        analisis_proy = analisis_proy.replace(_full, '\n\n' + _full)
-                                        break
-                            analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
+                    for _title in ['INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE',
+                                  'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA',
+                                  'SECCION 1','SECCION 2','SECCION 3','SECCION 4',
+                                  'SECCI\u00d3N 1','SECCI\u00d3N 2','SECCI\u00d3N 3','SECCI\u00d3N 4']:
+                        for _sep in [' - ',' \u2014 ',': ','. ']:
+                            _full = _title + _sep
+                            if _full in analisis_proy:
+                                analisis_proy = analisis_proy.replace(_full, '\n\n' + _full)
+                                break
+                    analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
                 except Exception:
-                    try:
-                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=800, temperature=0.3)) or ''
-                    except Exception: pass
+                    pass
             await msg.edit_text("📊 Generando dashboard HTML...")
             html_content = await loop.run_in_executor(
                 None, generar_html_economia, all_data, datos_cmf, datos_afp, analisis_ia, analisis_proy)
