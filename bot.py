@@ -681,31 +681,130 @@ async def reporte_ejecutivo_comando(update: Update, context: ContextTypes.DEFAUL
         fp=st.get('fb',{}).get('positivo',0); fn_=st.get('fb',{}).get('negativo',0); ft=fp+fn_; fpc=round(fp/max(ft,1)*100)
         th=''.join(f'<tr><td>{t[0]}</td><td>{t[1]}</td></tr>' for t in st.get('temas',[]))
         uh=''.join(f'<tr><td>{u[0]}</td><td>{u[1]}</td></tr>' for u in st.get('top',[]))
-        html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Reporte Ejecutivo</title>
-<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:Segoe UI,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59,#1a3a6a);color:#e0e6ed;min-height:100vh;padding:2rem}}
-.c{{max-width:900px;margin:0 auto}}h1{{text-align:center;color:#c3a55a;font-size:1.8rem;margin-bottom:.3rem}}.dt{{text-align:center;color:#889;margin-bottom:2rem}}
-.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:2rem}}
-.k{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem;text-align:center}}
-.k .v{{font-size:2rem;font-weight:700;color:#38bdf8}}.k .l{{font-size:.8rem;color:#889;margin-top:.3rem}}.k.gd .v{{color:#c3a55a}}.k.gn .v{{color:#22c55e}}
-.s{{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem}}
-.s h2{{color:#c3a55a;font-size:1.1rem;margin-bottom:1rem;border-bottom:1px solid rgba(195,165,90,.2);padding-bottom:.5rem}}
-table{{width:100%;border-collapse:collapse}}th{{text-align:left;color:#38bdf8;font-size:.75rem;text-transform:uppercase;padding:.4rem .6rem}}
-td{{padding:.4rem .6rem;font-size:.85rem;border-bottom:1px solid rgba(255,255,255,.03)}}
-.br{{height:8px;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:.5rem}}.bf{{height:100%;border-radius:4px;background:linear-gradient(90deg,#38bdf8,#c3a55a)}}</style></head>
-<body><div class="c"><h1>REPORTE EJECUTIVO</h1><div class="dt">Cofradia de Networking - {ahora.strftime('%d/%m/%Y %H:%M')}</div>
-<div class="g"><div class="k"><div class="v">{st.get('a',0)}</div><div class="l">Activos</div></div>
-<div class="k gd"><div class="v">{st.get('m7',0):,}</div><div class="l">Msgs 7d</div></div>
-<div class="k gn"><div class="v">{st.get('p7',0)}</div><div class="l">Participantes</div></div>
-<div class="k"><div class="v">{st.get('tj',0)}</div><div class="l">Tarjetas</div></div></div>
-<div class="s"><h2>Temas Semana</h2><table><tr><th>Tema</th><th>Msgs</th></tr>{th}</table></div>
-<div class="s"><h2>Top Cofrades</h2><table><tr><th>Nombre</th><th>Msgs</th></tr>{uh}</table></div>
-<div class="s"><h2>IA</h2><p>Budget: {bg['daily_calls']}/{bg['daily_limit']} hoy ({bg['daily_pct']}%)</p>
+        html=f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Reporte Ejecutivo - Cofradia</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#0a1628 0%,#0f2f59 50%,#1a3a6a 100%);color:#e0e6ed;min-height:100vh;padding:2rem 1rem}}
+.c{{max-width:1100px;margin:0 auto}}
+.header{{text-align:center;padding:20px 0 25px;border-bottom:2px solid rgba(195,165,90,.4);margin-bottom:30px}}
+h1{{color:#c3a55a;font-size:2rem;letter-spacing:2px;text-shadow:0 2px 10px rgba(195,165,90,.3);margin-bottom:.4rem}}
+.dt{{color:#8899aa;font-size:.95rem}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1.2rem;margin-bottom:2rem}}
+.kpi{{background:linear-gradient(135deg,rgba(15,47,89,.8),rgba(30,80,140,.4));border:1px solid rgba(195,165,90,.3);border-radius:14px;padding:1.5rem 1rem;text-align:center;cursor:help;transition:transform .2s,box-shadow .2s;position:relative}}
+.kpi:hover{{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.4);border-color:rgba(195,165,90,.6)}}
+.kpi .val{{font-size:2.3rem;font-weight:800;color:#c3a55a;text-shadow:0 0 20px rgba(195,165,90,.3);line-height:1}}
+.kpi .lbl{{font-size:.8rem;color:#8899aa;margin-top:.5rem;text-transform:uppercase;letter-spacing:1px;font-weight:600}}
+.kpi.blue .val{{color:#38bdf8}}
+.kpi.green .val{{color:#2ecc71}}
+.kpi.purple .val{{color:#9b59b6}}
+.section{{background:linear-gradient(145deg,rgba(15,47,89,.6),rgba(10,22,40,.8));border:1px solid rgba(52,120,195,.2);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 4px 20px rgba(0,0,0,.3)}}
+.section h2{{color:#c3a55a;font-size:1.15rem;margin-bottom:1.2rem;border-bottom:1px solid rgba(195,165,90,.2);padding-bottom:.6rem;letter-spacing:.5px}}
+table{{width:100%;border-collapse:collapse}}
+th{{text-align:left;color:#38bdf8;font-size:.75rem;text-transform:uppercase;padding:.6rem .7rem;letter-spacing:1px;border-bottom:1px solid rgba(52,120,195,.3)}}
+td{{padding:.7rem .7rem;font-size:.9rem;border-bottom:1px solid rgba(255,255,255,.04);color:#d0d6dd}}
+tr:hover td{{background:rgba(195,165,90,.05)}}
+.val-cell{{color:#c3a55a;font-weight:700;text-align:right}}
+.br{{height:10px;border-radius:5px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:.6rem}}
+.bf{{height:100%;border-radius:5px;background:linear-gradient(90deg,#38bdf8,#c3a55a);transition:width .8s ease}}
+.info-row{{display:flex;justify-content:space-between;padding:.4rem 0;font-size:.9rem}}
+.info-row span:first-child{{color:#8899aa}}
+.info-row span:last-child{{color:#c3a55a;font-weight:700}}
+/* Modal pop-up */
+.modal{{display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:1rem}}
+.modal.active{{display:flex}}
+.modal-box{{background:linear-gradient(145deg,#0f2f59,#1a3a6a);border:2px solid #c3a55a;border-radius:16px;padding:2rem;max-width:500px;width:100%;position:relative;box-shadow:0 20px 60px rgba(0,0,0,.7);animation:pop .25s ease-out}}
+@keyframes pop{{from{{transform:scale(.85);opacity:0}}to{{transform:scale(1);opacity:1}}}}
+.modal-box h3{{color:#c3a55a;font-size:1.3rem;margin-bottom:1rem;padding-right:2rem}}
+.modal-box p{{color:#d0d6dd;line-height:1.6;font-size:.95rem}}
+.modal-close{{position:absolute;top:.8rem;right:1rem;background:none;border:none;color:#c3a55a;font-size:1.8rem;cursor:pointer;line-height:1;padding:0 .5rem}}
+.modal-close:hover{{color:#fff}}
+.foot{{text-align:center;color:#556677;font-size:.8rem;margin-top:2rem;padding-top:1rem;border-top:1px solid rgba(195,165,90,.15)}}
+.foot span{{color:#c3a55a}}
+.hint{{text-align:center;color:#667788;font-size:.8rem;margin-bottom:1.5rem;font-style:italic}}
+</style></head>
+<body>
+<div class="c">
+<div class="header">
+<h1>&#128202; REPORTE EJECUTIVO</h1>
+<div class="dt">Cofradia de Networking &middot; {ahora.strftime('%d/%m/%Y %H:%M')}</div>
+</div>
+
+<div class="hint">&#128161; Haz click en cualquier KPI para ver su definicion</div>
+
+<div class="grid">
+<div class="kpi" onclick="showDef('Activos')"><div class="val">{st.get('a',0)}</div><div class="lbl">Miembros Activos</div></div>
+<div class="kpi blue" onclick="showDef('Msgs7d')"><div class="val">{st.get('m7',0):,}</div><div class="lbl">Mensajes 7 dias</div></div>
+<div class="kpi green" onclick="showDef('Participantes')"><div class="val">{st.get('p7',0)}</div><div class="lbl">Participantes 7d</div></div>
+<div class="kpi purple" onclick="showDef('Tarjetas')"><div class="val">{st.get('tj',0)}</div><div class="lbl">Tarjetas Creadas</div></div>
+</div>
+
+<div class="section"><h2>&#128202; Temas de la Semana</h2>
+<table><thead><tr><th>Tema</th><th style="text-align:right">Mensajes</th></tr></thead>
+<tbody>{th or '<tr><td colspan="2" style="text-align:center;color:#667788">Sin datos en los ultimos 7 dias</td></tr>'}</tbody></table>
+</div>
+
+<div class="section"><h2>&#127942; Top Cofrades (7 dias)</h2>
+<table><thead><tr><th>Nombre</th><th style="text-align:right">Mensajes</th></tr></thead>
+<tbody>{uh or '<tr><td colspan="2" style="text-align:center;color:#667788">Sin datos en los ultimos 7 dias</td></tr>'}</tbody></table>
+</div>
+
+<div class="section"><h2>&#129302; Inteligencia Artificial</h2>
+<div class="info-row" onclick="showDef('Budget')" style="cursor:help"><span>Budget diario usado:</span><span>{bg['daily_calls']}/{bg['daily_limit']} ({bg['daily_pct']}%)</span></div>
 <div class="br"><div class="bf" style="width:{min(bg['daily_pct'],100)}%"></div></div>
-<p style="margin-top:.8rem">Feedback: +{fp}/-{fn_} ({fpc}%)</p></div>
-<div class="s"><h2>Mensual</h2><div class="g" style="margin:0">
-<div class="k"><div class="v">{st.get('m30',0):,}</div><div class="l">Msgs 30d</div></div>
-<div class="k gd"><div class="v">{st.get('tt',0)}</div><div class="l">Total</div></div>
-<div class="k gn"><div class="v">{bg['monthly_calls']:,}</div><div class="l">Llamadas IA</div></div></div></div></div></body></html>"""
+<div class="info-row" onclick="showDef('Feedback')" style="cursor:help;margin-top:1rem"><span>Feedback usuarios:</span><span>+{fp} / -{fn_} ({fpc}% positivo)</span></div>
+</div>
+
+<div class="section"><h2>&#128200; Resumen Mensual</h2>
+<div class="grid" style="margin:0">
+<div class="kpi blue" onclick="showDef('Msgs30d')"><div class="val">{st.get('m30',0):,}</div><div class="lbl">Mensajes 30 dias</div></div>
+<div class="kpi" onclick="showDef('Total')"><div class="val">{st.get('tt',0)}</div><div class="lbl">Total Historico</div></div>
+<div class="kpi green" onclick="showDef('LlamadasIA')"><div class="val">{bg['monthly_calls']:,}</div><div class="lbl">Llamadas IA mes</div></div>
+</div>
+</div>
+
+<div class="foot">Premium Bot &middot; <span>Cofradia de Networking</span> &middot; Admin Panel</div>
+</div>
+
+<!-- Modal Pop-up -->
+<div class="modal" id="modal" onclick="if(event.target===this)closeDef()">
+<div class="modal-box">
+<button class="modal-close" onclick="closeDef()">&times;</button>
+<h3 id="modal-title"></h3>
+<p id="modal-text"></p>
+</div>
+</div>
+
+<script>
+var DEFS = {{
+'Activos': ['Miembros Activos', 'Cantidad total de usuarios con suscripcion en estado ACTIVO en este momento. Representa la base efectiva de la Cofradia que tiene acceso al bot y sus servicios.'],
+'Msgs7d': ['Mensajes 7 dias', 'Total de mensajes enviados en el grupo durante los ultimos 7 dias corridos. Indicador de actividad semanal reciente.'],
+'Participantes': ['Participantes 7d', 'Cantidad de usuarios UNICOS que publicaron al menos un mensaje en los ultimos 7 dias. Mide el compromiso y participacion real del grupo (no solo lurkers).'],
+'Tarjetas': ['Tarjetas Creadas', 'Total de tarjetas profesionales creadas historicamente via comando /mi_tarjeta. Refleja adopcion del directorio profesional.'],
+'Budget': ['Budget diario IA', 'Cuenta de llamadas a la IA (Groq/Gemini) realizadas HOY sobre el limite diario configurado. Proteccion contra abuso y control de costos. Se resetea cada dia a las 00:00 hora Chile.'],
+'Feedback': ['Feedback Usuarios', 'Reacciones positivas (pulgar arriba) y negativas (pulgar abajo) que los usuarios han dado a las respuestas de IA del bot. Porcentaje de satisfaccion sobre el total.'],
+'Msgs30d': ['Mensajes 30 dias', 'Total de mensajes enviados en el grupo durante los ultimos 30 dias. Tendencia mensual de actividad para comparar con periodos anteriores.'],
+'Total': ['Total Historico', 'Suma acumulada de TODAS las suscripciones registradas en la historia del bot (activas + expiradas + canceladas). Crecimiento organico total.'],
+'LlamadasIA': ['Llamadas IA mes', 'Cantidad total de invocaciones a motores de IA acumuladas en el mes en curso. Mide uso intensivo del valor agregado del bot.']
+}};
+function showDef(key){{
+  var d = DEFS[key];
+  if(!d) return;
+  document.getElementById('modal-title').textContent = d[0];
+  document.getElementById('modal-text').textContent = d[1];
+  document.getElementById('modal').classList.add('active');
+}}
+function closeDef(){{
+  document.getElementById('modal').classList.remove('active');
+}}
+document.addEventListener('keydown', function(e){{ if(e.key==='Escape') closeDef(); }});
+</script>
+</body></html>"""
         path=f"/tmp/reporte_{ahora.strftime('%Y%m%d')}.html"
         with open(path,'w',encoding='utf-8') as f: f.write(html)
         await msg.edit_text("Reporte listo!")
@@ -3593,6 +3692,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 ESTADÍSTICAS
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
+/reporte_ejecutivo - Reporte ejecutivo HTML (admin)
 /top_usuarios - Ranking de participación
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
@@ -4114,12 +4214,20 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= ? AND estado = 'activo'", (fecha_inicio,))
             nuevos_7d = c.fetchone()[0]
         
-        # 6. Datos Drive si disponible
+        # 6. Datos Drive si disponible - FORZAR LECTURA FRESCA sin caché
+        await msg.edit_text("📊 Descargando datos frescos desde Google Drive...")
         drive_data = None
         try:
             drive_data = obtener_datos_excel_drive()
-        except:
-            pass
+            if drive_data is not None and len(drive_data) > 0:
+                logger.info(f"/graficos: Drive OK - {len(drive_data)} registros frescos descargados")
+                await msg.edit_text(f"✅ Drive: {len(drive_data)} registros frescos\n📊 Generando dashboard...")
+            else:
+                logger.warning("/graficos: Drive devolvio vacio o None")
+                await msg.edit_text("📊 Generando dashboard (sin datos Drive)...")
+        except Exception as _e_drv:
+            logger.error(f"/graficos: Error Drive: {_e_drv}")
+            await msg.edit_text("📊 Generando dashboard (Drive no disponible)...")
         
         drive_stats = {}
         if drive_data is not None and len(drive_data) > 0:
@@ -4258,7 +4366,7 @@ body {{
 <body>
 <div class="header">
     <h1>⚓ COFRADÍA DE NETWORKING</h1>
-    <div class="subtitle">Dashboard de Actividad — Últimos 7 días</div>
+    <div class="subtitle">Dashboard de Actividad — Últimos 7 días<br><span style="font-size:0.8em;color:#c3a55a">🔄 Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} · Drive: {drive_stats.get('total_registros', 0)} registros</span></div>
 </div>
 
 <div class="kpi-row">
@@ -6209,43 +6317,92 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
 body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}}
 h1{{text-align:center;color:#c3a55a;font-size:1.8em;margin:20px 0 5px;letter-spacing:2px}}
 .sub{{text-align:center;color:#667788;margin-bottom:25px}}
+.hint{{text-align:center;color:#667788;font-size:0.8em;margin-bottom:20px;font-style:italic}}
 .gauges{{display:flex;flex-wrap:wrap;gap:15px;justify-content:center;margin-bottom:25px}}
-.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px}}
+.gauge-box{{background:rgba(15,47,89,0.6);border:1px solid rgba(195,165,90,0.2);border-radius:12px;padding:10px;width:260px;height:230px;cursor:help;transition:transform .2s,border-color .2s}}
+.gauge-box:hover{{transform:translateY(-3px);border-color:rgba(195,165,90,0.5)}}
 .gauge{{width:100%;height:100%}}
 .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1000px;margin:0 auto}}
-.stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center}}
+.stat{{background:rgba(15,47,89,0.6);border:1px solid rgba(52,120,195,0.2);border-radius:10px;padding:18px;text-align:center;cursor:help;transition:transform .2s,border-color .2s}}
+.stat:hover{{transform:translateY(-2px);border-color:rgba(195,165,90,0.5);box-shadow:0 4px 12px rgba(0,0,0,.3)}}
 .stat .val{{font-size:2em;font-weight:800;color:#c3a55a}}
 .stat .lbl{{font-size:0.78em;color:#667788;text-transform:uppercase;letter-spacing:1px;margin-top:4px}}
 .stat.highlight{{border-color:rgba(195,165,90,0.4);background:rgba(15,47,89,0.8)}}
 .stat.highlight .val{{color:#2ecc71}}
 .foot{{text-align:center;color:#445566;font-size:0.8em;margin-top:25px;padding-top:15px;border-top:1px solid rgba(195,165,90,0.15)}}
+.modal{{display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:1rem}}
+.modal.active{{display:flex}}
+.modal-box{{background:linear-gradient(145deg,#0f2f59,#1a3a6a);border:2px solid #c3a55a;border-radius:16px;padding:2rem;max-width:480px;width:100%;position:relative;box-shadow:0 20px 60px rgba(0,0,0,.7);animation:pop .25s ease-out}}
+@keyframes pop{{from{{transform:scale(.85);opacity:0}}to{{transform:scale(1);opacity:1}}}}
+.modal-box h3{{color:#c3a55a;font-size:1.25em;margin-bottom:.9rem;padding-right:2rem}}
+.modal-box p{{color:#d0d6dd;line-height:1.6;font-size:.92em}}
+.modal-close{{position:absolute;top:.6rem;right:1rem;background:none;border:none;color:#c3a55a;font-size:1.8em;cursor:pointer;line-height:1;padding:0 .5rem}}
+.modal-close:hover{{color:#fff}}
 </style></head><body>
 <h1>⚓ ESTADÍSTICAS COFRADÍA</h1>
 <div class="sub">Resumen General — {datetime.now().strftime('%d/%m/%Y')}</div>
+<div class="hint">💡 Haz click en cualquier KPI para ver su definición</div>
 
 <div class="gauges">
-<div class="gauge-box"><div id="g1" class="gauge"></div></div>
-<div class="gauge-box"><div id="g2" class="gauge"></div></div>
-<div class="gauge-box"><div id="g3" class="gauge"></div></div>
-<div class="gauge-box"><div id="g4" class="gauge"></div></div>
+<div class="gauge-box" onclick="showDef('g_msgs_hoy')"><div id="g1" class="gauge"></div></div>
+<div class="gauge-box" onclick="showDef('g_promedio')"><div id="g2" class="gauge"></div></div>
+<div class="gauge-box" onclick="showDef('g_pct_tarjetas')"><div id="g3" class="gauge"></div></div>
+<div class="gauge-box" onclick="showDef('g_nuevos')"><div id="g4" class="gauge"></div></div>
 </div>
 
 <div class="stats-grid">
-<div class="stat"><div class="val">{total_msgs:,}</div><div class="lbl">Mensajes Totales</div></div>
-<div class="stat"><div class="val">{total_usuarios:,}</div><div class="lbl">Usuarios Únicos</div></div>
-<div class="stat"><div class="val">{suscriptores:,}</div><div class="lbl">Miembros Activos</div></div>
-<div class="stat"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
-<div class="stat"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
-<div class="stat"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
-<div class="stat highlight"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
-<div class="stat highlight"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
-<div class="stat"><div class="val">{usuarios_ia:,}</div><div class="lbl">Usuarios IA</div></div>
-<div class="stat"><div class="val">{busq_empleo:,}</div><div class="lbl">Búsquedas Empleo</div></div>
+<div class="stat" onclick="showDef('total_msgs')"><div class="val">{total_msgs:,}</div><div class="lbl">Mensajes Totales</div></div>
+<div class="stat" onclick="showDef('total_usuarios')"><div class="val">{total_usuarios:,}</div><div class="lbl">Usuarios Únicos</div></div>
+<div class="stat" onclick="showDef('suscriptores')"><div class="val">{suscriptores:,}</div><div class="lbl">Miembros Activos</div></div>
+<div class="stat" onclick="showDef('msgs_hoy')"><div class="val">{msgs_hoy:,}</div><div class="lbl">Mensajes Hoy</div></div>
+<div class="stat" onclick="showDef('total_recs')"><div class="val">{total_recs:,}</div><div class="lbl">Recomendaciones</div></div>
+<div class="stat" onclick="showDef('total_tarjetas')"><div class="val">{total_tarjetas:,}</div><div class="lbl">Tarjetas Creadas</div></div>
+<div class="stat highlight" onclick="showDef('total_eventos')"><div class="val">{total_eventos:,}</div><div class="lbl">Eventos Activos</div></div>
+<div class="stat highlight" onclick="showDef('nuevos_7d')"><div class="val">{nuevos_7d:,}</div><div class="lbl">Nuevos (7 días)</div></div>
+<div class="stat" onclick="showDef('usuarios_ia')"><div class="val">{usuarios_ia:,}</div><div class="lbl">Usuarios IA</div></div>
+<div class="stat" onclick="showDef('busq_empleo')"><div class="val">{busq_empleo:,}</div><div class="lbl">Búsquedas Empleo</div></div>
 </div>
 
 <div class="foot">Premium Bot · Cofradía de Networking</div>
 
+<!-- Modal Pop-up -->
+<div class="modal" id="modal" onclick="if(event.target===this)closeDef()">
+<div class="modal-box">
+<button class="modal-close" onclick="closeDef()">&times;</button>
+<h3 id="modal-title"></h3>
+<p id="modal-text"></p>
+</div>
+</div>
+
 <script>
+var DEFS = {{
+'g_msgs_hoy': ['Mensajes Hoy', 'Cantidad de mensajes publicados en el grupo durante el día de hoy (desde las 00:00 hora Chile). Indicador en vivo de actividad del día.'],
+'g_promedio': ['Promedio Diario', 'Promedio de mensajes por día en los últimos 7 días. Muestra la intensidad típica de actividad reciente del grupo.'],
+'g_pct_tarjetas': ['% Tarjetas', 'Porcentaje de miembros activos que han creado su tarjeta profesional. Mide adopción del directorio y completitud del perfil.'],
+'g_nuevos': ['Nuevos 7 días', 'Cantidad de miembros nuevos registrados en los últimos 7 días. Indicador de crecimiento orgánico semanal.'],
+'total_msgs': ['Mensajes Totales', 'Suma histórica de TODOS los mensajes guardados por el bot desde su activación. Esta es la base de conocimiento acumulada del grupo.'],
+'total_usuarios': ['Usuarios Únicos', 'Cantidad total de personas distintas que han interactuado con el bot en toda la historia del grupo (aunque ya no sean miembros activos).'],
+'suscriptores': ['Miembros Activos', 'Cantidad de suscripciones en estado ACTIVO en este momento. Es la base efectiva que tiene acceso al bot y todos sus servicios Premium.'],
+'msgs_hoy': ['Mensajes Hoy', 'Mensajes publicados solo en el día de hoy. Se resetea a 0 cada día a medianoche hora Chile.'],
+'total_recs': ['Recomendaciones', 'Cantidad de recomendaciones profesionales hechas entre cofrades vía /recomendar. Refleja confianza y red de contactos del grupo.'],
+'total_tarjetas': ['Tarjetas Creadas', 'Total histórico de tarjetas profesionales digitales creadas via /mi_tarjeta. Base del directorio profesional de la Cofradía.'],
+'total_eventos': ['Eventos Activos', 'Cantidad de eventos futuros programados en el calendario del bot (reuniones, almuerzos, ceremonias). Eventos pasados no cuentan.'],
+'nuevos_7d': ['Nuevos (7 días)', 'Miembros nuevos que se han registrado en los últimos 7 días vía /registrarse o /activar. Indicador de crecimiento reciente.'],
+'usuarios_ia': ['Usuarios IA', 'Cantidad de usuarios únicos que han utilizado servicios de Inteligencia Artificial del bot (CV, entrevista, análisis LinkedIn, etc).'],
+'busq_empleo': ['Búsquedas Empleo', 'Total de veces que usuarios han consultado ofertas de trabajo mediante el comando /empleo. Mide demanda de bolsa laboral.']
+}};
+function showDef(key){{
+  var d = DEFS[key];
+  if(!d) return;
+  document.getElementById('modal-title').textContent = d[0];
+  document.getElementById('modal-text').textContent = d[1];
+  document.getElementById('modal').classList.add('active');
+}}
+function closeDef(){{
+  document.getElementById('modal').classList.remove('active');
+}}
+document.addEventListener('keydown', function(e){{ if(e.key==='Escape') closeDef(); }});
+
 var gold='#c3a55a',blue='#3478c3',green='#2ecc71',orange='#e67e22';
 function gauge(id,val,max,title,color){{
   var c=echarts.init(document.getElementById(id));
@@ -17624,7 +17781,7 @@ CH.br=echarts.init(document.getElementById('cBr'));CH.br.setOption({backgroundCo
 // Cripto
 CH.cr=echarts.init(document.getElementById('cCr'));CH.cr.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(btc) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(eth) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(sol) + ''',itemStyle:{color:'#9945FF'}}],label:{color:tx,fontSize:11,formatter:function(p){return p.name+'\\nUSD '+fc(p.value,0)}},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
 // Sparkline dolar
-CH.sp=echarts.init(document.getElementById('cSp'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),lb=[];for(var i=0;i<d.length;i++)lb.push('D-'+(d.length-i));CH.sp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'10%',right:'5%',bottom:'10%',top:'12%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy},markLine:{silent:true,data:[{yAxis:s.avg,lineStyle:{color:gd,type:'dashed'},label:{formatter:function(){return'Prom: $'+fc(s.avg,2)},color:gd}},{yAxis:s.min,lineStyle:{color:gn,type:'dotted'},label:{formatter:function(){return'Min: $'+fc(s.min,2)},color:gn}},{yAxis:s.max,lineStyle:{color:rd,type:'dotted'},label:{formatter:function(){return'Max: $'+fc(s.max,2)},color:rd}}]}}]})})();
+CH.sp=echarts.init(document.getElementById('cSp'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),lb=[];for(var i=0;i<d.length;i++)lb.push('D-'+(d.length-i));CH.sp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'12%',right:'15%',bottom:'10%',top:'12%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy},markLine:{silent:true,symbol:['none','none'],label:{show:true,position:'insideEndTop',fontSize:11,fontWeight:'bold',padding:[4,8,4,8],borderRadius:4},data:[{yAxis:s.avg,lineStyle:{color:gd,type:'dashed',width:2},label:{formatter:'PROM: $'+fc(s.avg,2),color:'#0a1628',backgroundColor:gd}},{yAxis:s.min,lineStyle:{color:gn,type:'solid',width:2},label:{formatter:'MIN: $'+fc(s.min,2),color:'#0a1628',backgroundColor:gn,position:'insideEndBottom'}},{yAxis:s.max,lineStyle:{color:rd,type:'solid',width:2},label:{formatter:'MAX: $'+fc(s.max,2),color:'#fff',backgroundColor:rd}}]}}]})})();
 // Proyeccion dolar
 CH.pj=echarts.init(document.getElementById('cPj'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),n=d.length;if(n<3)return;var sX=0,sY=0,sXY=0,sX2=0;for(var i=0;i<n;i++){sX+=i;sY+=d[i];sXY+=i*d[i];sX2+=i*i}var sl=(n*sXY-sX*sY)/(n*sX2-sX*sX),ic=(sY-sl*sX)/n;var lb=[],ac2=[],tr=[],pr=[];for(var i=0;i<n;i++){lb.push('D-'+(n-i));ac2.push(d[i]);tr.push(Math.round((ic+sl*i)*100)/100);pr.push(null)}for(var i=0;i<7;i++){lb.push('P+'+(i+1));ac2.push(null);tr.push(null);pr.push(Math.round((ic+sl*(n+i))*100)/100)}
 CH.pj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Real','Tendencia','Proy 7d'],textStyle:{color:tx},top:5},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:8},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Real',type:'line',data:ac2,lineStyle:{color:cy,width:2},itemStyle:{color:cy}},{name:'Tendencia',type:'line',data:tr,lineStyle:{color:gd,width:1,type:'dashed'},itemStyle:{color:gd},symbol:'none'},{name:'Proy 7d',type:'line',data:pr,lineStyle:{color:gn,width:2,type:'dotted'},itemStyle:{color:gn},areaStyle:{color:'rgba(0,229,160,0.1)'}}]})})();
