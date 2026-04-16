@@ -17227,37 +17227,94 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.edit_text(f"🤖 IA analizando {len(datos)} indicadores...")
             explicaciones = {}
             
-            # Preparar resumen de todos los indicadores para un solo prompt
+            # Preparar resumen EXTENDIDO: actual + 7d + 30d + variaciones
             indicadores_txt = ""
             for cod, d in datos.items():
-                val_act = d['valor']
-                serie = d.get('serie30', [])
-                val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
-                var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
-                tendencia = 'subio' if var_pct > 0 else ('bajo' if var_pct < 0 else 'estable')
-                indicadores_txt += f"- {d['nombre']} ({cod}): {val_ant:.2f} -> {val_act:.2f} ({var_pct:+.3f}%, {tendencia})\n"
+                try:
+                    val_act = d.get('valor')
+                    if val_act is None:
+                        continue  # skip indicador sin valor actual
+                    val_act = float(val_act)
+                    serie = d.get('serie30', []) or []
+                    # Helper para extraer valor numérico o fallback
+                    def _svn(idx, fallback):
+                        try:
+                            if -len(serie) <= idx < len(serie):
+                                v = serie[idx].get('valor') if isinstance(serie[idx], dict) else None
+                                if v is None:
+                                    return fallback
+                                return float(v)
+                        except (TypeError, ValueError, AttributeError):
+                            pass
+                        return fallback
+                    val_ant = _svn(1, val_act) if len(serie) >= 2 else val_act
+                    val_7d = _svn(7, val_ant) if len(serie) >= 8 else val_ant
+                    val_30d = _svn(-1, val_ant) if len(serie) >= 15 else val_ant
+                    var_dia_pct = ((val_act - val_ant) / val_ant * 100) if val_ant else 0
+                    var_7d_pct = ((val_act - val_7d) / val_7d * 100) if val_7d else 0
+                    var_30d_pct = ((val_act - val_30d) / val_30d * 100) if val_30d else 0
+                    tendencia_7d = 'ALZA' if var_7d_pct > 0.5 else ('BAJA' if var_7d_pct < -0.5 else 'ESTABLE')
+                    nombre_ind = d.get('nombre', cod)
+                    indicadores_txt += (f"- {nombre_ind} ({cod}): hoy={val_act:.2f} | "
+                                       f"ayer={val_ant:.2f} ({var_dia_pct:+.2f}%) | "
+                                       f"hace7d={val_7d:.2f} ({var_7d_pct:+.2f}%) | "
+                                       f"hace30d={val_30d:.2f} ({var_30d_pct:+.2f}%) | "
+                                       f"tendencia_semanal={tendencia_7d}\n")
+                except Exception as _e_ind:
+                    logger.warning(f"/indicadores prompt build skip {cod}: {_e_ind}")
+                    continue
             
             contexto_extra = ""
             if noticias_bcch:
-                contexto_extra = "\nNoticias Banco Central:\n" + "\n".join(str(n) for n in noticias_bcch[:3])
+                contexto_extra = "\nNOTICIAS RECIENTES BANCO CENTRAL:\n" + "\n".join(str(n) for n in noticias_bcch[:3])
             
+            # Contexto macro Chile abril 2026: Kast asumio 11-mar-2026, nuevo gabinete economico
             prompt_batch = (
-                f"Eres economista chileno senior con 20 anos de experiencia en Banco Central y mercados. "
-                f"Hoy {_ahora_chile().strftime('%d/%m/%Y')}.\n\n"
-                f"Para CADA indicador escribe un parrafo de analisis COMPLETO (4-6 oraciones) con este formato:\n"
-                f"CODIGO: [Parrafo de analisis detallado]\n\n"
-                f"Cada parrafo DEBE incluir:\n"
-                f"1. Por que vario (causa directa: politica monetaria, tipo de cambio, demanda, oferta, etc.)\n"
-                f"2. Factor internacional relevante (Fed, guerra comercial, China, petroleo, geopolitica)\n"
-                f"3. Tendencia reciente: si viene subiendo/bajando las ultimas semanas y por que\n"
-                f"4. Impacto practico: como afecta al ciudadano chileno (creditos, arriendos, compras, ahorro)\n"
-                f"5. Proyeccion corta: hacia donde se dirige en las proximas 2-4 semanas segun consenso\n\n"
-                f"INDICADORES:\n{indicadores_txt}\n{contexto_extra}\n\n"
-                f"IMPORTANTE: Cada indicador debe tener su propio parrafo de 4-6 oraciones. "
-                f"No uses emojis, asteriscos ni markdown. Usa datos concretos, no generalidades."
+                f"Eres economista chileno senior con 25 anos de experiencia en Banco Central de Chile (BCCh), "
+                f"Hacienda y mercados de capitales. Hoy es {_ahora_chile().strftime('%d de %B de %Y')}.\n\n"
+                f"CONTEXTO ACTUAL CHILE:\n"
+                f"- Presidente: Jose Antonio Kast (asumio 11-marzo-2026, gobierno emergencia seguridad)\n"
+                f"- Ministra de Hacienda: (mencionar por contexto si hay noticia, sino decir 'el Ministro de Hacienda')\n"
+                f"- Presidente BCCh: Rosanna Costa (consejo monetario)\n"
+                f"- Contexto externo: Fed con Powell/Trump tension tasas, China desaceleracion demanda cobre, "
+                f"guerra comercial aranceles EEUU, petroleo volatil por Medio Oriente.\n\n"
+                f"TAREA: Para CADA indicador escribe UN parrafo profesional de 4-6 oraciones.\n"
+                f"Formato EXACTO de respuesta (una linea por indicador):\n"
+                f"CODIGO: [parrafo analitico]\n\n"
+                f"CADA parrafo DEBE incluir obligatoriamente:\n"
+                f"1. CAUSA CONCRETA: Por que vario en las ultimas semanas. Menciona al menos UN actor, "
+                f"institucion o evento REAL especifico (ej: 'el Consejo del BCCh en su reunion de...', "
+                f"'el dato IPC del INE de marzo', 'el anuncio de la Fed sobre tasas', 'la caida del cobre en Shanghai'). "
+                f"NO digas 'factores varios' ni generalidades vacias.\n"
+                f"2. TENDENCIA 7d vs 30d: Compara la variacion de los ultimos 7 dias con la de 30 dias. "
+                f"Si es distinta (ej: subio semana pero bajo el mes), explica el quiebre.\n"
+                f"3. IMPACTO EN EL COFRADE: Como afecta concretamente a un oficial de Armada chileno jubilado "
+                f"o en servicio (ej: UF afecta arriendo y dividendo, Dolar afecta compras internacionales y viajes, "
+                f"TPM afecta depositos a plazo y creditos hipotecarios, IPSA afecta AFP-A/B, "
+                f"Cobre afecta la economia nacional y peso).\n"
+                f"4. PROYECCION 15-30 DIAS: Hacia donde va segun consenso de mercado, con rango numerico "
+                f"(ej: 'consenso Bloomberg proyecta rango 920-945 para abril').\n\n"
+                f"CONTEXTO POR INDICADOR (usa solo lo relevante a cada uno):\n"
+                f"- UF/UTM: Banco Central publica el 9 de cada mes; IPC INE; reajustes arriendos y creditos hipotecarios.\n"
+                f"- DOLAR: Intervencion BCCh si hay volatilidad; diferencial tasa Fed vs TPM; cuenta corriente; flujos no residentes.\n"
+                f"- EURO: Politica BCE (Lagarde); crisis industrial Alemania; guerra Ucrania.\n"
+                f"- TPM: Decisiones reunion mensual BCCh; inflacion subyacente; expectativas IPoM.\n"
+                f"- IPC: INE publica primeros 8 dias del mes; canasta basica; administrados (electricidad, combustibles).\n"
+                f"- LIBRA_COBRE: Bolsa Shanghai (SHFE); inventarios LME; demanda China construccion; Codelco.\n"
+                f"- BITCOIN/ETH/SOL: Flujos ETF spot; decisiones Fed; regulacion EEUU; halving; nivel MicroStrategy/Saylor.\n"
+                f"- IPSA: Flujos AFP; utilidades Q1; cobre como driver; sector bancario; riesgo Chile (EMBI).\n"
+                f"- TASA_DESEMPLEO: Encuesta INE trimestral movil; creacion empleo formal; desempleo juvenil; mujeres.\n"
+                f"- IMACEC: Indicador mensual BCCh; proxy PIB; minero vs no minero.\n\n"
+                f"DATOS DE INDICADORES (actual | ayer | hace 7d | hace 30d):\n{indicadores_txt}\n{contexto_extra}\n\n"
+                f"REGLAS ESTRICTAS:\n"
+                f"- Cada parrafo en 4-6 oraciones completas, profesional pero accesible.\n"
+                f"- Menciona al menos UN actor, institucion o evento especifico por parrafo.\n"
+                f"- Usa datos numericos del cuadro (variaciones, rangos).\n"
+                f"- NO uses emojis, asteriscos, markdown ni listas. Solo texto corrido.\n"
+                f"- NO digas 'varios factores' ni 'multiples causas' sin nombrarlos."
             )
             
-            resp_batch = llamar_groq(prompt_batch, max_tokens=4000, temperature=0.3)
+            resp_batch = llamar_groq(prompt_batch, max_tokens=5000, temperature=0.45)
             if resp_batch:
                 for linea in resp_batch.strip().split('\n'):
                     linea = linea.strip()
@@ -17584,6 +17641,80 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
     ipc_h = hist_10a.get('ipc',{})
     infla_a_js = json.dumps(ipc_h.get('anios',[])); infla_v_js = json.dumps(ipc_h.get('valores',[]))
 
+    # Desempleo 15 anos con colores por presidente de turno
+    # Periodos presidenciales Chile (asunciones 11-marzo):
+    # 2010-2014: Sebastian Pinera (primer mandato) - azul claro
+    # 2014-2018: Michelle Bachelet (segundo mandato) - rojo
+    # 2018-2022: Sebastian Pinera (segundo mandato) - azul
+    # 2022-2026: Gabriel Boric - morado
+    # 2026-2030: Jose Antonio Kast - azul oscuro
+    des_h = hist_10a.get('tasa_desempleo', {})
+    des_anios_base = list(des_h.get('anios', []))
+    des_valores_base = list(des_h.get('valores', []))
+    # Extender 5 anios mas hacia atras (2011-2015 relativos a hoy) con consulta puntual
+    try:
+        if des_anios_base:
+            anio_min_actual = min(des_anios_base)
+            anios_faltantes = list(range(anio_min_actual - 5, anio_min_actual))
+            _extra_anios, _extra_valores = [], []
+            # Consulta directa a findic.cl/tasa_desempleo/<year> (misma fuente que hist_10a)
+            import requests as _rq_ext
+            for _yr in anios_faltantes:
+                try:
+                    _r = _rq_ext.get(f'https://findic.cl/api/tasa_desempleo/{_yr}', timeout=3)
+                    if _r.status_code == 200:
+                        _j = _r.json() or {}
+                        _serie = _j.get('serie', [])
+                        if _serie:
+                            _vals = [x.get('valor', 0) for x in _serie if x.get('valor') is not None]
+                            if _vals:
+                                _extra_anios.append(_yr)
+                                _extra_valores.append(round(sum(_vals)/len(_vals), 3))
+                                continue
+                    _extra_anios.append(_yr); _extra_valores.append(None)
+                except Exception:
+                    _extra_anios.append(_yr); _extra_valores.append(None)
+            # Concatenar extras al inicio (mas antiguos primero)
+            des_anios = _extra_anios + des_anios_base
+            des_valores = _extra_valores + des_valores_base
+        else:
+            des_anios = des_anios_base
+            des_valores = des_valores_base
+    except Exception as _e_des_ext:
+        logger.warning(f"/economia desempleo extender 15a: {_e_des_ext}")
+        des_anios = des_anios_base
+        des_valores = des_valores_base
+    def _presidente_de(anio):
+        try:
+            a = int(anio)
+        except:
+            return ('Sin dato', '#888888')
+        if a <= 2013: return ('S. Pinera I', '#5dade2')
+        if a <= 2017: return ('M. Bachelet II', '#e74c3c')
+        if a <= 2021: return ('S. Pinera II', '#3498db')
+        if a <= 2025: return ('G. Boric', '#9b59b6')
+        return ('J.A. Kast', '#1f3a5f')
+    des_datos_js = []
+    for i, yr in enumerate(des_anios):
+        val = des_valores[i] if i < len(des_valores) and des_valores[i] is not None else None
+        pres_nombre, pres_color = _presidente_de(yr)
+        des_datos_js.append({
+            'name': str(yr),
+            'value': val,
+            'presidente': pres_nombre,
+            'itemStyle': {'color': pres_color, 'borderRadius': [6, 6, 0, 0]}
+        })
+    des_data_js = json.dumps(des_datos_js)
+    # Leyenda unica de presidentes (para mostrar en el grafico)
+    des_leyenda = []
+    vistos = set()
+    for yr in des_anios:
+        nom, col = _presidente_de(yr)
+        if nom not in vistos:
+            vistos.add(nom)
+            des_leyenda.append({'nombre': nom, 'color': col})
+    des_leyenda_js = json.dumps(des_leyenda)
+
     ai_safe = analisis_ia.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_ia else ''
     proy_safe = analisis_proyectado.replace('`','').replace('<','&lt;').replace('>','&gt;').replace('\n','<br>') if analisis_proyectado else ''
 
@@ -17715,6 +17846,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <div class="CB"><div class="CT">PROYECCION DOLAR — TENDENCIA + 7d</div><div class="C" id="cPj"></div></div>
 <div class="CB"><div class="CT">COMPARATIVO UF vs DOLAR vs EURO (30d)</div><div class="C" id="cCm"></div></div>
 <div class="CB"><div class="CT">INFLACION IPC ANUALIZADO (10 ANOS)</div><div class="C" id="cIn"></div></div>
+<div class="CB"><div class="CT">DESEMPLEO 15 ANOS POR PRESIDENTE</div><div class="C" id="cDs"></div></div>
 </div></div>
 <!-- HISTORICO -->
 <div class="P" id="tab-hist"><div class="CG">
@@ -17845,6 +17977,8 @@ CH.cm=echarts.init(document.getElementById('cCm'));(function(){function ix(a){if
 CH.cm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['UF','Dolar','Euro'],textStyle:{color:tx},top:5},grid:{left:'8%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'UF',type:'line',data:iu,smooth:true,lineStyle:{color:gd,width:2},itemStyle:{color:gd}},{name:'Dolar',type:'line',data:id,smooth:true,lineStyle:{color:cy,width:2},itemStyle:{color:cy}},{name:'Euro',type:'line',data:ie,smooth:true,lineStyle:{color:bl,width:2},itemStyle:{color:bl}}]})})();
 // Inflacion 10yr
 CH.inf=echarts.init(document.getElementById('cIn'));(function(){var a=''' + infla_a_js + ''',v=''' + infla_v_js + ''';CH.inf.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'12%',top:'12%'},xAxis:{type:'category',data:a,axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},visualMap:{show:false,pieces:[{gt:0,lte:3,color:gn},{gt:3,lte:5,color:gd},{gt:5,color:rd},{lte:0,color:cy}],dimension:1},series:[{type:'bar',data:v,itemStyle:{borderRadius:[6,6,0,0]},label:{show:true,position:'top',color:tx,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}},markLine:{silent:true,data:[{yAxis:3,lineStyle:{color:gn,type:'dashed'},label:{formatter:'Meta BC 3%',color:gn}}]}}]})})();
+// Desempleo 10 anos coloreado por presidente de turno
+CH.ds=echarts.init(document.getElementById('cDs'));(function(){var d=''' + des_data_js + ''',lg=''' + des_leyenda_js + ''';if(!d.length){CH.ds.setOption({title:{text:'Sin datos historicos de desempleo',left:'center',top:'40%',textStyle:{color:tx,fontSize:14}}});return}var an=d.map(function(p){return p.name}),vm=Math.max.apply(null,d.map(function(p){return p.value||0})),ym=Math.ceil(vm*1.2);CH.ds.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gd,textStyle:{color:tx},formatter:function(p){var q=d[p.dataIndex];return'<b>'+q.name+'</b><br/>Desempleo: '+fc(q.value,2)+'%<br/>Presidente: '+q.presidente}},legend:{data:lg.map(function(x){return x.nombre}),textStyle:{color:tx,fontSize:10},top:5,itemWidth:14,itemHeight:10,formatter:function(name){for(var i=0;i<lg.length;i++){if(lg[i].nombre===name)return name}return name},data:lg.map(function(x){return{name:x.nombre,itemStyle:{color:x.color}}})},grid:{left:'8%',right:'5%',bottom:'12%',top:'18%'},xAxis:{type:'category',data:an,axisLabel:{color:tx,fontSize:10,rotate:0},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',max:ym,axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{type:'bar',data:d,label:{show:true,position:'top',color:tx,fontWeight:'bold',fontSize:10,formatter:function(p){return fc(p.value,1)+'%'}},markLine:{silent:true,data:[{yAxis:8,lineStyle:{color:gd,type:'dashed',width:1},label:{formatter:'Umbral 8%',color:gd,fontSize:9}}]}}]})})();
 // Hist 12m
 CH.h12=echarts.init(document.getElementById('cH12'));CH.h12.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Dolar','Euro'],textStyle:{color:tx},top:5},grid:{left:'8%',right:'5%',bottom:'15%',top:'15%'},xAxis:{type:'category',data:''' + h12_labels + ''',axisLabel:{color:tx,fontSize:9,rotate:30},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Dolar',type:'line',smooth:true,data:''' + h12_d + ''',lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy}},{name:'Euro',type:'line',smooth:true,data:''' + h12_e + ''',lineStyle:{color:bl,width:2,type:'dashed'},itemStyle:{color:bl}}]});
 // Hist 5y CLP
