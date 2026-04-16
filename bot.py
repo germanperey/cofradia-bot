@@ -3808,6 +3808,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 REPORTES ADMIN
 /reporte_ejecutivo - Dashboard ejecutivo HTML
 /web_tarjeta - Tarjeta web publica (todos)
+
+💾 BACKUP BD (diario auto 03:00 AM)
+/backup_ahora - Ejecutar backup manual BD a Drive
+/listar_backups - Ver backups disponibles en Drive
 """
         await update.message.reply_text(admin_txt)
 
@@ -9071,6 +9075,339 @@ def obtener_datos_excel_drive(sheet_name=0):
     except Exception as e:
         logger.error(f"Error obteniendo datos Excel Drive (sheet={sheet_name}): {e}")
         return None
+
+
+# ==================== SISTEMA DE BACKUP BD A GOOGLE DRIVE ====================
+# Hace backup diario de las 3 tablas criticas de Supabase (mensajes + suscripciones + tarjetas_profesional)
+# a la carpeta Backups_BD en Google Drive. Mantiene TODOS los backups (no borra antiguos).
+
+# Folder ID de la carpeta Backups_BD en Google Drive
+DRIVE_BACKUP_FOLDER_ID = os.environ.get('DRIVE_BACKUP_FOLDER_ID', '1jQ9M2f3y7k_h_3tSbYfICBNGNY9MC7rQ')
+
+
+def _drive_access_token_write():
+    """Obtiene un access token con scope de escritura (drive.file) usando las mismas credenciales.
+    El scope drive.file permite SOLO acceder a archivos que la app crea/abre, es mas seguro que 'drive'.
+    La carpeta destino debe estar compartida con la cuenta de servicio como Editor."""
+    try:
+        from oauth2client.service_account import ServiceAccountCredentials
+        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
+        if not creds_json:
+            return None
+        creds_dict = json.loads(creds_json)
+        scope = ['https://www.googleapis.com/auth/drive.file']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return creds.get_access_token().access_token
+    except Exception as e:
+        logger.error(f"Backup: error generando token escritura: {e}")
+        return None
+
+
+def _backup_tabla_a_df(conn, nombre_tabla):
+    """Lee una tabla completa de Supabase/SQLite y devuelve (DataFrame, filas)."""
+    try:
+        if DATABASE_URL:
+            import psycopg2.extras
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(f"SELECT * FROM {nombre_tabla}")
+            rows = cur.fetchall()
+            cur.close()
+            df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+        else:
+            df = pd.read_sql_query(f"SELECT * FROM {nombre_tabla}", conn)
+        # Sanitizar: convertir columnas no compatibles con Excel (dicts/lists/timezone-aware)
+        for col in df.columns:
+            try:
+                # Convertir datetime tz-aware a naive (Excel no soporta tz-aware)
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    try:
+                        df[col] = df[col].dt.tz_localize(None)
+                    except Exception:
+                        try:
+                            df[col] = df[col].dt.tz_convert(None)
+                        except Exception:
+                            pass
+                # Convertir dicts/lists a string JSON para que Excel pueda guardarlos
+                if df[col].dtype == 'object':
+                    df[col] = df[col].apply(lambda x: json.dumps(x, default=str) if isinstance(x, (dict, list)) else x)
+            except Exception as _e_col:
+                logger.debug(f"Backup sanitize col {col}: {_e_col}")
+        return df, len(df)
+    except Exception as e:
+        logger.error(f"Backup: error leyendo tabla {nombre_tabla}: {e}")
+        return pd.DataFrame(), 0
+
+
+def respaldo_bd_a_drive():
+    """Hace backup de las 3 tablas criticas a un archivo Excel multi-hoja y lo sube a Drive.
+    Devuelve dict con: success, filename, tamano_kb, duracion_seg, registros_por_tabla, error."""
+    import time as _t_bkp
+    t_inicio = _t_bkp.time()
+    resultado = {
+        'success': False,
+        'filename': None,
+        'tamano_kb': 0,
+        'duracion_seg': 0,
+        'registros_por_tabla': {},
+        'error': None,
+        'drive_file_id': None
+    }
+    
+    try:
+        # PASO 1: Validar variables de entorno
+        if not DRIVE_BACKUP_FOLDER_ID:
+            resultado['error'] = 'DRIVE_BACKUP_FOLDER_ID no configurada'
+            return resultado
+        
+        # PASO 2: Obtener token de escritura
+        token = _drive_access_token_write()
+        if not token:
+            resultado['error'] = 'No se pudo obtener token de escritura de Drive'
+            return resultado
+        
+        # PASO 3: Conectar a BD y extraer tablas
+        conn = get_db_connection()
+        if not conn:
+            resultado['error'] = 'No se pudo conectar a la base de datos'
+            return resultado
+        
+        tablas = ['mensajes', 'suscripciones', 'tarjetas_profesional']
+        dfs = {}
+        for tabla in tablas:
+            df, n_rows = _backup_tabla_a_df(conn, tabla)
+            dfs[tabla] = df
+            resultado['registros_por_tabla'][tabla] = n_rows
+        
+        try: conn.close()
+        except: pass
+        
+        # PASO 4: Generar Excel multi-hoja en memoria
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            for tabla, df in dfs.items():
+                # Excel tiene limite de 31 caracteres en nombres de hoja
+                sheet_name = tabla[:31]
+                if df.empty:
+                    # Hoja vacia con mensaje
+                    pd.DataFrame({'info': [f'Tabla {tabla} sin datos']}).to_excel(writer, sheet_name=sheet_name, index=False)
+                else:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            # Hoja de metadatos
+            meta_df = pd.DataFrame({
+                'campo': ['fecha_backup', 'timezone', 'tablas_incluidas', 'total_registros', 'version_bot'],
+                'valor': [
+                    _ahora_chile().strftime('%Y-%m-%d %H:%M:%S'),
+                    'America/Santiago',
+                    ','.join(tablas),
+                    sum(resultado['registros_por_tabla'].values()),
+                    'Cofradia Premium v6+'
+                ]
+            })
+            meta_df.to_excel(writer, sheet_name='_metadata', index=False)
+        
+        buf.seek(0)
+        contenido = buf.getvalue()
+        tamano_bytes = len(contenido)
+        resultado['tamano_kb'] = round(tamano_bytes / 1024, 1)
+        
+        # PASO 5: Subir a Drive usando multipart upload
+        ahora = _ahora_chile()
+        filename = f"Backup_Cofradia_{ahora.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        resultado['filename'] = filename
+        
+        # Multipart upload: metadata + contenido en una sola request
+        boundary = '===CofradiaBotBoundary==='
+        metadata = {
+            'name': filename,
+            'parents': [DRIVE_BACKUP_FOLDER_ID],
+            'description': f"Backup automatico BD Cofradia - {ahora.strftime('%d/%m/%Y %H:%M')} - Registros: {sum(resultado['registros_por_tabla'].values())}"
+        }
+        metadata_json = json.dumps(metadata)
+        
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{metadata_json}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+        ).encode('utf-8') + contenido + f"\r\n--{boundary}--\r\n".encode('utf-8')
+        
+        upload_url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': f'multipart/related; boundary={boundary}'
+        }
+        
+        resp = requests.post(upload_url, headers=headers, data=body, timeout=180)
+        
+        if resp.status_code in (200, 201):
+            resp_json = resp.json() or {}
+            resultado['drive_file_id'] = resp_json.get('id')
+            resultado['success'] = True
+        else:
+            resultado['error'] = f'HTTP {resp.status_code}: {resp.text[:300]}'
+        
+    except Exception as e:
+        import traceback
+        resultado['error'] = f'{type(e).__name__}: {str(e)[:200]}'
+        logger.error(f"Backup BD a Drive fallo: {e}\n{traceback.format_exc()}")
+    
+    resultado['duracion_seg'] = round(_t_bkp.time() - t_inicio, 1)
+    return resultado
+
+
+def _listar_backups_drive(max_resultados=20):
+    """Lista los backups existentes en la carpeta Backups_BD. Devuelve lista de dicts con
+    id, name, size, modifiedTime, webViewLink. Ordenados por fecha descendente."""
+    try:
+        if not DRIVE_BACKUP_FOLDER_ID:
+            return []
+        token = _drive_access_token_write()
+        if not token:
+            return []
+        url = 'https://www.googleapis.com/drive/v3/files'
+        params = {
+            'q': f"'{DRIVE_BACKUP_FOLDER_ID}' in parents and name contains 'Backup_Cofradia' and trashed=false",
+            'fields': 'files(id,name,size,modifiedTime,webViewLink)',
+            'orderBy': 'modifiedTime desc',
+            'pageSize': max_resultados
+        }
+        resp = requests.get(url, headers={'Authorization': f'Bearer {token}'}, params=params, timeout=30)
+        if resp.status_code != 200:
+            logger.warning(f"Listar backups: HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
+        return (resp.json() or {}).get('files', [])
+    except Exception as e:
+        logger.error(f"Listar backups Drive: {e}")
+        return []
+
+
+async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /backup_ahora - Ejecuta backup manual de la BD (solo admin)."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    
+    msg = await update.message.reply_text("💾 Iniciando backup manual de BD...\n⏳ Extrayendo tablas de Supabase...")
+    try:
+        loop = asyncio.get_running_loop()
+        await msg.edit_text("💾 Generando Excel multi-hoja...\n⏳ Esto puede tardar 10-30 segundos.")
+        resultado = await loop.run_in_executor(None, respaldo_bd_a_drive)
+        
+        if resultado['success']:
+            regs_txt = "\n".join([f"  • {t}: {n:,} registros" for t, n in resultado['registros_por_tabla'].items()])
+            total_regs = sum(resultado['registros_por_tabla'].values())
+            link = f"https://drive.google.com/file/d/{resultado['drive_file_id']}/view" if resultado.get('drive_file_id') else ''
+            texto = (
+                f"✅ BACKUP COMPLETADO\n{'━'*30}\n\n"
+                f"📁 Archivo: {resultado['filename']}\n"
+                f"📊 Tamaño: {resultado['tamano_kb']} KB\n"
+                f"⏱️ Duración: {resultado['duracion_seg']}s\n"
+                f"📦 Total registros: {total_regs:,}\n\n"
+                f"TABLAS RESPALDADAS:\n{regs_txt}\n\n"
+                f"💾 Ubicación: Google Drive › Backups_BD"
+            )
+            if link:
+                texto += f"\n🔗 {link}"
+            await msg.edit_text(texto)
+        else:
+            await msg.edit_text(
+                f"❌ BACKUP FALLÓ\n{'━'*30}\n\n"
+                f"Error: {resultado.get('error', 'Desconocido')}\n"
+                f"Duración: {resultado['duracion_seg']}s\n\n"
+                f"💡 Revisa logs de Render y que DRIVE_BACKUP_FOLDER_ID esté configurado."
+            )
+    except Exception as e:
+        await msg.edit_text(f"❌ Error inesperado: {str(e)[:200]}")
+
+
+async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /listar_backups - Lista los ultimos 20 backups en Drive (solo admin)."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    
+    msg = await update.message.reply_text("📋 Consultando backups en Drive...")
+    try:
+        loop = asyncio.get_running_loop()
+        archivos = await loop.run_in_executor(None, _listar_backups_drive, 20)
+        
+        if not archivos:
+            await msg.edit_text(
+                "📭 No se encontraron backups en Drive.\n\n"
+                "💡 Posibles causas:\n"
+                "  • Aún no se ha ejecutado ningún backup\n"
+                "  • DRIVE_BACKUP_FOLDER_ID no configurado\n"
+                "  • La carpeta no está compartida con la cuenta de servicio\n\n"
+                "Usa /backup_ahora para crear el primero."
+            )
+            return
+        
+        # Calcular stats totales
+        total_size_kb = sum(int(a.get('size', 0)) for a in archivos) / 1024
+        
+        lineas = [f"📋 BACKUPS DISPONIBLES ({len(archivos)} recientes)\n{'━'*35}\n"]
+        for i, arch in enumerate(archivos[:20], 1):
+            nombre = arch.get('name', 'sin_nombre')
+            size_kb = round(int(arch.get('size', 0)) / 1024, 1)
+            mod_time = arch.get('modifiedTime', '')[:16].replace('T', ' ')
+            lineas.append(f"{i:2d}. {nombre}")
+            lineas.append(f"    📅 {mod_time} · 📊 {size_kb} KB")
+        
+        lineas.append(f"\n{'━'*35}")
+        lineas.append(f"📦 Total mostrado: {round(total_size_kb,1)} KB")
+        lineas.append(f"📁 Drive › Backups_BD")
+        
+        texto = "\n".join(lineas)
+        # Telegram limit 4096 chars
+        if len(texto) > 4000:
+            texto = texto[:3900] + "\n\n... (truncado)"
+        await msg.edit_text(texto)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
+    """Job automatico que ejecuta respaldo_bd_a_drive() diariamente a las 03:00 AM hora Chile
+    y notifica al admin el resultado por mensaje privado."""
+    try:
+        logger.info("🔄 Job backup BD diario: iniciando...")
+        loop = asyncio.get_running_loop()
+        resultado = await loop.run_in_executor(None, respaldo_bd_a_drive)
+        
+        if resultado['success']:
+            total_regs = sum(resultado['registros_por_tabla'].values())
+            regs_txt = ", ".join([f"{t}={n}" for t, n in resultado['registros_por_tabla'].items()])
+            logger.info(f"✅ Backup BD OK: {resultado['filename']} - {resultado['tamano_kb']}KB - {total_regs} registros - {resultado['duracion_seg']}s")
+            if OWNER_ID:
+                try:
+                    texto = (
+                        f"✅ BACKUP AUTOMATICO COMPLETADO\n{'━'*30}\n\n"
+                        f"📁 {resultado['filename']}\n"
+                        f"📊 {resultado['tamano_kb']} KB · ⏱️ {resultado['duracion_seg']}s\n"
+                        f"📦 {total_regs:,} registros totales\n\n"
+                        f"TABLAS: {regs_txt}\n\n"
+                        f"💾 Drive › Backups_BD"
+                    )
+                    await context.bot.send_message(chat_id=OWNER_ID, text=texto)
+                except Exception as _e_notif:
+                    logger.warning(f"Backup notif admin falló: {_e_notif}")
+        else:
+            logger.error(f"❌ Backup BD fallo: {resultado.get('error')}")
+            if OWNER_ID:
+                try:
+                    await context.bot.send_message(
+                        chat_id=OWNER_ID,
+                        text=(f"⚠️ BACKUP AUTOMATICO FALLÓ\n{'━'*30}\n\n"
+                              f"Error: {resultado.get('error', 'Desconocido')}\n"
+                              f"Duración: {resultado['duracion_seg']}s\n\n"
+                              f"💡 Revisa logs o usa /backup_ahora")
+                    )
+                except Exception: pass
+    except Exception as e:
+        logger.error(f"Job backup BD exception: {e}")
 
 
 def detectar_columna_anio_egreso(df):
@@ -19623,6 +19960,9 @@ def main():
     # Mejoras: nuevos comandos
     application.add_handler(CommandHandler("reporte_ejecutivo", reporte_ejecutivo_comando))
     application.add_handler(CommandHandler("web_tarjeta", web_tarjeta_comando))
+    # Fase 2B: Sistema de backup BD a Drive
+    application.add_handler(CommandHandler("backup_ahora", backup_ahora_comando))
+    application.add_handler(CommandHandler("listar_backups", listar_backups_comando))
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
@@ -20126,6 +20466,21 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 name='resumen_nocturno'
             )
         logger.info("🌙 Tarea de resumen nocturno programada para las 20:00 Chile")
+        
+        # Fase 2B: Backup automatico diario de BD a Drive a las 03:00 AM Chile
+        if chile_tz:
+            job_queue.run_daily(
+                _job_backup_bd_diario,
+                time=dt_time(hour=3, minute=0, second=0, tzinfo=chile_tz),
+                name='backup_bd_diario'
+            )
+        else:
+            job_queue.run_daily(
+                _job_backup_bd_diario,
+                time=dt_time(hour=7, minute=0, second=0),  # ~3AM Chile si server en UTC
+                name='backup_bd_diario'
+            )
+        logger.info("💾 Tarea de backup BD diario programada para las 03:00 AM Chile")
         
         # RAG indexación cada 6 horas (Excel only, preserva PDFs)
         job_queue.run_repeating(
