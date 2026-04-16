@@ -17509,7 +17509,55 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
         if not vals: return {'min':0,'max':0,'avg':0,'data':[]}
         return {'min':min(vals),'max':max(vals),'avg':sum(vals)/len(vals),'data':vals}
     stats = {c: _stats(c) for c in ['uf','dolar','euro','bitcoin','libra_cobre','ipsa']}
-    stats_js = json.dumps({c:{'min':round(s['min'],2),'max':round(s['max'],2),'avg':round(s['avg'],2),'data':[round(v,2) for v in s['data'][:30]]} for c,s in stats.items()})
+
+    # ===== Bandas de Bollinger (ventana 7d, +/- 2 sigma) para series con 30d =====
+    # Las bandas se calculan sobre la serie cronologica (mas antigua -> mas reciente)
+    # Nota: data viene en orden mas reciente -> mas antigua; se invierte para el calculo
+    def _bollinger(data, window=7, num_std=2):
+        if not data or len(data) < window:
+            return [], []
+        # Convertir a orden cronologico (antiguo -> reciente) para calcular movil
+        serie = list(reversed(data))  # data estaba nuevo->viejo, ahora viejo->nuevo
+        up_bands = []
+        dn_bands = []
+        for i in range(len(serie)):
+            # Ventana hasta el punto i (inclusive), con al menos `window` puntos
+            start = max(0, i - window + 1)
+            window_vals = serie[start:i+1]
+            n = len(window_vals)
+            if n < 2:
+                up_bands.append(None)
+                dn_bands.append(None)
+                continue
+            mean = sum(window_vals) / n
+            variance = sum((x - mean) ** 2 for x in window_vals) / n
+            std = variance ** 0.5
+            up_bands.append(mean + num_std * std)
+            dn_bands.append(mean - num_std * std)
+        # Volver a orden visual del grafico (reciente -> antiguo)
+        up_bands.reverse()
+        dn_bands.reverse()
+        return up_bands, dn_bands
+
+    # Calcular bandas solo para el dolar (que es donde se piden visualmente)
+    _bol_dolar_up, _bol_dolar_dn = _bollinger(stats.get('dolar',{}).get('data',[]), window=7, num_std=2)
+
+    def _round_or_null(v):
+        return round(v, 2) if v is not None else None
+
+    stats_full = {}
+    for c, s in stats.items():
+        entry = {
+            'min': round(s['min'], 2),
+            'max': round(s['max'], 2),
+            'avg': round(s['avg'], 2),
+            'data': [round(v, 2) for v in s['data'][:30]]
+        }
+        if c == 'dolar':
+            entry['bolUp'] = [_round_or_null(v) for v in (_bol_dolar_up[:30] if _bol_dolar_up else [])]
+            entry['bolDn'] = [_round_or_null(v) for v in (_bol_dolar_dn[:30] if _bol_dolar_dn else [])]
+        stats_full[c] = entry
+    stats_js = json.dumps(stats_full)
     ind_vals_js = json.dumps({'uf':uf,'dolar':dol,'euro':eur,'utm':utm,'bitcoin':btc,'libra_cobre':cob,'solana':sol,'ethereum':eth})
 
     # TMC
@@ -17663,7 +17711,7 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <div class="CB"><div class="CT">GAUGE — UF HOY</div><div class="C" id="cGU"></div></div>
 <div class="CB"><div class="CT">INDICADORES MACRO (%)</div><div class="C" id="cBr"></div></div>
 <div class="CB"><div class="CT">CRIPTOMONEDAS (USD)</div><div class="C" id="cCr"></div></div>
-<div class="CB"><div class="CT">DOLAR 30d — MIN / MAX / PROMEDIO</div><div class="C" id="cSp"></div></div>
+<div class="CB"><div class="CT">DOLAR 30d — BANDAS BOLLINGER + MIN/MAX/PROMEDIO</div><div class="C" id="cSp"></div></div>
 <div class="CB"><div class="CT">PROYECCION DOLAR — TENDENCIA + 7d</div><div class="C" id="cPj"></div></div>
 <div class="CB"><div class="CT">COMPARATIVO UF vs DOLAR vs EURO (30d)</div><div class="C" id="cCm"></div></div>
 <div class="CB"><div class="CT">INFLACION IPC ANUALIZADO (10 ANOS)</div><div class="C" id="cIn"></div></div>
@@ -17781,7 +17829,14 @@ CH.br=echarts.init(document.getElementById('cBr'));CH.br.setOption({backgroundCo
 // Cripto
 CH.cr=echarts.init(document.getElementById('cCr'));CH.cr.setOption({backgroundColor:'transparent',tooltip:{trigger:'item',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},series:[{type:'pie',radius:['35%','68%'],data:[{name:'Bitcoin',value:''' + str(btc) + ''',itemStyle:{color:'#f7931a'}},{name:'Ethereum',value:''' + str(eth) + ''',itemStyle:{color:'#627EEA'}},{name:'Solana',value:''' + str(sol) + ''',itemStyle:{color:'#9945FF'}}],label:{color:tx,fontSize:11,formatter:function(p){return p.name+'\\nUSD '+fc(p.value,0)}},itemStyle:{borderColor:'rgba(7,24,40,0.9)',borderWidth:2,borderRadius:5}}]});
 // Sparkline dolar
-CH.sp=echarts.init(document.getElementById('cSp'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),lb=[];for(var i=0;i<d.length;i++)lb.push('D-'+(d.length-i));CH.sp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'12%',right:'15%',bottom:'10%',top:'12%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{type:'line',data:d,smooth:true,lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy},markLine:{silent:true,symbol:['none','none'],label:{show:true,position:'insideEndTop',fontSize:11,fontWeight:'bold',padding:[4,8,4,8],borderRadius:4},data:[{yAxis:s.avg,lineStyle:{color:gd,type:'dashed',width:2},label:{formatter:'PROM: $'+fc(s.avg,2),color:'#0a1628',backgroundColor:gd}},{yAxis:s.min,lineStyle:{color:gn,type:'solid',width:2},label:{formatter:'MIN: $'+fc(s.min,2),color:'#0a1628',backgroundColor:gn,position:'insideEndBottom'}},{yAxis:s.max,lineStyle:{color:rd,type:'solid',width:2},label:{formatter:'MAX: $'+fc(s.max,2),color:'#fff',backgroundColor:rd}}]}}]})})();
+CH.sp=echarts.init(document.getElementById('cSp'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),bu=(s.bolUp||[]).slice().reverse(),bd=(s.bolDn||[]).slice().reverse(),lb=[];for(var i=0;i<d.length;i++)lb.push('D-'+(d.length-i));
+var _series=[];
+if(bd.length===d.length&&bu.length===d.length){
+_series.push({name:'Banda Inferior',type:'line',data:bd,smooth:true,symbol:'none',lineStyle:{color:'rgba(46,204,113,0.6)',width:1,type:'dashed'},itemStyle:{color:'#2ecc71'},z:1});
+_series.push({name:'Banda Superior',type:'line',data:bu,smooth:true,symbol:'none',lineStyle:{color:'rgba(231,76,60,0.6)',width:1,type:'dashed'},itemStyle:{color:'#e74c3c'},areaStyle:{origin:'start',color:'rgba(195,165,90,0.08)'},z:1});
+}
+_series.push({name:'Dolar',type:'line',data:d,smooth:true,lineStyle:{color:cy,width:3},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(0,212,255,0.25)'},{offset:1,color:'rgba(0,212,255,0.02)'}]}},itemStyle:{color:cy},z:3,markLine:{silent:true,symbol:['none','none'],label:{show:true,position:'insideEndTop',fontSize:11,fontWeight:'bold',padding:[4,8,4,8],borderRadius:4},data:[{yAxis:s.avg,lineStyle:{color:gd,type:'dashed',width:2},label:{formatter:'PROM: $'+fc(s.avg,2),color:'#0a1628',backgroundColor:gd}},{yAxis:s.min,lineStyle:{color:gn,type:'solid',width:2},label:{formatter:'MIN: $'+fc(s.min,2),color:'#0a1628',backgroundColor:gn,position:'insideEndBottom'}},{yAxis:s.max,lineStyle:{color:rd,type:'solid',width:2},label:{formatter:'MAX: $'+fc(s.max,2),color:'#fff',backgroundColor:rd}}]}});
+CH.sp.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx},valueFormatter:function(v){return v==null?'':'$'+fc(v,2)}},legend:{show:bd.length===d.length,data:['Banda Superior','Dolar','Banda Inferior'],textStyle:{color:tx,fontSize:9},top:0,right:10,itemWidth:12,itemHeight:8},grid:{left:'12%',right:'15%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',scale:true,axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:_series})})();
 // Proyeccion dolar
 CH.pj=echarts.init(document.getElementById('cPj'));(function(){var s=ST.dolar||{data:[]},d=s.data.slice().reverse(),n=d.length;if(n<3)return;var sX=0,sY=0,sXY=0,sX2=0;for(var i=0;i<n;i++){sX+=i;sY+=d[i];sXY+=i*d[i];sX2+=i*i}var sl=(n*sXY-sX*sY)/(n*sX2-sX*sX),ic=(sY-sl*sX)/n;var lb=[],ac2=[],tr=[],pr=[];for(var i=0;i<n;i++){lb.push('D-'+(n-i));ac2.push(d[i]);tr.push(Math.round((ic+sl*i)*100)/100);pr.push(null)}for(var i=0;i<7;i++){lb.push('P+'+(i+1));ac2.push(null);tr.push(null);pr.push(Math.round((ic+sl*(n+i))*100)/100)}
 CH.pj.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Real','Tendencia','Proy 7d'],textStyle:{color:tx},top:5},grid:{left:'10%',right:'5%',bottom:'10%',top:'18%'},xAxis:{type:'category',data:lb,axisLabel:{color:tx,fontSize:8},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9,formatter:function(v){return'$'+fc(v,0)}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Real',type:'line',data:ac2,lineStyle:{color:cy,width:2},itemStyle:{color:cy}},{name:'Tendencia',type:'line',data:tr,lineStyle:{color:gd,width:1,type:'dashed'},itemStyle:{color:gd},symbol:'none'},{name:'Proy 7d',type:'line',data:pr,lineStyle:{color:gn,width:2,type:'dotted'},itemStyle:{color:gn},areaStyle:{color:'rgba(0,229,160,0.1)'}}]})})();
