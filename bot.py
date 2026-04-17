@@ -3810,8 +3810,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /web_tarjeta - Tarjeta web publica (todos)
 
 💾 BACKUP BD (diario auto 03:00 AM)
-/backup_ahora - Ejecutar backup manual BD a Drive
-/listar_backups - Ver backups disponibles en Drive
+/backup_ahora - Ejecutar backup manual BD a Supabase Storage
+/listar_backups - Ver backups en Supabase Storage
 """
         await update.message.reply_text(admin_txt)
 
@@ -9077,30 +9077,37 @@ def obtener_datos_excel_drive(sheet_name=0):
         return None
 
 
-# ==================== SISTEMA DE BACKUP BD A GOOGLE DRIVE ====================
-# Hace backup diario de las 3 tablas criticas de Supabase (mensajes + suscripciones + tarjetas_profesional)
-# a la carpeta Backups_BD en Google Drive. Mantiene TODOS los backups (no borra antiguos).
+# ==================== SISTEMA DE BACKUP BD A SUPABASE STORAGE ====================
+# Hace backup diario de las 3 tablas criticas (mensajes + suscripciones + tarjetas_profesional)
+# a un bucket de Supabase Storage. Mantiene TODOS los backups (no borra antiguos).
+# Razon de elegir Supabase Storage sobre Google Drive: las cuentas de servicio de Google
+# no tienen cuota propia y requieren Shared Drive (Workspace pagado). Supabase Storage
+# es nativo, gratis hasta 1GB, misma red que la BD, sin problemas de cuota.
 
-# Folder ID de la carpeta Backups_BD en Google Drive
-DRIVE_BACKUP_FOLDER_ID = os.environ.get('DRIVE_BACKUP_FOLDER_ID', '1jQ9M2f3y7k_h_3tSbYfICBNGNY9MC7rQ')
+SUPABASE_BACKUP_BUCKET = os.environ.get('SUPABASE_BACKUP_BUCKET', 'backups-bd')
 
 
-def _drive_access_token_write():
-    """Obtiene un access token con scope de escritura (drive.file) usando las mismas credenciales.
-    El scope drive.file permite SOLO acceder a archivos que la app crea/abre, es mas seguro que 'drive'.
-    La carpeta destino debe estar compartida con la cuenta de servicio como Editor."""
-    try:
-        from oauth2client.service_account import ServiceAccountCredentials
-        creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
-        if not creds_json:
-            return None
-        creds_dict = json.loads(creds_json)
-        scope = ['https://www.googleapis.com/auth/drive.file']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return creds.get_access_token().access_token
-    except Exception as e:
-        logger.error(f"Backup: error generando token escritura: {e}")
+def _supabase_storage_base_url():
+    """Construye la URL base del endpoint de Storage a partir de SUPABASE_URL.
+    Ejemplo: https://abc.supabase.co -> https://abc.supabase.co/storage/v1
+    Devuelve None si SUPABASE_URL no esta configurado."""
+    url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    if not url:
         return None
+    return f"{url}/storage/v1"
+
+
+def _supabase_storage_headers():
+    """Devuelve los headers con el service_role key para peticiones autenticadas a Storage.
+    El service_role key tiene permisos totales (bypassa RLS), necesario para escritura de backups.
+    Devuelve None si SUPABASE_SERVICE_KEY no esta configurado."""
+    key = os.environ.get('SUPABASE_SERVICE_KEY', '')
+    if not key:
+        return None
+    return {
+        'apikey': key,
+        'Authorization': f'Bearer {key}'
+    }
 
 
 def _backup_tabla_a_df(conn, nombre_tabla):
@@ -9139,8 +9146,10 @@ def _backup_tabla_a_df(conn, nombre_tabla):
 
 
 def respaldo_bd_a_drive():
-    """Hace backup de las 3 tablas criticas a un archivo Excel multi-hoja y lo sube a Drive.
-    Devuelve dict con: success, filename, tamano_kb, duracion_seg, registros_por_tabla, error."""
+    """Hace backup de las 3 tablas criticas a un archivo Excel multi-hoja y lo sube a Supabase Storage.
+    El nombre 'respaldo_bd_a_drive' se mantiene por compatibilidad con llamadas existentes,
+    pero internamente usa Supabase Storage (no Google Drive).
+    Devuelve dict con: success, filename, tamano_kb, duracion_seg, registros_por_tabla, error, storage_url."""
     import time as _t_bkp
     t_inicio = _t_bkp.time()
     resultado = {
@@ -9150,22 +9159,26 @@ def respaldo_bd_a_drive():
         'duracion_seg': 0,
         'registros_por_tabla': {},
         'error': None,
-        'drive_file_id': None
+        'storage_url': None
     }
     
     try:
-        # PASO 1: Validar variables de entorno
-        if not DRIVE_BACKUP_FOLDER_ID:
-            resultado['error'] = 'DRIVE_BACKUP_FOLDER_ID no configurada'
+        # PASO 1: Validar configuracion
+        base_url = _supabase_storage_base_url()
+        if not base_url:
+            resultado['error'] = 'Variable SUPABASE_URL no configurada en Render'
             return resultado
         
-        # PASO 2: Obtener token de escritura
-        token = _drive_access_token_write()
-        if not token:
-            resultado['error'] = 'No se pudo obtener token de escritura de Drive'
+        headers = _supabase_storage_headers()
+        if not headers:
+            resultado['error'] = 'Variable SUPABASE_SERVICE_KEY no configurada en Render'
             return resultado
         
-        # PASO 3: Conectar a BD y extraer tablas
+        if not SUPABASE_BACKUP_BUCKET:
+            resultado['error'] = 'Bucket de Supabase Storage no configurado (SUPABASE_BACKUP_BUCKET)'
+            return resultado
+        
+        # PASO 2: Conectar a BD y extraer tablas
         conn = get_db_connection()
         if not conn:
             resultado['error'] = 'No se pudo conectar a la base de datos'
@@ -9181,7 +9194,7 @@ def respaldo_bd_a_drive():
         try: conn.close()
         except: pass
         
-        # PASO 4: Generar Excel multi-hoja en memoria
+        # PASO 3: Generar Excel multi-hoja en memoria
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine='openpyxl') as writer:
             for tabla, df in dfs.items():
@@ -9210,75 +9223,73 @@ def respaldo_bd_a_drive():
         tamano_bytes = len(contenido)
         resultado['tamano_kb'] = round(tamano_bytes / 1024, 1)
         
-        # PASO 5: Subir a Drive usando multipart upload
+        # PASO 4: Subir a Supabase Storage
         ahora = _ahora_chile()
         filename = f"Backup_Cofradia_{ahora.strftime('%Y%m%d_%H%M%S')}.xlsx"
         resultado['filename'] = filename
         
-        # Multipart upload: metadata + contenido en una sola request
-        boundary = '===CofradiaBotBoundary==='
-        metadata = {
-            'name': filename,
-            'parents': [DRIVE_BACKUP_FOLDER_ID],
-            'description': f"Backup automatico BD Cofradia - {ahora.strftime('%d/%m/%Y %H:%M')} - Registros: {sum(resultado['registros_por_tabla'].values())}"
-        }
-        metadata_json = json.dumps(metadata)
+        # POST a /storage/v1/object/<bucket>/<path>
+        # x-upsert: false significa "fallar si ya existe un archivo con el mismo nombre"
+        # (deberia ser imposible porque el timestamp incluye segundos, pero por seguridad)
+        upload_url = f"{base_url}/object/{SUPABASE_BACKUP_BUCKET}/{filename}"
+        upload_headers = dict(headers)
+        upload_headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        upload_headers['x-upsert'] = 'false'
+        upload_headers['Cache-Control'] = 'max-age=3600'
         
-        body = (
-            f"--{boundary}\r\n"
-            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-            f"{metadata_json}\r\n"
-            f"--{boundary}\r\n"
-            f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
-        ).encode('utf-8') + contenido + f"\r\n--{boundary}--\r\n".encode('utf-8')
-        
-        upload_url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': f'multipart/related; boundary={boundary}'
-        }
-        
-        resp = requests.post(upload_url, headers=headers, data=body, timeout=180)
+        resp = requests.post(upload_url, headers=upload_headers, data=contenido, timeout=180)
         
         if resp.status_code in (200, 201):
-            resp_json = resp.json() or {}
-            resultado['drive_file_id'] = resp_json.get('id')
             resultado['success'] = True
+            # Construir URL de acceso (requiere autenticacion, no es publica)
+            resultado['storage_url'] = f"{SUPABASE_BACKUP_BUCKET}/{filename}"
         else:
             resultado['error'] = f'HTTP {resp.status_code}: {resp.text[:300]}'
         
     except Exception as e:
         import traceback
         resultado['error'] = f'{type(e).__name__}: {str(e)[:200]}'
-        logger.error(f"Backup BD a Drive fallo: {e}\n{traceback.format_exc()}")
+        logger.error(f"Backup BD a Supabase Storage fallo: {e}\n{traceback.format_exc()}")
     
     resultado['duracion_seg'] = round(_t_bkp.time() - t_inicio, 1)
     return resultado
 
 
 def _listar_backups_drive(max_resultados=20):
-    """Lista los backups existentes en la carpeta Backups_BD. Devuelve lista de dicts con
-    id, name, size, modifiedTime, webViewLink. Ordenados por fecha descendente."""
+    """Lista los backups existentes en el bucket de Supabase Storage. Devuelve lista de dicts con
+    name, size, created_at, updated_at. Ordenados por fecha descendente.
+    El nombre '_listar_backups_drive' se mantiene por compatibilidad."""
     try:
-        if not DRIVE_BACKUP_FOLDER_ID:
+        base_url = _supabase_storage_base_url()
+        if not base_url:
             return []
-        token = _drive_access_token_write()
-        if not token:
+        headers = _supabase_storage_headers()
+        if not headers:
             return []
-        url = 'https://www.googleapis.com/drive/v3/files'
-        params = {
-            'q': f"'{DRIVE_BACKUP_FOLDER_ID}' in parents and name contains 'Backup_Cofradia' and trashed=false",
-            'fields': 'files(id,name,size,modifiedTime,webViewLink)',
-            'orderBy': 'modifiedTime desc',
-            'pageSize': max_resultados
+        
+        # POST a /storage/v1/object/list/<bucket>
+        list_url = f"{base_url}/object/list/{SUPABASE_BACKUP_BUCKET}"
+        list_headers = dict(headers)
+        list_headers['Content-Type'] = 'application/json'
+        
+        body = {
+            'limit': max_resultados,
+            'offset': 0,
+            'sortBy': {'column': 'created_at', 'order': 'desc'},
+            'prefix': ''
         }
-        resp = requests.get(url, headers={'Authorization': f'Bearer {token}'}, params=params, timeout=30)
+        
+        resp = requests.post(list_url, headers=list_headers, json=body, timeout=30)
         if resp.status_code != 200:
-            logger.warning(f"Listar backups: HTTP {resp.status_code}: {resp.text[:200]}")
+            logger.warning(f"Listar backups Supabase Storage: HTTP {resp.status_code}: {resp.text[:200]}")
             return []
-        return (resp.json() or {}).get('files', [])
+        
+        archivos = resp.json() or []
+        # Filtrar solo los que empiezan con 'Backup_Cofradia' (por si hay otros archivos en el bucket)
+        backups = [a for a in archivos if isinstance(a, dict) and str(a.get('name', '')).startswith('Backup_Cofradia')]
+        return backups
     except Exception as e:
-        logger.error(f"Listar backups Drive: {e}")
+        logger.error(f"Listar backups Supabase Storage: {e}")
         return []
 
 
@@ -9298,7 +9309,6 @@ async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         if resultado['success']:
             regs_txt = "\n".join([f"  • {t}: {n:,} registros" for t, n in resultado['registros_por_tabla'].items()])
             total_regs = sum(resultado['registros_por_tabla'].values())
-            link = f"https://drive.google.com/file/d/{resultado['drive_file_id']}/view" if resultado.get('drive_file_id') else ''
             texto = (
                 f"✅ BACKUP COMPLETADO\n{'━'*30}\n\n"
                 f"📁 Archivo: {resultado['filename']}\n"
@@ -9306,59 +9316,66 @@ async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"⏱️ Duración: {resultado['duracion_seg']}s\n"
                 f"📦 Total registros: {total_regs:,}\n\n"
                 f"TABLAS RESPALDADAS:\n{regs_txt}\n\n"
-                f"💾 Ubicación: Google Drive › Backups_BD"
+                f"💾 Ubicación: Supabase Storage › {SUPABASE_BACKUP_BUCKET}\n"
+                f"💡 Accede desde el dashboard de Supabase."
             )
-            if link:
-                texto += f"\n🔗 {link}"
             await msg.edit_text(texto)
         else:
             await msg.edit_text(
                 f"❌ BACKUP FALLÓ\n{'━'*30}\n\n"
                 f"Error: {resultado.get('error', 'Desconocido')}\n"
                 f"Duración: {resultado['duracion_seg']}s\n\n"
-                f"💡 Revisa logs de Render y que DRIVE_BACKUP_FOLDER_ID esté configurado."
+                f"💡 Verifica en Render:\n"
+                f"  • SUPABASE_URL configurada\n"
+                f"  • SUPABASE_SERVICE_KEY configurada\n"
+                f"  • Bucket '{SUPABASE_BACKUP_BUCKET}' existe en Supabase Storage"
             )
     except Exception as e:
         await msg.edit_text(f"❌ Error inesperado: {str(e)[:200]}")
 
 
 async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /listar_backups - Lista los ultimos 20 backups en Drive (solo admin)."""
+    """Comando /listar_backups - Lista los ultimos 20 backups en Supabase Storage (solo admin)."""
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ Comando exclusivo del administrador.")
         return
     
-    msg = await update.message.reply_text("📋 Consultando backups en Drive...")
+    msg = await update.message.reply_text("📋 Consultando backups en Supabase Storage...")
     try:
         loop = asyncio.get_running_loop()
         archivos = await loop.run_in_executor(None, _listar_backups_drive, 20)
         
         if not archivos:
             await msg.edit_text(
-                "📭 No se encontraron backups en Drive.\n\n"
+                "📭 No se encontraron backups en Supabase Storage.\n\n"
                 "💡 Posibles causas:\n"
                 "  • Aún no se ha ejecutado ningún backup\n"
-                "  • DRIVE_BACKUP_FOLDER_ID no configurado\n"
-                "  • La carpeta no está compartida con la cuenta de servicio\n\n"
+                "  • SUPABASE_URL o SUPABASE_SERVICE_KEY no configurados\n"
+                f"  • Bucket '{SUPABASE_BACKUP_BUCKET}' no existe\n\n"
                 "Usa /backup_ahora para crear el primero."
             )
             return
         
         # Calcular stats totales
-        total_size_kb = sum(int(a.get('size', 0)) for a in archivos) / 1024
+        total_size_kb = 0
+        for a in archivos:
+            meta = a.get('metadata') or {}
+            total_size_kb += int(meta.get('size', 0))
+        total_size_kb = total_size_kb / 1024
         
         lineas = [f"📋 BACKUPS DISPONIBLES ({len(archivos)} recientes)\n{'━'*35}\n"]
         for i, arch in enumerate(archivos[:20], 1):
             nombre = arch.get('name', 'sin_nombre')
-            size_kb = round(int(arch.get('size', 0)) / 1024, 1)
-            mod_time = arch.get('modifiedTime', '')[:16].replace('T', ' ')
+            meta = arch.get('metadata') or {}
+            size_kb = round(int(meta.get('size', 0)) / 1024, 1)
+            created = arch.get('created_at', '')[:16].replace('T', ' ')
             lineas.append(f"{i:2d}. {nombre}")
-            lineas.append(f"    📅 {mod_time} · 📊 {size_kb} KB")
+            lineas.append(f"    📅 {created} · 📊 {size_kb} KB")
         
         lineas.append(f"\n{'━'*35}")
         lineas.append(f"📦 Total mostrado: {round(total_size_kb,1)} KB")
-        lineas.append(f"📁 Drive › Backups_BD")
+        lineas.append(f"💾 Supabase Storage › {SUPABASE_BACKUP_BUCKET}")
         
         texto = "\n".join(lineas)
         # Telegram limit 4096 chars
@@ -9389,7 +9406,7 @@ async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
                         f"📊 {resultado['tamano_kb']} KB · ⏱️ {resultado['duracion_seg']}s\n"
                         f"📦 {total_regs:,} registros totales\n\n"
                         f"TABLAS: {regs_txt}\n\n"
-                        f"💾 Drive › Backups_BD"
+                        f"💾 Supabase Storage › {SUPABASE_BACKUP_BUCKET}"
                     )
                     await context.bot.send_message(chat_id=OWNER_ID, text=texto)
                 except Exception as _e_notif:
