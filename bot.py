@@ -2296,10 +2296,10 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 registrar_servicio_usado(user_id, 'voz_comando')
                 return
         
-        # PASO 3: Búsqueda multi-agente (5 motores en paralelo: RAG, historial,
-        #         directorio, web DDG, conocimiento LLM)
+        # PASO 3: Búsqueda multi-agente (4 motores en paralelo: RAG, historial,
+        #         directorio, web DDG). FASE 3A: reducido limit_rag de 60→20, hist 20→10
         resultados = busqueda_multiagente_paralela(
-            texto_para_busqueda, limit_rag=60, limit_hist=20)
+            texto_para_busqueda, limit_rag=20, limit_hist=10)
         contexto = formatear_contexto_multiagente(resultados, texto_para_busqueda)
         
         fuentes_info = ", ".join(resultados.get('fuentes_usadas', [])) or "conocimiento propio"
@@ -2308,34 +2308,30 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         agentes_ok   = resultados.get('agentes_ok', [])
         
         # Modo de respuesta segun confianza combinada
+        # FASE 3A: prompt simplificado, sin contradicciones que confunden al LLM
         if rag_conf in ('alta', 'media') and rag_tema in ('relevante', 'posible'):
-            modo_audio = ("MODO DOCUMENTOS: Basa tu respuesta principalmente en los "
-                          "fragmentos RAG -- tienen la informacion exacta solicitada.")
+            modo_audio = "Usa los fragmentos de documentos como fuente principal."
         elif resultados.get('web'):
-            modo_audio = ("MODO WEB+LLM: No hay docs internos directamente relevantes. "
-                          "Usa los resultados web y tu conocimiento propio.")
+            modo_audio = "Combina tu conocimiento propio con los resultados web."
         else:
-            modo_audio = ("MODO LLM: No hay docs ni web relevante. Responde desde tu "
-                          "conocimiento experto sin decir 'no tengo informacion'.")
+            modo_audio = "Responde con tu conocimiento experto sobre el tema."
         
         intent_audio_hint = ""
         if texto_para_busqueda != texto_transcrito:
             intent_audio_hint = (f"\n(Consulta enriquecida usada: "
                                  f"\"{texto_para_busqueda[:100]}\")")
         
-        prompt = f"""Eres el asistente inteligente de la Cofradia de Networking, comunidad de oficiales navales chilenos. Respondes como un ser humano calido, claro y bien informado. Tu respuesta sera convertida a audio.
+        prompt = f"""Eres el asistente de la Cofradia de Networking (oficiales navales chilenos). Respondes en tono humano y claro. Tu respuesta sera convertida a audio.
 
 INSTRUCCIONES:
-- Dirigete a {user.first_name} por su nombre al comenzar.
-- Responde de forma conversacional y natural, como si hablaras con el/ella en persona.
-- Maximo 5 oraciones fluidas. Sin listas, sin emojis, sin asteriscos.
+- Saluda a {user.first_name} por su nombre.
+- Respuesta conversacional, 4-5 oraciones maximo. Sin listas ni asteriscos.
 - {modo_audio}
-- Si los documentos tienen la informacion, extraela con detalle y citala naturalmente.
-- Si NO hay docs relevantes pero sabes del tema como LLM experto, responde con confianza.
-- NUNCA inventes datos sobre personas de la Cofradia.
+- Si los fragmentos contienen la respuesta, extraela y citala naturalmente.
+- No inventes datos sobre personas de la Cofradia.
 
-MOTORES CONSULTADOS ({len(agentes_ok)}/5): {', '.join(agentes_ok) or 'conocimiento propio'}{intent_audio_hint}
-Fuentes: {fuentes_info} | Confianza RAG: {rag_conf}
+MOTORES CONSULTADOS: {', '.join(agentes_ok) or 'conocimiento propio'}{intent_audio_hint}
+Confianza RAG: {rag_conf}
 
 {contexto}
 
@@ -4750,20 +4746,24 @@ Responde de forma completa y útil en español. No menciones que "no hay documen
     await msg.edit_text("🧠 Analizando resultados con IA...")
     
     contexto_completo = formatear_contexto_unificado(resultados, consulta)
-    modo_buscar = ("USA el contexto encontrado como base." if rag_conf in ('alta','media')
-                   else "El RAG tiene relevancia baja/ninguna → si sabes del tema como LLM, responde desde tu conocimiento.")
+    # FASE 3A: modo simplificado, sin contradicciones
+    if rag_conf in ('alta', 'media'):
+        modo_buscar = "Usa los fragmentos de documentos como fuente principal de la respuesta."
+    else:
+        modo_buscar = "No hay documentos directamente relevantes. Responde con tu conocimiento experto."
     
-    prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales de la Armada de Chile.
+    prompt = f"""Eres el asistente de la Cofradía de Networking (oficiales de la Armada de Chile).
 
-MODO: {modo_buscar}
-REGLAS: (1) NUNCA digas "no tengo información" si conoces el tema. (2) NUNCA inventes personas de la Cofradía. (3) NUNCA modifiques datos.
+{modo_buscar}
+
+REGLAS: (1) Si los fragmentos contienen la respuesta, extrae los datos y cítalos. (2) No inventes personas de la Cofradía. (3) No modifiques cifras ni fechas.
 
 CONSULTA: "{consulta}"
 
-CONTEXTO (fuentes: {fuentes}, confianza RAG: {rag_conf}):
-{contexto_completo if contexto_completo else "(Sin contexto relevante)"}
+CONTEXTO (confianza RAG: {rag_conf}):
+{contexto_completo if contexto_completo else "(Sin contexto relevante - usa tu conocimiento)"}
 
-Responde de forma completa, útil y natural. Sin asteriscos. Máximo 400 palabras."""
+Responde de forma completa y natural en español. Sin asteriscos. Máximo 400 palabras."""
 
     respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.3)
     
@@ -9770,6 +9770,138 @@ def indexar_google_drive_rag():
         logger.error(f"Error indexando RAG: {e}")
 
 
+def expandir_query_con_llm(query_original, timeout_sec=4):
+    """FASE 3C: Query expansion con LLM ligero.
+    
+    Toma la consulta original del usuario y genera 2-3 reformulaciones que usen
+    términos diferentes (sinónimos, nombres alternativos, etc.) para mejorar el
+    recall de la búsqueda por keywords.
+    
+    Ejemplo:
+        query_original: "qué dice Kiyosaki sobre activos"
+        expansiones: ["robert kiyosaki inversiones patrimonio",
+                      "padre rico padre pobre activos pasivos"]
+    
+    Devuelve una lista de strings: [query_original, expansion1, expansion2, ...]
+    
+    Si el LLM no está disponible o falla, devuelve solo [query_original].
+    """
+    if not query_original or len(query_original.strip()) < 3:
+        return [query_original]
+    
+    if not GROQ_API_KEY:
+        return [query_original]
+    
+    # No expandir consultas muy cortas (1 palabra) - probablemente nombres propios exactos
+    if len(query_original.split()) <= 1:
+        return [query_original]
+    
+    try:
+        prompt_expand = f"""Genera 2 reformulaciones de esta consulta que usen palabras DIFERENTES (sinonimos, nombres alternativos, terminos relacionados).
+
+CONSULTA: "{query_original}"
+
+Responde en formato exacto (2 lineas, nada mas):
+1. <primera reformulacion>
+2. <segunda reformulacion>
+
+NO expliques, NO agregues texto, SOLO las 2 lineas numeradas."""
+        
+        respuesta = llamar_groq(prompt_expand, max_tokens=120, temperature=0.4)
+        
+        if not respuesta:
+            return [query_original]
+        
+        # Parsear: extraer las 2 lineas numeradas
+        import re as _re_qe
+        expansiones = []
+        for linea in respuesta.split('\n'):
+            linea = linea.strip()
+            # Quitar prefijos "1.", "2.", "-", etc.
+            m = _re_qe.match(r'^\s*[\d\-\*\.\)]+\s*(.+)$', linea)
+            if m:
+                exp = m.group(1).strip().strip('"\'')
+                if len(exp) >= 3 and exp.lower() != query_original.lower().strip():
+                    expansiones.append(exp)
+        
+        # Limitar a máximo 2 expansiones + original
+        resultado_final = [query_original] + expansiones[:2]
+        
+        if len(resultado_final) > 1:
+            logger.info(f"🔎 Query expansion: '{query_original[:40]}' → "
+                        f"{len(resultado_final)-1} variantes")
+        
+        return resultado_final
+    
+    except Exception as e:
+        logger.debug(f"Query expansion fallo: {e}")
+        return [query_original]
+
+
+def buscar_rag_expandido(query_original, limit=5):
+    """FASE 3C: Wrapper sobre buscar_rag que usa query expansion.
+    
+    Busca con la consulta original Y con 2 reformulaciones generadas por LLM,
+    luego combina resultados y deduplica. Esto aumenta el recall (encuentra más
+    info relevante) sin perder precisión.
+    
+    La expansion se hace en paralelo con la primera búsqueda para no sumar latencia.
+    """
+    from concurrent.futures import ThreadPoolExecutor as _TPE_qe
+    
+    # PASO 1: Primera búsqueda directa con la query original (siempre se hace)
+    # PASO 2: En paralelo, generar expansiones (si toma demasiado, no importa)
+    try:
+        with _TPE_qe(max_workers=2) as pool:
+            fut_original = pool.submit(buscar_rag, query_original, limit * 2)
+            fut_expansiones = pool.submit(expandir_query_con_llm, query_original)
+            
+            # La búsqueda original tiene prioridad (timeout más largo)
+            try:
+                chunks_original, score_orig = fut_original.result(timeout=10)
+            except Exception as _e_o:
+                logger.warning(f"Buscar original fallo: {_e_o}")
+                chunks_original, score_orig = [], 0.0
+            
+            # Expansiones: si tardan más de 4s, se usan solo las chunks originales
+            try:
+                queries_expandidas = fut_expansiones.result(timeout=5)
+            except Exception:
+                queries_expandidas = [query_original]
+        
+        # PASO 3: Si hay expansiones distintas a la original, buscar con ellas
+        if len(queries_expandidas) > 1:
+            all_chunks = list(chunks_original)
+            score_max = score_orig
+            seen_keys = set(
+                (c[0][:80] if isinstance(c, tuple) else c[:80])
+                for c in chunks_original
+            )
+            
+            # Búsqueda adicional solo con 1 expansion (la que parezca mas prometedora)
+            # Para no saturar - suficiente con probar 1 variante
+            for q_exp in queries_expandidas[1:2]:
+                try:
+                    chunks_exp, score_exp = buscar_rag(q_exp, limit)
+                    for c in chunks_exp:
+                        key = (c[0][:80] if isinstance(c, tuple) else c[:80])
+                        if key and key not in seen_keys:
+                            seen_keys.add(key)
+                            all_chunks.append(c)
+                    score_max = max(score_max, score_exp)
+                except Exception as _e_exp:
+                    logger.debug(f"Busqueda expandida fallo: {_e_exp}")
+            
+            # Devolver top limit después de deduplicar
+            return all_chunks[:limit * 3], score_max
+        
+        return chunks_original, score_orig
+    
+    except Exception as e:
+        logger.warning(f"buscar_rag_expandido fallo, fallback a buscar_rag: {e}")
+        return buscar_rag(query_original, limit)
+
+
 def buscar_rag(query, limit=5):
     """
     Búsqueda RAG bifásica:
@@ -10055,6 +10187,102 @@ def buscar_rag(query, limit=5):
         return [], 0.0
 
 
+def rerank_chunks_con_llm(query, chunks_con_score, top_k=5, timeout_sec=6):
+    """FASE 3B: Re-ranking de chunks con LLM ligero.
+    
+    Toma los chunks encontrados por buscar_rag (keyword-match) y le pide al LLM que
+    evalúe rápidamente cuáles son los MÁS relevantes para la consulta.
+    Devuelve los top_k más relevantes en orden, preservando la tupla (texto, source).
+    
+    Si el re-ranking falla (timeout, error, etc.), devuelve los primeros top_k tal cual.
+    Esto garantiza que nunca se rompa el flujo principal.
+    
+    Args:
+        query: la consulta del usuario
+        chunks_con_score: lista de (texto, source) ya rankeada por buscar_rag
+        top_k: cuantos chunks devolver (default 5)
+        timeout_sec: timeout para la llamada al LLM (default 6s)
+    
+    Returns:
+        lista de (texto, source) reordenada por relevancia real
+    """
+    # Si hay pocos chunks, no vale la pena llamar al LLM - devolver tal cual
+    if not chunks_con_score or len(chunks_con_score) <= top_k:
+        return chunks_con_score[:top_k] if chunks_con_score else []
+    
+    # Si no hay LLM disponible, devolver los primeros top_k (ya ordenados por score keyword)
+    if not GROQ_API_KEY:
+        return chunks_con_score[:top_k]
+    
+    try:
+        # Construir prompt compacto: numerar chunks y pedir ranking
+        # Solo primeros 15 chunks (más que eso satura el LLM)
+        candidatos = chunks_con_score[:15]
+        resumen_chunks = ""
+        for i, item in enumerate(candidatos, 1):
+            txt = (item[0] if isinstance(item, tuple) else item)
+            # Solo primeros 200 chars de cada chunk para el rerank (es preview)
+            resumen_chunks += f"[{i}] {txt[:200]}...\n\n"
+        
+        prompt_rerank = f"""Evalua cual de los fragmentos responde mejor esta consulta.
+
+CONSULTA: "{query}"
+
+FRAGMENTOS:
+{resumen_chunks}
+
+Responde SOLO con los numeros de los {top_k} fragmentos mas relevantes, separados por comas, en orden de mejor a peor.
+Formato exacto: 3,7,1,12,5
+NO agregues texto ni explicacion, SOLO los numeros."""
+        
+        respuesta = llamar_groq(prompt_rerank, max_tokens=50, temperature=0.0)
+        
+        if not respuesta:
+            logger.debug("Rerank: sin respuesta LLM, fallback a orden original")
+            return chunks_con_score[:top_k]
+        
+        # Parsear respuesta: extraer números
+        import re as _re_rr
+        numeros = _re_rr.findall(r'\b(\d+)\b', respuesta)
+        if not numeros:
+            logger.debug(f"Rerank: no se extrajeron numeros de '{respuesta[:100]}'")
+            return chunks_con_score[:top_k]
+        
+        # Convertir a índices 0-based, filtrar rango válido, deduplicar
+        indices = []
+        vistos = set()
+        for n_str in numeros:
+            try:
+                idx = int(n_str) - 1  # 1-based → 0-based
+                if 0 <= idx < len(candidatos) and idx not in vistos:
+                    indices.append(idx)
+                    vistos.add(idx)
+                    if len(indices) >= top_k:
+                        break
+            except ValueError:
+                continue
+        
+        if not indices:
+            return chunks_con_score[:top_k]
+        
+        # Reordenar según el ranking del LLM
+        reranked = [candidatos[i] for i in indices]
+        
+        # Si el LLM devolvió menos de top_k, completar con los primeros no usados
+        if len(reranked) < top_k:
+            for i, c in enumerate(candidatos):
+                if i not in vistos and len(reranked) < top_k:
+                    reranked.append(c)
+        
+        logger.info(f"✅ Rerank LLM: {len(candidatos)} candidatos → top {len(reranked)} "
+                    f"(indices elegidos: {indices[:top_k]})")
+        return reranked
+    
+    except Exception as e:
+        logger.warning(f"Rerank LLM fallo, usando orden original: {e}")
+        return chunks_con_score[:top_k]
+
+
 def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Incluye verificación de relevancia temática: si los docs no tratan el tema
@@ -10210,19 +10438,15 @@ def formatear_contexto_unificado(resultados, query):
             docs_agrupados[fuente_key].append(chunk_texto)
         
         contexto += "\n\n╔══════════════════════════════════════════════════╗\n"
-        contexto += "║  FRAGMENTOS DE DOCUMENTOS INDEXADOS (FUENTE RAG) ║\n"
+        contexto += "║  FRAGMENTOS DE DOCUMENTOS INDEXADOS              ║\n"
         contexto += "╚══════════════════════════════════════════════════╝\n\n"
         
-        # INSTRUCCIÓN EXPLÍCITA: conectar nombre del documento con la consulta
+        # FASE 3A: instrucción clara y simple (antes: múltiples líneas confusas y negativas)
         nombres_docs = list(docs_agrupados.keys())
-        contexto += f"⚠️ INSTRUCCIÓN PARA EL ASISTENTE:\n"
-        contexto += f"Los siguientes fragmentos provienen de estos documentos indexados:\n"
+        contexto += "Los siguientes fragmentos provienen de estos documentos:\n"
         for nd in nombres_docs:
-            contexto += f"  → \"{nd}\"\n"
-        contexto += f"\nESTOS FRAGMENTOS CONTIENEN LA INFORMACIÓN SOLICITADA.\n"
-        contexto += f"Tu tarea: LEER cada fragmento y SINTETIZAR una respuesta completa.\n"
-        contexto += f"El nombre del documento identifica de qué trata — úsalo para contextualizar el contenido.\n"
-        contexto += f"NO digas 'no encontré información' — la información ESTÁ en los fragmentos.\n\n"
+            contexto += f"  • {nd}\n"
+        contexto += "\nLee los fragmentos y extrae la información que responda la consulta.\n\n"
         
         for doc_nombre, chunks in docs_agrupados.items():
             # Título del documento con nombre limpio y visible
@@ -10234,17 +10458,20 @@ def formatear_contexto_unificado(resultados, query):
             contexto += f"📄 DOCUMENTO: \"{titulo_limpio}\"\n"
             contexto += f"   (archivo: {doc_nombre})\n"
             contexto += f"{'─'*50}\n"
-            for i, chunk in enumerate(chunks, 1):
-                contexto += f"[Fragmento {i}]:\n{chunk[:800]}\n\n"
+            # FASE 3A: limitar a 5 chunks por documento y 500 chars cada uno
+            # (antes: todos los chunks a 800 chars = contexto saturado que confunde al LLM)
+            for i, chunk in enumerate(chunks[:5], 1):
+                contexto += f"[Fragmento {i}]:\n{chunk[:500]}\n\n"
             contexto += "\n"
     
     # Historial del grupo (al final, menos prioritario)
     if resultados.get('historial'):
         contexto += "\n\n── CONVERSACIONES DEL GRUPO (referencia) ──\n"
-        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:8], 1):
+        # FASE 3A: reducido de 8 a 5 mensajes, de 350 a 250 chars
+        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:5], 1):
             nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
             fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
-            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:350]}\n"
+            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:250]}\n"
     
     return contexto
 
@@ -10289,17 +10516,19 @@ def _scrape_ddg_sync(q: str, n: int = 5) -> list:
         return []
 
 
-def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 60,
-                                   limit_hist: int = 20) -> dict:
+def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 20,
+                                   limit_hist: int = 10) -> dict:
     """
-    Ejecuta 5 motores de búsqueda en PARALELO (ThreadPoolExecutor) y combina
+    Ejecuta 4 motores de búsqueda en PARALELO (ThreadPoolExecutor) y combina
     los resultados en un dict enriquecido compatible con formatear_contexto_unificado.
 
     Motor 1 — RAG/vectorial  : documentos e‑books indexados en BD
     Motor 2 — Historial       : conversaciones del grupo
     Motor 3 — Directorio      : tarjetas profesionales Cofradía
     Motor 4 — Web DDG         : DuckDuckGo sin API key
-    Motor 5 — LLM‑knowledge   : micro‑consulta Groq para anclar conocimiento propio
+    
+    FASE 3A: eliminado Motor 5 (LLM-hint) porque duplicaba trabajo (Groq llamado 2 veces)
+    y sumaba 12s al tiempo total sin aportar valor real.
     """
     from concurrent.futures import ThreadPoolExecutor as _TPE_ma
 
@@ -10352,30 +10581,23 @@ def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 60,
             return []
 
     # ── Motor 5: micro‑consulta LLM (ancla conocimiento propio) ───────────
+    # FASE 3A: DESHABILITADO - duplicaba trabajo y sumaba 12s sin aporte real.
+    # El LLM principal ya tiene conocimiento propio suficiente.
     def _motor_llm_hint(q: str) -> str:
-        try:
-            if not GROQ_API_KEY:
-                return ''
-            p = (f'En UNA sola oración compacta (máx 80 palabras) indica qué sabes '
-                 f'sobre: "{q}". Si no sabes responde solo: sin_conocimiento.')
-            hint = llamar_groq(p, max_tokens=160, temperature=0.15)
-            if hint and 'sin_conocimiento' not in hint.lower() and len(hint) > 10:
-                return hint.strip()
-        except Exception as _e:
-            logger.debug(f"Motor LLM hint MA: {_e}")
-        return ''
+        return ''  # Siempre vacío - deshabilitado en Fase 3A
 
-    # ── Lanzar los 5 motores en paralelo ──────────────────────────────────
-    with _TPE_ma(max_workers=5) as pool:
-        fut_rag  = pool.submit(buscar_rag, query, limit_rag)
+    # ── Lanzar los motores en paralelo ────────────────────────────────────
+    # FASE 3A: 4 motores (eliminado LLM-hint redundante)
+    # FASE 3C: buscar_rag_expandido usa query expansion internamente para mejor recall
+    with _TPE_ma(max_workers=4) as pool:
+        fut_rag  = pool.submit(buscar_rag_expandido, query, limit_rag)
         fut_hist = pool.submit(buscar_en_historial, query, limit=limit_hist)
         fut_tar  = pool.submit(_motor_tarjetas, query)
         fut_web  = pool.submit(_scrape_ddg_sync, query, 5)
-        fut_hint = pool.submit(_motor_llm_hint, query)
 
         # Recolectar — cada motor tiene su propio timeout
         try:
-            chunks_rag, score_max = fut_rag.result(timeout=14)
+            chunks_rag, score_max = fut_rag.result(timeout=18)  # +4s para dar margen a query expansion
             resultado['rag'] = chunks_rag
             resultado['rag_score_max'] = score_max
             if chunks_rag:
@@ -10400,20 +10622,25 @@ def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 60,
             logger.debug(f"Motor Directorio MA: {_e}")
 
         try:
-            web = fut_web.result(timeout=16)
+            web = fut_web.result(timeout=10)  # Reducido de 16 a 10s
             if web:
                 resultado['web'] = web
                 resultado['agentes_ok'].append('Web')
         except Exception as _e:
             logger.debug(f"Motor Web MA: {_e}")
 
+    # ── FASE 3B: Re-ranking con LLM ──────────────────────────────────────
+    # Toma los chunks del RAG y usa el LLM para identificar los más relevantes.
+    # Esto resuelve el problema de que "encuentra info pero responde mal":
+    # el LLM ya no recibe 20 chunks mezclados, recibe 5 chunks bien elegidos.
+    if resultado['rag'] and len(resultado['rag']) > 5:
         try:
-            hint = fut_hint.result(timeout=12)
-            if hint:
-                resultado['llm_hint'] = hint
-                resultado['agentes_ok'].append('LLM-knowledge')
-        except Exception as _e:
-            logger.debug(f"Motor LLM hint MA: {_e}")
+            rag_reranked = rerank_chunks_con_llm(query, resultado['rag'], top_k=5)
+            if rag_reranked:
+                resultado['rag'] = rag_reranked
+                resultado['agentes_ok'].append('Rerank')
+        except Exception as _e_rr:
+            logger.warning(f"Rerank falló, usando orden original: {_e_rr}")
 
     # ── Calcular confianza RAG ─────────────────────────────────────────────
     sm = resultado['rag_score_max']
