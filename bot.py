@@ -3810,8 +3810,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /web_tarjeta - Tarjeta web publica (todos)
 
 💾 BACKUP BD (diario auto 03:00 AM)
-/backup_ahora - Ejecutar backup manual BD a Supabase Storage
-/listar_backups - Ver backups en Supabase Storage
+/backup_ahora - Ejecutar backup y enviar Excel
+/listar_backups - Ver backups (con botones descarga)
+/descargar_backup [n] - Descargar backup N (1=último)
 """
         await update.message.reply_text(admin_txt)
 
@@ -9243,6 +9244,8 @@ def respaldo_bd_a_drive():
             resultado['success'] = True
             # Construir URL de acceso (requiere autenticacion, no es publica)
             resultado['storage_url'] = f"{SUPABASE_BACKUP_BUCKET}/{filename}"
+            # Guardar contenido bytes para que el comando pueda enviarlo por Telegram sin re-descargar
+            resultado['_contenido_bytes'] = contenido
         else:
             resultado['error'] = f'HTTP {resp.status_code}: {resp.text[:300]}'
         
@@ -9293,6 +9296,30 @@ def _listar_backups_drive(max_resultados=20):
         return []
 
 
+def _descargar_backup_de_supabase(nombre_archivo):
+    """Descarga un archivo de backup desde Supabase Storage. Devuelve (bytes, error_msg).
+    Si exito: (contenido_bytes, None). Si error: (None, 'mensaje error')."""
+    try:
+        base_url = _supabase_storage_base_url()
+        if not base_url:
+            return None, 'SUPABASE_URL no configurada'
+        headers = _supabase_storage_headers()
+        if not headers:
+            return None, 'SUPABASE_SERVICE_KEY no configurada'
+        
+        # GET a /storage/v1/object/<bucket>/<filename>
+        download_url = f"{base_url}/object/{SUPABASE_BACKUP_BUCKET}/{nombre_archivo}"
+        resp = requests.get(download_url, headers=headers, timeout=60)
+        
+        if resp.status_code == 200:
+            return resp.content, None
+        else:
+            return None, f'HTTP {resp.status_code}: {resp.text[:200]}'
+    except Exception as e:
+        logger.error(f"Descargar backup Supabase: {e}")
+        return None, f'{type(e).__name__}: {str(e)[:200]}'
+
+
 async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /backup_ahora - Ejecuta backup manual de la BD (solo admin)."""
     user_id = update.effective_user.id
@@ -9320,6 +9347,26 @@ async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"💡 Accede desde el dashboard de Supabase."
             )
             await msg.edit_text(texto)
+            # Enviar el archivo Excel al admin por Telegram
+            try:
+                contenido_bytes = resultado.get('_contenido_bytes')
+                if contenido_bytes and len(contenido_bytes) < 48 * 1024 * 1024:  # Telegram bot limit ~50MB
+                    from io import BytesIO as _BIO
+                    bio = _BIO(contenido_bytes)
+                    bio.name = resultado['filename']
+                    await update.message.reply_document(
+                        document=bio,
+                        filename=resultado['filename'],
+                        caption=f"📥 {resultado['filename']}\n📊 {resultado['tamano_kb']} KB · {total_regs:,} registros"
+                    )
+                elif contenido_bytes:
+                    await update.message.reply_text(
+                        f"⚠️ Archivo muy grande para enviar por Telegram ({resultado['tamano_kb']} KB > 48 MB).\n"
+                        f"Descárgalo desde Supabase Storage directamente."
+                    )
+            except Exception as _e_send:
+                logger.warning(f"Backup envio Telegram fallo: {_e_send}")
+                await update.message.reply_text(f"⚠️ No se pudo enviar el archivo por Telegram: {str(_e_send)[:100]}")
         else:
             await msg.edit_text(
                 f"❌ BACKUP FALLÓ\n{'━'*30}\n\n"
@@ -9335,7 +9382,8 @@ async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /listar_backups - Lista los ultimos 20 backups en Supabase Storage (solo admin)."""
+    """Comando /listar_backups - Lista los ultimos 20 backups en Supabase Storage (solo admin).
+    Los 8 primeros tienen boton de descarga inline."""
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ Comando exclusivo del administrador.")
@@ -9357,6 +9405,10 @@ async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
         
+        # Guardar lista de archivos en context.user_data para callbacks posteriores
+        # Telegram callback_data limite = 64 bytes, usamos indice corto en vez de nombre completo
+        context.user_data['_backups_lista'] = [a.get('name', '') for a in archivos[:20]]
+        
         # Calcular stats totales
         total_size_kb = 0
         for a in archivos:
@@ -9376,14 +9428,189 @@ async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_T
         lineas.append(f"\n{'━'*35}")
         lineas.append(f"📦 Total mostrado: {round(total_size_kb,1)} KB")
         lineas.append(f"💾 Supabase Storage › {SUPABASE_BACKUP_BUCKET}")
+        lineas.append(f"\n💡 Usa /descargar_backup [N] o los botones de abajo")
         
         texto = "\n".join(lineas)
         # Telegram limit 4096 chars
         if len(texto) > 4000:
             texto = texto[:3900] + "\n\n... (truncado)"
-        await msg.edit_text(texto)
+        
+        # Botones inline: descargar los 8 mas recientes (2 columnas x 4 filas)
+        keyboard = []
+        max_botones = min(8, len(archivos))
+        for row_start in range(0, max_botones, 2):
+            row = []
+            for offset in range(2):
+                idx = row_start + offset
+                if idx < max_botones:
+                    # Extraer fecha del nombre del archivo para el boton (mas corto)
+                    arch = archivos[idx]
+                    nombre = arch.get('name', '')
+                    # Nombre: Backup_Cofradia_20260417_045759.xlsx -> 17/04 04:57
+                    fecha_corta = nombre.replace('Backup_Cofradia_', '').replace('.xlsx', '')
+                    try:
+                        # 20260417_045759 -> 17/04 04:57
+                        if len(fecha_corta) >= 15:
+                            fecha_corta = f"{fecha_corta[6:8]}/{fecha_corta[4:6]} {fecha_corta[9:11]}:{fecha_corta[11:13]}"
+                    except: pass
+                    row.append(InlineKeyboardButton(
+                        f"⬇️ #{idx+1} {fecha_corta}",
+                        callback_data=f"bkpdl_{idx}"
+                    ))
+            if row:
+                keyboard.append(row)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        await msg.edit_text(texto, reply_markup=reply_markup)
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def descargar_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /descargar_backup [n] - Descarga el n-esimo backup mas reciente (1=ultimo, 2=penultimo, etc).
+    Sin argumento descarga el ultimo. Solo admin."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    
+    # Parsear argumento opcional: numero (1=mas reciente)
+    indice_usuario = 1  # default
+    try:
+        if context.args and len(context.args) > 0:
+            indice_usuario = int(context.args[0])
+            if indice_usuario < 1:
+                await update.message.reply_text("❌ El número debe ser 1 o mayor (1 = más reciente).")
+                return
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Argumento inválido. Usa /descargar_backup [numero]\n"
+            "Ejemplo: /descargar_backup 1 (mas reciente)\n"
+            "Ejemplo: /descargar_backup 3 (3er mas reciente)"
+        )
+        return
+    
+    msg = await update.message.reply_text(f"📋 Buscando backup #{indice_usuario} en Supabase Storage...")
+    try:
+        loop = asyncio.get_running_loop()
+        # Pedir hasta 20 backups (limite practico)
+        archivos = await loop.run_in_executor(None, _listar_backups_drive, 20)
+        
+        if not archivos:
+            await msg.edit_text("📭 No hay backups disponibles.\nUsa /backup_ahora para crear uno.")
+            return
+        
+        # Validar indice
+        if indice_usuario > len(archivos):
+            await msg.edit_text(
+                f"❌ Solo hay {len(archivos)} backup(s) disponible(s).\n"
+                f"Pediste el #{indice_usuario}, pero el máximo es #{len(archivos)}."
+            )
+            return
+        
+        # Obtener nombre del archivo solicitado (indice 1-based del usuario -> 0-based en la lista)
+        archivo_target = archivos[indice_usuario - 1]
+        nombre = archivo_target.get('name', '')
+        meta = archivo_target.get('metadata') or {}
+        size_kb = round(int(meta.get('size', 0)) / 1024, 1)
+        created = archivo_target.get('created_at', '')[:16].replace('T', ' ')
+        
+        await msg.edit_text(f"⬇️ Descargando {nombre}...\n📊 {size_kb} KB · 📅 {created}")
+        
+        # Descargar contenido
+        contenido, error = await loop.run_in_executor(None, _descargar_backup_de_supabase, nombre)
+        
+        if error or not contenido:
+            await msg.edit_text(f"❌ Error descargando: {error or 'contenido vacio'}")
+            return
+        
+        # Validar tamaño (Telegram limite 50MB para bots)
+        if len(contenido) >= 48 * 1024 * 1024:
+            await msg.edit_text(
+                f"⚠️ Archivo muy grande para Telegram ({size_kb} KB > 48 MB).\n"
+                f"Descárgalo desde Supabase Storage directamente."
+            )
+            return
+        
+        # Enviar como documento
+        from io import BytesIO as _BIO
+        bio = _BIO(contenido)
+        bio.name = nombre
+        await msg.edit_text(f"✅ Enviando {nombre}...")
+        await update.message.reply_document(
+            document=bio,
+            filename=nombre,
+            caption=(f"📥 Backup #{indice_usuario} de {len(archivos)}\n"
+                     f"📁 {nombre}\n"
+                     f"📊 {size_kb} KB · 📅 {created}")
+        )
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def descargar_backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback de los botones ⬇️ inline de /listar_backups. Pattern: bkpdl_<indice>"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    if user_id != OWNER_ID:
+        await query.answer("❌ Solo el administrador", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    try:
+        # Parsear indice del callback_data
+        data = query.data or ''
+        if not data.startswith('bkpdl_'):
+            return
+        idx = int(data.replace('bkpdl_', ''))
+        
+        # Recuperar lista guardada de la sesion
+        lista = context.user_data.get('_backups_lista', [])
+        if not lista or idx >= len(lista):
+            await query.message.reply_text(
+                "⚠️ La lista de backups expiró.\n"
+                "Ejecuta /listar_backups de nuevo para refrescar los botones."
+            )
+            return
+        
+        nombre = lista[idx]
+        if not nombre:
+            await query.message.reply_text("❌ Archivo no identificado en la lista.")
+            return
+        
+        msg = await query.message.reply_text(f"⬇️ Descargando {nombre}...")
+        
+        loop = asyncio.get_running_loop()
+        contenido, error = await loop.run_in_executor(None, _descargar_backup_de_supabase, nombre)
+        
+        if error or not contenido:
+            await msg.edit_text(f"❌ Error descargando: {error or 'contenido vacio'}")
+            return
+        
+        if len(contenido) >= 48 * 1024 * 1024:
+            await msg.edit_text(
+                f"⚠️ Archivo muy grande para Telegram ({round(len(contenido)/1024,1)} KB > 48 MB).\n"
+                f"Descárgalo desde Supabase Storage directamente."
+            )
+            return
+        
+        from io import BytesIO as _BIO
+        bio = _BIO(contenido)
+        bio.name = nombre
+        size_kb = round(len(contenido)/1024, 1)
+        await msg.edit_text(f"✅ Enviando {nombre}...")
+        await query.message.reply_document(
+            document=bio,
+            filename=nombre,
+            caption=f"📥 {nombre}\n📊 {size_kb} KB"
+        )
+        await msg.delete()
+    except Exception as e:
+        try:
+            await query.message.reply_text(f"❌ Error: {str(e)[:200]}")
+        except: pass
 
 
 async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
@@ -19980,6 +20207,8 @@ def main():
     # Fase 2B: Sistema de backup BD a Drive
     application.add_handler(CommandHandler("backup_ahora", backup_ahora_comando))
     application.add_handler(CommandHandler("listar_backups", listar_backups_comando))
+    application.add_handler(CommandHandler("descargar_backup", descargar_backup_comando))
+    application.add_handler(CallbackQueryHandler(descargar_backup_callback, pattern=r'^bkpdl_\d+$'))
     application.add_handler(CallbackQueryHandler(emergencia_tipo_callback, pattern='^emer_(choque|asalto|incendio|accidente)$'))
     application.add_handler(CallbackQueryHandler(emergencia_geo_callback, pattern='^emer_geo$'))
     application.add_handler(CallbackQueryHandler(emergencia_dir_callback, pattern='^emer_dir$'))
