@@ -969,6 +969,63 @@ else:
     logger.warning("⚠️ DATABASE_URL no configurada - usando SQLite local")
 
 
+# ==================== FASE 10: CACHÉ CON TTL ====================
+# Sistema de cache en memoria con expiracion automatica (Time To Live).
+# Acelera consultas repetidas a APIs externas (datos economicos, RAG, etc).
+# Thread-safe para uso con ThreadPoolExecutor.
+
+import threading as _threading_cache
+import time as _time_cache
+
+_CACHE_STORE = {}
+_CACHE_LOCK = _threading_cache.Lock()
+
+
+def cache_get(key):
+    """Obtiene un valor del cache si existe y NO ha expirado. None si no hay o expiró."""
+    with _CACHE_LOCK:
+        entry = _CACHE_STORE.get(key)
+        if not entry:
+            return None
+        valor, expira_en = entry
+        if _time_cache.time() >= expira_en:
+            # Expirado, limpiar
+            try: del _CACHE_STORE[key]
+            except: pass
+            return None
+        return valor
+
+
+def cache_set(key, valor, ttl_segundos=300):
+    """Guarda un valor en el cache con un TTL (tiempo de vida) en segundos.
+    Default: 5 minutos. Thread-safe."""
+    with _CACHE_LOCK:
+        _CACHE_STORE[key] = (valor, _time_cache.time() + ttl_segundos)
+
+
+def cache_clear(prefix=None):
+    """Limpia el cache. Si se da prefix, solo borra keys que empiecen con ese prefijo."""
+    with _CACHE_LOCK:
+        if prefix is None:
+            _CACHE_STORE.clear()
+            return 0
+        keys_a_borrar = [k for k in _CACHE_STORE.keys() if k.startswith(prefix)]
+        for k in keys_a_borrar:
+            try: del _CACHE_STORE[k]
+            except: pass
+        return len(keys_a_borrar)
+
+
+def cache_stats():
+    """Devuelve estadísticas del cache: cantidad de entradas, tamaño aproximado, keys."""
+    with _CACHE_LOCK:
+        entries = len(_CACHE_STORE)
+        now = _time_cache.time()
+        vigentes = sum(1 for _, (_, exp) in _CACHE_STORE.items() if exp > now)
+        keys = list(_CACHE_STORE.keys())[:30]  # primeros 30 para no saturar
+    return {'total': entries, 'vigentes': vigentes, 'keys_sample': keys}
+
+
 # ==================== CONEXIÓN A BASE DE DATOS ====================
 
 def get_db_connection():
@@ -3660,6 +3717,11 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /buscar_especialista_sec [área] - Buscar especialistas SEC
 /empleo [cargo] - Buscar empleos
 
+👥 POR USUARIO
+/publicaciones @usuario - Ver publicaciones de un usuario
+/temas @usuario - Temas que toca un usuario (IA)
+/stats_usuario @usuario - Estadísticas de participación
+
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
 /web_tarjeta - Tarjeta web descargable HTML
@@ -3812,6 +3874,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /backup_ahora - Ejecutar backup y enviar Excel
 /listar_backups - Ver backups (con botones descarga)
 /descargar_backup [n] - Descargar backup N (1=último)
+
+⚡ CACHE (Fase 10 - velocidad)
+/cache_status - Ver estado del cache TTL
+/cache_limpiar - Vaciar cache manualmente
 """
         await update.message.reply_text(admin_txt)
 
@@ -4805,6 +4871,462 @@ Responde en español, de forma completa y con datos concretos del material. Sin 
                 chunk_texto = item[0] if isinstance(item, tuple) else item
                 mensaje += f"📄 {chunk_texto[:200]}...\n\n"
         await enviar_mensaje_largo(update, mensaje)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FASE 9: BÚSQUEDA POR AUTOR
+# Comandos para ver qué ha aportado cada usuario al grupo.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _resolver_usuario_busqueda(args_list, update):
+    """Resuelve un usuario a partir de args. Devuelve (user_id, display_name, error_msg).
+    Formas soportadas:
+      - /comando @username     -> busca por username
+      - /comando 12345678      -> busca por user_id
+      - /comando Juan Pérez    -> busca por first_name (match parcial)
+      - /comando (sin args, en respuesta a un mensaje) -> usa el usuario del mensaje citado
+    """
+    try:
+        # Caso 1: respuesta a otro mensaje
+        if not args_list and hasattr(update, 'message') and update.message and update.message.reply_to_message:
+            rt = update.message.reply_to_message
+            if rt.from_user:
+                uid = rt.from_user.id
+                nombre = rt.from_user.first_name or rt.from_user.username or f"ID:{uid}"
+                return uid, nombre, None
+        
+        if not args_list:
+            return None, None, ("❌ Debes indicar un usuario.\n\n"
+                                "Formas válidas:\n"
+                                "  /comando @username\n"
+                                "  /comando 12345678 (user_id)\n"
+                                "  /comando Juan (primer nombre)\n"
+                                "  O responde a un mensaje de ese usuario con el comando")
+        
+        arg = ' '.join(args_list).strip()
+        conn = get_db_connection()
+        if not conn:
+            return None, None, "❌ Error de conexión a BD"
+        c = conn.cursor()
+        
+        # Caso 2: @username
+        if arg.startswith('@'):
+            uname = arg[1:].lower().strip()
+            if DATABASE_URL:
+                c.execute("""SELECT user_id, first_name, username FROM mensajes 
+                            WHERE LOWER(username) = %s LIMIT 1""", (uname,))
+            else:
+                c.execute("""SELECT user_id, first_name, username FROM mensajes 
+                            WHERE LOWER(username) = ? LIMIT 1""", (uname,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                uid = row['user_id'] if DATABASE_URL else row[0]
+                fn = (row['first_name'] if DATABASE_URL else row[1]) or f"@{uname}"
+                return uid, fn, None
+            return None, None, f"❌ No se encontró ningún usuario con @{uname} en el historial del grupo."
+        
+        # Caso 3: número (user_id)
+        if arg.isdigit():
+            uid_buscado = int(arg)
+            if DATABASE_URL:
+                c.execute("SELECT first_name, username FROM mensajes WHERE user_id = %s LIMIT 1",
+                         (uid_buscado,))
+            else:
+                c.execute("SELECT first_name, username FROM mensajes WHERE user_id = ? LIMIT 1",
+                         (uid_buscado,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                fn = (row['first_name'] if DATABASE_URL else row[0]) or f"ID:{uid_buscado}"
+                return uid_buscado, fn, None
+            return None, None, f"❌ No se encontró el usuario con ID {uid_buscado} en el historial."
+        
+        # Caso 4: nombre (first_name)
+        nombre_buscar = arg.lower()
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, first_name, username, COUNT(*) as n
+                        FROM mensajes WHERE LOWER(first_name) LIKE %s 
+                        GROUP BY user_id, first_name, username
+                        ORDER BY n DESC LIMIT 5""", (f'%{nombre_buscar}%',))
+        else:
+            c.execute("""SELECT user_id, first_name, username, COUNT(*) as n
+                        FROM mensajes WHERE LOWER(first_name) LIKE ? 
+                        GROUP BY user_id, first_name, username
+                        ORDER BY n DESC LIMIT 5""", (f'%{nombre_buscar}%',))
+        filas = c.fetchall()
+        conn.close()
+        
+        if not filas:
+            return None, None, f"❌ No se encontraron usuarios con el nombre '{arg}' en el historial."
+        
+        # Si hay 1 solo match claro, devolverlo
+        if len(filas) == 1:
+            row = filas[0]
+            uid = row['user_id'] if DATABASE_URL else row[0]
+            fn = (row['first_name'] if DATABASE_URL else row[1]) or arg
+            return uid, fn, None
+        
+        # Múltiples matches - mostrar lista para que elija
+        lineas = [f"🔍 Se encontraron {len(filas)} usuarios con '{arg}':"]
+        for i, row in enumerate(filas, 1):
+            if DATABASE_URL:
+                uid_m = row['user_id']; fn_m = row['first_name'] or '-'
+                un_m = row['username'] or ''; n_m = row['n']
+            else:
+                uid_m, fn_m, un_m, n_m = row[0], row[1] or '-', row[2] or '', row[3]
+            at = f"@{un_m}" if un_m else f"ID:{uid_m}"
+            lineas.append(f"  {i}. {fn_m} ({at}) - {n_m} mensajes")
+        lineas.append("\n💡 Sé más específico o usa @username o user_id")
+        return None, None, "\n".join(lineas)
+    
+    except Exception as e:
+        logger.error(f"Error resolviendo usuario: {e}")
+        return None, None, f"❌ Error: {str(e)[:150]}"
+
+
+@requiere_suscripcion
+async def publicaciones_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /publicaciones @usuario - Muestra los mensajes más recientes de un usuario del grupo."""
+    uid, display_name, err = _resolver_usuario_busqueda(context.args, update)
+    if err:
+        await update.message.reply_text(err)
+        return
+    
+    msg = await update.message.reply_text(f"🔍 Buscando publicaciones de {display_name}...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión a BD")
+            return
+        c = conn.cursor()
+        
+        # Obtener últimos 15 mensajes del usuario
+        if DATABASE_URL:
+            c.execute("""SELECT message, fecha, categoria FROM mensajes 
+                        WHERE user_id = %s AND message IS NOT NULL AND LENGTH(message) > 10
+                        ORDER BY fecha DESC LIMIT 15""", (uid,))
+        else:
+            c.execute("""SELECT message, fecha, categoria FROM mensajes 
+                        WHERE user_id = ? AND message IS NOT NULL AND LENGTH(message) > 10
+                        ORDER BY fecha DESC LIMIT 15""", (uid,))
+        filas = c.fetchall()
+        
+        # Contar total
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as n FROM mensajes WHERE user_id = %s", (uid,))
+        else:
+            c.execute("SELECT COUNT(*) as n FROM mensajes WHERE user_id = ?", (uid,))
+        total_row = c.fetchone()
+        total = total_row['n'] if DATABASE_URL else total_row[0]
+        conn.close()
+        
+        if not filas:
+            await msg.edit_text(f"📭 {display_name} aún no tiene publicaciones registradas en el grupo.")
+            return
+        
+        lineas = [f"📝 PUBLICACIONES DE {display_name.upper()}\n{'━'*35}",
+                  f"Total histórico: {total} mensajes · Mostrando últimos {len(filas)}\n"]
+        
+        for fila in filas:
+            if DATABASE_URL:
+                mensaje_txt = fila['message'] or ''
+                fecha = fila['fecha']
+                cat = fila['categoria'] or ''
+            else:
+                mensaje_txt = fila[0] or ''
+                fecha = fila[1]
+                cat = fila[2] or ''
+            
+            fecha_str = fecha.strftime("%d/%m/%Y %H:%M") if hasattr(fecha, 'strftime') else str(fecha)[:16]
+            cat_str = f" [{cat}]" if cat else ""
+            # Truncar mensajes muy largos
+            texto_corto = mensaje_txt[:250] + "..." if len(mensaje_txt) > 250 else mensaje_txt
+            lineas.append(f"📅 {fecha_str}{cat_str}")
+            lineas.append(f"   {texto_corto}\n")
+        
+        texto_final = "\n".join(lineas)
+        if len(texto_final) > 4000:
+            texto_final = texto_final[:3900] + "\n\n... (truncado)"
+        
+        await msg.edit_text(texto_final)
+        registrar_servicio_usado(update.effective_user.id, 'publicaciones')
+    except Exception as e:
+        logger.error(f"Error /publicaciones: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def temas_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /temas @usuario - Analiza con IA los principales temas de que ha hablado el usuario."""
+    uid, display_name, err = _resolver_usuario_busqueda(context.args, update)
+    if err:
+        await update.message.reply_text(err)
+        return
+    
+    msg = await update.message.reply_text(f"🔍 Analizando temas de {display_name}...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión a BD")
+            return
+        c = conn.cursor()
+        
+        # Distribución por categoría
+        if DATABASE_URL:
+            c.execute("""SELECT categoria, COUNT(*) as n FROM mensajes 
+                        WHERE user_id = %s AND categoria IS NOT NULL AND categoria != ''
+                        GROUP BY categoria ORDER BY n DESC""", (uid,))
+        else:
+            c.execute("""SELECT categoria, COUNT(*) as n FROM mensajes 
+                        WHERE user_id = ? AND categoria IS NOT NULL AND categoria != ''
+                        GROUP BY categoria ORDER BY n DESC""", (uid,))
+        cats = c.fetchall()
+        
+        # Top mensajes (más largos = probablemente más sustantivos)
+        if DATABASE_URL:
+            c.execute("""SELECT message FROM mensajes 
+                        WHERE user_id = %s AND message IS NOT NULL AND LENGTH(message) > 30
+                        ORDER BY LENGTH(message) DESC LIMIT 25""", (uid,))
+        else:
+            c.execute("""SELECT message FROM mensajes 
+                        WHERE user_id = ? AND message IS NOT NULL AND LENGTH(message) > 30
+                        ORDER BY LENGTH(message) DESC LIMIT 25""", (uid,))
+        mensajes_top = c.fetchall()
+        conn.close()
+        
+        if not mensajes_top:
+            await msg.edit_text(f"📭 {display_name} aún no tiene suficientes mensajes para analizar temas.")
+            return
+        
+        # Construir análisis de categorías
+        lineas = [f"📊 TEMAS DE {display_name.upper()}\n{'━'*35}"]
+        
+        if cats:
+            lineas.append(f"\n📂 DISTRIBUCIÓN POR CATEGORÍA:")
+            for cat_row in cats[:8]:
+                cat = cat_row['categoria'] if DATABASE_URL else cat_row[0]
+                n = cat_row['n'] if DATABASE_URL else cat_row[1]
+                lineas.append(f"  • {cat}: {n} mensajes")
+        
+        # Análisis con IA: temas recurrentes
+        if GROQ_API_KEY:
+            await msg.edit_text(f"🧠 Analizando con IA los temas de {display_name}...")
+            textos_concat = "\n".join([
+                (m['message'] if DATABASE_URL else m[0])[:250]
+                for m in mensajes_top[:20]
+            ])[:5000]
+            
+            prompt_temas = f"""Analiza estos mensajes de un usuario llamado {display_name} en un grupo de networking profesional y dime en espanol:
+
+1. Los 3-5 temas principales que suele tocar
+2. Su area de experiencia aparente (si se deduce)
+3. Su estilo de participacion (consulta, comparte, comenta, etc.)
+
+Mensajes:
+{textos_concat}
+
+Responde en maximo 200 palabras, sin asteriscos, en tono claro y profesional."""
+            
+            analisis = llamar_groq(prompt_temas, max_tokens=500, temperature=0.3)
+            if analisis:
+                lineas.append(f"\n🧠 ANÁLISIS IA:")
+                lineas.append(analisis.replace('*', '').replace('_', ' '))
+        
+        texto_final = "\n".join(lineas)
+        if len(texto_final) > 4000:
+            texto_final = texto_final[:3900] + "\n\n... (truncado)"
+        
+        await msg.edit_text(texto_final)
+        registrar_servicio_usado(update.effective_user.id, 'temas_usuario')
+    except Exception as e:
+        logger.error(f"Error /temas: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def stats_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /stats_usuario @usuario - Estadísticas de participación del usuario."""
+    uid, display_name, err = _resolver_usuario_busqueda(context.args, update)
+    if err:
+        await update.message.reply_text(err)
+        return
+    
+    msg = await update.message.reply_text(f"📊 Calculando estadísticas de {display_name}...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión a BD")
+            return
+        c = conn.cursor()
+        
+        # Total mensajes
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) as n FROM mensajes WHERE user_id = %s", (uid,))
+        else:
+            c.execute("SELECT COUNT(*) as n FROM mensajes WHERE user_id = ?", (uid,))
+        total = (c.fetchone()['n'] if DATABASE_URL else c.fetchone()[0])
+        
+        # Primer y último mensaje
+        if DATABASE_URL:
+            c.execute("""SELECT MIN(fecha) as primera, MAX(fecha) as ultima 
+                        FROM mensajes WHERE user_id = %s""", (uid,))
+        else:
+            c.execute("""SELECT MIN(fecha) as primera, MAX(fecha) as ultima 
+                        FROM mensajes WHERE user_id = ?""", (uid,))
+        row_fechas = c.fetchone()
+        if DATABASE_URL:
+            primera = row_fechas['primera']; ultima = row_fechas['ultima']
+        else:
+            primera = row_fechas[0]; ultima = row_fechas[1]
+        
+        # Longitud promedio
+        if DATABASE_URL:
+            c.execute("""SELECT AVG(LENGTH(message)) as prom FROM mensajes 
+                        WHERE user_id = %s AND message IS NOT NULL""", (uid,))
+        else:
+            c.execute("""SELECT AVG(LENGTH(message)) as prom FROM mensajes 
+                        WHERE user_id = ? AND message IS NOT NULL""", (uid,))
+        row_avg = c.fetchone()
+        avg_len = (row_avg['prom'] if DATABASE_URL else row_avg[0]) or 0
+        
+        # Mensajes últimos 30 días
+        try:
+            if DATABASE_URL:
+                c.execute("""SELECT COUNT(*) as n FROM mensajes 
+                            WHERE user_id = %s AND fecha >= NOW() - INTERVAL '30 days'""", (uid,))
+            else:
+                c.execute("""SELECT COUNT(*) as n FROM mensajes 
+                            WHERE user_id = ? AND fecha >= date('now', '-30 days')""", (uid,))
+            row_30 = c.fetchone()
+            mes_actual = row_30['n'] if DATABASE_URL else row_30[0]
+        except Exception:
+            mes_actual = 0
+        
+        # Top 3 categorías
+        if DATABASE_URL:
+            c.execute("""SELECT categoria, COUNT(*) as n FROM mensajes 
+                        WHERE user_id = %s AND categoria IS NOT NULL AND categoria != ''
+                        GROUP BY categoria ORDER BY n DESC LIMIT 3""", (uid,))
+        else:
+            c.execute("""SELECT categoria, COUNT(*) as n FROM mensajes 
+                        WHERE user_id = ? AND categoria IS NOT NULL AND categoria != ''
+                        GROUP BY categoria ORDER BY n DESC LIMIT 3""", (uid,))
+        top_cats = c.fetchall()
+        
+        # Tiene tarjeta profesional?
+        try:
+            if DATABASE_URL:
+                c.execute("""SELECT nombre_completo, profesion, empresa, ciudad 
+                            FROM tarjetas_profesional WHERE user_id = %s LIMIT 1""", (uid,))
+            else:
+                c.execute("""SELECT nombre_completo, profesion, empresa, ciudad 
+                            FROM tarjetas_profesional WHERE user_id = ? LIMIT 1""", (uid,))
+            tarjeta = c.fetchone()
+        except Exception:
+            tarjeta = None
+        
+        conn.close()
+        
+        if total == 0:
+            await msg.edit_text(f"📭 {display_name} aún no tiene mensajes registrados.")
+            return
+        
+        # Construir reporte
+        lineas = [f"📊 ESTADÍSTICAS DE {display_name.upper()}\n{'━'*35}"]
+        lineas.append(f"")
+        lineas.append(f"💬 ACTIVIDAD:")
+        lineas.append(f"  • Total histórico: {total:,} mensajes")
+        lineas.append(f"  • Últimos 30 días: {mes_actual:,} mensajes")
+        lineas.append(f"  • Longitud promedio: {int(avg_len)} caracteres")
+        
+        if primera:
+            primera_str = primera.strftime("%d/%m/%Y") if hasattr(primera, 'strftime') else str(primera)[:10]
+            lineas.append(f"  • Primer mensaje: {primera_str}")
+        if ultima:
+            ultima_str = ultima.strftime("%d/%m/%Y %H:%M") if hasattr(ultima, 'strftime') else str(ultima)[:16]
+            lineas.append(f"  • Último mensaje: {ultima_str}")
+        
+        # Días activo (si hay primera y última)
+        if primera and ultima and hasattr(primera, 'strftime'):
+            try:
+                dias_activo = (ultima - primera).days + 1
+                promedio_diario = total / max(dias_activo, 1)
+                lineas.append(f"  • Promedio: {promedio_diario:.1f} mensajes/día activo")
+            except Exception:
+                pass
+        
+        if top_cats:
+            lineas.append(f"")
+            lineas.append(f"📂 TOP CATEGORÍAS:")
+            for cat_row in top_cats:
+                cat = cat_row['categoria'] if DATABASE_URL else cat_row[0]
+                n = cat_row['n'] if DATABASE_URL else cat_row[1]
+                porcentaje = (n * 100 / total) if total else 0
+                lineas.append(f"  • {cat}: {n} ({porcentaje:.0f}%)")
+        
+        if tarjeta:
+            lineas.append(f"")
+            lineas.append(f"💼 TARJETA PROFESIONAL:")
+            if DATABASE_URL:
+                lineas.append(f"  • {tarjeta['nombre_completo']}")
+                if tarjeta.get('profesion'): lineas.append(f"  • Profesión: {tarjeta['profesion']}")
+                if tarjeta.get('empresa'): lineas.append(f"  • Empresa: {tarjeta['empresa']}")
+                if tarjeta.get('ciudad'): lineas.append(f"  • Ciudad: {tarjeta['ciudad']}")
+            else:
+                lineas.append(f"  • {tarjeta[0]}")
+                if tarjeta[1]: lineas.append(f"  • Profesión: {tarjeta[1]}")
+                if tarjeta[2]: lineas.append(f"  • Empresa: {tarjeta[2]}")
+                if tarjeta[3]: lineas.append(f"  • Ciudad: {tarjeta[3]}")
+        else:
+            lineas.append(f"")
+            lineas.append(f"💼 Sin tarjeta profesional registrada")
+        
+        texto_final = "\n".join(lineas)
+        if len(texto_final) > 4000:
+            texto_final = texto_final[:3900] + "\n\n... (truncado)"
+        
+        await msg.edit_text(texto_final)
+        registrar_servicio_usado(update.effective_user.id, 'stats_usuario')
+    except Exception as e:
+        logger.error(f"Error /stats_usuario: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def cache_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /cache_status - Ver estado del cache TTL (solo admin). FASE 10."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    stats = cache_stats()
+    lineas = [f"📦 ESTADO DEL CACHE\n{'━'*30}",
+              f"Total entradas: {stats['total']}",
+              f"Vigentes (no expiradas): {stats['vigentes']}",
+              ""]
+    if stats['keys_sample']:
+        lineas.append("Keys activas:")
+        for k in stats['keys_sample']:
+            lineas.append(f"  • {k[:60]}")
+    else:
+        lineas.append("(Cache vacio)")
+    lineas.append("")
+    lineas.append("💡 /cache_limpiar para vaciar todo el cache")
+    await update.message.reply_text("\n".join(lineas))
+
+
+async def cache_limpiar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /cache_limpiar - Limpia el cache TTL (solo admin). FASE 10."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Comando exclusivo del administrador.")
+        return
+    # Contar antes de limpiar
+    stats_antes = cache_stats()
+    cache_clear()
+    await update.message.reply_text(
+        f"🧹 Cache limpiado.\n"
+        f"Entradas eliminadas: {stats_antes['total']}\n\n"
+        f"💡 Los proximos comandos van a buscar datos frescos."
+    )
 
 
 @requiere_suscripcion
@@ -16692,7 +17214,17 @@ def obtener_indicadores_chile():
       2) mindicador.cl — SECONDARY (1 request /api para valores base)
       3) dolarapi.com + CoinGecko — TERTIARY (dolar/euro/cripto)
     Merge: primero findic, luego mindicador llena huecos, luego dolarapi.
+    
+    FASE 10: cacheado por 180 segundos. Los indicadores economicos no cambian
+    tan rapido. Multiples llamadas en <3min reutilizan el resultado.
     """
+    # FASE 10: Intentar cache primero
+    _cache_key_ind = 'indicadores_chile_14'
+    _cached = cache_get(_cache_key_ind)
+    if _cached is not None:
+        logger.info(f"⚡ obtener_indicadores_chile: cache HIT (ahorrados ~10s)")
+        return _cached
+    
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time as _t
     t0 = _t.time()
@@ -16924,8 +17456,14 @@ def obtener_indicadores_chile():
     logger.info(f"📈 HIST5 ({_t.time()-t4:.1f}s)")
     logger.info(f"🏁 TOTAL: {_t.time()-t0:.1f}s — {len(datos_actuales)}/14 indicadores")
 
-    return {'datos_actuales': datos_actuales, 'hist_12m': hist_12m,
+    _resultado_final = {'datos_actuales': datos_actuales, 'hist_12m': hist_12m,
             'hist_10a': hist_10a, 'generado': AHORA.strftime('%d/%m/%Y %H:%M')}
+    
+    # FASE 10: cachear por 180s (3 min) solo si tenemos >=10 indicadores validos
+    if len(datos_actuales) >= 10:
+        cache_set('indicadores_chile_14', _resultado_final, ttl_segundos=180)
+    
+    return _resultado_final
 
 
 
@@ -16936,7 +17474,15 @@ def obtener_indicadores_cmf():
     - TAB UF: eliminado. El card 2 ahora muestra contexto financiero calculado.
     Campos reales del JSON CMF:
       TMC: TMCs[{Titulo, SubTitulo, Fecha, Hasta, Valor, Tipo}]
+    
+    FASE 10: cacheado por 600s (10 min) - TMC CMF se actualiza raramente.
     """
+    # FASE 10: cache hit
+    _cached_cmf = cache_get('indicadores_cmf')
+    if _cached_cmf is not None:
+        logger.info("⚡ obtener_indicadores_cmf: cache HIT")
+        return _cached_cmf
+    
     AHORA = _ahora_chile()
     HDR   = {"Accept": "application/json", "User-Agent": "CofrBot/6.0"}
 
@@ -17041,10 +17587,14 @@ def obtener_indicadores_cmf():
             return 99
     tmc_items.sort(key=_tipo_sort)
 
-    return {
+    _resultado_cmf = {
         "tmc": tmc_items,
         "ok":  bool(tmc_items),
     }
+    # FASE 10: cachear 10 min si se obtuvo info valida
+    if tmc_items:
+        cache_set('indicadores_cmf', _resultado_cmf, ttl_segundos=600)
+    return _resultado_cmf
 
 
 def obtener_rentabilidad_afp():
@@ -17052,7 +17602,15 @@ def obtener_rentabilidad_afp():
     Obtiene la variacion de rentabilidad de todas las AFP (7) y fondos (A-E)
     en los ultimos 6 meses, usando la API de quetalmiafp.cl.
     Calcula: (cuota_final / cuota_inicial - 1) * 100
+    
+    FASE 10: cacheado por 1 hora (3600s) - AFP se actualizan una vez al dia.
     """
+    # FASE 10: cache hit
+    _cached_afp = cache_get('rentabilidad_afp')
+    if _cached_afp is not None:
+        logger.info("⚡ obtener_rentabilidad_afp: cache HIT")
+        return _cached_afp
+    
     from datetime import timedelta
     from collections import defaultdict
 
@@ -17152,6 +17710,9 @@ def obtener_rentabilidad_afp():
     except Exception as e:
         logger.error(f"obtener_rentabilidad_afp: {e}")
 
+    # FASE 10: cachear 1 hora si se obtuvo data valida
+    if resultado.get("ok"):
+        cache_set('rentabilidad_afp', resultado, ttl_segundos=3600)
     return resultado
 
 
@@ -20361,6 +20922,13 @@ def main():
     # Handlers de búsqueda
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
+    # Fase 9: Busqueda por autor (quien public\u00f3 qu\u00e9 en el grupo)
+    application.add_handler(CommandHandler("publicaciones", publicaciones_comando))
+    application.add_handler(CommandHandler("temas", temas_usuario_comando))
+    application.add_handler(CommandHandler("stats_usuario", stats_usuario_comando))
+    # Fase 10: Administracion de cache TTL
+    application.add_handler(CommandHandler("cache_status", cache_status_comando))
+    application.add_handler(CommandHandler("cache_limpiar", cache_limpiar_comando))
     application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("buscar_apoyo", buscar_apoyo_comando))
     application.add_handler(CommandHandler("buscar_especialista_sec", buscar_especialista_sec_comando))
