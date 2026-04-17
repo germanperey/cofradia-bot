@@ -2090,6 +2090,56 @@ COMANDOS_VOZ = {
 }
 
 
+async def _enviar_respuesta_con_audio(update, texto_respuesta_completa, texto_para_audio=None, tag_tts='respuesta'):
+    """
+    Helper que envia una respuesta por TEXTO + AUDIO.
+    
+    Args:
+        update: el objeto Update de Telegram
+        texto_respuesta_completa: texto que se envia como mensaje de Telegram (puede ser largo)
+        texto_para_audio: texto que se convierte a voz (si None, usa texto_respuesta_completa)
+                          Debe ser mas corto para el audio (maximo 1500 chars recomendado)
+        tag_tts: etiqueta identificadora para el archivo y logs
+    
+    Comportamiento:
+        - Siempre envia el texto (no falla)
+        - Genera y envia audio si es posible (silenciosamente falla si TTS no funciona)
+        - Nunca rompe el flujo del comando aunque el TTS falle
+    """
+    # PASO 1: Enviar siempre el texto (esto es lo principal)
+    try:
+        await enviar_mensaje_largo(update, texto_respuesta_completa)
+    except Exception as _e_txt:
+        logger.warning(f"Error enviando texto de respuesta: {_e_txt}")
+        # Si ni siquiera el texto pudo enviarse, no hay nada que hacer
+        return
+    
+    # PASO 2: Generar y enviar audio (best-effort, silencioso si falla)
+    if not texto_para_audio:
+        texto_para_audio = texto_respuesta_completa
+    
+    # Truncar a 1500 chars para TTS (Chatterbox y edge-TTS son mas lentos con textos largos)
+    if len(texto_para_audio) > 1500:
+        texto_para_audio = texto_para_audio[:1497] + "..."
+    
+    # No generar audio para respuestas muy cortas (<40 chars, no vale la pena)
+    if len(texto_para_audio.strip()) < 40:
+        return
+    
+    try:
+        uid = update.effective_user.id if update.effective_user else 0
+        filename = f"/tmp/{tag_tts}_{uid}.mp3"
+        audio_path = await generar_audio_tts(texto_para_audio, filename)
+        if audio_path and os.path.exists(audio_path):
+            with open(audio_path, 'rb') as af:
+                await update.message.reply_voice(voice=af)
+            try: os.remove(audio_path)
+            except: pass
+    except Exception as _e_tts:
+        # Silencioso: el usuario ya tiene el texto, no necesita saber que fallo el audio
+        logger.debug(f"TTS {tag_tts}: {_e_tts}")
+
+
 def detectar_comando_por_voz(texto_transcrito: str):
     """Detecta si el texto transcrito contiene 'comando [nombre]' y extrae argumentos.
     Whisper transcribe con puntuación: 'Cofradía Bot, Comando, Resumen, Mes.'
@@ -4856,7 +4906,12 @@ Responde en español, de forma completa y con datos concretos del material. Sin 
         mensaje_final += "━" * 25 + "\n\n"
         mensaje_final += respuesta_limpia
         
-        await enviar_mensaje_largo(update, mensaje_final)
+        # FASE 11: enviar texto + audio (el audio solo la respuesta, sin el header tecnico)
+        await _enviar_respuesta_con_audio(
+            update, mensaje_final,
+            texto_para_audio=respuesta_limpia,
+            tag_tts='buscar_ia'
+        )
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
     else:
         # Fallback: mostrar resultados crudos
@@ -9194,7 +9249,14 @@ REGLA FINAL: Si el sistema dice que estos fragmentos son del tema buscado → CO
                 texto_final += "━" * 30 + "\n"
                 texto_final += f"📚 Fuentes: {fuentes}"
                 
-                await msg.edit_text(texto_final)
+                # FASE 11: enviar texto + audio (solo la respuesta IA, sin encabezados)
+                try: await msg.delete()
+                except: pass
+                await _enviar_respuesta_con_audio(
+                    update, texto_final,
+                    texto_para_audio=respuesta_limpia,
+                    tag_tts='rag_consulta'
+                )
                 registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
                 return
         
@@ -20051,7 +20113,17 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if url and url.startswith("http"):
                     lines.append(f"   🔗 {url[:200]}")
             lines += ["", sep, "Fuente: DuckDuckGo · Groq IA | Cofradía de Networking"]
-            await msg.edit_text("\n".join(lines))
+            # FASE 11: texto + audio solo cuando hay resumen IA (contenido conversacional)
+            if ia_res:
+                try: await msg.delete()
+                except: pass
+                await _enviar_respuesta_con_audio(
+                    update, "\n".join(lines),
+                    texto_para_audio=ia_res,
+                    tag_tts='buscar_web'
+                )
+            else:
+                await msg.edit_text("\n".join(lines))
         else:
             # Scraping falló → Groq directo
             await msg.edit_text(f"🌐 Consultando IA sobre: {query[:50]}...")
