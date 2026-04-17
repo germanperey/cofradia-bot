@@ -2308,9 +2308,11 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         agentes_ok   = resultados.get('agentes_ok', [])
         
         # Modo de respuesta segun confianza combinada
-        # FASE 3A: prompt simplificado, sin contradicciones que confunden al LLM
+        # FASE 3 FIX: prompt reforzado para forzar citas especificas del material
         if rag_conf in ('alta', 'media') and rag_tema in ('relevante', 'posible'):
-            modo_audio = "Usa los fragmentos de documentos como fuente principal."
+            modo_audio = ("Usa los fragmentos como fuente PRINCIPAL. Cita datos "
+                          "especificos: autores, conceptos concretos, ejemplos del texto. "
+                          "NO generalices — extrae ideas CONCRETAS del material.")
         elif resultados.get('web'):
             modo_audio = "Combina tu conocimiento propio con los resultados web."
         else:
@@ -2325,9 +2327,10 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 INSTRUCCIONES:
 - Saluda a {user.first_name} por su nombre.
-- Respuesta conversacional, 4-5 oraciones maximo. Sin listas ni asteriscos.
+- Respuesta conversacional y DENSA en informacion concreta. 5-7 oraciones. Sin listas ni asteriscos.
 - {modo_audio}
-- Si los fragmentos contienen la respuesta, extraela y citala naturalmente.
+- Menciona autores, conceptos especificos o ejemplos del material cuando estan disponibles.
+- Evita generalidades tipo "el libro habla sobre eso" — di QUE dice concretamente.
 - No inventes datos sobre personas de la Cofradia.
 
 MOTORES CONSULTADOS: {', '.join(agentes_ok) or 'conocimiento propio'}{intent_audio_hint}
@@ -4746,9 +4749,14 @@ Responde de forma completa y útil en español. No menciones que "no hay documen
     await msg.edit_text("🧠 Analizando resultados con IA...")
     
     contexto_completo = formatear_contexto_unificado(resultados, consulta)
-    # FASE 3A: modo simplificado, sin contradicciones
+    # FASE 3 FIX: prompts reforzados para forzar citas especificas
     if rag_conf in ('alta', 'media'):
-        modo_buscar = "Usa los fragmentos de documentos como fuente principal de la respuesta."
+        modo_buscar = (
+            "DEBES citar datos ESPECÍFICOS de los fragmentos: nombres de autores, "
+            "títulos de capítulos, conceptos exactos, cifras, ejemplos concretos. "
+            "NO des respuestas genéricas tipo 'el libro habla sobre X' — extrae "
+            "FRASES e IDEAS CONCRETAS del texto."
+        )
     else:
         modo_buscar = "No hay documentos directamente relevantes. Responde con tu conocimiento experto."
     
@@ -4756,16 +4764,22 @@ Responde de forma completa y útil en español. No menciones que "no hay documen
 
 {modo_buscar}
 
-REGLAS: (1) Si los fragmentos contienen la respuesta, extrae los datos y cítalos. (2) No inventes personas de la Cofradía. (3) No modifiques cifras ni fechas.
+REGLAS IMPORTANTES:
+(1) Si los fragmentos contienen datos concretos, CÍTALOS textualmente o parafraséalos con precisión.
+(2) Menciona el nombre del documento cuando cites algo relevante.
+(3) Si un fragmento menciona un concepto, EXPLÍCALO con el detalle que aparece en el texto.
+(4) NO inventes personas de la Cofradía ni modifiques cifras/fechas.
+(5) EVITA respuestas genéricas. Prefiere respuestas DENSAS en información específica del material.
 
 CONSULTA: "{consulta}"
 
 CONTEXTO (confianza RAG: {rag_conf}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante - usa tu conocimiento)"}
 
-Responde de forma completa y natural en español. Sin asteriscos. Máximo 400 palabras."""
+Responde en español, de forma completa y con datos concretos del material. Sin asteriscos. Máximo 500 palabras."""
 
-    respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.3)
+    # FASE 3 FIX: max_tokens 1000→1400 para permitir respuestas mas densas
+    respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.3)
     
     await msg.delete()
     
@@ -10458,20 +10472,20 @@ def formatear_contexto_unificado(resultados, query):
             contexto += f"📄 DOCUMENTO: \"{titulo_limpio}\"\n"
             contexto += f"   (archivo: {doc_nombre})\n"
             contexto += f"{'─'*50}\n"
-            # FASE 3A: limitar a 5 chunks por documento y 500 chars cada uno
-            # (antes: todos los chunks a 800 chars = contexto saturado que confunde al LLM)
-            for i, chunk in enumerate(chunks[:5], 1):
-                contexto += f"[Fragmento {i}]:\n{chunk[:500]}\n\n"
+            # FASE 3 FIX: aumentado de 5→10 chunks por doc, 500→700 chars
+            # (Fase 3A original fue demasiado agresivo, perdia info relevante)
+            for i, chunk in enumerate(chunks[:10], 1):
+                contexto += f"[Fragmento {i}]:\n{chunk[:700]}\n\n"
             contexto += "\n"
     
     # Historial del grupo (al final, menos prioritario)
     if resultados.get('historial'):
         contexto += "\n\n── CONVERSACIONES DEL GRUPO (referencia) ──\n"
-        # FASE 3A: reducido de 8 a 5 mensajes, de 350 a 250 chars
-        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:5], 1):
+        # FASE 3 FIX: 6 msgs × 350 chars (antes 5×250, muy poco)
+        for i, (nombre, texto, fecha) in enumerate(resultados['historial'][:6], 1):
             nombre_limpio = limpiar_nombre_display(nombre) if callable(limpiar_nombre_display) else nombre
             fecha_str = fecha.strftime("%d/%m/%Y") if hasattr(fecha, 'strftime') else str(fecha)[:10]
-            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:250]}\n"
+            contexto += f"{i}. {nombre_limpio} ({fecha_str}): {texto[:350]}\n"
     
     return contexto
 
@@ -10632,10 +10646,11 @@ def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 20,
     # ── FASE 3B: Re-ranking con LLM ──────────────────────────────────────
     # Toma los chunks del RAG y usa el LLM para identificar los más relevantes.
     # Esto resuelve el problema de que "encuentra info pero responde mal":
-    # el LLM ya no recibe 20 chunks mezclados, recibe 5 chunks bien elegidos.
-    if resultado['rag'] and len(resultado['rag']) > 5:
+    # el LLM ya no recibe 20 chunks mezclados, recibe 8 chunks bien elegidos.
+    # FASE 3 FIX: top_k aumentado de 5 a 8 para dar mas material de citacion
+    if resultado['rag'] and len(resultado['rag']) > 8:
         try:
-            rag_reranked = rerank_chunks_con_llm(query, resultado['rag'], top_k=5)
+            rag_reranked = rerank_chunks_con_llm(query, resultado['rag'], top_k=8)
             if rag_reranked:
                 resultado['rag'] = rag_reranked
                 resultado['agentes_ok'].append('Rerank')
