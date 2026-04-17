@@ -1303,6 +1303,40 @@ def init_db():
             conn.commit()
             logger.info("✅ Tablas v4.0 (Coins, Precios) inicializadas")
             
+            # === FASE 12: GAMIFICACIÓN ===
+            c.execute('''CREATE TABLE IF NOT EXISTS puntos_usuario (
+                user_id BIGINT PRIMARY KEY,
+                puntos_total BIGINT DEFAULT 0,
+                puntos_mes BIGINT DEFAULT 0,
+                mes_referencia TEXT DEFAULT '',
+                mensajes_totales BIGINT DEFAULT 0,
+                respuestas_totales BIGINT DEFAULT 0,
+                insignias TEXT DEFAULT '[]',
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_puntos_total ON puntos_usuario(puntos_total DESC)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_puntos_mes ON puntos_usuario(puntos_mes DESC)')
+            # Tabla historico_ranking: guarda top 10 del mes cuando se hace reset
+            c.execute('''CREATE TABLE IF NOT EXISTS historico_ranking (
+                id SERIAL PRIMARY KEY,
+                mes_referencia TEXT,
+                user_id BIGINT,
+                puntos BIGINT,
+                posicion INTEGER,
+                fecha_cierre TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            # Tabla matches_conectar: rastrea recomendaciones de /conectar para insignia Mentor
+            c.execute('''CREATE TABLE IF NOT EXISTS matches_conectar (
+                id SERIAL PRIMARY KEY,
+                user_id_solicitante BIGINT,
+                user_id_recomendado BIGINT,
+                consulta TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_matches_recomendado ON matches_conectar(user_id_recomendado)')
+            conn.commit()
+            logger.info("🏆 Tablas Fase 12 (Gamificacion + Matching) inicializadas")
+            
             # === TABLAS v5.0: Agente Inteligente de Networking ===
             c.execute('''CREATE TABLE IF NOT EXISTS agenda_personal (
                 id SERIAL PRIMARY KEY,
@@ -1568,6 +1602,36 @@ def init_db():
             c.execute("DELETE FROM precios_servicios WHERE servicio = 'mi_dashboard'")
             conn.commit()
             logger.info("✅ Tablas v4.0 SQLite inicializadas")
+            
+            # === FASE 12 SQLite: GAMIFICACION ===
+            c.execute('''CREATE TABLE IF NOT EXISTS puntos_usuario (
+                user_id INTEGER PRIMARY KEY,
+                puntos_total INTEGER DEFAULT 0,
+                puntos_mes INTEGER DEFAULT 0,
+                mes_referencia TEXT DEFAULT '',
+                mensajes_totales INTEGER DEFAULT 0,
+                respuestas_totales INTEGER DEFAULT 0,
+                insignias TEXT DEFAULT '[]',
+                actualizado DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_puntos_total ON puntos_usuario(puntos_total DESC)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_puntos_mes ON puntos_usuario(puntos_mes DESC)')
+            c.execute('''CREATE TABLE IF NOT EXISTS historico_ranking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mes_referencia TEXT, user_id INTEGER,
+                puntos INTEGER, posicion INTEGER,
+                fecha_cierre DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS matches_conectar (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id_solicitante INTEGER,
+                user_id_recomendado INTEGER,
+                consulta TEXT,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_matches_recomendado ON matches_conectar(user_id_recomendado)')
+            conn.commit()
+            logger.info("🏆 Tablas Fase 12 SQLite inicializadas")
             
             # === TABLAS v5.0 SQLite: Agente Inteligente ===
             c.execute('''CREATE TABLE IF NOT EXISTS agenda_personal (
@@ -2780,6 +2844,285 @@ def extender_suscripcion(user_id, dias):
         return False
 
 
+# ==================== FASE 12: GAMIFICACIÓN ====================
+# Sistema de puntos e insignias automatico.
+# Puntos: 1 por mensaje publicado, 3 por responder a otro, 10 por crear tarjeta.
+# Ranking mensual (reset dia 1 del mes) + ranking historico acumulado.
+# 10 insignias automaticas segun logros.
+
+INSIGNIAS_DEFS = {
+    'bienvenido': {'emoji': '🌱', 'nombre': 'Bienvenido', 'descripcion': 'Primer mensaje publicado'},
+    'conversador': {'emoji': '💬', 'nombre': 'Conversador', 'descripcion': '50+ mensajes acumulados'},
+    'veterano': {'emoji': '🎖️', 'nombre': 'Veterano', 'descripcion': '200+ mensajes acumulados'},
+    'leyenda': {'emoji': '🏆', 'nombre': 'Leyenda', 'descripcion': '500+ mensajes acumulados'},
+    'top10_mes': {'emoji': '⭐', 'nombre': 'Top 10 del Mes', 'descripcion': 'Entro al top 10 mensual'},
+    'numero_uno_mes': {'emoji': '👑', 'nombre': '#1 del Mes', 'descripcion': 'Quedo primero en ranking mensual'},
+    'conector': {'emoji': '🤝', 'nombre': 'Conector', 'descripcion': '20+ respuestas a otros en un mes'},
+    'profesional': {'emoji': '📇', 'nombre': 'Profesional', 'descripcion': 'Tiene tarjeta profesional completa'},
+    'mentor': {'emoji': '🧠', 'nombre': 'Mentor', 'descripcion': 'Recomendado 3+ veces en /conectar'},
+    'ex_cadete': {'emoji': '🎓', 'nombre': 'Ex-cadete Activo', 'descripcion': 'Ex-cadete con 30+ mensajes'},
+}
+
+
+def _mes_actual_str():
+    """Devuelve el mes actual en formato YYYY-MM para comparar resets."""
+    return _ahora_chile().strftime('%Y-%m')
+
+
+def _obtener_o_crear_puntos(conn, user_id):
+    """Devuelve el registro de puntos del usuario. Lo crea si no existe. Tambien
+    resetea puntos_mes si cambio el mes."""
+    c = conn.cursor()
+    mes_actual = _mes_actual_str()
+    
+    try:
+        if DATABASE_URL:
+            c.execute("SELECT * FROM puntos_usuario WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT * FROM puntos_usuario WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            # Crear registro nuevo
+            if DATABASE_URL:
+                c.execute("""INSERT INTO puntos_usuario (user_id, puntos_total, puntos_mes, mes_referencia, mensajes_totales, respuestas_totales, insignias)
+                            VALUES (%s, 0, 0, %s, 0, 0, '[]') ON CONFLICT (user_id) DO NOTHING""",
+                         (user_id, mes_actual))
+            else:
+                c.execute("""INSERT OR IGNORE INTO puntos_usuario (user_id, puntos_total, puntos_mes, mes_referencia, mensajes_totales, respuestas_totales, insignias)
+                            VALUES (?, 0, 0, ?, 0, 0, '[]')""",
+                         (user_id, mes_actual))
+            conn.commit()
+            return {'user_id': user_id, 'puntos_total': 0, 'puntos_mes': 0, 
+                    'mes_referencia': mes_actual, 'mensajes_totales': 0, 
+                    'respuestas_totales': 0, 'insignias': '[]'}
+        
+        # Convertir a dict para consistencia
+        if DATABASE_URL:
+            row_dict = dict(row)
+        else:
+            row_dict = {k: row[i] for i, k in enumerate(['user_id', 'puntos_total', 'puntos_mes',
+                        'mes_referencia', 'mensajes_totales', 'respuestas_totales', 'insignias', 'actualizado'])}
+        
+        # Si cambio el mes → resetear puntos_mes y actualizar mes_referencia
+        if row_dict.get('mes_referencia', '') != mes_actual:
+            if DATABASE_URL:
+                c.execute("""UPDATE puntos_usuario SET puntos_mes = 0, mes_referencia = %s
+                            WHERE user_id = %s""", (mes_actual, user_id))
+            else:
+                c.execute("""UPDATE puntos_usuario SET puntos_mes = 0, mes_referencia = ?
+                            WHERE user_id = ?""", (mes_actual, user_id))
+            conn.commit()
+            row_dict['puntos_mes'] = 0
+            row_dict['mes_referencia'] = mes_actual
+        
+        return row_dict
+    except Exception as e:
+        logger.error(f"Error obtener puntos: {e}")
+        return None
+
+
+def sumar_puntos(user_id, puntos, motivo='mensaje', es_respuesta=False):
+    """Suma puntos al usuario. Motivos: 'mensaje' (1pt), 'respuesta' (3pt), 'tarjeta' (10pt).
+    Actualiza contadores de mensajes/respuestas para insignias."""
+    if not user_id or puntos <= 0:
+        return False
+    
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        registro = _obtener_o_crear_puntos(conn, user_id)
+        if not registro:
+            conn.close()
+            return False
+        
+        c = conn.cursor()
+        if DATABASE_URL:
+            if es_respuesta:
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + %s,
+                            puntos_mes = puntos_mes + %s,
+                            mensajes_totales = mensajes_totales + 1,
+                            respuestas_totales = respuestas_totales + 1,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = %s""", (puntos, puntos, user_id))
+            elif motivo == 'mensaje':
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + %s,
+                            puntos_mes = puntos_mes + %s,
+                            mensajes_totales = mensajes_totales + 1,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = %s""", (puntos, puntos, user_id))
+            else:
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + %s,
+                            puntos_mes = puntos_mes + %s,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = %s""", (puntos, puntos, user_id))
+        else:
+            if es_respuesta:
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + ?,
+                            puntos_mes = puntos_mes + ?,
+                            mensajes_totales = mensajes_totales + 1,
+                            respuestas_totales = respuestas_totales + 1,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = ?""", (puntos, puntos, user_id))
+            elif motivo == 'mensaje':
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + ?,
+                            puntos_mes = puntos_mes + ?,
+                            mensajes_totales = mensajes_totales + 1,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = ?""", (puntos, puntos, user_id))
+            else:
+                c.execute("""UPDATE puntos_usuario SET 
+                            puntos_total = puntos_total + ?,
+                            puntos_mes = puntos_mes + ?,
+                            actualizado = CURRENT_TIMESTAMP
+                            WHERE user_id = ?""", (puntos, puntos, user_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Evaluar insignias automáticas (async pero best-effort, no bloquea)
+        try:
+            evaluar_insignias_automaticas(user_id)
+        except Exception as _e:
+            logger.debug(f"Eval insignias: {_e}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error sumando puntos: {e}")
+        try: conn.close()
+        except: pass
+        return False
+
+
+def obtener_insignias_usuario(user_id):
+    """Devuelve lista de keys de insignias que tiene el usuario."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT insignias FROM puntos_usuario WHERE user_id = %s", (user_id,))
+        else:
+            c.execute("SELECT insignias FROM puntos_usuario WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return []
+        insignias_str = row['insignias'] if DATABASE_URL else row[0]
+        try:
+            return json.loads(insignias_str or '[]')
+        except Exception:
+            return []
+    except Exception as e:
+        logger.error(f"Error obteniendo insignias: {e}")
+        return []
+
+
+def otorgar_insignia(user_id, insignia_key):
+    """Otorga una insignia al usuario si aun no la tiene. Devuelve True si se otorgo."""
+    if insignia_key not in INSIGNIAS_DEFS:
+        return False
+    
+    actuales = obtener_insignias_usuario(user_id)
+    if insignia_key in actuales:
+        return False  # ya la tiene
+    
+    actuales.append(insignia_key)
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        c = conn.cursor()
+        nuevo_json = json.dumps(actuales)
+        if DATABASE_URL:
+            c.execute("UPDATE puntos_usuario SET insignias = %s WHERE user_id = %s",
+                     (nuevo_json, user_id))
+        else:
+            c.execute("UPDATE puntos_usuario SET insignias = ? WHERE user_id = ?",
+                     (nuevo_json, user_id))
+        conn.commit()
+        conn.close()
+        insig_def = INSIGNIAS_DEFS[insignia_key]
+        logger.info(f"🏅 Insignia otorgada: user {user_id} → {insig_def['emoji']} {insig_def['nombre']}")
+        return True
+    except Exception as e:
+        logger.error(f"Error otorgando insignia: {e}")
+        try: conn.close()
+        except: pass
+        return False
+
+
+def evaluar_insignias_automaticas(user_id):
+    """Revisa las condiciones de todas las insignias automaticas y otorga las que correspondan.
+    Se llama tras cada cambio de puntos. Es rapido (1-2 queries)."""
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT mensajes_totales, respuestas_totales, puntos_mes FROM puntos_usuario WHERE user_id = %s",
+                     (user_id,))
+        else:
+            c.execute("SELECT mensajes_totales, respuestas_totales, puntos_mes FROM puntos_usuario WHERE user_id = ?",
+                     (user_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return
+        mensajes = row['mensajes_totales'] if DATABASE_URL else row[0]
+        respuestas = row['respuestas_totales'] if DATABASE_URL else row[1]
+        
+        # Check tarjeta profesional (para Profesional y Ex-cadete)
+        tiene_tarjeta = False
+        es_ex_cadete = False
+        try:
+            if DATABASE_URL:
+                c.execute("""SELECT nombre_completo, profesion FROM tarjetas_profesional 
+                            WHERE user_id = %s LIMIT 1""", (user_id,))
+            else:
+                c.execute("""SELECT nombre_completo, profesion FROM tarjetas_profesional 
+                            WHERE user_id = ? LIMIT 1""", (user_id,))
+            t = c.fetchone()
+            if t:
+                nombre_t = t['nombre_completo'] if DATABASE_URL else t[0]
+                prof_t = (t['profesion'] if DATABASE_URL else t[1]) or ''
+                tiene_tarjeta = bool(nombre_t and nombre_t.strip())
+                # Ex-cadete: keyword en profesion o historial
+                es_ex_cadete = any(kw in prof_t.lower() for kw in ['ex-cadete', 'ex cadete', 'excadete', 'cadete', 'armada', 'naval'])
+        except Exception: pass
+        conn.close()
+        
+        # Evaluar cada insignia
+        if mensajes >= 1:
+            otorgar_insignia(user_id, 'bienvenido')
+        if mensajes >= 50:
+            otorgar_insignia(user_id, 'conversador')
+        if mensajes >= 200:
+            otorgar_insignia(user_id, 'veterano')
+        if mensajes >= 500:
+            otorgar_insignia(user_id, 'leyenda')
+        if respuestas >= 20:
+            otorgar_insignia(user_id, 'conector')
+        if tiene_tarjeta:
+            otorgar_insignia(user_id, 'profesional')
+        if es_ex_cadete and mensajes >= 30:
+            otorgar_insignia(user_id, 'ex_cadete')
+        # mentor, top10_mes, numero_uno_mes se otorgan en contextos especificos
+    except Exception as e:
+        logger.debug(f"Eval insignias error: {e}")
+        try: conn.close()
+        except: pass
+
+
 # ==================== FUNCIONES DE MENSAJES ====================
 
 def guardar_mensaje(user_id, username, first_name, message, topic_id=None, last_name=''):
@@ -3771,6 +4114,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /publicaciones @usuario - Ver publicaciones de un usuario
 /temas @usuario - Temas que toca un usuario (IA)
 /stats_usuario @usuario - Estadísticas de participación
+
+🏆 GAMIFICACIÓN & MATCHING
+/ranking - Top 10 del mes e histórico
+/mis_puntos - Tus puntos y posición
+/mis_insignias - Tus 10 insignias posibles
+/conectar [necesidad] - Matching inteligente con miembros
 
 📇 DIRECTORIO PROFESIONAL
 /mi_tarjeta - Crear/ver tu tarjeta profesional
@@ -5348,6 +5697,469 @@ async def stats_usuario_comando(update: Update, context: ContextTypes.DEFAULT_TY
         await msg.edit_text(f"❌ Error: {str(e)[:200]}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# FASE 12: GAMIFICACIÓN + MATCHING /CONECTAR
+# ══════════════════════════════════════════════════════════════════════════════
+
+@requiere_suscripcion
+async def ranking_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /ranking - Muestra el ranking mensual y historico de puntos."""
+    msg = await update.message.reply_text("🏆 Calculando ranking...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexion a BD")
+            return
+        c = conn.cursor()
+        mes_actual = _mes_actual_str()
+        
+        # Top 10 mensual
+        if DATABASE_URL:
+            c.execute("""SELECT pu.user_id, pu.puntos_mes, COALESCE(m.first_name, 'Usuario') as nombre
+                        FROM puntos_usuario pu
+                        LEFT JOIN (SELECT DISTINCT ON (user_id) user_id, first_name FROM mensajes) m
+                            ON m.user_id = pu.user_id
+                        WHERE pu.puntos_mes > 0 AND pu.mes_referencia = %s
+                        ORDER BY pu.puntos_mes DESC LIMIT 10""", (mes_actual,))
+        else:
+            c.execute("""SELECT pu.user_id, pu.puntos_mes, COALESCE(
+                            (SELECT first_name FROM mensajes WHERE user_id = pu.user_id LIMIT 1), 'Usuario') as nombre
+                        FROM puntos_usuario pu
+                        WHERE pu.puntos_mes > 0 AND pu.mes_referencia = ?
+                        ORDER BY pu.puntos_mes DESC LIMIT 10""", (mes_actual,))
+        top_mes = c.fetchall()
+        
+        # Top 10 historico
+        if DATABASE_URL:
+            c.execute("""SELECT pu.user_id, pu.puntos_total, COALESCE(m.first_name, 'Usuario') as nombre
+                        FROM puntos_usuario pu
+                        LEFT JOIN (SELECT DISTINCT ON (user_id) user_id, first_name FROM mensajes) m
+                            ON m.user_id = pu.user_id
+                        WHERE pu.puntos_total > 0
+                        ORDER BY pu.puntos_total DESC LIMIT 10""")
+        else:
+            c.execute("""SELECT pu.user_id, pu.puntos_total, COALESCE(
+                            (SELECT first_name FROM mensajes WHERE user_id = pu.user_id LIMIT 1), 'Usuario') as nombre
+                        FROM puntos_usuario pu WHERE pu.puntos_total > 0
+                        ORDER BY pu.puntos_total DESC LIMIT 10""")
+        top_hist = c.fetchall()
+        conn.close()
+        
+        if not top_mes and not top_hist:
+            await msg.edit_text(
+                "🏆 RANKING COFRADIA\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📭 Aun no hay suficiente actividad para generar ranking.\n\n"
+                "💡 Publica mensajes en el grupo para ganar puntos:\n"
+                "  • 1 punto por mensaje publicado\n"
+                "  • 3 puntos por responder a otro usuario\n"
+                "  • 10 puntos por crear/actualizar tu tarjeta profesional"
+            )
+            return
+        
+        medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
+        lineas = [f"🏆 RANKING COFRADIA — {mes_actual}\n{'━'*35}\n"]
+        
+        if top_mes:
+            lineas.append(f"📅 TOP 10 DEL MES:")
+            for i, row in enumerate(top_mes, 1):
+                if DATABASE_URL:
+                    uid = row['user_id']; pts = row['puntos_mes']; nom = row['nombre'] or 'Usuario'
+                else:
+                    uid, pts, nom = row[0], row[1], row[2] or 'Usuario'
+                medalla = medallas[i-1] if i <= 10 else f"{i}."
+                lineas.append(f"{medalla} {nom} — {pts:,} pts")
+        else:
+            lineas.append("📅 TOP 10 DEL MES: (sin datos aún)")
+        
+        lineas.append("")
+        
+        if top_hist:
+            lineas.append(f"📊 TOP 10 HISTORICO:")
+            for i, row in enumerate(top_hist, 1):
+                if DATABASE_URL:
+                    uid = row['user_id']; pts = row['puntos_total']; nom = row['nombre'] or 'Usuario'
+                else:
+                    uid, pts, nom = row[0], row[1], row[2] or 'Usuario'
+                medalla = medallas[i-1] if i <= 10 else f"{i}."
+                lineas.append(f"{medalla} {nom} — {pts:,} pts")
+        
+        lineas.append("")
+        lineas.append(f"{'━'*35}")
+        lineas.append("💡 Consulta tus puntos: /mis_puntos")
+        lineas.append("🏅 Tus insignias: /mis_insignias")
+        
+        await msg.edit_text("\n".join(lineas))
+        registrar_servicio_usado(update.effective_user.id, 'ranking')
+    except Exception as e:
+        logger.error(f"Error /ranking: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def mis_puntos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mis_puntos - Muestra los puntos y posicion del usuario en el ranking."""
+    user_id = update.effective_user.id
+    first_name = update.effective_user.first_name or "Usuario"
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Error de conexion a BD")
+            return
+        
+        registro = _obtener_o_crear_puntos(conn, user_id)
+        if not registro:
+            await update.message.reply_text("❌ No se pudo obtener tus puntos")
+            conn.close()
+            return
+        
+        c = conn.cursor()
+        
+        # Calcular posicion mensual
+        if DATABASE_URL:
+            c.execute("""SELECT COUNT(*) + 1 as pos FROM puntos_usuario 
+                        WHERE puntos_mes > %s AND mes_referencia = %s""",
+                     (registro['puntos_mes'], _mes_actual_str()))
+        else:
+            c.execute("""SELECT COUNT(*) + 1 as pos FROM puntos_usuario 
+                        WHERE puntos_mes > ? AND mes_referencia = ?""",
+                     (registro['puntos_mes'], _mes_actual_str()))
+        pos_mes = (c.fetchone()['pos'] if DATABASE_URL else c.fetchone()[0])
+        
+        # Calcular posicion historica
+        if DATABASE_URL:
+            c.execute("SELECT COUNT(*) + 1 as pos FROM puntos_usuario WHERE puntos_total > %s",
+                     (registro['puntos_total'],))
+        else:
+            c.execute("SELECT COUNT(*) + 1 as pos FROM puntos_usuario WHERE puntos_total > ?",
+                     (registro['puntos_total'],))
+        pos_hist = (c.fetchone()['pos'] if DATABASE_URL else c.fetchone()[0])
+        
+        conn.close()
+        
+        insignias_keys = obtener_insignias_usuario(user_id)
+        insignias_txt = ' '.join([INSIGNIAS_DEFS[k]['emoji'] for k in insignias_keys if k in INSIGNIAS_DEFS])
+        if not insignias_txt:
+            insignias_txt = "(sin insignias aun)"
+        
+        texto = (
+            f"💎 TUS PUNTOS — {first_name}\n{'━'*30}\n\n"
+            f"📅 ESTE MES ({_mes_actual_str()}):\n"
+            f"  • Puntos: {registro['puntos_mes']:,}\n"
+            f"  • Posicion: #{pos_mes}\n\n"
+            f"📊 HISTORICO:\n"
+            f"  • Puntos totales: {registro['puntos_total']:,}\n"
+            f"  • Posicion: #{pos_hist}\n\n"
+            f"💬 ACTIVIDAD:\n"
+            f"  • Mensajes publicados: {registro['mensajes_totales']:,}\n"
+            f"  • Respuestas a otros: {registro['respuestas_totales']:,}\n\n"
+            f"🏅 INSIGNIAS: {insignias_txt}\n\n"
+            f"💡 Ver ranking: /ranking\n"
+            f"🏅 Detalle insignias: /mis_insignias"
+        )
+        await update.message.reply_text(texto)
+        registrar_servicio_usado(user_id, 'mis_puntos')
+    except Exception as e:
+        logger.error(f"Error /mis_puntos: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def mis_insignias_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /mis_insignias - Muestra las insignias del usuario y las que le faltan."""
+    user_id = update.effective_user.id
+    first_name = update.effective_user.first_name or "Usuario"
+    
+    try:
+        insignias_obtenidas = set(obtener_insignias_usuario(user_id))
+        
+        lineas = [f"🏅 INSIGNIAS DE {first_name.upper()}\n{'━'*30}\n"]
+        
+        if insignias_obtenidas:
+            lineas.append(f"✅ OBTENIDAS ({len(insignias_obtenidas)}/10):")
+            for key in insignias_obtenidas:
+                if key in INSIGNIAS_DEFS:
+                    d = INSIGNIAS_DEFS[key]
+                    lineas.append(f"  {d['emoji']} {d['nombre']} — {d['descripcion']}")
+        else:
+            lineas.append("✅ OBTENIDAS: (aun ninguna)")
+        
+        faltantes = [k for k in INSIGNIAS_DEFS.keys() if k not in insignias_obtenidas]
+        if faltantes:
+            lineas.append(f"\n⏳ POR OBTENER ({len(faltantes)}/10):")
+            for key in faltantes:
+                d = INSIGNIAS_DEFS[key]
+                lineas.append(f"  {d['emoji']} {d['nombre']} — {d['descripcion']}")
+        
+        lineas.append(f"\n{'━'*30}")
+        lineas.append("💡 Las insignias se otorgan automaticamente.")
+        lineas.append("📈 Ver tu progreso: /mis_puntos")
+        
+        await update.message.reply_text("\n".join(lineas))
+        registrar_servicio_usado(user_id, 'mis_insignias')
+    except Exception as e:
+        logger.error(f"Error /mis_insignias: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
+@requiere_suscripcion
+async def conectar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /conectar [necesidad] - Matching inteligente entre miembros.
+    FASE 12: analiza tarjetas + mensajes historicos + temas para recomendar 3-5 miembros."""
+    if not context.args:
+        await update.message.reply_text(
+            "🤝 Uso: /conectar [lo que necesitas]\n\n"
+            "Ejemplos:\n"
+            "  /conectar busco inversionista para startup tech\n"
+            "  /conectar necesito abogado especializado en familia\n"
+            "  /conectar alguien que sepa de marketing digital\n"
+            "  /conectar mentor en liderazgo militar\n\n"
+            "El bot analiza las tarjetas profesionales y el historial del grupo "
+            "para recomendar a los 3 miembros mas relevantes."
+        )
+        return
+    
+    consulta = ' '.join(context.args).strip()
+    user_id_solicitante = update.effective_user.id
+    nombre_solicitante = update.effective_user.first_name or "Usuario"
+    
+    msg = await update.message.reply_text(f"🔍 Buscando profesionales para: {consulta[:80]}...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexion a BD")
+            return
+        c = conn.cursor()
+        
+        # Extraer palabras clave
+        palabras = [p.lower() for p in consulta.split() if len(p) > 3][:8]
+        if not palabras:
+            await msg.edit_text("❌ Consulta muy corta o sin palabras clave. Dale mas contexto.")
+            return
+        
+        # PASO 1: Buscar en tarjetas_profesional (match en profesion/empresa/servicios)
+        candidatos = {}  # user_id -> {nombre, profesion, empresa, ciudad, servicios, score, username}
+        
+        partes = []
+        params = []
+        for p in palabras:
+            if DATABASE_URL:
+                partes.append("(LOWER(profesion) LIKE %s OR LOWER(empresa) LIKE %s OR LOWER(servicios) LIKE %s OR LOWER(experiencia) LIKE %s)")
+                params.extend([f'%{p}%'] * 4)
+            else:
+                partes.append("(LOWER(profesion) LIKE ? OR LOWER(empresa) LIKE ? OR LOWER(servicios) LIKE ? OR LOWER(experiencia) LIKE ?)")
+                params.extend([f'%{p}%'] * 4)
+        
+        try:
+            query_t = f"""SELECT user_id, nombre_completo, profesion, empresa, ciudad, servicios, experiencia 
+                          FROM tarjetas_profesional WHERE {' OR '.join(partes)} LIMIT 15"""
+            c.execute(query_t, params)
+            for fila in c.fetchall():
+                if DATABASE_URL:
+                    uid = fila['user_id']
+                    candidatos[uid] = {
+                        'nombre': fila['nombre_completo'] or '',
+                        'profesion': fila['profesion'] or '',
+                        'empresa': fila['empresa'] or '',
+                        'ciudad': fila['ciudad'] or '',
+                        'servicios': fila['servicios'] or '',
+                        'experiencia': fila['experiencia'] or '',
+                        'score': 0, 'origen': 'tarjeta'
+                    }
+                else:
+                    uid = fila[0]
+                    candidatos[uid] = {
+                        'nombre': fila[1] or '', 'profesion': fila[2] or '',
+                        'empresa': fila[3] or '', 'ciudad': fila[4] or '',
+                        'servicios': fila[5] or '', 'experiencia': fila[6] or '',
+                        'score': 0, 'origen': 'tarjeta'
+                    }
+        except Exception as _et:
+            logger.debug(f"Matching tarjetas: {_et}")
+        
+        # PASO 2: Buscar usuarios que han hablado de los temas en mensajes historicos
+        partes_m = []
+        params_m = []
+        for p in palabras:
+            if DATABASE_URL:
+                partes_m.append("LOWER(message) LIKE %s")
+                params_m.append(f'%{p}%')
+            else:
+                partes_m.append("LOWER(message) LIKE ?")
+                params_m.append(f'%{p}%')
+        
+        try:
+            query_m = f"""SELECT user_id, first_name, username, COUNT(*) as n 
+                          FROM mensajes WHERE ({' OR '.join(partes_m)}) AND LENGTH(message) > 30
+                          GROUP BY user_id, first_name, username
+                          ORDER BY n DESC LIMIT 15"""
+            c.execute(query_m, params_m)
+            for fila in c.fetchall():
+                if DATABASE_URL:
+                    uid = fila['user_id']; nom = fila['first_name'] or ''
+                    un = fila['username'] or ''; n = fila['n']
+                else:
+                    uid, nom, un, n = fila[0], fila[1] or '', fila[2] or '', fila[3]
+                
+                if uid in candidatos:
+                    candidatos[uid]['score'] += n * 0.5  # bonus por actividad sobre el tema
+                    candidatos[uid]['msgs_tema'] = n
+                    candidatos[uid]['username'] = un
+                else:
+                    candidatos[uid] = {
+                        'nombre': nom, 'profesion': '(no tiene tarjeta)',
+                        'empresa': '', 'ciudad': '', 'servicios': '', 'experiencia': '',
+                        'score': n * 0.3, 'origen': 'mensajes',
+                        'msgs_tema': n, 'username': un
+                    }
+        except Exception as _em:
+            logger.debug(f"Matching mensajes: {_em}")
+        
+        # Enriquecer candidatos con username si falta
+        for uid in list(candidatos.keys()):
+            if 'username' not in candidatos[uid]:
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT username FROM mensajes WHERE user_id = %s AND username IS NOT NULL LIMIT 1", (uid,))
+                    else:
+                        c.execute("SELECT username FROM mensajes WHERE user_id = ? AND username IS NOT NULL LIMIT 1", (uid,))
+                    r = c.fetchone()
+                    candidatos[uid]['username'] = (r['username'] if DATABASE_URL else r[0]) if r else ''
+                except Exception:
+                    candidatos[uid]['username'] = ''
+        
+        conn.close()
+        
+        # Excluir al solicitante de los candidatos
+        candidatos.pop(user_id_solicitante, None)
+        
+        if not candidatos:
+            await msg.edit_text(
+                f"🤝 No encontre profesionales que calcen con: {consulta[:80]}\n\n"
+                f"💡 Intenta con otras palabras clave o mas generales."
+            )
+            return
+        
+        # PASO 3: Scoring basico + seleccion top 3
+        # Score base: tarjeta=10pts, mensajes_tema=n*0.3pts
+        for uid, d in candidatos.items():
+            texto_tarjeta = f"{d.get('profesion','')} {d.get('empresa','')} {d.get('servicios','')} {d.get('experiencia','')}".lower()
+            for p in palabras:
+                if p in texto_tarjeta:
+                    d['score'] += 5  # match directo en tarjeta
+        
+        # Ordenar por score y tomar top 3
+        top3 = sorted(candidatos.items(), key=lambda x: -x[1]['score'])[:3]
+        
+        if not top3:
+            await msg.edit_text(f"🤝 No encontre matches suficientemente relevantes para: {consulta[:80]}")
+            return
+        
+        # PASO 4: LLM ranking/contextualizacion (opcional, si Groq disponible)
+        ranked_with_ia = None
+        if GROQ_API_KEY and len(top3) >= 2:
+            await msg.edit_text(f"🧠 Analizando relevancia con IA...")
+            desc_candidatos = ""
+            for i, (uid, d) in enumerate(top3, 1):
+                desc_candidatos += f"{i}. {d['nombre']} — {d.get('profesion','(sin tarjeta)')} "
+                if d.get('empresa'): desc_candidatos += f"en {d['empresa']} "
+                if d.get('servicios'): desc_candidatos += f"[servicios: {d['servicios'][:100]}] "
+                if d.get('msgs_tema'): desc_candidatos += f"(ha hablado del tema {d['msgs_tema']} veces) "
+                desc_candidatos += "\n"
+            
+            prompt_match = f"""Un miembro de la comunidad busca ayuda para: "{consulta}"
+
+Candidatos encontrados:
+{desc_candidatos}
+
+Para cada uno, escribe UNA sola frase (max 30 palabras) explicando por que es buena opcion para esta consulta, en español natural. Formato exacto:
+
+1. [razon candidato 1]
+2. [razon candidato 2]
+3. [razon candidato 3]
+
+NO agregues encabezado, SOLO las lineas numeradas."""
+            
+            try:
+                razones_ia = llamar_groq(prompt_match, max_tokens=300, temperature=0.3)
+                if razones_ia:
+                    ranked_with_ia = razones_ia
+            except Exception as _e_ia:
+                logger.debug(f"LLM conectar: {_e_ia}")
+        
+        # PASO 5: Construir respuesta con etiquetado (sin confirmacion previa - elegiste "directo")
+        import re as _re_conn
+        lineas_razon = {}
+        if ranked_with_ia:
+            for l in ranked_with_ia.split('\n'):
+                mt = _re_conn.match(r'^\s*(\d+)[.\s\-)]+\s*(.+)$', l.strip())
+                if mt:
+                    lineas_razon[int(mt.group(1))] = mt.group(2).strip()
+        
+        lineas_resp = [f"🤝 CONEXIONES RECOMENDADAS\n{'━'*30}\n",
+                       f"{nombre_solicitante} busca: \"{consulta[:120]}\"\n"]
+        
+        for i, (uid, d) in enumerate(top3, 1):
+            # Etiqueta via username o nombre simple
+            un = d.get('username', '')
+            if un:
+                etiqueta = f"@{un}"
+            else:
+                etiqueta = d.get('nombre', f'Usuario {uid}')
+            
+            lineas_resp.append(f"{i}. {etiqueta}")
+            if d.get('profesion') and d['profesion'] != '(no tiene tarjeta)':
+                lineas_resp.append(f"   💼 {d['profesion']}")
+                if d.get('empresa'): lineas_resp.append(f"   🏢 {d['empresa']}")
+                if d.get('ciudad'): lineas_resp.append(f"   📍 {d['ciudad']}")
+            razon = lineas_razon.get(i, '')
+            if razon:
+                lineas_resp.append(f"   💡 {razon}")
+            lineas_resp.append("")
+        
+        lineas_resp.append(f"{'━'*30}")
+        lineas_resp.append("💡 Contactalos directamente o usa /buscar_profesional para mas opciones")
+        
+        await msg.delete()
+        await update.message.reply_text("\n".join(lineas_resp))
+        
+        # PASO 6: Guardar matches para insignia Mentor (recomendado 3+ veces)
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                for uid, d in top3:
+                    if DATABASE_URL:
+                        c.execute("""INSERT INTO matches_conectar (user_id_solicitante, user_id_recomendado, consulta)
+                                    VALUES (%s, %s, %s)""", (user_id_solicitante, uid, consulta[:200]))
+                    else:
+                        c.execute("""INSERT INTO matches_conectar (user_id_solicitante, user_id_recomendado, consulta)
+                                    VALUES (?, ?, ?)""", (user_id_solicitante, uid, consulta[:200]))
+                    
+                    # Verificar si merece insignia Mentor (recomendado 3+ veces)
+                    if DATABASE_URL:
+                        c.execute("SELECT COUNT(*) as n FROM matches_conectar WHERE user_id_recomendado = %s", (uid,))
+                    else:
+                        c.execute("SELECT COUNT(*) as n FROM matches_conectar WHERE user_id_recomendado = ?", (uid,))
+                    rm = c.fetchone()
+                    total_matches = rm['n'] if DATABASE_URL else rm[0]
+                    if total_matches >= 3:
+                        otorgar_insignia(uid, 'mentor')
+                
+                conn.commit()
+                conn.close()
+        except Exception as _e_mm:
+            logger.debug(f"Matches log: {_e_mm}")
+        
+        registrar_servicio_usado(user_id_solicitante, 'conectar')
+    except Exception as e:
+        logger.error(f"Error /conectar: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        try: await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+        except: pass
+
+
 async def cache_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /cache_status - Ver estado del cache TTL (solo admin). FASE 10."""
     if update.effective_user.id != OWNER_ID:
@@ -6040,6 +6852,22 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
         topic_id,
         last_name=last_name
     )
+    
+    # FASE 12: GAMIFICACIÓN - sumar puntos automaticamente
+    try:
+        # Detectar si es respuesta a otro usuario (reply_to_message de otro user)
+        es_respuesta = False
+        if update.message.reply_to_message and update.message.reply_to_message.from_user:
+            replied_user = update.message.reply_to_message.from_user
+            # Solo cuenta como respuesta si responde a OTRO usuario (no a si mismo)
+            if replied_user.id != user_id and not replied_user.is_bot:
+                es_respuesta = True
+        
+        puntos = 3 if es_respuesta else 1
+        sumar_puntos(user_id, puntos, motivo=('respuesta' if es_respuesta else 'mensaje'),
+                    es_respuesta=es_respuesta)
+    except Exception as _e_pt:
+        logger.debug(f"Puntos gamif: {_e_pt}")
     
     # Backfill: actualizar registros antiguos sin last_name si ahora tenemos uno
     if last_name and last_name.strip():
@@ -10252,6 +11080,112 @@ async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Job backup BD exception: {e}")
 
 
+async def _job_cierre_ranking_mensual(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 12: Job que se ejecuta el dia 1 de cada mes a las 00:05 AM Chile.
+    1. Obtiene el top 10 del mes que recien termino
+    2. Lo guarda en historico_ranking
+    3. Otorga insignias top10_mes (top 10) y numero_uno_mes (#1)
+    4. Resetea puntos_mes de todos los usuarios
+    5. Anuncia ganador en el grupo (si hay)
+    """
+    try:
+        from datetime import timedelta as _td_rk
+        ahora = _ahora_chile()
+        # El mes que recien termino es el anterior al actual
+        mes_pasado_dt = (ahora.replace(day=1) - _td_rk(days=1))
+        mes_pasado = mes_pasado_dt.strftime('%Y-%m')
+        logger.info(f"🏆 Cerrando ranking mensual: {mes_pasado}")
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Job cierre ranking: BD no disponible")
+            return
+        c = conn.cursor()
+        
+        # Obtener top 10 del mes pasado
+        if DATABASE_URL:
+            c.execute("""SELECT user_id, puntos_mes, 
+                        (SELECT first_name FROM mensajes WHERE user_id = pu.user_id LIMIT 1) as nombre
+                        FROM puntos_usuario pu
+                        WHERE mes_referencia = %s AND puntos_mes > 0
+                        ORDER BY puntos_mes DESC LIMIT 10""", (mes_pasado,))
+        else:
+            c.execute("""SELECT user_id, puntos_mes,
+                        (SELECT first_name FROM mensajes WHERE user_id = pu.user_id LIMIT 1) as nombre
+                        FROM puntos_usuario pu
+                        WHERE mes_referencia = ? AND puntos_mes > 0
+                        ORDER BY puntos_mes DESC LIMIT 10""", (mes_pasado,))
+        top_mes = c.fetchall()
+        
+        ganador_info = None
+        top10_uids = []
+        
+        for i, fila in enumerate(top_mes, 1):
+            if DATABASE_URL:
+                uid = fila['user_id']; pts = fila['puntos_mes']; nom = fila['nombre'] or 'Usuario'
+            else:
+                uid, pts, nom = fila[0], fila[1], fila[2] or 'Usuario'
+            
+            top10_uids.append(uid)
+            
+            # Guardar en historico_ranking
+            try:
+                if DATABASE_URL:
+                    c.execute("""INSERT INTO historico_ranking (mes_referencia, user_id, puntos, posicion)
+                                VALUES (%s, %s, %s, %s)""", (mes_pasado, uid, pts, i))
+                else:
+                    c.execute("""INSERT INTO historico_ranking (mes_referencia, user_id, puntos, posicion)
+                                VALUES (?, ?, ?, ?)""", (mes_pasado, uid, pts, i))
+            except Exception as _e_h:
+                logger.debug(f"Hist ranking: {_e_h}")
+            
+            # Otorgar insignias
+            otorgar_insignia(uid, 'top10_mes')
+            if i == 1:
+                otorgar_insignia(uid, 'numero_uno_mes')
+                ganador_info = {'user_id': uid, 'nombre': nom, 'puntos': pts}
+        
+        # Resetear puntos_mes de todos (nuevo mes empieza en 0)
+        mes_actual = _mes_actual_str()
+        if DATABASE_URL:
+            c.execute("UPDATE puntos_usuario SET puntos_mes = 0, mes_referencia = %s",
+                     (mes_actual,))
+        else:
+            c.execute("UPDATE puntos_usuario SET puntos_mes = 0, mes_referencia = ?",
+                     (mes_actual,))
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"✅ Ranking {mes_pasado} cerrado: {len(top10_uids)} usuarios en top 10")
+        
+        # Anunciar ganador al admin
+        if OWNER_ID:
+            try:
+                if ganador_info:
+                    texto_admin = (
+                        f"🏆 CIERRE DE RANKING MENSUAL\n{'━'*30}\n\n"
+                        f"📅 Mes cerrado: {mes_pasado}\n\n"
+                        f"👑 GANADOR #{1}: {ganador_info['nombre']}\n"
+                        f"   Puntos: {ganador_info['puntos']:,}\n\n"
+                        f"🏅 Insignias otorgadas: {len(top10_uids)} miembros recibieron 'Top 10 del Mes'\n"
+                        f"👑 1 miembro recibio '#1 del Mes'\n\n"
+                        f"🔄 Puntos mensuales reseteados. Empieza {mes_actual}."
+                    )
+                else:
+                    texto_admin = (
+                        f"🏆 CIERRE DE RANKING MENSUAL\n{'━'*30}\n\n"
+                        f"📅 Mes cerrado: {mes_pasado}\n"
+                        f"⚠️ No hubo actividad suficiente para generar ranking."
+                    )
+                await context.bot.send_message(chat_id=OWNER_ID, text=texto_admin)
+            except Exception as _e_n:
+                logger.debug(f"Notif cierre ranking: {_e_n}")
+    except Exception as e:
+        logger.error(f"Job cierre ranking mensual: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
 def detectar_columna_anio_egreso(df):
     """Detecta automáticamente la columna que contiene años de egreso"""
     for col_idx in range(len(df.columns)):
@@ -12885,6 +13819,11 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
             conn.close()
             await update.message.reply_text(f"✅ {campo.capitalize()} actualizado: {valor}\n\nVer tarjeta: /mi_tarjeta")
             otorgar_coins(user_id, 15, 'Actualizar tarjeta profesional')
+            # FASE 12: +10 puntos gamificacion por actualizar tarjeta (solo la primera vez al dia)
+            try:
+                sumar_puntos(user_id, 10, motivo='tarjeta')
+            except Exception as _e_pt:
+                logger.debug(f"Pts tarjeta: {_e_pt}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
@@ -21001,6 +21940,11 @@ def main():
     # Fase 10: Administracion de cache TTL
     application.add_handler(CommandHandler("cache_status", cache_status_comando))
     application.add_handler(CommandHandler("cache_limpiar", cache_limpiar_comando))
+    # Fase 12: Gamificacion + Matching
+    application.add_handler(CommandHandler("ranking", ranking_comando))
+    application.add_handler(CommandHandler("mis_puntos", mis_puntos_comando))
+    application.add_handler(CommandHandler("mis_insignias", mis_insignias_comando))
+    application.add_handler(CommandHandler("conectar", conectar_comando))
     application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("buscar_apoyo", buscar_apoyo_comando))
     application.add_handler(CommandHandler("buscar_especialista_sec", buscar_especialista_sec_comando))
@@ -21609,6 +22553,27 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 name='backup_bd_diario'
             )
         logger.info("💾 Tarea de backup BD diario programada para las 03:00 AM Chile")
+        
+        # Fase 12: Cierre de ranking mensual - corre DIARIO a las 00:05 AM, pero
+        # internamente solo hace el reset si el dia es 1 (cambio de mes).
+        # Enfoque simple y robusto sin necesidad de cron especial.
+        async def _wrapper_cierre_ranking(ctx):
+            if _ahora_chile().day == 1:
+                await _job_cierre_ranking_mensual(ctx)
+        
+        if chile_tz:
+            job_queue.run_daily(
+                _wrapper_cierre_ranking,
+                time=dt_time(hour=0, minute=5, second=0, tzinfo=chile_tz),
+                name='cierre_ranking_mensual'
+            )
+        else:
+            job_queue.run_daily(
+                _wrapper_cierre_ranking,
+                time=dt_time(hour=4, minute=5, second=0),  # ~00:05 Chile si server UTC
+                name='cierre_ranking_mensual'
+            )
+        logger.info("🏆 Tarea cierre ranking mensual programada (dia 1, 00:05 AM Chile)")
         
         # RAG indexación cada 6 horas (Excel only, preserva PDFs)
         job_queue.run_repeating(
