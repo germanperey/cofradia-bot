@@ -5108,9 +5108,13 @@ window.addEventListener('resize', function() {{
             
             # Enviar imagen preview
             await msg.delete()
+            # FASE 1: timestamp visible de actualizacion del Excel desde Drive
+            _ts_drive = _ahora_chile().strftime('%d/%m/%Y %H:%M')
+            _drive_info = f"📥 Excel Drive descargado FRESCO: {_ts_drive} hrs (Chile)\n" if drive_data is not None and len(drive_data) > 0 else ""
             await update.message.reply_photo(
                 photo=buf,
                 caption=f"📊 Dashboard Cofradía — Últimos 7 días\n\n"
+                        f"{_drive_info}"
                         f"📨 {total_msgs_7d} mensajes · 👥 {len(usuarios_clean)} usuarios activos\n"
                         f"📈 Promedio: {promedio_diario}/día · 🕐 Pico: {hora_pico:02d}:00\n\n"
                         f"⬇️ Descarga el archivo HTML adjunto para ver el dashboard interactivo completo."
@@ -12730,12 +12734,19 @@ def obtener_cumpleanos_hoy():
     """
     Obtiene los cumpleaños del día desde el Excel de Google Drive.
     Columna X = Fecha cumpleaños (formato DD-MMM, ej: 15-Ene)
+
+    FASE 1: Bug timezone reparado.
+    - Antes: usaba datetime.now() que en Render retorna UTC -> dia/mes incorrecto cerca de medianoche.
+    - Ahora: usa _ahora_chile() (zona America/Santiago).
+    - Parser ampliado para manejar pandas Timestamp/datetime objects (cuando Excel
+      formatea la celda como fecha, pandas la lee como datetime y NO como string).
     """
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         
         creds_json = os.environ.get('GOOGLE_DRIVE_CREDS')
         if not creds_json:
+            logger.warning("🎂 GOOGLE_DRIVE_CREDS no configurado")
             return None
         
         creds_dict = json.loads(creds_json)
@@ -12755,6 +12766,7 @@ def obtener_cumpleanos_hoy():
         archivos = response.json().get('files', [])
         
         if not archivos:
+            logger.warning("🎂 No se encontró archivo 'BD Grupo Laboral' en Drive")
             return None
         
         # Descargar Excel
@@ -12763,14 +12775,16 @@ def obtener_cumpleanos_hoy():
         response = requests.get(download_url, headers=headers, timeout=60)
         
         if response.status_code != 200:
+            logger.warning(f"🎂 Error descargando Excel: HTTP {response.status_code}")
             return None
         
         df = pd.read_excel(BytesIO(response.content), engine='openpyxl', header=0)
         
-        # Fecha de hoy
-        hoy = datetime.now()
+        # FIX FASE 1: usar hora Chile, no hora del servidor (Render = UTC)
+        hoy = _ahora_chile()
         dia_hoy = hoy.day
         mes_hoy = hoy.month
+        logger.info(f"🎂 Verificando cumpleaños para hoy {dia_hoy:02d}/{mes_hoy:02d} (hora Chile {hoy.strftime('%H:%M')}) - {len(df)} filas en Excel")
         
         # Mapeo de meses en español
         MESES = {
@@ -12781,41 +12795,71 @@ def obtener_cumpleanos_hoy():
         }
         
         cumpleaneros = []
+        filas_parseadas_ok = 0
+        filas_parseo_fallido = 0
         
         for idx, row in df.iterrows():
             try:
                 # Columna X = índice 23
                 fecha_cumple = row.iloc[23] if len(row) > 23 else None
                 
-                if pd.isna(fecha_cumple) or not fecha_cumple:
+                if pd.isna(fecha_cumple) or fecha_cumple is None or str(fecha_cumple).strip() == '':
                     continue
                 
-                fecha_str = str(fecha_cumple).strip().lower()
-                
-                # Intentar parsear diferentes formatos
                 dia_cumple = None
                 mes_cumple = None
                 
-                # Formato DD-MMM (ej: 15-Ene)
-                if '-' in fecha_str:
-                    partes = fecha_str.split('-')
-                    if len(partes) >= 2:
-                        try:
-                            dia_cumple = int(partes[0])
-                            mes_str = partes[1].strip()[:3]
-                            mes_cumple = MESES.get(mes_str)
-                        except:
-                            pass
+                # FIX FASE 1: CASO 1 — pandas Timestamp / datetime / date
+                # Cuando Excel formatea la celda como fecha, pandas la lee como datetime
+                # y str(timestamp) da "1900-01-15 00:00:00" que el parser anterior no
+                # manejaba (rompía con dia=1900 mes='01' que no estaba en el dict MESES).
+                if hasattr(fecha_cumple, 'day') and hasattr(fecha_cumple, 'month'):
+                    try:
+                        dia_cumple = int(fecha_cumple.day)
+                        mes_cumple = int(fecha_cumple.month)
+                    except Exception:
+                        dia_cumple = None
+                        mes_cumple = None
                 
-                # Formato DD/MM
-                elif '/' in fecha_str:
-                    partes = fecha_str.split('/')
-                    if len(partes) >= 2:
-                        try:
-                            dia_cumple = int(partes[0])
-                            mes_cumple = int(partes[1])
-                        except:
-                            pass
+                # CASO 2: parser de string (formato DD-MMM, DD/MM, DD-MM, YYYY-MM-DD)
+                if dia_cumple is None or mes_cumple is None:
+                    fecha_str = str(fecha_cumple).strip().lower()
+                    
+                    if '-' in fecha_str:
+                        partes = fecha_str.split('-')
+                        # YYYY-MM-DD (Timestamp serializado a string)
+                        if len(partes[0]) == 4 and partes[0].isdigit() and len(partes) >= 3:
+                            try:
+                                mes_cumple = int(partes[1])
+                                dia_part = partes[2].split()[0] if partes[2] else ''
+                                dia_cumple = int(dia_part)
+                            except Exception:
+                                pass
+                        # DD-MMM (15-Ene) o DD-MM (15-01)
+                        elif len(partes) >= 2:
+                            try:
+                                dia_cumple = int(partes[0])
+                                mes_token = partes[1].strip()[:3]
+                                if mes_token.isdigit():
+                                    mes_cumple = int(mes_token[:2])
+                                else:
+                                    mes_cumple = MESES.get(mes_token)
+                            except Exception:
+                                pass
+                    
+                    elif '/' in fecha_str:
+                        partes = fecha_str.split('/')
+                        if len(partes) >= 2:
+                            try:
+                                dia_cumple = int(partes[0])
+                                mes_cumple = int(partes[1][:2])
+                            except Exception:
+                                pass
+                
+                if dia_cumple is None or mes_cumple is None:
+                    filas_parseo_fallido += 1
+                    continue
+                filas_parseadas_ok += 1
                 
                 # Verificar si es hoy
                 if dia_cumple == dia_hoy and mes_cumple == mes_hoy:
@@ -12824,53 +12868,89 @@ def obtener_cumpleanos_hoy():
                     
                     if nombre and nombre.lower() not in ['nan', 'none', '']:
                         nombre_completo = f"{nombre} {apellido}".strip()
+                        if nombre_completo.endswith(' nan'):
+                            nombre_completo = nombre_completo[:-4].strip()
                         cumpleaneros.append(nombre_completo)
                         
             except Exception as e:
+                filas_parseo_fallido += 1
                 continue
         
+        logger.info(f"🎂 Parseo Excel: {filas_parseadas_ok} OK, {filas_parseo_fallido} fallidos. Cumpleañeros hoy: {len(cumpleaneros)}")
         return cumpleaneros
         
     except Exception as e:
         logger.error(f"Error obteniendo cumpleaños: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
 async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
-    """Tarea programada para enviar felicitaciones de cumpleaños a las 8:00 AM"""
+    """Tarea programada para enviar felicitaciones de cumpleaños a las 8:00 AM (hora Chile)
+
+    FASE 1: timezone Chile, mensaje cálido, logging robusto.
+    """
     try:
+        logger.info("🎂 Job cumpleaños diario disparado")
         cumpleaneros = obtener_cumpleanos_hoy()
-        
-        if not cumpleaneros:
-            logger.info("No hay cumpleaños hoy")
+
+        if cumpleaneros is None:
+            logger.warning("🎂 Job cumpleaños: obtener_cumpleanos_hoy() devolvió None (ver logs anteriores)")
             return
-        
-        # Crear mensaje de cumpleaños
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-        
-        mensaje = "🎂🎉 CUMPLEANOS DEL DIA! 🎉🎂\n"
-        mensaje += "━" * 30 + "\n"
-        mensaje += f"📅 {fecha_hoy}\n\n"
-        
-        mensaje += "🥳 Hoy celebramos a:\n\n"
-        
-        for nombre in cumpleaneros:
-            mensaje += f"🎈 {nombre}\n"
-        
-        mensaje += "\n" + "━" * 30 + "\n"
-        mensaje += "💐 Felicidades! Les deseamos un excelente dia.\n\n"
-        mensaje += "👉 Saluda a los cumpleaneros en el subgrupo 'Cumpleanos, Eventos y Efemerides COFRADIA'"
-        
-        # Enviar al grupo SIN parse_mode
+
+        if not cumpleaneros:
+            logger.info("🎂 Job cumpleaños: no hay cumpleañeros hoy")
+            return
+
+        # FIX FASE 1: usar hora Chile, no datetime.now() del servidor
+        ahora_cl = _ahora_chile()
+        fecha_hoy = ahora_cl.strftime("%d/%m/%Y")
+        nombre_dia = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'][ahora_cl.weekday()]
+
+        # Mensaje cálido y personalizado
+        if len(cumpleaneros) == 1:
+            mensaje  = "🎂🎉 ¡FELIZ CUMPLEAÑOS! 🎉🎂\n"
+            mensaje += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"📅 {nombre_dia} {fecha_hoy}\n\n"
+            mensaje += f"🎈 Hoy celebramos a *{cumpleaneros[0]}* 🎈\n\n"
+            mensaje += "💐 Que este nuevo año esté lleno de éxitos, salud y muchas alegrías junto a tu familia y amigos.\n\n"
+            mensaje += "🥂 Toda la Cofradía te abraza con cariño en este día especial."
+        else:
+            mensaje  = "🎂🎉 ¡CUMPLEAÑOS DEL DÍA! 🎉🎂\n"
+            mensaje += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"📅 {nombre_dia} {fecha_hoy}\n\n"
+            mensaje += "🥳 Hoy celebramos a:\n\n"
+            for nombre in cumpleaneros:
+                mensaje += f"   🎈 *{nombre}*\n"
+            mensaje += "\n💐 ¡Felicidades! Les deseamos un día maravilloso, lleno de alegría y momentos memorables.\n\n"
+            mensaje += "🥂 Toda la Cofradía les abraza con cariño."
+
+        mensaje += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        mensaje += "👉 Saluda a los cumpleañeros en el subgrupo «Cumpleaños, Eventos y Efemérides COFRADÍA»"
+
+        # Enviar al grupo (con parse_mode Markdown para los nombres en negrita)
         if COFRADIA_GROUP_ID:
-            await context.bot.send_message(
-                chat_id=COFRADIA_GROUP_ID,
-                text=mensaje
-            )
-            logger.info(f"✅ Enviado mensaje de cumpleaños: {len(cumpleaneros)} cumpleañeros")
-        
+            try:
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID,
+                    text=mensaje,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"✅ Mensaje cumpleaños enviado: {len(cumpleaneros)} cumpleañeros — {', '.join(cumpleaneros)}")
+            except Exception as e_md:
+                # Fallback sin Markdown si algun nombre rompe el parsing
+                logger.warning(f"🎂 Markdown falló ({e_md}), reintentando sin parse_mode")
+                mensaje_plano = mensaje.replace('*', '«').replace('»', '»')
+                await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=mensaje_plano)
+                logger.info(f"✅ Mensaje cumpleaños enviado (plano): {len(cumpleaneros)} cumpleañeros")
+        else:
+            logger.warning("🎂 COFRADIA_GROUP_ID no configurado, no se puede enviar cumpleaños")
+
     except Exception as e:
         logger.error(f"Error enviando cumpleaños: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
@@ -18516,17 +18596,40 @@ def obtener_indicadores_cmf():
         except Exception:
             return None
 
-    # -- TMC: intentar mes actual; retroceder al mes anterior si sin datos --
+    # FIX FASE 1 (TMC): La CMF anuncio el 30/dic/2025 una nueva metodologia de
+    # calculo de tasas de interes corriente y maxima convencional, vigente desde
+    # FEBRERO 2026 (basada en Archivo D35). Algunos meses pueden no estar disponibles
+    # inmediatamente o devolver TMCs vacio mientras se consolida la nueva metodologia.
+    # Solucion: retroceder hasta 4 meses + logging detallado de cada intento + fallback
+    # al endpoint anual /tmc/<year> cuando el endpoint mensual falla.
     tmc_items = []
-    for delta in (0, 1):
-        m = AHORA.month - delta or 12
-        a = AHORA.year if (AHORA.month - delta) >= 1 else AHORA.year - 1
-        j = _get(f"{CMF_BASE_URL}/tmc/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json")
+    intentos_log = []
+    raw_final_source = None  # para logging
+
+    # Estrategia 1: endpoint mensual, retrocediendo hasta 5 meses
+    for delta in (0, 1, 2, 3, 4):
+        m_calc = AHORA.month - delta
+        if m_calc <= 0:
+            m = m_calc + 12
+            a = AHORA.year - 1
+        else:
+            m = m_calc
+            a = AHORA.year
+        url = f"{CMF_BASE_URL}/tmc/{a}/{m:02d}?apikey={CMF_API_KEY}&formato=json"
+        j = _get(url)
         if not j:
+            intentos_log.append(f"{a}-{m:02d}: sin respuesta API")
             continue
+        # Manejar variaciones de estructura de la API CMF
         raw = j.get("TMCs") or j.get("tmc") or j.get("Tmc") or []
+        if not raw and isinstance(j.get("IndicadoresFinancieros"), dict):
+            raw = j["IndicadoresFinancieros"].get("TMCs") or []
         if not raw:
+            intentos_log.append(f"{a}-{m:02d}: API ok pero TMCs vacio")
             continue
+        intentos_log.append(f"{a}-{m:02d}: {len(raw)} registros encontrados OK")
+        raw_final_source = f"endpoint mensual {a}-{m:02d}"
+        # Procesar registros
         seen_tipos = set()
         for it in raw:
             titulo = str(it.get("Titulo") or "").strip()
@@ -18579,6 +18682,53 @@ def obtener_indicadores_cmf():
                 })
         if tmc_items:
             break
+
+    # Estrategia 2: si el mensual no devolvio nada, intentar endpoint anual del ano actual
+    if not tmc_items:
+        url_anual = f"{CMF_BASE_URL}/tmc/{AHORA.year}?apikey={CMF_API_KEY}&formato=json"
+        j = _get(url_anual)
+        if j:
+            raw = j.get("TMCs") or j.get("tmc") or []
+            if not raw and isinstance(j.get("IndicadoresFinancieros"), dict):
+                raw = j["IndicadoresFinancieros"].get("TMCs") or []
+            if raw:
+                # Filtrar a la fecha mas reciente disponible
+                # Agrupar por (tipo, fecha) y tomar el mas reciente por tipo
+                latest_by_tipo = {}
+                for it in raw:
+                    tipo = str(it.get("Tipo") or "").strip()
+                    fecha = str(it.get("Hasta") or it.get("Fecha") or "")[:10]
+                    if tipo not in latest_by_tipo or fecha > latest_by_tipo[tipo].get("_fecha_cmp", ""):
+                        it_copy = dict(it)
+                        it_copy["_fecha_cmp"] = fecha
+                        latest_by_tipo[tipo] = it_copy
+                intentos_log.append(f"endpoint anual {AHORA.year}: {len(raw)} registros, {len(latest_by_tipo)} ultimos por tipo")
+                raw_final_source = f"endpoint anual {AHORA.year}"
+                for it in latest_by_tipo.values():
+                    titulo = str(it.get("Titulo") or "").strip()
+                    sub = str(it.get("SubTitulo") or "").strip()
+                    v = _val(it.get("Valor") or it.get("valor"))
+                    fecha = str(it.get("Hasta") or it.get("Fecha") or "")[:10]
+                    tipo = str(it.get("Tipo") or "").strip()
+                    if tipo in TMC_TIPO_LABEL:
+                        label = TMC_TIPO_LABEL[tipo]
+                    else:
+                        # Fallback humanamente legible
+                        label = (titulo[:30] + (" T" + tipo if tipo else "")).strip() or "TMC"
+                    if v is not None:
+                        tmc_items.append({
+                            "label": label, "valor": v, "fecha": fecha,
+                            "titulo": titulo, "subtitulo": sub, "tipo": tipo,
+                        })
+            else:
+                intentos_log.append(f"endpoint anual {AHORA.year}: respuesta vacia")
+        else:
+            intentos_log.append(f"endpoint anual {AHORA.year}: sin respuesta")
+
+    if tmc_items:
+        logger.info(f"✅ TMC: {len(tmc_items)} tipos obtenidos desde {raw_final_source}")
+    else:
+        logger.warning(f"⚠️ TMC: no se pudieron obtener datos. Intentos: {' | '.join(intentos_log)}")
 
     # Ordenar por Tipo numerico (1,2,3... luego desconocidos)
     def _tipo_sort(x):
@@ -18880,15 +19030,26 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         d = datos.get(cod)
         if not d: continue
         col    = _s(d.get("color") or "#3478c3")
-        vals30 = [s.get("valor") or 0 for s in reversed(d.get("serie30", []))]
+        # FASE 2: para el modal ampliado necesitamos serie cronologica + fechas + nombre legible
+        serie30_raw = d.get("serie30", [])
+        vals30 = [s.get("valor") or 0 for s in reversed(serie30_raw)]
+        fechas30 = [(s.get("fecha") or '')[:10] for s in reversed(serie30_raw)]
         # Normalizar para sparkline (evita escala rota con valores 0 consecutivos)
         spk_d  = _j.dumps([round(float(v), 4) for v in vals30])
         xd     = _j.dumps(list(range(len(vals30))))
+        # Datos extra para modal ampliado
+        fechas_js = _j.dumps(fechas30)
+        nombre_legible = _s(d.get("nombre") or cod.upper())
+        # Min, Max, Avg para mostrar en modal
+        nums = [float(v) for v in vals30 if v not in (None, 0)] or vals30 or [0]
+        v_min = round(min(nums), 4) if nums else 0
+        v_max = round(max(nums), 4) if nums else 0
+        v_avg = round(sum(nums) / len(nums), 4) if nums else 0
         var_h  = variacion_html(d.get("serie30", []))
         vfmt   = fmt(d.get("valor"), cod)
         cards_html += (
             '<div class="card" onclick="_showDef(\'' + cod + '\')" style="cursor:pointer"'
-            ' title="Click para ver definicion y semaforo">'
+            ' title="Click para ver definicion, semaforo y grafico ampliado 30d">'
             '<div class="cn">' + _s(d.get("nombre")) + '</div>'
             '<div class="cv">' + vfmt + ' ' + var_h + '</div>'
             '<div class="cd">' + _s(d.get("descripcion")) + '</div>'
@@ -18896,10 +19057,12 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
             '<div class="cf">Actualizado: ' + _s(d.get("fecha")) + ' &#128270;</div>'
             '</div>'
         )
-        # Acumular config de sparkline para init diferido (JSON safe)
+        # Acumular config de sparkline para init diferido + datos para modal ampliado
         spark_cfg_items.append(
-            '{"id":"sp_' + cod + '","col":"' + col + '",'
-            '"dat":' + spk_d + ',"xd":' + xd + '}'
+            '{"id":"sp_' + cod + '","cod":"' + cod + '","col":"' + col + '",'
+            '"nm":"' + nombre_legible.replace('"', '\\"') + '",'
+            '"dat":' + spk_d + ',"xd":' + xd + ',"fc":' + fechas_js + ','
+            '"vmin":' + str(v_min) + ',"vmax":' + str(v_max) + ',"vavg":' + str(v_avg) + '}'
         )
 
     # JS: init todos los sparklines en requestAnimationFrame para que CSS grid
@@ -19462,7 +19625,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '</div></div>'
 
         '<div id="defModal" onclick="if(event.target===this)_closeDef()">'
-        '<div class="modal-box">'
+        '<div class="modal-box" style="max-width:680px">'
         '<button class="modal-close" onclick="_closeDef()">&#10005;</button>'
         '<div class="modal-title" id="defTitle"></div>'
         '<div class="modal-desc" id="defDesc"></div>'
@@ -19474,7 +19637,17 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '<span class="sem-text" id="defYellow"></span></div>'
         '<div class="sem-row red"><span class="sem-icon">&#128308;</span>'
         '<span class="sem-text" id="defRed"></span></div>'
-        '</div></div></div>'
+        '</div>'
+        # FASE 2: bloque de grafico ampliado 30 dias con eje X (fechas) e Y (valores)
+        '<div id="defChartBlock" style="margin-top:16px;display:none">'
+        '<div style="font-size:.95em;font-weight:800;color:#c3a55a;margin-bottom:6px">'
+        '&#128202; Tendencia ultimos 30 dias</div>'
+        '<div id="defStats" style="font-size:.78em;color:#aed6f1;margin-bottom:8px;'
+        'display:flex;gap:14px;flex-wrap:wrap"></div>'
+        '<div id="defChart" style="width:100%;height:260px;'
+        'background:rgba(0,0,0,.18);border-radius:10px;padding:6px"></div>'
+        '</div>'
+        '</div></div>'
 
         '<footer>'
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
@@ -19485,8 +19658,59 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
 
         '<script>'
         'var _DEFS={"uf":{"t":"Unidad de Fomento (UF)","d":"Unidad de cuenta reajustable diariamente segun la inflacion (IPC) del mes anterior. Es la medida mas usada en Chile para creditos hipotecarios (dividendos), arriendos comerciales, seguros de vida, AFP, contratos de largo plazo y ahorro (APV/cuenta 2). Su valor sube con inflacion positiva y baja solo en periodos de deflacion. Publicada por el Banco Central de Chile.","g":"Variacion mensual &lt; 0.3% — inflacion controlada, dividendos hipotecarios estables, buen momento para creditos en UF.","y":"Variacion mensual 0.3%–0.6% — inflacion moderada, dividendos comienzan a subir, monitorear decisiones del BCCh.","r":"Variacion mensual &gt; 0.6% — inflacion alta, dividendos hipotecarios se encarecen, creditos en UF mas caros, evaluar refinanciamiento."},"dolar":{"t":"Dolar Observado (USD/CLP)","d":"Tipo de cambio oficial entre el dolar estadounidense y el peso chileno, publicado diariamente por el Banco Central. Impacta directamente: precio de bencina, alimentos importados, tecnologia, viajes al exterior, deuda en dolares de empresas, y el costo de insumos industriales. Un dolar alto beneficia exportadores (cobre, frutas) pero encarece importaciones.","g":"$780–$880 CLP — rango equilibrado para la economia, bencina estable, importaciones accesibles.","y":"$880–$950 o $700–$780 — volatilidad moderada, posible intervencion del BCCh, atencion a portafolios en USD.","r":"&gt; $950 o &lt; $700 — alta volatilidad, riesgo cambiario significativo, impacto en precios de combustibles y alimentos."},"euro":{"t":"Euro (EUR/CLP)","d":"Tipo de cambio entre el euro y el peso chileno. Relevante para comercio con la Union Europea (vinos, frutas, maquinaria), viajes a Europa, estudios en el extranjero, y transferencias internacionales. Correlacionado con el dolar pero influenciado por decisiones del Banco Central Europeo (BCE).","g":"$850–$970 CLP — rango equilibrado para comercio e importaciones europeas.","y":"$970–$1.050 o $780–$850 — atencion a tendencias, posible impacto en importaciones de maquinaria.","r":"&gt; $1.050 o &lt; $780 — desequilibrio importante, impacto en costos de importacion desde Europa."},"utm":{"t":"Unidad Tributaria Mensual (UTM)","d":"Medida utilizada en Chile exclusivamente para fines tributarios y legales. Se reajusta mensualmente segun el IPC. Sirve para calcular: multas de transito, topes de beneficios sociales (bonos), tramos de impuesto a la renta (2da categoria), topes para boletas de honorarios, montos exentos de IVA, y limites legales diversos. Publicada por el SII.","g":"Variacion mensual &lt; 0.4% — estabilidad tributaria, tramos impositivos predecibles.","y":"Variacion mensual 0.4%–0.8% — ajuste moderado, revisar tramos tributarios.","r":"Variacion mensual &gt; 0.8% — impacto en cargas tributarias, posible cambio de tramo de renta."},"ipc":{"t":"Indice de Precios al Consumidor (IPC)","d":"Variacion porcentual mensual de precios de una canasta de 303 bienes y servicios representativa del consumo chileno. Es el indicador OFICIAL de inflacion, publicado por el INE el dia 8 de cada mes. Determina el reajuste de la UF, sueldos en UF, arriendos, pensiones y contratos indexados. Meta del Banco Central: 3% anual.","g":"0.0%–0.3% mensual — inflacion dentro de la meta del BCCh (3% anual), economia estable.","y":"0.3%–0.6% mensual — inflacion sobre la meta, probable mantencion o alza de TPM por el BCCh.","r":"&gt; 0.6% mensual o negativo persistente — inflacion descontrolada o deflacion, riesgo para la economia."},"tpm":{"t":"Tasa de Politica Monetaria (TPM)","d":"Tasa de interes de referencia fijada por el Consejo del Banco Central de Chile en reuniones mensuales. Es LA tasa que determina el costo del dinero para todo el sistema financiero: creditos hipotecarios, creditos de consumo, tarjetas de credito, lineas de credito y depositos a plazo. Una TPM alta encarece creditos pero controla inflacion; una TPM baja abarata creditos pero puede generar inflacion.","g":"3.0%–5.0% — politica monetaria neutra/expansiva, creditos accesibles, economia en crecimiento.","y":"5.0%–8.0% — politica restrictiva moderada, creditos mas caros, BCCh controlando inflacion.","r":"&gt; 8.0% o &lt; 2.0% — situacion extrema: crisis inflacionaria o recesion profunda."},"bitcoin":{"t":"Bitcoin (BTC)","d":"Criptomoneda descentralizada creada en 2009, la de mayor capitalizacion de mercado mundial (~$1.3T). Su precio refleja: sentimiento global de riesgo, adopcion institucional (ETFs, fondos), decisiones de la Fed de EE.UU., y regulaciones globales. Altamente volatil — puede variar 10-20% en dias. En Chile se puede comprar en Buda.com, CryptoMarket y otras plataformas.","g":"Variacion diaria &lt; 3% — mercado estable, confianza inversora.","y":"Variacion diaria 3%–8% — volatilidad moderada, atencion a noticias macro globales.","r":"Variacion diaria &gt; 8% — alta volatilidad, riesgo elevado, posible liquidacion de posiciones."},"tasa_desempleo":{"t":"Tasa de Desempleo (INE)","d":"Porcentaje de personas de la fuerza laboral (mayores de 15 anos) que buscan activamente empleo sin encontrarlo. Publicada trimestralmente por el INE (trimestre movil). Es el indicador clave de salud del mercado laboral y bienestar social. Afecta consumo interno, recaudacion fiscal, y politicas sociales del gobierno.","g":"&lt; 7.5% — mercado laboral saludable, buenas oportunidades de empleo.","y":"7.5%–9.5% — desempleo moderado, dificultades para encontrar trabajo, alerta social.","r":"&gt; 9.5% — crisis laboral severa, requiere politicas activas de empleo y subsidios."},"imacec":{"t":"IMACEC (Actividad Economica)","d":"Indicador Mensual de Actividad Economica, publicado por el Banco Central ~35 dias despues del mes medido. Es la estimacion mensual del PIB y mide si la economia chilena crece o se contrae. Incluye todos los sectores: mineria, comercio, servicios, industria, construccion, agricultura. Es el indicador mas seguido por analistas para evaluar la salud economica del pais.","g":"&gt; 2.5% — crecimiento saludable, economia expandiendose, buen momento para inversiones.","y":"0.5%–2.5% — crecimiento debil, economia avanzando lento, cautela en inversiones.","r":"&lt; 0.5% o negativo — estancamiento o recesion tecnica, contraer gastos, proteger capital."},"libra_cobre":{"t":"Precio del Cobre (USD/lb)","d":"Precio de la libra de cobre en la Bolsa de Metales de Londres (LME). Chile es el MAYOR productor mundial (~27% de produccion global). El cobre representa ~50% de las exportaciones chilenas y es determinante para: ingresos fiscales (Codelco), tipo de cambio (dolar), empleo en regiones mineras, y la regla fiscal del gobierno. Llamado el sueldo de Chile.","g":"&gt; USD 4.00/lb — precios altos, bonanza fiscal, fortalecimiento del peso, mayores ingresos para Chile.","y":"USD 3.00–4.00/lb — precios moderados, equilibrio fiscal razonable.","r":"&lt; USD 3.00/lb — precios bajos, menor recaudacion, presion sobre el tipo de cambio, recortes en Codelco."},"ivp":{"t":"Indice de Valor Promedio (IVP)","d":"Indice diario publicado por el Banco Central que mide el valor promedio de la UF durante el mes ANTERIOR. Se usa como alternativa a la UF en ciertas operaciones de credito bancarias, pagares reajustables, y transacciones financieras. Es menos volatile que la UF del dia porque promedia todo el mes.","g":"Variacion estable y alineada con la UF — normalidad financiera.","y":"Divergencia moderada con la UF — revisar condiciones de pagares reajustables.","r":"Divergencia significativa — posible anomalia, revisar condiciones de credito indexado a IVP."},"ipsa":{"t":"IPSA — Bolsa de Comercio de Santiago","d":"Indice de Precio Selectivo de Acciones. Mide el rendimiento de las 30 acciones con mayor presencia bursatil en la Bolsa de Santiago. Incluye empresas como Falabella, COPEC, SQM, Banco de Chile, ENELAM, Cencosud, CAP. Es el principal indicador del mercado accionario chileno y refleja la confianza de los inversionistas en la economia local.","g":"Tendencia alcista sostenida — confianza inversora, economia sana, buen momento para fondos mutuos accionarios.","y":"Lateral o volatil — incertidumbre, diversificar inversiones.","r":"Tendencia bajista prolongada — aversion al riesgo, posible fuga de capitales, proteger portafolio."},"solana":{"t":"Solana (SOL)","d":"Criptomoneda y plataforma blockchain de ALTA VELOCIDAD (~65.000 transacciones/seg vs 15 de Ethereum). Utilizada para DeFi (finanzas descentralizadas), NFTs y aplicaciones descentralizadas. Competidor directo de Ethereum con transacciones mucho mas baratas (~$0.01 vs $5-50 de ETH).","g":"Variacion diaria &lt; 5% — estabilidad relativa en cripto.","y":"Variacion diaria 5%–10% — volatilidad moderada, comun en altcoins.","r":"Variacion diaria &gt; 10% — volatilidad extrema, alto riesgo."},"ethereum":{"t":"Ethereum (ETH)","d":"Segunda criptomoneda por capitalizacion (~$400B). Plataforma LIDER en contratos inteligentes (smart contracts), DeFi, NFTs y tokenizacion de activos reales. Migro a Proof of Stake (PoS) reduciendo 99% su consumo energetico. Base de miles de proyectos cripto y Web3. Mas estable que altcoins pero mas volatil que Bitcoin.","g":"Variacion diaria &lt; 4% — mercado estable.","y":"Variacion diaria 4%–8% — volatilidad moderada.","r":"Variacion diaria &gt; 8% — alta volatilidad, precaucion."}};'
-        'function _showDef(cod){var d=_DEFS[cod];if(!d)return;document.getElementById("defTitle").innerHTML=d.t;document.getElementById("defDesc").innerHTML=d.d;document.getElementById("defGreen").innerHTML=d.g;document.getElementById("defYellow").innerHTML=d.y;document.getElementById("defRed").innerHTML=d.r;document.getElementById("defModal").style.display="block";document.body.style.overflow="hidden";}'
-        'function _closeDef(){document.getElementById("defModal").style.display="none";document.body.style.overflow="auto";}'
+        # FASE 2: _showDef ahora muestra ademas el grafico ampliado 30 dias
+        # con eje X (fechas), eje Y (valores) y stats min/max/promedio del periodo.
+        'var _defChartInst=null;'
+        'function _fmtNum(v){if(v==null)return "-";var n=Number(v);if(!isFinite(n))return "-";'
+        'if(Math.abs(n)>=1000)return n.toLocaleString("es-CL",{minimumFractionDigits:0,maximumFractionDigits:2});'
+        'return n.toLocaleString("es-CL",{minimumFractionDigits:2,maximumFractionDigits:4});}'
+        'function _showDef(cod){var d=_DEFS[cod];if(!d)return;'
+        'document.getElementById("defTitle").innerHTML=d.t;'
+        'document.getElementById("defDesc").innerHTML=d.d;'
+        'document.getElementById("defGreen").innerHTML=d.g;'
+        'document.getElementById("defYellow").innerHTML=d.y;'
+        'document.getElementById("defRed").innerHTML=d.r;'
+        # Buscar config de grafico ampliado en _sparkCfg
+        'var cfg=null;for(var i=0;i<_sparkCfg.length;i++){if(_sparkCfg[i].cod===cod){cfg=_sparkCfg[i];break}}'
+        'var blk=document.getElementById("defChartBlock");'
+        'if(cfg&&cfg.dat&&cfg.dat.length>0){'
+        # Stats
+        'var stEl=document.getElementById("defStats");'
+        'stEl.innerHTML="<span>&#9650; Max: <b style=\\"color:#2ecc71\\">"+_fmtNum(cfg.vmax)+"</b></span>"+'
+        '"<span>&#9660; Min: <b style=\\"color:#e74c3c\\">"+_fmtNum(cfg.vmin)+"</b></span>"+'
+        '"<span>&#9679; Promedio: <b style=\\"color:#c3a55a\\">"+_fmtNum(cfg.vavg)+"</b></span>"+'
+        '"<span>&#128197; "+(cfg.fc[0]||"")+" -> "+(cfg.fc[cfg.fc.length-1]||"")+"</span>";'
+        'blk.style.display="block";'
+        'setTimeout(function(){'
+        'var ce=document.getElementById("defChart");'
+        'if(_defChartInst){_defChartInst.dispose();_defChartInst=null;}'
+        '_defChartInst=echarts.init(ce);'
+        '_defChartInst.setOption({'
+        'backgroundColor:"transparent",'
+        'animation:true,'
+        'grid:{left:60,right:18,top:14,bottom:36},'
+        'tooltip:{trigger:"axis",backgroundColor:"rgba(15,47,89,.95)",'
+        'borderColor:"#c3a55a",textStyle:{color:"#e0e6ed",fontSize:11},'
+        'formatter:function(p){var i=p[0];return i.axisValue+"<br/>"+'
+        '"<span style=\\"color:"+i.color+"\\">&#9679;</span> "+_fmtNum(i.value);}},'
+        'xAxis:{type:"category",data:cfg.fc,axisLabel:{color:"#8899aa",fontSize:9,rotate:35,interval:Math.max(0,Math.floor(cfg.fc.length/8)-1)},'
+        'axisLine:{lineStyle:{color:"#2a4a6a"}}},'
+        'yAxis:{type:"value",scale:true,axisLabel:{color:"#8899aa",fontSize:10,formatter:function(v){return _fmtNum(v)}},'
+        'splitLine:{lineStyle:{color:"rgba(195,165,90,.12)"}}},'
+        'series:[{type:"line",data:cfg.dat,smooth:true,symbol:"circle",symbolSize:4,'
+        'lineStyle:{color:cfg.col,width:2.6},'
+        'itemStyle:{color:cfg.col},'
+        'areaStyle:{color:{type:"linear",x:0,y:0,x2:0,y2:1,'
+        'colorStops:[{offset:0,color:cfg.col+"66"},{offset:1,color:"transparent"}]}}'
+        '}]});'
+        '_defChartInst.resize();'
+        '},80);'
+        '}else{blk.style.display="none";}'
+        'document.getElementById("defModal").style.display="block";'
+        'document.body.style.overflow="hidden";}'
+        'function _closeDef(){document.getElementById("defModal").style.display="none";'
+        'document.body.style.overflow="auto";'
+        'if(_defChartInst){_defChartInst.dispose();_defChartInst=null;}}'
         'document.addEventListener("keydown",function(e){if(e.key==="Escape")_closeDef();});'
         # TMC definitions injected into _DEFS
         'var _TMC={"tmc_T21":{"t":"TMC T21 — Reajustables &lt; 1 ano","d":"Tasa maxima legal para creditos REAJUSTABLES (en UF) con plazo menor a 1 ano. Aplica a creditos de consumo en UF de corto plazo y lineas de credito reajustables. Si pides un credito en UF pagadero en menos de 12 meses, esta es la tasa maxima que el banco puede cobrarte.","g":"Si tu credito esta bajo esta tasa, tienes buenas condiciones.","y":"Cercano a la TMC — estas en el limite legal, compara alternativas.","r":"No se puede superar esta tasa — seria usura."},"tmc_T22":{"t":"TMC T22 — Reajustables &gt;1a &gt;2.000 UF","d":"Creditos REAJUSTABLES a 1 ano o mas, montos SOBRE 2.000 UF (~$80M). Aplica a creditos hipotecarios de montos altos y creditos comerciales en UF. Es la tasa tope para creditos hipotecarios grandes.","g":"Credito hipotecario bien bajo esta tasa.","y":"Tasa cercana al tope — negociar mejores condiciones.","r":"Tasa tope legal — no puede superarse."},"tmc_T24":{"t":"TMC T24 — Reajustables &gt;1a &le;2.000 UF","d":"Creditos REAJUSTABLES a 1 ano o mas, montos HASTA 2.000 UF (~$80M). La MAYORIA de creditos hipotecarios normales de personas caen aqui. Si estas comprando una vivienda con credito hipotecario, esta es probablemente tu tasa maxima legal.","g":"Tu hipotecario tiene buena tasa.","y":"Cercano al tope — compara entre bancos.","r":"Tasa tope — evalua otras opciones de financiamiento."},"tmc_T25":{"t":"TMC T25 — No reaj. &lt;90d &gt;5.000 UF","d":"Creditos NO REAJUSTABLES en pesos, plazo menor a 90 dias, montos sobre 5.000 UF. Aplica a prestamos empresariales de corto plazo, factoring y lineas de credito comerciales grandes.","g":"Buena tasa para operacion comercial.","y":"Monitorear — comparar con factoring alternativo.","r":"Tasa tope."},"tmc_T26":{"t":"TMC T26 — No reaj. &lt;90d 200-5K UF","d":"Creditos NO REAJUSTABLES en pesos, plazo menor a 90 dias, montos 200-5.000 UF. Esta es la tasa MAS ALTA de todas y aplica a: avances en efectivo de tarjetas de credito, creditos de consumo rapidos, y prestamos personales de corto plazo. Por eso las tarjetas de credito son tan caras.","g":"Evita estos creditos si puedes.","y":"MUY cara — solo en emergencia.","r":"La tasa mas alta del sistema — EXTREMA PRECAUCION."},"tmc_T34":{"t":"TMC T34 — Reajustables &gt;5.000 UF","d":"Grandes operaciones empresariales en UF, leasing inmobiliario comercial, financiamiento de proyectos inmobiliarios grandes.","g":"Condiciones normales de mercado.","y":"Evaluar alternativas.","r":"Tope legal."},"tmc_T35":{"t":"TMC T35 — Reajustables 200-5K UF","d":"Creditos de consumo medianos en UF (200-5.000 UF), creditos automotrices, prestamos personales reajustables. Comun para compra de vehiculos y creditos de libre disposicion.","g":"Buena tasa para el segmento.","y":"Comparar ofertas.","r":"Tope."},"tmc_T43":{"t":"TMC T43 — No reaj. &ge;90d descuento pension","d":"Creditos para JUBILADOS con descuento directo de su pension. Tasa especial regulada para proteger a pensionados. Si eres jubilado y te ofrecen un credito, la tasa no puede superar este limite.","g":"Proteccion al pensionado.","y":"Verificar que no supere este tope.","r":"Tope legal — denunciar excesos ante CMF."},"tmc_T44":{"t":"TMC T44 — Reajustables 50-200 UF","d":"Creditos pequenos en UF ($2-8M), compras a credito reajustables, prestamos de consumo menores.","g":"Condiciones aceptables.","y":"Tasa elevada — buscar alternativas.","r":"Tope — precaucion."},"tmc_T45":{"t":"TMC T45 — Reajustables &le;50 UF","d":"Micro-creditos de hasta 50 UF (~$2M). Prestamos muy pequenos. Tasa alta porque el riesgo del monto bajo es mayor para el banco. Comun en cooperativas y cajas de compensacion.","g":"Normal para micro-credito.","y":"Alta pero esperable para montos chicos.","r":"Tope — preferir ahorro antes que micro-credito."},"tmc_T46":{"t":"TMC T46 — No reaj. &ge;90d &le;2K UF","d":"Creditos de consumo NORMALES en pesos chilenos, plazo 90 dias o mas, hasta 2.000 UF. Es la categoria mas comun: tu credito de consumo bancario tipico, prestamo personal, credito automotriz en pesos.","g":"Tu credito tiene buena tasa.","y":"Cercano al tope — negociar.","r":"Tope legal para creditos de consumo."},"tmc_T47":{"t":"TMC T47 — No reaj. &ge;90d &gt;2K UF","d":"Creditos comerciales en pesos, leasing empresarial, creditos de mediano plazo sobre 2.000 UF. Para empresas que necesitan financiamiento en pesos sin reajustabilidad.","g":"Buenas condiciones comerciales.","y":"Comparar ofertas bancarias.","r":"Tope para creditos comerciales."}};'
@@ -20012,7 +20236,23 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
     afp_list = (datos_afp or {}).get('afps', [])
     afp_a = [round((afp_tabla.get(a) or {}).get('A',{}).get('rent_pct') or 0,2) for a in afp_list]
     afp_e = [round((afp_tabla.get(a) or {}).get('E',{}).get('rent_pct') or 0,2) for a in afp_list]
+    # FASE 2: datos completos de los 5 fondos para modal ampliado
+    afp_b = [round((afp_tabla.get(a) or {}).get('B',{}).get('rent_pct') or 0,2) for a in afp_list]
+    afp_c = [round((afp_tabla.get(a) or {}).get('C',{}).get('rent_pct') or 0,2) for a in afp_list]
+    afp_d = [round((afp_tabla.get(a) or {}).get('D',{}).get('rent_pct') or 0,2) for a in afp_list]
+    afp_full_js = json.dumps({
+        'A': afp_a, 'B': afp_b, 'C': afp_c, 'D': afp_d, 'E': afp_e
+    })
     afp_names_js = json.dumps([a.capitalize() for a in afp_list])
+    # FASE 2: datos TMC completos para modal ampliado
+    tmc_full_js = json.dumps([
+        {'label': t.get('label', ''),
+         'valor': round(t.get('valor', 0), 2),
+         'titulo': t.get('titulo', ''),
+         'subtitulo': t.get('subtitulo', ''),
+         'fecha': t.get('fecha', ''),
+         'tipo': t.get('tipo', '')} for t in tmc_items[:14]
+    ])
 
     h12_labels = json.dumps(hist_12m.get('labels',[])); h12_d = json.dumps(hist_12m.get('dolar',[])); h12_e = json.dumps(hist_12m.get('euro',[]))
 
@@ -20322,6 +20562,16 @@ table.TB{width:100%;border-collapse:collapse;font-size:0.76em;margin-top:8px}
 <div class="mPA" id="mPA"></div>
 </div>
 </div></div>
+<!-- FASE 2: Modal universal para expansion de graficos (Indicadores y AFP & TASAS) -->
+<div id="xpModal" style="display:none;position:fixed;z-index:9999;inset:0;background:rgba(0,0,0,.85);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:1rem" onclick="if(event.target===this)_xpClose()">
+<div style="background:linear-gradient(145deg,#0f2f59,#1a3a6a);border:2px solid #c3a55a;border-radius:16px;padding:1.4rem 1.6rem;max-width:1100px;width:96%;max-height:94vh;overflow-y:auto;position:relative;box-shadow:0 25px 80px rgba(0,0,0,.85)">
+<button onclick="_xpClose()" style="position:absolute;top:.6rem;right:1rem;background:none;border:none;color:#c3a55a;font-size:1.9rem;cursor:pointer;line-height:1">&times;</button>
+<div id="xpTitle" style="color:#c3a55a;font-size:1.35em;font-weight:800;margin-bottom:.4rem;padding-right:2rem"></div>
+<div id="xpSubtitle" style="color:#aed6f1;font-size:.85em;margin-bottom:.9rem"></div>
+<div id="xpStats" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:.9rem;font-size:.82em;color:#d0d6dd"></div>
+<div id="xpChart" style="width:100%;height:480px;background:rgba(0,0,0,.22);border-radius:12px;padding:6px"></div>
+<div id="xpInfo" style="margin-top:.9rem;font-size:.86em;color:#d0d6dd;line-height:1.55;padding:10px 14px;background:rgba(0,0,0,.18);border-radius:10px;border-left:3px solid #c3a55a"></div>
+</div></div>
 <div class="F">&#9875; DASHBOARD ECONOMICO <b>COFRADIA DE NETWORKING</b> · Fuentes: Banco Central · CMF · AFP<br><b>''' + generado + '''</b></div>
 </div>
 <script>
@@ -20377,6 +20627,107 @@ CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundCo
 // Grafico de Proyecciones (3 escenarios)
 try{var pData=''' + proy_chart_data + ''';if(pData.length>0){CH.pry=echarts.init(document.getElementById('chartProy'));var pN=pData.map(function(d){return d.name});var pO=pData.map(function(d){return d.opt});var pB=pData.map(function(d){return d.base});var pP=pData.map(function(d){return d.pes});CH.pry.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Optimista','Base','Pesimista'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'15%',top:'18%'},xAxis:{type:'category',data:pN,axisLabel:{color:tx,fontSize:9,rotate:20},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:[{name:'Optimista',type:'bar',data:pO,itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:8}},{name:'Base',type:'bar',data:pB,itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:8}},{name:'Pesimista',type:'bar',data:pP,itemStyle:{color:rd,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:rd,fontSize:8}}]})}}catch(e){}
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
+
+// FASE 2: SISTEMA DE EXPANSION DE GRAFICOS — click en cualquier .CB de Indicadores/AFP & TASAS
+// abre un modal grande con el grafico ampliado, leyendas visibles, valores en eje, info adicional
+var _xpInst=null;
+var _afpFull=''' + afp_full_js + ''';
+var _tmcFull=''' + tmc_full_js + ''';
+var _afpNames=''' + afp_names_js + ''';
+var _xpMeta={
+'cGD':{ch:'gd',titulo:'Dolar USD/CLP — Gauge actual',sub:'Tipo de cambio observado en tiempo real',info:'El dolar observado es publicado diariamente por el Banco Central de Chile a partir de las operaciones del mercado bancario. Impacta directamente el precio de combustibles, alimentos importados, tecnologia, viajes y deuda en USD. Un dolar alto beneficia a exportadores (cobre, frutas) pero encarece importaciones.'},
+'cGU':{ch:'gu',titulo:'Unidad de Fomento (UF) — Gauge actual',sub:'Valor diario de la UF en pesos chilenos',info:'La UF es una unidad de cuenta reajustable diariamente segun la inflacion (IPC) del mes anterior. Es la medida mas usada en Chile para creditos hipotecarios, arriendos comerciales, seguros, AFP y contratos de largo plazo. Publicada por el Banco Central.'},
+'cBr':{ch:'br',titulo:'INDICADORES MACROECONOMICOS (%)',sub:'IPC, TPM, Desempleo e IMACEC en una sola vista',info:'IPC: inflacion mensual (meta BCCh 3% anual). TPM: tasa de politica monetaria. Desempleo: % de la fuerza laboral sin trabajo (INE trimestral). IMACEC: actividad economica mensual (~PIB). Estos 4 indicadores definen el pulso macroeconomico del pais.'},
+'cCr':{ch:'cr',titulo:'CRIPTOMONEDAS — Capitalizacion en USD',sub:'Bitcoin, Ethereum y Solana en USD actual',info:'Bitcoin (BTC) es la cripto mas grande (~1.3T USD). Ethereum (ETH, ~400B) lidera contratos inteligentes y DeFi. Solana (SOL) se distingue por velocidad (65k tx/seg) y costos bajos. Altamente volatiles, su precio refleja sentimiento global de riesgo y decisiones de la Fed.'},
+'cSp':{ch:'sp',titulo:'DOLAR 30 DIAS — BANDAS BOLLINGER + MIN/MAX/PROMEDIO',sub:'Volatilidad y sobrecompra/sobreventa del USD/CLP',info:'Las Bandas de Bollinger se calculan como media movil (7 dias) +/- 2 desviaciones estandar. Cuando el precio toca la banda superior puede indicar sobrecompra; en la banda inferior, sobreventa. Util para detectar momentos de alta volatilidad cambiaria.'},
+'cPj':{ch:'pj',titulo:'PROYECCION DOLAR — TENDENCIA + 7 DIAS',sub:'Proyeccion lineal a 7 dias (regresion sobre 30 dias)',info:'Proyeccion calculada por regresion lineal simple sobre los ultimos 30 dias de cotizacion. ATENCION: es una proyeccion matematica que NO considera shocks de mercado, intervenciones del BCCh, decisiones de la Fed o eventos geopoliticos. Usar como referencia, no como prediccion.'},
+'cCm':{ch:'cm',titulo:'COMPARATIVO UF vs DOLAR vs EURO (30d normalizado)',sub:'Variacion porcentual en base 100 (D-30 = 100)',info:'Las series estan normalizadas con base 100 al primer dia para comparar movimientos relativos sin importar la magnitud absoluta. Permite ver de un vistazo cual de los 3 instrumentos se aprecio o deprecio mas en el ultimo mes.'},
+'cIn':{ch:'inf',titulo:'INFLACION IPC ANUALIZADO — ULTIMOS 10 AÑOS',sub:'Inflacion anual (% acumulada) por ano calendario',info:'IPC anualizado representa la inflacion acumulada en 12 meses (variacion del IPC entre diciembre del ano anterior y diciembre del ano en curso). Meta del Banco Central de Chile: 3% anual. Verde = dentro de meta; Amarillo = 3-5% (presion inflacionaria); Rojo = >5% (alarmante).'},
+'cDs':{ch:'ds',titulo:'DESEMPLEO 15 AÑOS POR PRESIDENTE',sub:'Tasa de desempleo anual coloreada por administracion',info:'Cada barra esta coloreada segun el presidente en ejercicio durante ese ano. Permite comparar la performance del mercado laboral bajo distintas administraciones. Umbral de alerta: >8% indica deterioro significativo del empleo. Fuente: INE (encuesta de empleo trimestral).'},
+'cAf':{ch:'af',titulo:'AFP — RENTABILIDAD 6 MESES (TODOS LOS FONDOS A,B,C,D,E)',sub:'Rentabilidad real ultimos 6 meses por AFP y fondo',info:'FONDO A: mas riesgoso, hasta 80% renta variable (acciones). Recomendado para jovenes (<35 anos). FONDO B: 60% renta variable. FONDO C: 40% renta variable, perfil moderado (35-55 anos). FONDO D: 20% renta variable, conservador (55+). FONDO E: maximo 5% renta variable, mas conservador. Fuente: quetalmiafp.cl.'},
+'cTm':{ch:'tm',titulo:'TASAS CMF — TASA MAXIMA CONVENCIONAL (TMC)',sub:'Tasas legales maximas por tipo de operacion',info:'La TMC es la tasa MAXIMA legal que un banco puede cobrar. Si te cobran mas, es usura (delito). Cada Tipo aplica a una categoria distinta: T46/T47 = creditos consumo en pesos. T22/T24 = hipotecarios reajustables. T26 = la mas alta, aplica a tarjetas de credito. La CMF anuncio el 30/dic/2025 una nueva metodologia vigente desde feb/2026 (Archivo D35). Fuente: api.cmfchile.cl.'},
+'cH12':{ch:'h12',titulo:'DOLAR vs EURO — ULTIMOS 12 MESES',sub:'Tendencia anual de las 2 monedas principales',info:'Comparativo del dolar y el euro frente al peso chileno en los ultimos 12 meses. La correlacion entre ambos suele ser alta porque dependen de factores comunes: precio del cobre, tasas en EE.UU. y Europa, y sentimiento global de riesgo.'},
+'cH5c':{ch:'h5c',titulo:'INDICADORES EN PESOS (CLP) — 5 AÑOS',sub:'UF, Dolar, Euro, UTM en horizonte largo',info:'Vista de 5 anos para identificar megatendencias: ciclos cambiarios, impacto de crisis (COVID, guerra Ucrania), reajuste de la UF en periodos inflacionarios. Util para decisiones de largo plazo: hipotecarios, ahorro previsional, inversiones.'},
+'cH5u':{ch:'h5u',titulo:'INDICADORES EN USD — 5 AÑOS',sub:'Bitcoin, Ethereum, Solana, Cobre',info:'Activos cotizados en dolares con 5 anos de historia. Cobre = sueldo de Chile (50% de exportaciones). Bitcoin/ETH/SOL = mercado cripto global. Util para entender ciclos de commodities y altcoins.'}
+};
+
+function _xpStat(label,val,col){return '<span style="display:inline-flex;align-items:center;gap:5px"><span style="opacity:.7">'+label+':</span> <b style="color:'+(col||'#c3a55a')+'">'+val+'</b></span>';}
+
+function _xpand(elId){
+  var meta=_xpMeta[elId];if(!meta){return}
+  var src=CH[meta.ch];
+  document.getElementById('xpTitle').textContent=meta.titulo;
+  document.getElementById('xpSubtitle').textContent=meta.sub;
+  document.getElementById('xpInfo').textContent=meta.info;
+  // Stats
+  var stats='';
+  if(elId==='cSp'||elId==='cPj'||elId==='cCm'){var s=ST.dolar||{};stats=_xpStat('Min 30d','$'+fc(s.min||0,2),'#e74c3c')+_xpStat('Max 30d','$'+fc(s.max||0,2),'#2ecc71')+_xpStat('Promedio','$'+fc(s.avg||0,2),'#c3a55a');}
+  else if(elId==='cAf'){stats=_xpStat('Periodo','Ultimos 6 meses')+_xpStat('Fondos','A · B · C · D · E')+_xpStat('Fuente','quetalmiafp.cl');}
+  else if(elId==='cTm'){stats=_xpStat('Total tipos',_tmcFull.length)+_xpStat('Fuente','api.cmfchile.cl')+_xpStat('Actualizacion',_tmcFull[0]?_tmcFull[0].fecha:'-');}
+  document.getElementById('xpStats').innerHTML=stats;
+  // Mostrar modal
+  var m=document.getElementById('xpModal');m.style.display='flex';document.body.style.overflow='hidden';
+  setTimeout(function(){
+    var ce=document.getElementById('xpChart');
+    if(_xpInst){_xpInst.dispose();_xpInst=null;}
+    _xpInst=echarts.init(ce);
+    var opt=null;
+    // OVERRIDES especificos: AFP modal muestra los 5 fondos en vez de 2
+    if(elId==='cAf'){
+      var colors=['#8ab4f8','#3478c3','#c3a55a','#f39c12','#2ecc71'];
+      var fondos=['A','B','C','D','E'];
+      var series=fondos.map(function(f,i){return{name:'Fondo '+f,type:'bar',data:_afpFull[f]||[],itemStyle:{color:colors[i],borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:colors[i],fontSize:9,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}});
+      opt={backgroundColor:'transparent',animation:true,tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx,fontSize:13}},legend:{data:fondos.map(function(f){return'Fondo '+f}),textStyle:{color:tx,fontSize:13},top:5,itemWidth:18,itemHeight:12},grid:{left:60,right:30,bottom:40,top:55,containLabel:true},xAxis:{type:'category',data:_afpNames,axisLabel:{color:tx,fontSize:13,fontWeight:'bold'},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:12,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:series};
+    }
+    // OVERRIDE TMC: mostrar todos los tipos con leyendas legibles
+    else if(elId==='cTm'){
+      var labels=_tmcFull.map(function(t){return t.label});
+      var values=_tmcFull.map(function(t){return t.valor});
+      var titulos=_tmcFull.map(function(t){return t.titulo+'\\n'+t.subtitulo});
+      opt={backgroundColor:'transparent',animation:true,tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx,fontSize:12},formatter:function(p){var i=p[0].dataIndex;return'<b>'+labels[i]+'</b><br/>Valor: <b style=\\"color:'+gd+'\\">'+fc(values[i],2)+'%</b><br/><span style=\\"font-size:.85em;color:#aed6f1\\">'+titulos[i].replace('\\n','<br/>')+'</span>'}},grid:{left:280,right:50,top:20,bottom:30},xAxis:{type:'value',axisLabel:{color:tx,fontSize:12,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:labels,axisLabel:{color:tx,fontSize:12,fontWeight:'bold'},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:values,itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.20)'},{offset:1,color:gd}]},borderRadius:[0,8,8,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',fontSize:13,formatter:function(p){return fc(p.value,2)+'%'}}}]};
+    }
+    // GENERICO: clonar option del chart original y ampliar fonts
+    else if(src){
+      try{
+        var origOpt=src.getOption();
+        opt=JSON.parse(JSON.stringify(origOpt));
+        // Ampliar fonts en ejes y leyendas para vista grande
+        function _bigger(o){if(!o)return;if(o.axisLabel){o.axisLabel.fontSize=Math.max(11,(o.axisLabel.fontSize||10)+3)}if(o.nameTextStyle){o.nameTextStyle.fontSize=13}}
+        if(opt.xAxis){var xa=Array.isArray(opt.xAxis)?opt.xAxis:[opt.xAxis];xa.forEach(_bigger)}
+        if(opt.yAxis){var ya=Array.isArray(opt.yAxis)?opt.yAxis:[opt.yAxis];ya.forEach(_bigger)}
+        if(opt.legend){var lg=Array.isArray(opt.legend)?opt.legend:[opt.legend];lg.forEach(function(l){if(l&&l.textStyle)l.textStyle.fontSize=13;else if(l)l.textStyle={color:tx,fontSize:13}})}
+        if(opt.grid){var gr=Array.isArray(opt.grid)?opt.grid:[opt.grid];gr.forEach(function(g){if(g){g.left=Math.max(g.left||40,55);g.top=Math.max(parseInt(g.top)||30,40);g.bottom=Math.max(parseInt(g.bottom)||30,45)}})}
+        // Activar labels en series tipo line para mostrar valores
+        if(opt.series){opt.series.forEach(function(s){if(s.type==='line'&&!s.label)s.label={show:false};if(s.type==='line'&&s.data&&s.data.length<=12)s.label={show:true,color:tx,fontSize:11,fontWeight:'bold',formatter:function(p){return fc(p.value,2)}}})}
+      }catch(e){opt=null;}
+    }
+    if(opt)_xpInst.setOption(opt,true);
+    _xpInst.resize();
+  },90);
+}
+function _xpClose(){var m=document.getElementById('xpModal');m.style.display='none';document.body.style.overflow='auto';if(_xpInst){_xpInst.dispose();_xpInst=null}}
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var m=document.getElementById('xpModal');if(m&&m.style.display==='flex')_xpClose();}});
+
+// Wire onclick a todos los .CB de Indicadores, AFP&Tasas e Historico
+(function(){
+  var tabsClick=['tab-ind','tab-afp','tab-hist'];
+  tabsClick.forEach(function(tid){
+    var t=document.getElementById(tid);if(!t)return;
+    t.querySelectorAll('.CB').forEach(function(cb){
+      var c=cb.querySelector('.C');if(!c||!c.id)return;
+      if(_xpMeta[c.id]){
+        cb.style.cursor='pointer';
+        cb.title='Click para ver el grafico ampliado con detalle';
+        var ct=cb.querySelector('.CT');
+        if(ct){ct.innerHTML=ct.innerHTML+' <span style="font-size:.7em;color:#c3a55a;opacity:.75">&#128270; click</span>'}
+        cb.addEventListener('click',function(ev){
+          // Solo si el click no es sobre un elemento interactivo del chart
+          if(ev.target.tagName==='CANVAS'||ev.target.tagName==='SPAN'||ev.target.tagName==='DIV'){_xpand(c.id)}
+        });
+      }
+    });
+  });
+})();
 // Simuladores
 var UF=''' + str(uf) + ''';
 var _lastAmort=null,_lastAPV=null,_lastInv=null;
@@ -21275,27 +21626,63 @@ async def match_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def calculadora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /calculadora — Abre Suite Económica Pro como WebApp popup"""
+    """Comando /calculadora — Abre Suite Económica Pro.
+
+    FASE 1: Soporta tanto chat privado como grupo.
+    - Chat privado: WebApp embebido en Telegram (mejor UX, abre dentro del cliente).
+    - Grupo: botón URL al navegador (Telegram NO soporta WebAppInfo en botones inline
+      de grupos, solo en chat privado o vía boton de teclado de reply). Se ofrece
+      adicionalmente un boton para continuar la experiencia en chat privado con el bot.
+    """
     render_url = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
     if not render_url:
         await update.message.reply_text("❌ URL del servidor no configurada (RENDER_EXTERNAL_URL).")
         return
     calc_url = f"{render_url}/calculadora"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧮 Abrir Suite Económica Pro", web_app=WebAppInfo(url=calc_url))],
-    ])
-    await update.message.reply_text(
-        "🧮 SUITE ECONÓMICA PRO\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Calculadora financiera completa:\n"
-        "• Simulador de créditos hipotecarios\n"
-        "• Conversión UF/CLP/USD/EUR\n"
-        "• Cálculo de IVA e impuestos\n"
-        "• Simulador de inversiones\n"
-        "• Y mucho más...\n\n"
-        "👇 Presiona el botón para abrir:",
-        reply_markup=keyboard
-    )
-    registrar_servicio_usado(update.effective_user.id, 'calculadora')
+
+    chat_type = update.effective_chat.type if update.effective_chat else 'private'
+    es_privado = (chat_type == 'private')
+
+    if es_privado:
+        # Chat privado: WebApp embebido (mejor experiencia, abre dentro de Telegram)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧮 Abrir Suite Económica Pro", web_app=WebAppInfo(url=calc_url))],
+        ])
+        texto = (
+            "🧮 SUITE ECONÓMICA PRO\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Calculadora financiera completa:\n"
+            "• Simulador de créditos hipotecarios\n"
+            "• Calculadora IPC (Variación / Reajuste)\n"
+            "• Conversión UF/CLP/USD/EUR\n"
+            "• Cálculo de IVA e impuestos\n"
+            "• APV — Ahorro Previsional\n"
+            "• Inversión Proyectada\n\n"
+            "👇 Presiona el botón para abrir:"
+        )
+    else:
+        # Grupo: WebAppInfo NO funciona en grupos, usar URL + opción privado
+        bot_username = (context.bot.username or BOT_USERNAME).lstrip('@')
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧮 Abrir en navegador", url=calc_url)],
+            [InlineKeyboardButton("💬 Mejor experiencia (chat privado)", url=f"https://t.me/{bot_username}?start=calculadora")],
+        ])
+        texto = (
+            "🧮 SUITE ECONÓMICA PRO\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Calculadora financiera completa:\n"
+            "• Simulador de créditos hipotecarios\n"
+            "• Calculadora IPC (Variación / Reajuste)\n"
+            "• Conversión UF/CLP/USD/EUR\n"
+            "• Cálculo de IVA e impuestos\n"
+            "• APV — Ahorro Previsional\n"
+            "• Inversión Proyectada\n\n"
+            "👇 Opciones para abrir:\n"
+            "   1️⃣ Abrir directo en navegador (botón superior)\n"
+            "   2️⃣ Continuar en chat privado conmigo (botón inferior, recomendado)"
+        )
+
+    await update.message.reply_text(texto, reply_markup=keyboard)
+    if update.effective_user:
+        registrar_servicio_usado(update.effective_user.id, 'calculadora')
 
 
 async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
