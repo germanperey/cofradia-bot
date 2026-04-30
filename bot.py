@@ -3970,8 +3970,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Error verificación QR: {e_verif}")
             await update.message.reply_text("❌ Error verificando usuario.")
             return ConversationHandler.END
+
+    # FIX FASE 1: DEEP LINK /start calculadora → abrir directamente el WebApp
+    # de la calculadora (en lugar de mostrar el panel de comandos /start).
+    # Se llega aqui cuando el usuario hace click en el boton "Mejor experiencia
+    # (chat privado)" desde el grupo (URL t.me/<bot>?start=calculadora).
+    if context.args and len(context.args) > 0 and context.args[0] == 'calculadora':
+        render_url = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
+        if render_url:
+            calc_url = f"{render_url}/calculadora"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧮 Abrir Suite Económica Pro", web_app=WebAppInfo(url=calc_url))],
+            ])
+            saludo = f"Hola {user.first_name}! 👋\n\n" if user and user.first_name else ""
+            await update.message.reply_text(
+                f"{saludo}🧮 SUITE ECONÓMICA PRO\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Calculadora financiera completa:\n"
+                "• Simulador de créditos hipotecarios\n"
+                "• Calculadora IPC (Variación / Reajuste)\n"
+                "• Conversión UF/CLP/USD/EUR\n"
+                "• Cálculo de IVA e impuestos\n"
+                "• APV — Ahorro Previsional\n"
+                "• Inversión Proyectada\n\n"
+                "👇 Presiona el botón para abrir la ventana emergente:",
+                reply_markup=keyboard
+            )
+            try:
+                registrar_servicio_usado(user_id, 'calculadora')
+            except Exception:
+                pass
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("❌ La calculadora no está disponible en este momento (servidor no configurado).")
+            return ConversationHandler.END
     
-    
+
     # Owner siempre tiene acceso completo
     if user_id == OWNER_ID:
         registrar_usuario_suscripcion(user_id, 'Germán', user.username or '', es_admin=True, dias_gratis=999999, last_name='Perey')
