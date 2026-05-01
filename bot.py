@@ -11472,143 +11472,11 @@ def buscar_rag_expandido(query_original, limit=5):
         return buscar_rag(query_original, limit)
 
 
-# ════════════════════════════════════════════════════════════════════════
-# FASE 6 — RAG MEJORADO: Query expansion + BM25 + fuzzy + sinónimos
-# Sin cambiar schema BD, sin reindexar libros, sin embeddings vectoriales.
-# Mejora: encuentra contenido aunque uses sinónimos o errores tipográficos.
-# ════════════════════════════════════════════════════════════════════════
-
-# Diccionario de sinónimos para query expansion (español + términos técnicos)
-_FASE6_SINONIMOS = {
-    # Liderazgo / management
-    'liderazgo': ['liderar', 'líder', 'lider', 'gestion', 'gestión', 'management', 'dirigir', 'dirección', 'mando'],
-    'liderar': ['liderazgo', 'gestion', 'gestión', 'dirigir', 'mando'],
-    'líder': ['liderazgo', 'liderar', 'jefe', 'gestion', 'management'],
-    'gestión': ['gestion', 'management', 'liderazgo', 'administración', 'administracion'],
-    'management': ['gestión', 'gestion', 'liderazgo', 'administración'],
-    # Economía
-    'inflación': ['inflacion', 'ipc', 'precios', 'devaluación', 'devaluacion'],
-    'inflacion': ['inflación', 'ipc', 'precios'],
-    'economía': ['economia', 'macroeconomía', 'finanzas', 'mercado'],
-    'economia': ['economía', 'finanzas', 'macroeconomía'],
-    'inversión': ['inversion', 'inversiones', 'invertir', 'rentabilidad'],
-    'inversion': ['inversión', 'inversiones', 'invertir'],
-    'finanzas': ['economía', 'economia', 'dinero', 'capital'],
-    # Estrategia
-    'estrategia': ['estrategico', 'estratégico', 'plan', 'táctica', 'tactica'],
-    'táctica': ['tactica', 'estrategia', 'método'],
-    # Naval / militar
-    'naval': ['armada', 'marina', 'oficial', 'militar'],
-    'armada': ['naval', 'marina', 'militar'],
-    'guerra': ['conflicto', 'combate', 'batalla', 'enfrentamiento'],
-    # Filosofía / pensamiento
-    'filosofía': ['filosofia', 'pensamiento', 'reflexión', 'reflexion'],
-    'filosofia': ['filosofía', 'pensamiento'],
-    'ética': ['etica', 'moral', 'valores', 'principios'],
-    # Negocios
-    'negocio': ['negocios', 'empresa', 'business', 'comercial'],
-    'empresa': ['negocio', 'compañía', 'compañia', 'corporación'],
-    'cliente': ['clientes', 'customer', 'consumidor'],
-    'producto': ['productos', 'servicio', 'oferta'],
-    # Aprendizaje
-    'aprender': ['aprendizaje', 'enseñar', 'educar', 'estudio'],
-    'enseñar': ['enseñanza', 'aprender', 'educar'],
-    # Personas
-    'autor': ['escritor', 'autora', 'pensador'],
-    'libro': ['libros', 'obra', 'texto', 'lectura'],
-}
-
-
-def _fase6_expandir_query(palabras_clave):
-    """FASE 6: Expande la lista de palabras con sinónimos del diccionario.
-    Recibe lista normalizada (sin tildes), devuelve lista expandida sin duplicados."""
-    expandidas = list(palabras_clave)  # original primero (mayor peso)
-    for p in palabras_clave:
-        sinonimos = _FASE6_SINONIMOS.get(p, [])
-        for s in sinonimos:
-            # Normalizar también el sinónimo
-            import unicodedata
-            s_norm = unicodedata.normalize('NFKD', s.lower())
-            s_norm = ''.join(ch for ch in s_norm if not unicodedata.combining(ch))
-            if s_norm not in expandidas:
-                expandidas.append(s_norm)
-    return expandidas
-
-
-def _fase6_calcular_idf(palabra, total_docs_estimado=200):
-    """FASE 6: BM25 IDF aproximado. Palabras raras valen más que comunes.
-    Sin estadísticas reales, usamos heurística: palabras largas son más raras."""
-    import math
-    # Heurística simple: palabras de 7+ letras son más distintivas
-    if len(palabra) >= 9:
-        return 3.0  # muy distintiva
-    elif len(palabra) >= 7:
-        return 2.2
-    elif len(palabra) >= 5:
-        return 1.5
-    else:
-        return 1.0
-
-
-def _fase6_score_bm25(texto_norm, palabras, palabras_originales=None, k1=1.5, b=0.75, doc_len_avg=600):
-    """FASE 6: Scoring BM25 simplificado.
-    Pondera term-frequency con saturation + length normalization + IDF.
-    Mucho mejor que LIKE %palabra% que solo cuenta si aparece o no."""
-    if not texto_norm or not palabras:
-        return 0.0
-    palabras_originales = palabras_originales or set()
-    doc_len = max(len(texto_norm), 1)
-    score = 0.0
-    for p in palabras:
-        if not p or len(p) < 3:
-            continue
-        tf = texto_norm.count(p)  # term frequency
-        if tf == 0:
-            continue
-        idf = _fase6_calcular_idf(p)
-        # BM25 formula con saturation y normalization
-        norm = (1 - b) + b * (doc_len / doc_len_avg)
-        bm25 = idf * (tf * (k1 + 1)) / (tf + k1 * norm)
-        # Boost extra si es palabra original (no expandida)
-        if p in palabras_originales:
-            bm25 *= 1.4
-        score += bm25
-    return score
-
-
-def _fase6_fuzzy_match(palabra_query, palabra_texto, max_distance=2):
-    """FASE 6: Matching fuzzy con distancia Levenshtein simplificada.
-    Tolera 1-2 errores de tipeo en palabras de 5+ letras (Kierkergard ≈ Kierkegaard)."""
-    if not palabra_query or not palabra_texto:
-        return False
-    if len(palabra_query) < 5 or len(palabra_texto) < 5:
-        return palabra_query == palabra_texto
-    if abs(len(palabra_query) - len(palabra_texto)) > max_distance:
-        return False
-    # Implementación rápida de Levenshtein (sin librería externa)
-    if palabra_query == palabra_texto:
-        return True
-    m, n = len(palabra_query), len(palabra_texto)
-    if m == 0 or n == 0:
-        return False
-    prev = list(range(n + 1))
-    for i in range(1, m + 1):
-        cur = [i] + [0] * n
-        for j in range(1, n + 1):
-            cost = 0 if palabra_query[i-1] == palabra_texto[j-1] else 1
-            cur[j] = min(cur[j-1] + 1, prev[j] + 1, prev[j-1] + cost)
-        if min(cur) > max_distance:
-            return False  # early exit
-        prev = cur
-    return prev[n] <= max_distance
-
-
 def buscar_rag(query, limit=5):
     """
-    Búsqueda RAG bifásica MEJORADA con FASE 6:
+    Búsqueda RAG bifásica:
     Fase 1 — Búsqueda por NOMBRE DE DOCUMENTO (nombres propios, títulos, autores)
     Fase 2 — Búsqueda semántica general balanceada (máx. 3 chunks por documento)
-    FASE 6: + query expansion con sinónimos + BM25 scoring + fuzzy match en títulos
     
     Retorna: (lista de (texto, source), score_maximo)
     """
@@ -11644,38 +11512,17 @@ def buscar_rag(query, limit=5):
             return [], 0.0
         
         # ═══════════════════════════════════════════════════
-        # FASE 6 (nuevo): EXPANSION DE QUERY CON SINONIMOS
-        # ═══════════════════════════════════════════════════
-        palabras_originales_set = set(palabras_clave)
-        palabras_expandidas = _fase6_expandir_query(palabras_clave)
-        if len(palabras_expandidas) > len(palabras_clave):
-            logger.info(f"📚 FASE 6 query expansion: {len(palabras_clave)} → {len(palabras_expandidas)} términos "
-                       f"(añadidos: {[p for p in palabras_expandidas if p not in palabras_originales_set][:5]})")
-        
-        # ═══════════════════════════════════════════════════
         # FASE 1: BÚSQUEDA POR NOMBRE DE DOCUMENTO
         # Si alguna palabra clave aparece en el SOURCE (nombre del archivo),
         # traer TODOS los chunks de ese documento — máxima prioridad
-        # FASE 6: + fuzzy match para tolerar errores tipográficos en títulos
         # ═══════════════════════════════════════════════════
         docs_fase1 = []    # sources encontrados en fase 1
         chunks_fase1 = []  # (texto, score, source) con score alto
         
-        # Pre-cargar TODOS los sources únicos para fuzzy matching
-        try:
-            if DATABASE_URL:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 500")
-            else:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 500")
-            todos_sources = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
-        except Exception:
-            todos_sources = []
-        
-        for palabra in palabras_clave:  # Solo originales en fase 1 (no expandidas — evita ruido)
+        for palabra in palabras_clave:
             if len(palabra) < 3:
                 continue
             try:
-                # 1) Búsqueda exacta substring (rápida)
                 if DATABASE_URL:
                     c.execute("SELECT DISTINCT source FROM rag_chunks WHERE LOWER(source) LIKE %s LIMIT 5",
                              (f'%{palabra}%',))
@@ -11688,21 +11535,6 @@ def buscar_rag(query, limit=5):
                     if src and src not in docs_fase1:
                         docs_fase1.append(src)
                         logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src}'")
-                
-                # 2) FASE 6: Búsqueda fuzzy si la exacta no encontró nada (errores tipograficos)
-                if not sources_encontrados and len(palabra) >= 5:
-                    for src in todos_sources:
-                        if src in docs_fase1:
-                            continue
-                        src_norm = normalizar(src)
-                        # Probar fuzzy contra cada palabra del source
-                        for token_src in src_norm.split():
-                            if len(token_src) >= 5 and _fase6_fuzzy_match(palabra, token_src, max_distance=2):
-                                docs_fase1.append(src)
-                                logger.info(f"🎯 Fase 1 RAG (FUZZY): '{palabra}' ≈ '{token_src}' → '{src}'")
-                                break
-                        if src in docs_fase1:
-                            break
             except Exception as e:
                 logger.debug(f"Error fase1 RAG: {e}")
         
@@ -11734,10 +11566,9 @@ def buscar_rag(query, limit=5):
         # ═══════════════════════════════════════════════════
         # FASE 2: BÚSQUEDA SEMÁNTICA GENERAL BALANCEADA
         # Busca por keywords/texto, pero limita chunks por documento
-        # FASE 6: + términos expandidos con sinónimos + scoring BM25 (mejor que conteo simple)
         # ═══════════════════════════════════════════════════
-        # Solo términos que no sean stopwords contextuales — incluyendo sinónimos
-        terminos_semanticos = [p for p in palabras_expandidas if len(p) >= 3][:12]  # antes era [:8] solo originales
+        # Solo términos que no sean stopwords contextuales
+        terminos_semanticos = [p for p in palabras_clave if len(p) >= 3][:8]
         
         chunks_fase2 = []
         
@@ -11753,7 +11584,7 @@ def buscar_rag(query, limit=5):
                     params.extend([f'%{term}%', f'%{term}%'])
             
             where_clause = " OR ".join(condiciones)
-            max_candidates = limit * 25  # FASE 6: subir candidatos para mejor BM25 ranking
+            max_candidates = limit * 20
             
             # Excluir documentos ya encontrados en fase 1
             if docs_fase1:
@@ -11775,7 +11606,7 @@ def buscar_rag(query, limit=5):
                                 WHERE {where_clause_f2} LIMIT ?""", params_f2 + [max_candidates])
                 filas_f2 = c.fetchall()
                 
-                # FASE 6: Scoring híbrido BM25 + título boost + bonificaciones por longitud/tipo
+                # Scoring semántico
                 for fila in filas_f2:
                     if DATABASE_URL:
                         texto = fila['chunk_text'] or ''
@@ -11788,22 +11619,14 @@ def buscar_rag(query, limit=5):
                     
                     texto_n = normalizar(texto)
                     kw_n = normalizar(keywords)
-                    src_n = normalizar(source)
                     
-                    # Score BM25 sobre el cuerpo del chunk (más informativo que conteo)
-                    score = _fase6_score_bm25(texto_n, terminos_semanticos, palabras_originales_set)
+                    score = 0.0
+                    for p in terminos_semanticos:
+                        if p in kw_n:
+                            score += 3.0
+                        if p in texto_n:
+                            score += 2.0 + min(texto_n.count(p) * 0.3, 2.0)
                     
-                    # Bonus por keywords (campo curado, mucho más denso)
-                    score += _fase6_score_bm25(kw_n, terminos_semanticos, palabras_originales_set, doc_len_avg=80) * 1.5
-                    
-                    # FASE 6: TITLE BOOST — si la palabra ORIGINAL aparece en el source/título, x3
-                    # (no en chunks_fase1 que ya capturó match exacto, sino otros casos)
-                    for p in palabras_originales_set:
-                        if len(p) >= 4 and p in src_n:
-                            score *= 3.0
-                            break
-                    
-                    # Bonificaciones por contenido (heredadas)
                     if len(texto) < 100:
                         score *= 0.4
                     elif len(texto) < 200:
@@ -11813,7 +11636,7 @@ def buscar_rag(query, limit=5):
                     if source.startswith('PDF:'):
                         score *= 1.1
                     
-                    if score > 0.1:  # umbral mínimo BM25 (era 0)
+                    if score > 0:
                         chunks_fase2.append((texto, score, source))
                         
             except Exception as e:
