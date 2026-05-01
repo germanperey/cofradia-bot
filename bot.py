@@ -6698,6 +6698,7 @@ REGLAS:
 5. Responde de forma completa, clara y útil en máximo 3-4 párrafos
 6. Sin asteriscos ni formatos Markdown
 7. Si hay comandos sugeridos relevantes, menciona 1-2 al final de tu respuesta de forma natural
+8. FASE 5 — SALUDO PERSONALIZADO OBLIGATORIO: comienza tu respuesta dirigiendote a {user_name} por su nombre de forma natural y cordial, eligiendo aleatoriamente entre formas como: "Hola {user_name}, ...", "Estimado {user_name}, ...", "{user_name}, mira...", "Excelente pregunta, {user_name}. ...", "Te cuento, {user_name}: ...", "{user_name}, te explico: ...". Variar entre opciones. Calido pero profesional.
 
 PREGUNTA DE {user_name}: "{pregunta}"
 
@@ -12986,6 +12987,181 @@ async def enviar_cumpleanos_diario(context: ContextTypes.DEFAULT_TYPE):
         logger.error(traceback.format_exc())
 
 
+# ════════════════════════════════════════════════════════════════════════
+# FASE 5 — ENGAGEMENT: Mensajes automaticos al grupo con variedad y personalidad
+# Implementa 3 mensajes proactivos diarios (matutino, mediodia, tarde) ademas
+# del resumen nocturno (20:00) y cumpleaños (8:00) ya existentes.
+# Cada mensaje rota entre 7+ variantes para evitar repeticion.
+# ════════════════════════════════════════════════════════════════════════
+
+# Frases motivacionales rotativas (1 por dia de la semana)
+_FASE5_FRASES_LUNES = [
+    "💪 La disciplina es el puente entre los objetivos y los logros. — Jim Rohn",
+    "⚓ Lunes: el día perfecto para zarpar hacia tus metas con determinación.",
+    "🎯 Comienza la semana con propósito: cada acción de hoy construye el éxito de mañana.",
+    "🚀 La excelencia no es un acto, sino un hábito. — Aristóteles",
+    "📈 Pequeños progresos diarios suman grandes resultados. ¡Buen lunes!",
+]
+_FASE5_FRASES_MARTES = [
+    "🧭 La constancia vence lo que la dicha no alcanza. Buen martes a todos.",
+    "💼 Hoy es un buen día para tomar esa decisión que has estado postergando.",
+    "🌟 El secreto del éxito está en la persistencia del propósito. — Disraeli",
+    "⚓ Marinero que ya no anhela puerto, ya no merece nave. Ánimo este martes.",
+]
+_FASE5_FRASES_MIERCOLES = [
+    "📊 Mitad de semana — momento perfecto para revisar tus avances.",
+    "🌊 Las tormentas no duran para siempre, pero los marineros experimentados sí. Buen miércoles.",
+    "💡 Las grandes ideas suelen llegar a mitad de semana, cuando ya estás en ritmo.",
+]
+_FASE5_FRASES_JUEVES = [
+    "🎯 El éxito es la suma de pequeños esfuerzos repetidos día tras día. — Robert Collier",
+    "⚓ Un buen capitán se forja en alta mar, no en aguas tranquilas.",
+    "📚 Quien deja de aprender se vuelve viejo, así tenga 20 u 80 años. — Henry Ford",
+]
+_FASE5_FRASES_VIERNES = [
+    "🌅 ¡Viernes! Buen día para cerrar lo pendiente y celebrar lo logrado.",
+    "🍷 La verdadera riqueza está en los amigos con quienes brindas. Buen viernes, Cofrades.",
+    "⚓ Llegamos al puerto del fin de semana — ¡a celebrar lo navegado!",
+]
+_FASE5_FRASES_SABADO = [
+    "🌊 El descanso es parte del trabajo bien hecho. ¡Buen sábado!",
+    "👨‍👩‍👧 Sábado: día perfecto para recargar energías junto a los tuyos.",
+    "🍽️ Una buena mesa y mejor compañía: la mejor inversión del fin de semana.",
+]
+_FASE5_FRASES_DOMINGO = [
+    "🌞 Domingo de calma — preparemos juntos una semana extraordinaria.",
+    "📖 La pausa también es estrategia. Disfruta tu domingo, Cofrade.",
+    "⚓ Después del descanso, el viento siempre vuelve a las velas.",
+]
+
+# Curiosidades histórico-navales y económicas para el mensaje de mediodía
+_FASE5_CURIOSIDADES = [
+    "🌊 SABÍAS QUE... la Armada de Chile es la 4ta más antigua de América (1817), fundada por Manuel Blanco Encalada.",
+    "⚓ DATO HISTÓRICO: el combate naval de Iquique (21 mayo 1879) inspiró la frase \"al abordaje, muchachos\" de Arturo Prat.",
+    "💰 CURIOSIDAD ECONÓMICA: Chile produce el 27% del cobre mundial, lo que lo hace el mayor productor del planeta.",
+    "📊 SABÍAS QUE... la UF (Unidad de Fomento) fue creada en 1967 para proteger el ahorro de la inflación.",
+    "🚢 DATO CURIOSO: el Buque Escuela Esmeralda recorre más de 60.000 millas náuticas en cada crucero anual de instrucción.",
+    "💵 ECONOMÍA: el peso chileno se introdujo en 1975, reemplazando al escudo. Antes existió el peso antiguo (hasta 1959).",
+    "⛵ NAVAL: Bernardo O'Higgins ordenó la creación de la Primera Escuadra Nacional el 9 de octubre de 1818.",
+    "📈 FINANZAS: el IPSA (Índice de Precios Selectivo de Acciones) reúne las 30 empresas más líquidas de la Bolsa de Santiago.",
+    "🌎 SABÍAS QUE... Chile tiene la costa continental más larga de Sudamérica: 4.270 km de Arica a Magallanes.",
+    "🪙 HISTORIA MONETARIA: el primer billete chileno se emitió en 1840 por el Banco de Arcos y Cía.",
+    "⚓ NAVAL: el escudo de la Armada incluye un cóndor, símbolo del territorio nacional, posado sobre un ancla.",
+    "💼 EMPRENDIMIENTO: en Chile hay más de 1,2 millones de PYMEs que generan el 65% del empleo formal.",
+    "📊 SABÍAS QUE... los fondos de AFP en Chile administran cerca de USD 170.000 millones, ~50% del PIB.",
+    "🌊 DATO CURIOSO: el hundimiento de la Esmeralda en 1879 marcó el inicio del heroísmo naval chileno.",
+]
+
+# Tips económicos rotativos para el insight de tarde
+_FASE5_TIPS = [
+    "💡 TIP FINANCIERO: pagar con débito en lugar de tarjeta de crédito te ahorra intereses promedio del 26% TMC anual.",
+    "📈 TIP INVERSIÓN: diversifica tu portafolio entre 3-4 instrumentos (acciones, fondos mutuos, depósitos a plazo, oro).",
+    "🏠 TIP HIPOTECARIO: si tu hipotecario tiene >5 años, simula refinanciar — las tasas cambian y podrías ahorrar millones.",
+    "💰 TIP AHORRO: la regla del 50/30/20 — 50% necesidades, 30% deseos, 20% ahorro/inversión.",
+    "📊 TIP APV: aporta voluntariamente al APV régimen A — recuperas el 15% como bonificación fiscal directa.",
+    "🛡️ TIP SEGUROS: revisa anualmente tus pólizas. Cambian las coberturas y las primas, y casi siempre puedes mejorar.",
+    "💳 TIP CRÉDITO: si tienes deuda con tasa >20%, prioriza pagarla antes de invertir — ningún instrumento te paga eso.",
+]
+
+
+async def enviar_saludo_matutino(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 5 — Saludo matutino (08:30 AM) con frase rotativa por día y dato de UF/dolar.
+    Variedad: 3-7 frases por día de la semana, evita repetición intra-semanal."""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        ahora_cl = _ahora_chile()
+        dia_semana = ahora_cl.weekday()  # 0=Lunes, 6=Domingo
+        nombre_dia = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'][dia_semana]
+        listas_frases = [_FASE5_FRASES_LUNES, _FASE5_FRASES_MARTES, _FASE5_FRASES_MIERCOLES,
+                         _FASE5_FRASES_JUEVES, _FASE5_FRASES_VIERNES, _FASE5_FRASES_SABADO, _FASE5_FRASES_DOMINGO]
+        import random as _rnd_fase5
+        frase = _rnd_fase5.choice(listas_frases[dia_semana])
+
+        # Tratar de obtener UF y dólar para enriquecer el mensaje (sin bloquear si falla)
+        uf_str = ''
+        dolar_str = ''
+        try:
+            r_uf = requests.get('https://mindicador.cl/api/uf', timeout=5)
+            if r_uf.status_code == 200:
+                serie_uf = (r_uf.json() or {}).get('serie', [])
+                if serie_uf:
+                    uf_val = serie_uf[0].get('valor')
+                    if uf_val:
+                        uf_str = f"UF: ${uf_val:,.2f}".replace(',','.')
+        except Exception:
+            pass
+        try:
+            r_d = requests.get('https://mindicador.cl/api/dolar', timeout=5)
+            if r_d.status_code == 200:
+                serie_d = (r_d.json() or {}).get('serie', [])
+                if serie_d:
+                    d_val = serie_d[0].get('valor')
+                    if d_val:
+                        dolar_str = f"Dólar: ${d_val:,.0f}".replace(',','.')
+        except Exception:
+            pass
+
+        msg = f"☀️ ¡Buenos días, Cofradía!\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"📅 {nombre_dia} {ahora_cl.strftime('%d/%m/%Y')}\n\n"
+        msg += f"{frase}\n"
+        if uf_str or dolar_str:
+            msg += f"\n📊 Indicadores hoy: "
+            if uf_str: msg += uf_str
+            if uf_str and dolar_str: msg += " · "
+            if dolar_str: msg += dolar_str
+        msg += f"\n\n💡 Usa /economia para el panorama completo del día."
+
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"☀️ FASE 5 saludo matutino enviado ({nombre_dia})")
+    except Exception as e:
+        logger.error(f"❌ FASE 5 saludo matutino error: {e}")
+
+
+async def enviar_curiosidad_mediodia(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 5 — Curiosidad de mediodía (13:00) con dato histórico-naval o económico.
+    Rotación: 14 curiosidades distintas, secuencial por día del año (no aleatoria)."""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        ahora_cl = _ahora_chile()
+        # Rotacion deterministica por dia del año
+        idx = (ahora_cl.timetuple().tm_yday) % len(_FASE5_CURIOSIDADES)
+        curiosidad = _FASE5_CURIOSIDADES[idx]
+        msg = f"🔔 PAUSA DE MEDIODÍA — DATO INTERESANTE\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"{curiosidad}\n\n"
+        msg += f"💬 ¿Conoces algún otro dato curioso? ¡Compártelo en el grupo!"
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"🍽️ FASE 5 curiosidad mediodia enviada (idx={idx})")
+    except Exception as e:
+        logger.error(f"❌ FASE 5 curiosidad mediodia error: {e}")
+
+
+async def enviar_insight_tarde(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 5 — Insight de tarde (17:30) con tip financiero rotativo + cierre del día.
+    Aparece SOLO de lunes a viernes (días hábiles)."""
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        ahora_cl = _ahora_chile()
+        # Solo lunes a viernes
+        if ahora_cl.weekday() >= 5:
+            return
+        idx = (ahora_cl.timetuple().tm_yday) % len(_FASE5_TIPS)
+        tip = _FASE5_TIPS[idx]
+        msg = f"🌇 CIERRE DE JORNADA\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"{tip}\n\n"
+        msg += f"⚓ Que tengan una excelente tarde, Cofrades.\n"
+        msg += f"💡 Para más herramientas financieras: /calculadora · /economia"
+        await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"🌇 FASE 5 insight tarde enviado (idx={idx})")
+    except Exception as e:
+        logger.error(f"❌ FASE 5 insight tarde error: {e}")
+
+
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
     """Tarea programada para enviar resumen del día a las 20:00"""
     try:
@@ -18614,13 +18790,34 @@ def obtener_indicadores_cmf():
         "9": "Credito Hipotecario",
     }
 
-    def _get(url):
-        try:
-            r = requests.get(url, headers=HDR, timeout=12)
-            if r.status_code == 200:
-                return r.json()
-        except Exception as _e:
-            logger.debug(f"CMF fetch: {_e}")
+    def _get(url, max_intentos=2):
+        """FIX FASE 5: logging visible + reintento + timeout 25s para Render→CMF.
+        Sin esto los fallos eran SILENCIOSOS (logger.debug invisible) y nunca se
+        sabía si la API CMF estaba caida, lenta, o devolviendo errores HTTP."""
+        import time as _t_get
+        for intento in range(1, max_intentos + 1):
+            try:
+                r = requests.get(url, headers=HDR, timeout=25)
+                if r.status_code == 200:
+                    try:
+                        return r.json()
+                    except Exception as _e_json:
+                        logger.warning(f"⚠️ CMF respuesta no-JSON: {url[:80]} — {_e_json}")
+                        return None
+                else:
+                    logger.warning(f"⚠️ CMF HTTP {r.status_code} (intento {intento}/{max_intentos}): {url[:100]}")
+                    if r.status_code in (429, 502, 503, 504) and intento < max_intentos:
+                        _t_get.sleep(1.5 * intento)  # backoff
+                        continue
+                    return None
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏱️ CMF TIMEOUT (intento {intento}/{max_intentos}): {url[:80]}")
+                if intento < max_intentos:
+                    _t_get.sleep(1.0)
+                    continue
+            except Exception as _e:
+                logger.warning(f"❌ CMF excepcion ({type(_e).__name__}): {url[:80]} — {_e}")
+                return None
         return None
 
     def _val(s):
@@ -18824,6 +19021,52 @@ def obtener_indicadores_cmf():
         except Exception as _e_html:
             intentos_log.append(f"E3 web scraping: excepcion {type(_e_html).__name__}")
             logger.warning(f"⚠️ TMC scraping fallo: {_e_html}")
+
+    # ───── ESTRATEGIA 4: API alternativa mindicador.cl (FIX FASE 5) ─────
+    # Si las 3 estrategias CMF directas fallaron, intentar mindicador.cl que
+    # mantiene una replica de TMC por categorias. Sin API key, gratuita, mas
+    # estable que la API CMF cuando hay cambios de metodologia (feb/2026).
+    if not tmc_items:
+        try:
+            # Categorias TMC en mindicador.cl: tasa_consumo (TMC consumo), tasa_microempresa, tasa_hipotecario
+            # No expone el detalle por tipo de la CMF, pero al menos da las 3 tasas referenciales
+            categorias_min = [
+                ('tasa_consumo', 'TMC Consumo', '1'),
+                ('tasa_microempresa', 'TMC Microempresa', '2'),
+                ('tasa_hipotecario', 'TMC Hipotecaria', '9'),
+            ]
+            tipo_seq_e4 = 1
+            for cat_id, cat_label, tipo_eq in categorias_min:
+                try:
+                    r_min = requests.get(f'https://mindicador.cl/api/{cat_id}', timeout=10,
+                                         headers={'User-Agent': 'Mozilla/5.0 (compatible; CofradiaBot/6.0)'})
+                    if r_min.status_code == 200:
+                        j_min = r_min.json() or {}
+                        serie = j_min.get('serie', [])
+                        if serie:
+                            ult = serie[0]
+                            v = ult.get('valor')
+                            f_str = (ult.get('fecha') or '')[:10]
+                            if v is not None:
+                                tmc_items.append({
+                                    "label": cat_label + f" T{tipo_seq_e4}",
+                                    "valor": float(v),
+                                    "fecha": f_str + ' (mindicador)',
+                                    "titulo": cat_label,
+                                    "subtitulo": "Fuente alternativa: mindicador.cl",
+                                    "tipo": str(tipo_seq_e4),
+                                })
+                                tipo_seq_e4 += 1
+                except Exception as _e_min_cat:
+                    logger.warning(f"E4 mindicador {cat_id}: {_e_min_cat}")
+            if tmc_items:
+                intentos_log.append(f"E4 mindicador.cl: {len(tmc_items)} tasas obtenidas")
+                raw_final_source = "E4 mindicador.cl (fuente alternativa)"
+            else:
+                intentos_log.append("E4 mindicador.cl: sin datos")
+        except Exception as _e_min:
+            intentos_log.append(f"E4 mindicador.cl: excepcion {type(_e_min).__name__}")
+            logger.warning(f"⚠️ TMC E4 fallo: {_e_min}")
 
     # ───── DIAGNOSTICO: detectar dato antiguo + alerta auto-reparacion ─────
     # FIX FASE 4: si los datos obtenidos tienen mas de 60 dias de antiguedad,
@@ -20925,7 +21168,7 @@ CH.h5u=echarts.init(document.getElementById('cH5u'));(function(){var h=''' + jso
 // AFP
 CH.af=echarts.init(document.getElementById('cAf'));CH.af.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Fondo A','Fondo E'],textStyle:{color:tx}},grid:{left:'8%',right:'5%',bottom:'10%',top:'15%',containLabel:true},xAxis:{type:'category',data:''' + afp_names_js + ''',axisLabel:{color:tx},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,2)+'%'}},splitLine:{lineStyle:{color:bc}}},series:[{name:'Fondo A',type:'bar',data:''' + json.dumps(afp_a) + ''',itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}},{name:'Fondo E',type:'bar',data:''' + json.dumps(afp_e) + ''',itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:9,formatter:function(p){return fc(p.value,2)+'%'}}}]});
 // TMC
-CH.tm=echarts.init(document.getElementById('cTm'));CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:''' + tmc_labels_js + ''',axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:''' + tmc_values_js + ''',itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]});
+CH.tm=echarts.init(document.getElementById('cTm'));(function(){var __tmL=''' + tmc_labels_js + ''',__tmV=''' + tmc_values_js + ''';if(!__tmL.length){CH.tm.setOption({backgroundColor:'transparent',title:{text:'Datos TMC no disponibles temporalmente',subtext:'API CMF en mantenimiento o nueva metodologia feb/2026',left:'center',top:'35%',textStyle:{color:gd,fontSize:13,fontWeight:'bold'},subtextStyle:{color:tx,fontSize:10}},graphic:{type:'text',left:'center',top:'58%',style:{text:'⚠️ Reintentando con fuente alternativa\\nVer logs Render para diagnostico',fill:tx,fontSize:10,textAlign:'center'}}});return}CH.tm.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},grid:{left:'35%',right:'10%',bottom:'5%',top:'5%',containLabel:true},xAxis:{type:'value',axisLabel:{color:tx,formatter:function(v){return fc(v,1)+'%'}},splitLine:{lineStyle:{color:bc}}},yAxis:{type:'category',inverse:true,data:__tmL,axisLabel:{color:tx,fontSize:9},axisLine:{lineStyle:{color:ac}}},series:[{type:'bar',data:__tmV,itemStyle:{color:{type:'linear',x:0,y:0,x2:1,y2:0,colorStops:[{offset:0,color:'rgba(200,168,75,0.15)'},{offset:1,color:gd}]},borderRadius:[0,6,6,0]},label:{show:true,position:'right',color:gd,fontWeight:'bold',formatter:function(p){return fc(p.value,2)+'%'}}}]})})();
 // Grafico de Proyecciones (3 escenarios)
 try{var pData=''' + proy_chart_data + ''';if(pData.length>0){CH.pry=echarts.init(document.getElementById('chartProy'));var pN=pData.map(function(d){return d.name});var pO=pData.map(function(d){return d.opt});var pB=pData.map(function(d){return d.base});var pP=pData.map(function(d){return d.pes});CH.pry.setOption({backgroundColor:'transparent',tooltip:{trigger:'axis',backgroundColor:bg,borderColor:gd,textStyle:{color:tx}},legend:{data:['Optimista','Base','Pesimista'],textStyle:{color:tx},top:5},grid:{left:'12%',right:'5%',bottom:'15%',top:'18%'},xAxis:{type:'category',data:pN,axisLabel:{color:tx,fontSize:9,rotate:20},axisLine:{lineStyle:{color:ac}}},yAxis:{type:'value',axisLabel:{color:tx,fontSize:9},splitLine:{lineStyle:{color:bc}}},series:[{name:'Optimista',type:'bar',data:pO,itemStyle:{color:gn,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:gn,fontSize:8}},{name:'Base',type:'bar',data:pB,itemStyle:{color:cy,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:cy,fontSize:8}},{name:'Pesimista',type:'bar',data:pP,itemStyle:{color:rd,borderRadius:[4,4,0,0]},label:{show:true,position:'top',color:rd,fontSize:8}}]})}}catch(e){}
 window.addEventListener('resize',function(){for(var k in CH)if(CH[k]&&CH[k].resize)CH[k].resize()});
@@ -21303,30 +21546,41 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             html_content = _economia_cache['html']
             await msg.edit_text("⚡ Dashboard económico (cache del día)")
         else:
-            # FASE 4: Optimización velocidad — lanzar TODO en paralelo desde el inicio
-            # ANTES (secuencial): indicadores → CMF+AFP+PIB → IA1 → IA2 → HTML  (~45-60s)
-            # AHORA (paralelo): indicadores‖CMF‖AFP‖PIB → IA1‖IA2 → HTML       (~25-35s)
-            # Reduccion: ~40% tiempo total en primera carga del dia
-            await msg.edit_text("⚡ Cargando indicadores + CMF + AFP + PIB en paralelo...")
+            # FIX FASE 5: Optimización velocidad CORREGIDA — phased parallelism
+            #
+            # PROBLEMA Fase 4 (paralelismo total): obtener_indicadores_chile() ya usa
+            # internamente pools de hasta 20+10+6+4 hilos. Lanzarlo SIMULTANEAMENTE con
+            # CMF+AFP+PIB saturaba conexiones HTTP en Render → throttling TCP → TIMEOUT
+            # → reintentos → MAS lento que el secuencial original.
+            #
+            # SOLUCION: Fase A primero (CMF+AFP+PIB son rapidos: ~5-10s), Fase B despues
+            # (indicadores ~12-15s, con sus propios pools internos sin competencia).
+            # Total: ~20-25s vs. ~55s secuencial original. Sin saturar Render.
+            await msg.edit_text("⚡ Fase A — CMF + AFP + PIB en paralelo...")
             from concurrent.futures import ThreadPoolExecutor as _TPE_eco
             import time as _t
             t_start = _t.time()
-            with _TPE_eco(max_workers=4) as pool_data:
-                # Las 4 fuentes de datos arrancan SIMULTANEAMENTE
-                fut_ind = pool_data.submit(obtener_indicadores_chile)
-                fut_cmf = pool_data.submit(lambda: _safe_call(obtener_indicadores_cmf))
-                fut_afp = pool_data.submit(lambda: _safe_call(obtener_rentabilidad_afp))
-                fut_pib = pool_data.submit(lambda: _safe_call(obtener_pib_15anos))
-                all_data = fut_ind.result() or {}
+            # FASE A: 3 fuentes ligeras en paralelo (cada una 2-5 conexiones)
+            with _TPE_eco(max_workers=3) as pool_ligero:
+                fut_cmf = pool_ligero.submit(lambda: _safe_call(obtener_indicadores_cmf))
+                fut_afp = pool_ligero.submit(lambda: _safe_call(obtener_rentabilidad_afp))
+                fut_pib = pool_ligero.submit(lambda: _safe_call(obtener_pib_15anos))
                 datos_cmf = fut_cmf.result() or {}
                 datos_afp = fut_afp.result() or {}
                 datos_pib = fut_pib.result() or {}
+            t_a = _t.time() - t_start
+            logger.info(f"⚡ FASE 5 /economia Fase A (CMF+AFP+PIB): {t_a:.1f}s")
+            await msg.edit_text(f"✅ Fase A OK ({t_a:.0f}s).\n📈 Fase B — descargando indicadores Chile...")
+            # FASE B: indicadores con sus propios pools internos (sin contencion)
+            t_b_start = _t.time()
+            all_data = await loop.run_in_executor(None, obtener_indicadores_chile) or {}
             datos = all_data.get('datos_actuales', {})
+            t_b = _t.time() - t_b_start
+            t_data = _t.time() - t_start
+            logger.info(f"⚡ FASE 5 /economia Fase B (indicadores): {t_b:.1f}s | Total datos: {t_data:.1f}s")
             if not datos:
                 await msg.edit_text("❌ Sin conexión a fuentes de datos.")
                 return
-            t_data = _t.time() - t_start
-            logger.info(f"⚡ FASE 4 /economia datos paralelos: {t_data:.1f}s ({len(datos)} ind + CMF + AFP + PIB)")
             await msg.edit_text(f"✅ {len(datos)} indicadores + CMF + AFP + PIB ({t_data:.0f}s).\n🤖 IA generando análisis...")
             analisis_ia = ''
             analisis_proy = ''
@@ -23412,6 +23666,52 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 name='cumpleanos_diario'
             )
         logger.info("🎂 Tarea de cumpleaños programada para las 8:00 AM Chile")
+        
+        # ════ FASE 5: Mensajes proactivos para engagement del grupo ════
+        # Saludo matutino (08:30 AM Chile)
+        if chile_tz:
+            job_queue.run_daily(
+                enviar_saludo_matutino,
+                time=dt_time(hour=8, minute=30, second=0, tzinfo=chile_tz),
+                name='fase5_saludo_matutino'
+            )
+        else:
+            job_queue.run_daily(
+                enviar_saludo_matutino,
+                time=dt_time(hour=12, minute=30, second=0),  # ~8:30 Chile si UTC
+                name='fase5_saludo_matutino'
+            )
+        logger.info("☀️ FASE 5: saludo matutino programado para las 08:30 AM Chile")
+        
+        # Curiosidad mediodía (13:00 Chile)
+        if chile_tz:
+            job_queue.run_daily(
+                enviar_curiosidad_mediodia,
+                time=dt_time(hour=13, minute=0, second=0, tzinfo=chile_tz),
+                name='fase5_curiosidad_mediodia'
+            )
+        else:
+            job_queue.run_daily(
+                enviar_curiosidad_mediodia,
+                time=dt_time(hour=17, minute=0, second=0),  # ~13:00 Chile si UTC
+                name='fase5_curiosidad_mediodia'
+            )
+        logger.info("🍽️ FASE 5: curiosidad mediodia programada para las 13:00 Chile")
+        
+        # Insight tarde (17:30 Chile, solo lun-vie — la función filtra internamente)
+        if chile_tz:
+            job_queue.run_daily(
+                enviar_insight_tarde,
+                time=dt_time(hour=17, minute=30, second=0, tzinfo=chile_tz),
+                name='fase5_insight_tarde'
+            )
+        else:
+            job_queue.run_daily(
+                enviar_insight_tarde,
+                time=dt_time(hour=21, minute=30, second=0),  # ~17:30 Chile si UTC
+                name='fase5_insight_tarde'
+            )
+        logger.info("🌇 FASE 5: insight tarde programado para las 17:30 Chile (lun-vie)")
         
         # Resumen nocturno a las 20:00 hora Chile
         if chile_tz:
