@@ -157,6 +157,137 @@ def _get_calculadora_html():
     return _gzip_calc.decompress(_b64_calc.b64decode(_CALC_HTML_GZ)).decode('utf-8')
 
 # ══════════════════════════════════════════════════════════════════════
+# ═══  FASE 8 — SUGERENCIAS CONTEXTUALES TRAS COMANDOS  ═════════════════
+# ══════════════════════════════════════════════════════════════════════
+# Mapeo de comando → comandos relacionados con explicacion. El helper
+# `_sugerencias_contextuales(comando, user_name)` retorna un texto motivador
+# que se anexa a las respuestas para incentivar interaccion.
+# ══════════════════════════════════════════════════════════════════════
+
+_FASE8_SUGERENCIAS = {
+    'buscar': [
+        ('buscar_ia', 'Búsqueda potenciada con IA que comprende el contexto de tu pregunta'),
+        ('rag_consulta', 'Consultar libros y documentos indexados de la biblioteca Cofradía'),
+        ('buscar_usuario', 'Buscar por nombre a un Cofrade especifico'),
+    ],
+    'buscar_ia': [
+        ('rag_consulta', 'Consultar libros y documentos indexados de la biblioteca Cofradía'),
+        ('buscar', 'Búsqueda rápida en historial del grupo (sin IA, mas veloz)'),
+        ('buscar_web', 'Búsqueda en internet con resumen IA'),
+    ],
+    'rag_consulta': [
+        ('buscar_ia', 'Búsqueda inteligente combinada (RAG + historial + IA)'),
+        ('rag_status', 'Ver libros y documentos disponibles en la biblioteca'),
+        ('subir_pdf', 'Subir un nuevo documento al sistema RAG (admin)'),
+    ],
+    'indicadores': [
+        ('economia', 'Dashboard económico completo con análisis IA y simuladores'),
+        ('graficos', 'Gráficos interactivos con tendencias semanales del grupo'),
+        ('calculadora', 'Suite financiera con 19 calculadoras (créditos, AFP, IPC, etc.)'),
+    ],
+    'economia': [
+        ('indicadores', 'Vista rápida de los 14 indicadores principales (UF, Dólar, IPC, TPM, etc.)'),
+        ('calculadora', 'Suite financiera con 19 calculadoras profesionales'),
+        ('graficos', 'Gráficos del grupo con estadísticas de mensajes'),
+    ],
+    'graficos': [
+        ('estadisticas', 'Estadísticas detalladas de actividad del grupo'),
+        ('economia', 'Dashboard económico completo de Chile'),
+        ('reporte_ejecutivo', 'Reporte ejecutivo del grupo (semanal)'),
+    ],
+    'estadisticas': [
+        ('graficos', 'Visualizaciones interactivas con ECharts'),
+        ('reporte_ejecutivo', 'Reporte ejecutivo semanal del grupo'),
+        ('top10', 'Top 10 Cofrades más activos del mes'),
+    ],
+    'calculadora': [
+        ('economia', 'Dashboard económico de Chile con análisis IA'),
+        ('indicadores', 'Indicadores económicos en tiempo real (UF, Dólar, IPC)'),
+        ('mi_tarjeta', 'Crea tu tarjeta profesional digital con QR'),
+    ],
+    'mi_tarjeta': [
+        ('directorio', 'Ver el directorio profesional completo de Cofradía'),
+        ('buscar_profesional', 'Buscar Cofrades por especialidad o área'),
+        ('conectar', 'Conexiones inteligentes basadas en tu perfil'),
+    ],
+    'buscar_profesional': [
+        ('directorio', 'Directorio completo de profesionales Cofradía'),
+        ('conectar', 'Conexiones inteligentes que IA sugiere para tu perfil'),
+        ('buscar_apoyo', 'Cofrades en búsqueda activa de empleo'),
+    ],
+    'directorio': [
+        ('buscar_profesional', 'Búsqueda específica por especialidad'),
+        ('mi_tarjeta', 'Tu tarjeta profesional digital'),
+        ('conectar', 'Sugerencias de conexión basadas en perfiles'),
+    ],
+    'empleo': [
+        ('buscar_apoyo', 'Cofrades en búsqueda activa que pueden necesitar tu red'),
+        ('publicar', 'Publicar una oferta laboral en el grupo'),
+        ('mi_tarjeta', 'Tu tarjeta profesional para postular'),
+    ],
+    'buscar_apoyo': [
+        ('empleo', 'Buscar ofertas laborales actuales'),
+        ('directorio', 'Conectar con Cofrades de tu área'),
+        ('publicar', 'Publicar tu disponibilidad para nuevas oportunidades'),
+    ],
+    'eventos': [
+        ('publicar', 'Publicar un evento o reunión Cofradía'),
+        ('directorio', 'Ver Cofrades por especialidad para invitarlos'),
+        ('anuncios', 'Tablón de anuncios actuales'),
+    ],
+    'anuncios': [
+        ('publicar', 'Publicar un anuncio o oferta'),
+        ('eventos', 'Ver próximos eventos Cofradía'),
+        ('consultar', 'Hacer una consulta profesional'),
+    ],
+    'consultar': [
+        ('consultas', 'Ver consultas profesionales abiertas que puedes responder'),
+        ('directorio', 'Buscar Cofrades especialistas'),
+        ('rag_consulta', 'Consultar la biblioteca de documentos'),
+    ],
+    'entrevista': [
+        ('generar_cv', 'Generar tu CV optimizado con IA'),
+        ('buscar_profesional', 'Conectar con Cofrades de tu área'),
+        ('mi_tarjeta', 'Tu tarjeta profesional para postular'),
+    ],
+    'generar_cv': [
+        ('entrevista', 'Practicar entrevistas con IA'),
+        ('mi_tarjeta', 'Tarjeta profesional digital'),
+        ('empleo', 'Buscar ofertas laborales'),
+    ],
+}
+
+
+def _sugerencias_contextuales(comando, user_name=None):
+    """FASE 8: Devuelve un texto motivador con comandos relacionados al ejecutado.
+    Si el comando no esta en el mapeo, devuelve sugerencias generales.
+    
+    El texto incentiva la interaccion y educa al usuario sobre que mas puede hacer.
+    """
+    saludo = f", {user_name}" if user_name else ""
+    sugerencias = _FASE8_SUGERENCIAS.get(comando)
+    
+    if not sugerencias:
+        # Sugerencias generales si el comando no esta mapeado
+        sugerencias = [
+            ('ayuda', 'Ver TODOS los comandos disponibles del bot'),
+            ('directorio', 'Directorio profesional Cofradía'),
+            ('economia', 'Dashboard económico de Chile'),
+        ]
+    
+    txt = f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    txt += f"💡 ¿QUÉ MÁS PUEDO HACER POR TI{saludo.upper()}?\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    txt += f"Te recomiendo explorar también estos comandos:\n\n"
+    for cmd, desc in sugerencias[:3]:
+        txt += f"   👉 /{cmd}\n      {desc}\n\n"
+    txt += f"📞 ¿Tienes alguna otra consulta? Escríbeme directamente "
+    txt += f"o usa /ayuda para ver el menú completo.\n"
+    txt += f"⚓ Estoy aquí para ayudarte."
+    return txt
+
+
+# ══════════════════════════════════════════════════════════════════════
 # ═══  SISTEMA MCP (Model Context Protocol) — Tool Registry  ═════════
 # ══════════════════════════════════════════════════════════════════════
 
@@ -4616,6 +4747,12 @@ async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await enviar_mensaje_largo(update, mensaje)
     registrar_servicio_usado(update.effective_user.id, 'buscar')
+    # FASE 8: Sugerencias contextuales
+    try:
+        _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+        await update.message.reply_text(_sugerencias_contextuales('buscar', _user_n_f8))
+    except Exception:
+        pass
 
 
 @requiere_suscripcion
@@ -5171,6 +5308,12 @@ window.addEventListener('resize', function() {{
             pass
         
         registrar_servicio_usado(update.effective_user.id, 'graficos')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('graficos', _user_n_f8))
+        except Exception:
+            pass
         
     except Exception as e:
         logger.error(f"Error en graficos_comando: {e}")
@@ -5299,6 +5442,12 @@ Responde en español, de forma completa y con datos concretos del material. Sin 
             tag_tts='buscar_ia'
         )
         registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('buscar_ia', _user_n_f8))
+        except Exception:
+            pass
     else:
         # Fallback: mostrar resultados crudos
         mensaje = f"🔍 RESULTADOS PARA: {consulta}\n"
@@ -6266,6 +6415,12 @@ async def empleo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
     await enviar_mensaje_largo(update, resultado, parse_mode='Markdown')
     registrar_servicio_usado(update.effective_user.id, 'empleo')
+    # FASE 8: Sugerencias contextuales
+    try:
+        _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+        await update.message.reply_text(_sugerencias_contextuales('empleo', _user_n_f8))
+    except Exception:
+        pass
 
 
 # ==================== CALLBACKS ====================
@@ -7917,6 +8072,12 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,30)},'Nuevos 7d',green);
         try: os.remove(html_path)
         except: pass
         registrar_servicio_usado(update.effective_user.id, 'estadisticas')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('estadisticas', _user_n_f8))
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Error en estadisticas: {e}")
         await update.message.reply_text("❌ Error obteniendo estadísticas")
@@ -8573,6 +8734,12 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
     await msg.delete()
     await enviar_mensaje_largo(update, resultado)
     registrar_servicio_usado(update.effective_user.id, 'buscar_profesional')
+    # FASE 8: Sugerencias contextuales
+    try:
+        _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+        await update.message.reply_text(_sugerencias_contextuales('buscar_profesional', _user_n_f8))
+    except Exception:
+        pass
 
 
 def buscar_profesionales(query):
@@ -10145,6 +10312,12 @@ REGLA FINAL: Si el sistema dice que estos fragmentos son del tema buscado → CO
         
         await msg.edit_text(texto_final)
         registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('rag_consulta', _user_n_f8))
+        except Exception:
+            pass
         
     except Exception as e:
         logger.error(f"Error en rag_consulta: {e}")
@@ -11077,6 +11250,87 @@ async def descargar_backup_callback(update: Update, context: ContextTypes.DEFAUL
         except: pass
 
 
+def _purgar_backups_antiguos(dias_retencion=10):
+    """FASE 8: Purga backups en Supabase Storage con antiguedad mayor a N dias.
+    Mantiene solo los ultimos N backups (default: 10 dias) para optimizar storage
+    y costos. Si por algun motivo no se ejecuta el backup un dia, se mantienen
+    igualmente los ultimos N archivos (no exactamente N dias calendario).
+    
+    Returns: dict con resultado: {'eliminados': int, 'mantenidos': int, 'errores': list}
+    """
+    resultado = {'eliminados': 0, 'mantenidos': 0, 'errores': []}
+    try:
+        # Listar TODOS los backups (no limitar a 20 como _listar_backups_drive)
+        base_url = _supabase_storage_base_url()
+        if not base_url:
+            resultado['errores'].append('SUPABASE_URL no configurada')
+            return resultado
+        headers = _supabase_storage_headers()
+        if not headers:
+            resultado['errores'].append('SUPABASE_SERVICE_KEY no configurada')
+            return resultado
+        
+        list_url = f"{base_url}/object/list/{SUPABASE_BACKUP_BUCKET}"
+        list_headers = dict(headers)
+        list_headers['Content-Type'] = 'application/json'
+        body = {
+            'limit': 200,  # asume <200 backups historicos
+            'offset': 0,
+            'sortBy': {'column': 'created_at', 'order': 'desc'},
+            'prefix': ''
+        }
+        resp = requests.post(list_url, headers=list_headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            resultado['errores'].append(f'Listar backups HTTP {resp.status_code}')
+            return resultado
+        
+        archivos = resp.json() or []
+        backups = [a for a in archivos if isinstance(a, dict) and str(a.get('name', '')).startswith('Backup_Cofradia')]
+        
+        if len(backups) <= dias_retencion:
+            resultado['mantenidos'] = len(backups)
+            logger.info(f"🗑️ Purga backups: {len(backups)} backups en total, ninguno excede el limite de {dias_retencion}")
+            return resultado
+        
+        # Los primeros N son los mas recientes (orden desc), los demas se eliminan
+        a_mantener = backups[:dias_retencion]
+        a_eliminar = backups[dias_retencion:]
+        resultado['mantenidos'] = len(a_mantener)
+        
+        # Eliminar uno por uno via DELETE (Supabase Storage permite bulk delete via POST a /remove)
+        # Usamos bulk delete que es atomico
+        remove_url = f"{base_url}/object/{SUPABASE_BACKUP_BUCKET}"
+        # Supabase Storage: DELETE individual es mas robusto para distintas versiones
+        for arch in a_eliminar:
+            nombre_arch = arch.get('name', '')
+            if not nombre_arch:
+                continue
+            try:
+                del_url = f"{base_url}/object/{SUPABASE_BACKUP_BUCKET}/{nombre_arch}"
+                r_del = requests.delete(del_url, headers=headers, timeout=30)
+                if r_del.status_code in (200, 204):
+                    resultado['eliminados'] += 1
+                    logger.info(f"🗑️ Purgado backup antiguo: {nombre_arch}")
+                else:
+                    err = f"DELETE {nombre_arch}: HTTP {r_del.status_code}"
+                    resultado['errores'].append(err)
+                    logger.warning(f"⚠️ {err}: {r_del.text[:120]}")
+            except Exception as _e_del:
+                err = f"DELETE {nombre_arch}: {_e_del}"
+                resultado['errores'].append(err)
+                logger.warning(f"⚠️ {err}")
+        
+        logger.info(
+            f"🗑️ FASE 8 purga backups: {resultado['eliminados']} eliminados, "
+            f"{resultado['mantenidos']} mantenidos (retencion={dias_retencion} dias)"
+        )
+        return resultado
+    except Exception as e:
+        resultado['errores'].append(f'Excepcion: {e}')
+        logger.error(f"Error purgar_backups_antiguos: {e}")
+        return resultado
+
+
 async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
     """Job automatico que ejecuta respaldo_bd_a_drive() diariamente a las 03:00 AM hora Chile
     y notifica al admin el resultado por mensaje privado."""
@@ -11089,6 +11343,19 @@ async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
             total_regs = sum(resultado['registros_por_tabla'].values())
             regs_txt = ", ".join([f"{t}={n}" for t, n in resultado['registros_por_tabla'].items()])
             logger.info(f"✅ Backup BD OK: {resultado['filename']} - {resultado['tamano_kb']}KB - {total_regs} registros - {resultado['duracion_seg']}s")
+            
+            # FASE 8: purgar backups antiguos (>10 dias) para mantener storage limpio
+            try:
+                purga = await loop.run_in_executor(None, _purgar_backups_antiguos, 10)
+                if purga.get('eliminados', 0) > 0:
+                    logger.info(f"🗑️ FASE 8: {purga['eliminados']} backups antiguos purgados, {purga['mantenidos']} mantenidos")
+                purga_txt = ""
+                if purga.get('eliminados', 0) > 0:
+                    purga_txt = f"\n🗑️ Purga: {purga['eliminados']} antiguos eliminados, {purga['mantenidos']} mantenidos"
+            except Exception as _e_purga:
+                logger.warning(f"Purga backups falló (no critico): {_e_purga}")
+                purga_txt = ""
+            
             if OWNER_ID:
                 try:
                     texto = (
@@ -11098,6 +11365,7 @@ async def _job_backup_bd_diario(context: ContextTypes.DEFAULT_TYPE):
                         f"📦 {total_regs:,} registros totales\n\n"
                         f"TABLAS: {regs_txt}\n\n"
                         f"💾 Supabase Storage › {SUPABASE_BACKUP_BUCKET}"
+                        f"{purga_txt}"
                     )
                     await context.bot.send_message(chat_id=OWNER_ID, text=texto)
                 except Exception as _e_notif:
@@ -11472,15 +11740,126 @@ def buscar_rag_expandido(query_original, limit=5):
         return buscar_rag(query_original, limit)
 
 
+# ════════════════════════════════════════════════════════════════════════
+# FASE 6 OPTIMIZADA — RAG INTELIGENTE: Caché LRU + sinónimos REACTIVOS
+# 
+# Filosofia: "no hacer trabajo extra a menos que sea necesario".
+# - Caché LRU: queries idénticas repetidas en <5min responden instantáneamente
+# - Sinónimos: solo se aplican si la búsqueda original devolvió <2 resultados
+# - Fuzzy matching: solo si NADA matchea (fallback final)
+# - Sources pre-cargados en módulo: una sola query SQL al iniciar
+# 
+# Resultado: queries comunes responden en milisegundos, queries dificiles
+# triggers expansion automaticamente sin penalizar las búsquedas exitosas.
+# ════════════════════════════════════════════════════════════════════════
+
+# Cache LRU — almacena (query_norm) → (resultados, score, timestamp)
+_FASE6_CACHE = {}
+_FASE6_CACHE_MAX = 100  # max 100 queries cacheadas
+_FASE6_CACHE_TTL = 300  # 5 minutos
+
+# Sinónimos compactos — solo los más comunes para no inflar memoria
+_FASE6_SINONIMOS_LIGHT = {
+    'liderazgo': ['liderar', 'lider', 'gestion', 'management'],
+    'liderar': ['liderazgo', 'gestion', 'dirigir'],
+    'gestion': ['liderazgo', 'management', 'administracion'],
+    'inflacion': ['ipc', 'precios'],
+    'ipc': ['inflacion', 'precios'],
+    'economia': ['finanzas', 'macroeconomia'],
+    'inversion': ['inversiones', 'invertir', 'rentabilidad'],
+    'estrategia': ['estrategico', 'plan', 'tactica'],
+    'naval': ['armada', 'marina', 'oficial'],
+    'armada': ['naval', 'marina'],
+    'filosofia': ['pensamiento', 'reflexion'],
+    'negocio': ['negocios', 'empresa', 'business'],
+    'cliente': ['clientes', 'consumidor'],
+    'aprender': ['aprendizaje', 'educar', 'estudio'],
+    'autor': ['escritor', 'pensador'],
+    'libro': ['libros', 'obra', 'texto'],
+}
+
+
+def _fase6_cache_get(query_norm):
+    """Lookup en caché LRU. Devuelve (resultados, score) o None."""
+    import time as _t_cache
+    entry = _FASE6_CACHE.get(query_norm)
+    if not entry:
+        return None
+    resultados, score, ts = entry
+    if _t_cache.time() - ts > _FASE6_CACHE_TTL:
+        del _FASE6_CACHE[query_norm]
+        return None
+    return resultados, score
+
+
+def _fase6_cache_set(query_norm, resultados, score):
+    """Guarda en caché. Si excede max, elimina la entrada mas antigua."""
+    import time as _t_cache
+    if len(_FASE6_CACHE) >= _FASE6_CACHE_MAX:
+        # Eliminar el mas antiguo (LRU simple por timestamp)
+        oldest = min(_FASE6_CACHE.items(), key=lambda x: x[1][2])[0]
+        del _FASE6_CACHE[oldest]
+    _FASE6_CACHE[query_norm] = (resultados, score, _t_cache.time())
+
+
+def _fase6_expandir_palabras(palabras):
+    """Expansion ligera con sinonimos selectivos. Devuelve lista expandida."""
+    expandidas = list(palabras)
+    seen = set(palabras)
+    for p in palabras:
+        for s in _FASE6_SINONIMOS_LIGHT.get(p, []):
+            if s not in seen:
+                expandidas.append(s)
+                seen.add(s)
+    return expandidas
+
+
+def _fase6_fuzzy_match_simple(query_word, target_word, max_dist=2):
+    """Levenshtein simple - retorna True si distancia <= max_dist.
+    Solo ejecuta si las palabras tienen longitudes compatibles para evitar overhead."""
+    if not query_word or not target_word:
+        return False
+    if abs(len(query_word) - len(target_word)) > max_dist:
+        return False
+    if query_word == target_word:
+        return True
+    m, n = len(query_word), len(target_word)
+    if m < 5 or n < 5:
+        return False
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        cur = [i] + [0] * n
+        for j in range(1, n + 1):
+            cost = 0 if query_word[i-1] == target_word[j-1] else 1
+            cur[j] = min(cur[j-1] + 1, prev[j] + 1, prev[j-1] + cost)
+        if min(cur) > max_dist:
+            return False
+        prev = cur
+    return prev[n] <= max_dist
+
+
 def buscar_rag(query, limit=5):
     """
     Búsqueda RAG bifásica:
     Fase 1 — Búsqueda por NOMBRE DE DOCUMENTO (nombres propios, títulos, autores)
     Fase 2 — Búsqueda semántica general balanceada (máx. 3 chunks por documento)
     
+    FASE 6 OPTIMIZADA: caché LRU + sinónimos reactivos + fuzzy fallback.
+    
     Retorna: (lista de (texto, source), score_maximo)
     """
     try:
+        # FASE 6: Cache lookup ANTES de cualquier query SQL — instant hit en queries repetidas
+        import unicodedata as _uni_cache
+        _query_norm_cache = _uni_cache.normalize('NFKD', (query or '').lower().strip())
+        _query_norm_cache = ''.join(ch for ch in _query_norm_cache if not _uni_cache.combining(ch))
+        _query_norm_cache = ' '.join(_query_norm_cache.split()[:10])  # primeras 10 palabras
+        if _query_norm_cache:
+            cached = _fase6_cache_get(_query_norm_cache)
+            if cached is not None:
+                logger.info(f"⚡ FASE 6 RAG cache HIT: '{_query_norm_cache[:60]}'")
+                return cached
+        
         conn = get_db_connection()
         if not conn:
             return [], 0.0
@@ -11537,6 +11916,33 @@ def buscar_rag(query, limit=5):
                         logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src}'")
             except Exception as e:
                 logger.debug(f"Error fase1 RAG: {e}")
+        
+        # FASE 6 OPTIMIZADA: Fuzzy fallback REACTIVO — solo si Fase 1 exact no encontró NADA
+        # y la palabra es de longitud razonable (>= 5 letras, candidata a nombre propio)
+        if not docs_fase1:
+            palabras_largas_fuzzy = [p for p in palabras_clave if len(p) >= 5][:3]
+            if palabras_largas_fuzzy:
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
+                    else:
+                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
+                    todos_sources = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+                    
+                    for palabra in palabras_largas_fuzzy:
+                        for src in todos_sources:
+                            if src in docs_fase1:
+                                continue
+                            src_norm = normalizar(src)
+                            for token_src in src_norm.split():
+                                if len(token_src) >= 5 and _fase6_fuzzy_match_simple(palabra, token_src, max_dist=2):
+                                    docs_fase1.append(src)
+                                    logger.info(f"🎯 FASE 6 FUZZY: '{palabra}' ≈ '{token_src}' → '{src}'")
+                                    break
+                            if src in docs_fase1:
+                                break
+                except Exception as _e_fuzzy:
+                    logger.debug(f"FASE 6 fuzzy fallo (no crítico): {_e_fuzzy}")
         
         if docs_fase1:
             # Traer TODOS los chunks de los documentos encontrados en fase 1
@@ -11747,6 +12153,60 @@ def buscar_rag(query, limit=5):
         logger.info(f"🔍 RAG resultado final: {len(resultados)} chunks "
                    f"(fase1_docs={len(docs_fase1)}, f2_candidates={len(chunks_fase2)}), "
                    f"score_max={score_maximo:.1f}")
+        
+        # ═══════════════════════════════════════════════════
+        # FASE 6 OPTIMIZADA: SI HAY POCOS RESULTADOS → expandir con sinónimos
+        # Solo se ejecuta si hay <2 resultados, evitando overhead en busquedas exitosas
+        # ═══════════════════════════════════════════════════
+        if len(resultados) < 2 and palabras_clave:
+            palabras_expandidas = _fase6_expandir_palabras(palabras_clave[:5])
+            sinonimos_extra = [p for p in palabras_expandidas if p not in palabras_clave]
+            if sinonimos_extra:
+                logger.info(f"📚 FASE 6: pocos resultados ({len(resultados)}), expandiendo con sinónimos: {sinonimos_extra[:5]}")
+                try:
+                    conn3 = get_db_connection()
+                    if conn3:
+                        c3 = conn3.cursor()
+                        # Buscar chunks con sinónimos (limit pequeño para no saturar)
+                        condiciones3 = []
+                        params3 = []
+                        for term in sinonimos_extra[:5]:  # máx 5 sinónimos
+                            if DATABASE_URL:
+                                condiciones3.append("(LOWER(keywords) LIKE %s OR LOWER(chunk_text) LIKE %s)")
+                                params3.extend([f'%{term}%', f'%{term}%'])
+                            else:
+                                condiciones3.append("(LOWER(keywords) LIKE ? OR LOWER(chunk_text) LIKE ?)")
+                                params3.extend([f'%{term}%', f'%{term}%'])
+                        where_extra = " OR ".join(condiciones3)
+                        # Excluir docs ya en resultados
+                        sources_ya = list(set([r[1] for r in resultados]))
+                        if sources_ya:
+                            placeholder = ','.join(['%s']*len(sources_ya) if DATABASE_URL else ['?']*len(sources_ya))
+                            where_extra = f"({where_extra}) AND source NOT IN ({placeholder})"
+                            params3 += sources_ya
+                        if DATABASE_URL:
+                            c3.execute(f"SELECT chunk_text, source FROM rag_chunks WHERE {where_extra} LIMIT 30", params3)
+                        else:
+                            c3.execute(f"SELECT chunk_text, source FROM rag_chunks WHERE {where_extra} LIMIT 30", params3)
+                        for fila3 in c3.fetchall():
+                            if len(resultados) >= limit:
+                                break
+                            txt3 = fila3['chunk_text'] if DATABASE_URL else fila3[0]
+                            src3 = fila3['source'] if DATABASE_URL else fila3[1]
+                            if txt3 and len(txt3) > 50:
+                                k = txt3[:80]
+                                if k not in seen:
+                                    seen.add(k)
+                                    resultados.append((txt3, src3))
+                                    score_maximo = max(score_maximo, 1.5)
+                        conn3.close()
+                        logger.info(f"📚 FASE 6 expansion: ahora {len(resultados)} resultados totales")
+                except Exception as _e_exp:
+                    logger.debug(f"FASE 6 expansion fallo (no crítico): {_e_exp}")
+        
+        # FASE 6: Guardar en caché LRU
+        if _query_norm_cache and len(resultados) > 0:
+            _fase6_cache_set(_query_norm_cache, resultados, score_maximo)
         
         return resultados, score_maximo
         
@@ -14176,6 +14636,12 @@ async def directorio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         msg += f"📊 {len(resultados)} resultado(s)\n💡 /mi_tarjeta para crear/editar tu tarjeta"
         await enviar_mensaje_largo(update, msg)
         registrar_servicio_usado(update.effective_user.id, 'directorio')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('directorio', _user_n_f8))
+        except Exception:
+            pass
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
@@ -16937,8 +17403,125 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
         conn.commit()
         conn.close()
         
-        # El mensaje de bienvenida se enviará automáticamente cuando el usuario
-        # ingrese al grupo (detectado por detectar_nuevo_miembro)
+        # ═══════════════════════════════════════════════════════════════
+        # FASE 8 (NUEVO): Bienvenida MEJORADA al aprobar solicitud
+        # 1. Mensaje publico de bienvenida en el grupo principal
+        # 2. Mensaje privado completo con guia de uso
+        # 3. Tutorial HTML de "mi_tarjeta" enviado como archivo
+        # ═══════════════════════════════════════════════════════════════
+        nombre_completo = f"{nombre} {apellido}".strip()
+        
+        # 1) MENSAJE PUBLICO EN EL GRUPO PRINCIPAL
+        if COFRADIA_GROUP_ID:
+            try:
+                bienvenida_grupo = (
+                    f"🎉 ¡BIENVENIDO/A A COFRADÍA DE NETWORKING! 🎉\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"⚓ Cofrades, demos la más cordial bienvenida a:\n\n"
+                    f"👤 {nombre_completo}\n"
+                    f"🎓 Generación: {generacion}\n\n"
+                    f"💎 Esperamos que disfrutes este espacio de camaradería, "
+                    f"intercambio profesional y conexiones de valor.\n\n"
+                    f"🤝 ¡Te invitamos a presentarte al grupo y participar activamente!\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🤖 Saludos cordiales,\n"
+                    f"Cofradía Premium Bot"
+                )
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID,
+                    text=bienvenida_grupo
+                )
+                logger.info(f"✅ Bienvenida publica enviada al grupo para {nombre_completo}")
+            except Exception as e_grupo:
+                logger.warning(f"No se pudo enviar bienvenida al grupo: {e_grupo}")
+        
+        # 2) MENSAJE PRIVADO COMPLETO con guia de uso del bot
+        try:
+            mensaje_privado = (
+                f"⚓ ¡Bienvenido/a a Cofradía, {nombre}! ⚓\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Soy tu Asistente IA de Cofradía Premium 🤖\n"
+                f"Estoy aquí para apoyarte en todo lo que necesites.\n\n"
+                f"💎 PARTICIPACIÓN ACTIVA EN EL GRUPO\n"
+                f"Te invitamos a presentarte, compartir tus experiencias profesionales, "
+                f"hacer consultas y conectar con otros Cofrades. La fuerza de Cofradía está "
+                f"en la red de personas que la conformamos.\n\n"
+                f"📚 ¿CÓMO INTERACTUAR CONMIGO?\n"
+                f"Puedes comunicarte conmigo de 3 maneras:\n\n"
+                f"   1️⃣ POR TEXTO\n"
+                f"      Escríbeme cualquier consulta en este chat privado o "
+                f"menciónamen el grupo (@Cofradia_Premium_Bot).\n\n"
+                f"   2️⃣ POR AUDIO\n"
+                f"      Envíame una nota de voz y la transcribiré para responderte.\n\n"
+                f"   3️⃣ POR COMANDOS\n"
+                f"      Para respuestas estructuradas o entrega de archivos HTML/PDF "
+                f"(ej: dashboards, reportes, gráficos).\n\n"
+                f"💡 Para ver TODOS los comandos disponibles escribe:\n"
+                f"   👉 /ayuda\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🪪 PRIMER PASO RECOMENDADO\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Crea tu Tarjeta Profesional (digital + QR) en 4 pasos:\n\n"
+                f"   1️⃣ Escribe el comando: /mi_tarjeta\n"
+                f"   2️⃣ Completa tus datos profesionales\n"
+                f"   3️⃣ Sube tu foto de perfil\n"
+                f"   4️⃣ ¡Listo! Recibirás tu tarjeta lista para compartir\n\n"
+                f"📎 Te envío a continuación una guía completa paso a paso "
+                f"en formato HTML para que la consultes cuando quieras.\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌟 ¡Estaré encantado de ayudarte en lo que necesites!\n\n"
+                f"📞 Comandos populares para empezar:\n"
+                f"   • /ayuda - Ver todos los comandos\n"
+                f"   • /mi_tarjeta - Crear tu tarjeta profesional\n"
+                f"   • /directorio - Ver Cofrades del directorio\n"
+                f"   • /buscar_profesional [especialidad] - Encontrar Cofrades\n"
+                f"   • /economia - Dashboard económico de Chile\n"
+                f"   • /eventos - Próximos eventos de la Cofradía\n\n"
+                f"⚓ ¡Bienvenido a bordo, {nombre}!"
+            )
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=mensaje_privado
+            )
+            logger.info(f"✅ Mensaje privado de bienvenida enviado a {nombre_completo}")
+        except Exception as e_priv:
+            logger.warning(f"No se pudo enviar mensaje privado de bienvenida: {e_priv}")
+        
+        # 3) TUTORIAL HTML "Como crear tu Tarjeta Profesional"
+        try:
+            import os as _os_tut
+            # Buscar el tutorial en posibles ubicaciones (Render despliega desde repo)
+            posibles_paths = [
+                './tutorial_mi_tarjeta.html',
+                '/app/tutorial_mi_tarjeta.html',
+                '/tmp/tutorial_mi_tarjeta.html',
+                _os_tut.path.join(_os_tut.path.dirname(_os_tut.path.abspath(__file__)), 'tutorial_mi_tarjeta.html'),
+            ]
+            tutorial_path = None
+            for p in posibles_paths:
+                if _os_tut.path.exists(p):
+                    tutorial_path = p
+                    break
+            
+            if tutorial_path:
+                with open(tutorial_path, 'rb') as f_tut:
+                    await context.bot.send_document(
+                        chat_id=target_user_id,
+                        document=f_tut,
+                        filename='tutorial_mi_tarjeta.html',
+                        caption=(
+                            "📘 TUTORIAL: Cómo crear tu Tarjeta Profesional\n\n"
+                            "Abre este archivo HTML en tu navegador para ver "
+                            "la guía completa con imágenes y ejemplos.\n\n"
+                            "💡 Tip: cuando estés listo, escribe /mi_tarjeta aquí "
+                            "para empezar a crear tu tarjeta."
+                        )
+                    )
+                logger.info(f"✅ Tutorial HTML enviado a {nombre_completo}")
+            else:
+                logger.warning(f"⚠️ Tutorial HTML no encontrado en filesystem (paths revisados: {posibles_paths})")
+        except Exception as e_tut:
+            logger.warning(f"Error enviando tutorial HTML: {e_tut}")
         
         # Registrar al usuario con suscripción de prueba
         try:
@@ -20609,6 +21192,14 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
         await msg.delete()
         registrar_servicio_usado(update.effective_user.id, 'indicadores')
+        
+        # FASE 8: Sugerencias contextuales para incentivar exploracion
+        try:
+            user_name_fase8 = update.effective_user.first_name if update.effective_user else None
+            sug_txt = _sugerencias_contextuales('indicadores', user_name_fase8)
+            await update.message.reply_text(sug_txt)
+        except Exception:
+            pass
 
     except Exception as e:
         import traceback as _tb
@@ -21701,6 +22292,12 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
         await msg.delete()
         registrar_servicio_usado(update.effective_user.id, 'economia')
+        # FASE 8: Sugerencias contextuales
+        try:
+            user_name_fase8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('economia', user_name_fase8))
+        except Exception:
+            pass
     except Exception as e:
         import traceback as _tb
         logger.error("economia_comando: " + str(e) + "\n" + _tb.format_exc())
@@ -22439,6 +23036,12 @@ async def calculadora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(texto, reply_markup=keyboard)
     if update.effective_user:
         registrar_servicio_usado(update.effective_user.id, 'calculadora')
+        # FASE 8: Sugerencias contextuales
+        try:
+            _user_n_f8 = update.effective_user.first_name if update.effective_user else None
+            await update.message.reply_text(_sugerencias_contextuales('calculadora', _user_n_f8))
+        except Exception:
+            pass
 
 
 async def emergencia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):

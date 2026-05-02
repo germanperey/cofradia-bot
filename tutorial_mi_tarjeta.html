@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tutorial: Como crear tu Tarjeta Profesional | Cofradia de Networking</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0e1a;
+  --bg2: #111827;
+  --gold: #c9a84c;
+  --gold-dim: rgba(201,168,76,.15);
+  --cyan: #38bdf8;
+  --green: #22c55e;
+  --purple: #a78bfa;
+  --amber: #f59e0b;
+  --navy: #1e3a5f;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --card-bg: rgba(17,24,39,.92);
+  --glow: 0 0 40px rgba(56,189,248,.12);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Outfit',sans-serif; background:var(--bg); color:var(--text); overflow-x:hidden; }
+.hero {
+  min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  background: var(--bg); text-align:center; padding:2rem; position:relative; overflow:hidden;
+}
+/* Gradient mesh - shifts smoothly */
+.hero::before {
+  content:''; position:absolute; inset:0; z-index:0;
+  background:
+    radial-gradient(ellipse 600px 400px at 20% 30%, rgba(56,189,248,.12) 0%, transparent 70%),
+    radial-gradient(ellipse 500px 500px at 75% 60%, rgba(201,168,76,.1) 0%, transparent 70%),
+    radial-gradient(ellipse 400px 300px at 50% 80%, rgba(167,139,250,.08) 0%, transparent 70%);
+  animation: meshShift 12s ease-in-out infinite alternate;
+}
+@keyframes meshShift {
+  0%{filter:blur(0px);transform:scale(1) translate(0,0)}
+  33%{filter:blur(2px);transform:scale(1.05) translate(2%,-1%)}
+  66%{filter:blur(1px);transform:scale(1.02) translate(-1%,2%)}
+  100%{filter:blur(0px);transform:scale(1.08) translate(1%,-2%)}
+}
+/* Rotating conic light rays */
+.hero::after {
+  content:''; position:absolute; top:-50%; left:-50%; width:200%; height:200%; z-index:0;
+  background: repeating-conic-gradient(from 0deg, transparent 0deg 6deg, rgba(201,168,76,.02) 6deg 8deg);
+  animation: rotateBg 90s linear infinite;
+}
+@keyframes rotateBg { to{transform:rotate(360deg)} }
+/* Floating orbs */
+.orb{position:absolute;border-radius:50%;z-index:0;pointer-events:none;filter:blur(60px);opacity:.6}
+.orb.o1{width:300px;height:300px;top:-5%;left:-8%;background:radial-gradient(circle,rgba(56,189,248,.2),transparent 70%);animation:oF1 8s ease-in-out infinite alternate}
+.orb.o2{width:250px;height:250px;bottom:5%;right:-5%;background:radial-gradient(circle,rgba(201,168,76,.18),transparent 70%);animation:oF2 10s ease-in-out infinite alternate}
+.orb.o3{width:200px;height:200px;top:40%;left:60%;background:radial-gradient(circle,rgba(167,139,250,.15),transparent 70%);animation:oF3 7s ease-in-out infinite alternate}
+.orb.o4{width:150px;height:150px;top:60%;left:10%;background:radial-gradient(circle,rgba(34,197,94,.12),transparent 70%);animation:oF1 9s ease-in-out 2s infinite alternate}
+@keyframes oF1{0%{transform:translate(0,0) scale(1)}50%{transform:translate(30px,-40px) scale(1.15)}100%{transform:translate(-20px,30px) scale(.9)}}
+@keyframes oF2{0%{transform:translate(0,0) scale(1)}50%{transform:translate(-40px,20px) scale(1.1)}100%{transform:translate(20px,-30px) scale(.95)}}
+@keyframes oF3{0%{transform:translate(0,0) scale(1)}50%{transform:translate(20px,30px) scale(1.2)}100%{transform:translate(-30px,-20px) scale(.85)}}
+/* Subtle grid overlay */
+.hgrid{position:absolute;inset:0;z-index:0;pointer-events:none;opacity:.04;
+  background-image:linear-gradient(rgba(56,189,248,.5) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.5) 1px,transparent 1px);
+  background-size:60px 60px;animation:gPulse 4s ease-in-out infinite alternate}
+@keyframes gPulse{0%{opacity:.03}100%{opacity:.06}}
+/* Rising particles */
+.hpart{position:absolute;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.hpart i{position:absolute;display:block;border-radius:50%;animation:pRise linear infinite}
+.hpart i:nth-child(1){left:5%;width:2px;height:2px;background:rgba(201,168,76,.4);animation-duration:18s;bottom:-5%}
+.hpart i:nth-child(2){left:15%;width:4px;height:4px;background:rgba(56,189,248,.3);animation-duration:22s;animation-delay:2s;bottom:-8%}
+.hpart i:nth-child(3){left:28%;width:2px;height:2px;background:rgba(201,168,76,.35);animation-duration:16s;animation-delay:4s;bottom:-3%}
+.hpart i:nth-child(4){left:40%;width:3px;height:3px;background:rgba(167,139,250,.35);animation-duration:20s;animation-delay:1s;bottom:-6%}
+.hpart i:nth-child(5){left:55%;width:2px;height:2px;background:rgba(201,168,76,.3);animation-duration:24s;animation-delay:3s;bottom:-4%}
+.hpart i:nth-child(6){left:68%;width:4px;height:4px;background:rgba(56,189,248,.25);animation-duration:17s;animation-delay:5s;bottom:-7%}
+.hpart i:nth-child(7){left:78%;width:2px;height:2px;background:rgba(201,168,76,.4);animation-duration:21s;bottom:-5%}
+.hpart i:nth-child(8){left:88%;width:3px;height:3px;background:rgba(34,197,94,.3);animation-duration:19s;animation-delay:2s;bottom:-3%}
+.hpart i:nth-child(9){left:35%;width:2px;height:2px;background:rgba(56,189,248,.3);animation-duration:23s;animation-delay:6s;bottom:-8%}
+.hpart i:nth-child(10){left:92%;width:2px;height:2px;background:rgba(167,139,250,.3);animation-duration:15s;animation-delay:1s;bottom:-4%}
+@keyframes pRise{0%{transform:translateY(0) rotate(0deg);opacity:0}10%{opacity:1}90%{opacity:.6}100%{transform:translateY(-110vh) rotate(720deg);opacity:0}}
+/* Hero content above background */
+.hero-badge,.hero h1,.hero p,.hero-cta{position:relative;z-index:1}
+.hero-badge {
+  display:inline-flex; align-items:center; gap:.5rem; padding:.5rem 1.2rem;
+  background:var(--gold-dim); border:1px solid rgba(201,168,76,.3); border-radius:100px;
+  font-size:.85rem; color:var(--gold); margin-bottom:1.5rem; position:relative;
+  animation: fadeDown .8s ease both;
+}
+.hero h1 {
+  font-size:clamp(2rem,6vw,4rem); font-weight:800; line-height:1.1;
+  background:linear-gradient(135deg,#fff 30%,var(--cyan));
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  animation: fadeDown 1s ease .2s both; position:relative;
+}
+.hero h1 span { background:linear-gradient(135deg,var(--gold),#f0d078);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+.hero p { font-size:1.15rem; color:var(--text-dim); max-width:560px; margin:1rem auto 2rem;
+  animation: fadeDown 1s ease .4s both; position:relative; line-height:1.6; }
+.hero-cta {
+  display:inline-flex; align-items:center; gap:.6rem; padding:.9rem 2rem;
+  background:linear-gradient(135deg,var(--cyan),#2563eb); color:#fff; border:none;
+  border-radius:12px; font-size:1.1rem; font-weight:600; cursor:pointer;
+  font-family:inherit; animation: fadeDown 1s ease .6s both; position:relative;
+  transition: transform .2s, box-shadow .2s;
+}
+.hero-cta:hover { transform:translateY(-2px); box-shadow:0 8px 30px rgba(56,189,248,.3); }
+@keyframes fadeDown { from{opacity:0;transform:translateY(-20px)} to{opacity:1;transform:translateY(0)} }
+.steps-section { padding:3rem 1rem 4rem; max-width:900px; margin:0 auto; }
+.rules-section { padding:2rem 1rem 1rem; max-width:900px; margin:0 auto; }
+.section-title,.rules-title { text-align:center; font-size:1.5rem; font-weight:700; margin-bottom:.4rem; }
+.section-title { color:var(--gold); }
+.rules-title { color:var(--cyan); }
+.section-sub,.rules-sub { text-align:center; color:var(--text-dim); margin-bottom:2.5rem; font-size:.95rem; }
+.step {
+  display:flex; gap:1.5rem; margin-bottom:2.5rem; opacity:0;
+  transform:translateX(-30px); transition: opacity .6s ease, transform .6s ease; align-items:flex-start;
+}
+.step.visible { opacity:1; transform:translateX(0); }
+.step-num {
+  flex-shrink:0; width:52px; height:52px; border-radius:16px;
+  background:linear-gradient(135deg, var(--cyan), #2563eb);
+  display:flex; align-items:center; justify-content:center;
+  font-size:1.3rem; font-weight:800; color:#fff; box-shadow: 0 4px 20px rgba(56,189,248,.25);
+}
+.step-content {
+  flex:1; background:var(--card-bg); border:1px solid rgba(255,255,255,.06);
+  border-radius:16px; padding:1.5rem; box-shadow:var(--glow);
+}
+.step-content h3 { font-size:1.15rem; font-weight:700; margin-bottom:.6rem; color:#fff; }
+.step-content p { color:var(--text-dim); line-height:1.6; font-size:.95rem; }
+.rule-card {
+  background:var(--card-bg); border:1px solid rgba(255,255,255,.06);
+  border-radius:16px; padding:1.3rem 1.5rem; margin-bottom:1.2rem;
+  box-shadow:var(--glow); position:relative; overflow:hidden;
+  opacity:0; transform:translateY(15px); transition: opacity .5s ease, transform .5s ease;
+}
+.rule-card.visible { opacity:1; transform:translateY(0); }
+.rule-card::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; }
+.rule-card.warn::before { background:linear-gradient(90deg,transparent,var(--amber),transparent); }
+.rule-card.info::before { background:linear-gradient(90deg,transparent,var(--cyan),transparent); }
+.rule-card.accent::before { background:linear-gradient(90deg,transparent,var(--purple),transparent); }
+.rule-card h4 { font-size:1.05rem; font-weight:700; margin-bottom:.6rem; display:flex; align-items:center; gap:.5rem; }
+.rule-card.warn h4 { color:#fbbf24; }
+.rule-card.info h4 { color:var(--cyan); }
+.rule-card.accent h4 { color:#c4b5fd; }
+.rule-card p,.rule-card li { color:var(--text-dim); line-height:1.65; font-size:.9rem; }
+.rule-card code { font-family:'JetBrains Mono',monospace; background:rgba(0,0,0,.35); padding:2px 7px; border-radius:4px; font-size:.8rem; }
+.example-row { display:flex; gap:1rem; margin:.6rem 0; flex-wrap:wrap; }
+.example-box { flex:1; min-width:140px; border-radius:10px; padding:.6rem .9rem; font-size:.82rem;
+  font-family:'JetBrains Mono',monospace; line-height:1.8; }
+.example-box.ok { background:rgba(34,197,94,.1); border:1px solid rgba(34,197,94,.25); color:var(--green); }
+.example-box.bad { background:rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.2); color:#ef4444; }
+.example-box .ex-label { font-family:'Outfit',sans-serif; font-size:.7rem; font-weight:700;
+  text-transform:uppercase; letter-spacing:.5px; margin-bottom:.3rem; opacity:.8; }
+.anatomy {
+  background:rgba(0,0,0,.25); border-radius:12px; padding:1.2rem;
+  margin:.8rem 0; font-family:'JetBrains Mono',monospace; font-size:.85rem; line-height:2.2;
+}
+.anatomy .a-cmd { color:var(--green); font-weight:700; }
+.anatomy .a-var { color:var(--gold); font-weight:700; }
+.anatomy .a-val { color:var(--cyan); }
+.anatomy .a-label { font-family:'Outfit',sans-serif; font-size:.65rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.5px; display:block; opacity:.6; }
+.var-table { width:100%; border-collapse:separate; border-spacing:0; margin:.8rem 0; border-radius:12px;
+  overflow:hidden; border:1px solid rgba(255,255,255,.08); }
+.var-table th { background:rgba(56,189,248,.1); color:var(--cyan); font-size:.78rem; font-weight:700;
+  text-transform:uppercase; letter-spacing:.5px; padding:.6rem .8rem; text-align:left;
+  border-bottom:1px solid rgba(255,255,255,.08); }
+.var-table td { padding:.55rem .8rem; font-size:.82rem; border-bottom:1px solid rgba(255,255,255,.04);
+  color:var(--text-dim); vertical-align:top; }
+.var-table tr:last-child td { border-bottom:none; }
+.var-table tr:hover td { background:rgba(255,255,255,.02); }
+.var-table td:first-child { font-family:'JetBrains Mono',monospace; color:var(--gold); font-weight:600; white-space:nowrap; }
+.var-table td:nth-child(3) { font-size:.78rem; color:var(--text-dim); font-style:italic; }
+.phone-mock { background:#1a1a2e; border-radius:20px; border:2px solid rgba(255,255,255,.1);
+  padding:.8rem; margin-top:1rem; max-width:380px; position:relative; overflow:hidden; }
+.phone-mock::before { content:''; position:absolute; top:0; left:50%; transform:translateX(-50%);
+  width:100px; height:20px; background:#0a0e1a; border-radius:0 0 12px 12px; }
+.phone-top { display:flex; align-items:center; gap:.5rem; padding:.5rem .8rem; margin-top:.5rem; }
+.phone-avatar { width:28px; height:28px; border-radius:50%; background:linear-gradient(135deg,var(--cyan),var(--gold)); }
+.phone-name { font-size:.8rem; font-weight:600; }
+.phone-sub { font-size:.65rem; color:var(--text-dim); }
+.chat-area { padding:.5rem .8rem; }
+.chat-bubble { max-width:85%; padding:.6rem .9rem; border-radius:16px 16px 16px 4px;
+  margin-bottom:.5rem; font-size:.78rem; line-height:1.5; position:relative;
+  animation: bubbleIn .5s ease both; }
+.chat-bubble.user { background:linear-gradient(135deg,#2563eb,var(--cyan));
+  margin-left:auto; border-radius:16px 16px 4px 16px; color:#fff; }
+.chat-bubble.bot { background:rgba(255,255,255,.08); color:var(--text); }
+@keyframes bubbleIn { from{opacity:0;transform:translateY(10px) scale(.95)} to{opacity:1;transform:translateY(0) scale(1)} }
+.cmd { font-family:'JetBrains Mono',monospace; background:rgba(0,0,0,.3); padding:2px 6px;
+  border-radius:4px; font-size:.75rem; color:var(--cyan); }
+.cmd-block { font-family:'JetBrains Mono',monospace; background:rgba(0,0,0,.4);
+  padding:.6rem .8rem; border-radius:8px; margin:.5rem 0; font-size:.75rem;
+  color:var(--green); border-left:3px solid var(--green); line-height:1.8; }
+.send-mark { color:var(--text-dim); font-size:.68rem; font-family:'Outfit',sans-serif; opacity:.7; }
+.card-preview { background:linear-gradient(145deg,#0f1f3a,#1a2d50);
+  border:1px solid rgba(201,168,76,.3); border-radius:16px;
+  padding:1.2rem; margin-top:1rem; max-width:380px; box-shadow:0 8px 32px rgba(0,0,0,.4); }
+.card-preview .cp-header { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
+.cp-avatar { width:50px; height:50px; border-radius:50%; background:linear-gradient(135deg,var(--gold),#f0d078);
+  display:flex; align-items:center; justify-content:center; font-size:1.3rem; font-weight:800; color:#0a0e1a; }
+.cp-name { font-size:1rem; font-weight:700; }
+.cp-title { font-size:.8rem; color:var(--gold); }
+.cp-row { display:flex; align-items:center; gap:.5rem; margin-bottom:.4rem; font-size:.8rem; color:var(--text-dim); }
+.cp-row span:first-child { width:20px; text-align:center; }
+.cp-qr { width:60px; height:60px; background:rgba(255,255,255,.9); border-radius:8px;
+  display:flex; align-items:center; justify-content:center; font-size:.5rem; color:#333; margin-top:.8rem; }
+.tip-box { background:rgba(34,197,94,.08); border:1px solid rgba(34,197,94,.2);
+  border-radius:12px; padding:1rem 1.2rem; margin-top:1rem; font-size:.85rem; color:var(--green); line-height:1.6; }
+.tip-box strong { color:#4ade80; }
+.tip-box.warn { background:rgba(245,158,11,.08); border-color:rgba(245,158,11,.2); color:#fbbf24; }
+.tip-box.warn strong { color:#fcd34d; }
+.footer { text-align:center; padding:2rem; color:var(--text-dim); font-size:.85rem;
+  border-top:1px solid rgba(255,255,255,.05); }
+.footer b { color:var(--gold); }
+.scroll-indicator { position:fixed; bottom:1.5rem; right:1.5rem; width:48px; height:48px;
+  background:linear-gradient(135deg,var(--cyan),#2563eb); border-radius:50%;
+  display:flex; align-items:center; justify-content:center; cursor:pointer;
+  box-shadow:0 4px 20px rgba(56,189,248,.3); z-index:100;
+  animation: pulse 2s ease infinite; font-size:1.2rem; transition: opacity .3s; }
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
+.progress-bar { position:fixed; top:0; left:0; height:3px; background:linear-gradient(90deg,var(--cyan),var(--gold));
+  z-index:1000; transition: width .3s ease; }
+@media(max-width:600px) {
+  .step { flex-direction:column; gap:.8rem; }
+  .step-num { width:40px; height:40px; font-size:1rem; }
+  .hero h1 { font-size:2rem; }
+  .example-row { flex-direction:column; }
+}
+</style>
+</head>
+<body>
+<div class="progress-bar" id="progress"></div>
+
+<!-- HERO -->
+<section class="hero" id="top">
+  <div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div><div class="orb o4"></div>
+  <div class="hgrid"></div>
+  <div class="hpart"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="hero-badge">&#9875; Cofradia de Networking &mdash; Tutorial Interactivo</div>
+  <h1>Como crear tu<br><span>Tarjeta Profesional</span></h1>
+  <p>Guia paso a paso para crear, editar y compartir tu tarjeta digital. Incluye las 3 reglas esenciales y la explicacion de cada variable.</p>
+  <button class="hero-cta" onclick="document.getElementById('reglas').scrollIntoView({behavior:'smooth'})">&#9654; Comenzar Tutorial</button>
+</section>
+
+<!-- ANTES DE EMPEZAR -->
+<section class="rules-section" id="reglas">
+  <div class="rules-title">&#128214; Antes de Empezar &mdash; Lee Esto</div>
+  <div class="rules-sub">3 reglas simples para que todo funcione perfecto</div>
+
+  <div class="rule-card info" data-step>
+    <h4>&#128300; Anatomia del Comando</h4>
+    <p>Cada comando tiene 3 partes. Veamos un ejemplo real:</p>
+    <div class="anatomy">
+      <span class="a-label">comando &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; variable &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; valor (lo que tu escribes)</span><br>
+      <span class="a-cmd">/mi_tarjeta</span> &nbsp;<span class="a-var">profesion</span> &nbsp;<span class="a-val">Ingeniero Civil Industrial</span>
+    </div>
+    <p style="margin-top:.6rem">El <strong style="color:var(--green)">comando</strong> siempre empieza con <code>/</code> (slash). La <strong style="color:var(--gold)">variable</strong> indica que campo vas a completar. El <strong style="color:var(--cyan)">valor</strong> es la informacion que tu ingresas libremente.</p>
+  </div>
+
+  <div class="rule-card warn" data-step>
+    <h4>&#9888;&#65039; Regla 1: Sin tildes ni acentos</h4>
+    <p>Los nombres de los comandos y las variables <strong style="color:#fbbf24">nunca llevan tilde</strong> (acento). El valor si puede llevar tildes porque es texto libre.</p>
+    <div class="example-row">
+      <div class="example-box ok">
+        <div class="ex-label">&#10003; Correcto</div>
+        /mi_tarjeta <strong>profesion</strong> Capitan<br>
+        /mi_tarjeta <strong>telefono</strong> +569...<br>
+        /buscar_<strong>ia</strong> inversiones
+      </div>
+      <div class="example-box bad">
+        <div class="ex-label">&#10007; Incorrecto</div>
+        /mi_tarjeta profesi&oacute;n Capitan<br>
+        /mi_tarjeta tel&eacute;fono +569...<br>
+        /buscar_&iacute;a inversiones
+      </div>
+    </div>
+    <p style="margin-top:.5rem"><strong style="color:#fbbf24">Ojo:</strong> En el <em>valor</em> (lo que escribes despues de la variable) <strong>si puedes usar tildes normalmente</strong>. Ejemplo: <code>/mi_tarjeta profesion Capitan de Navio</code> &mdash; la variable "profesion" va sin tilde, pero en el valor puedes escribir con o sin tildes.</p>
+  </div>
+
+  <div class="rule-card info" data-step>
+    <h4>&#128279; Regla 2: Palabras unidas con guion bajo _</h4>
+    <p>Cuando un comando o variable tiene dos o mas palabras, se unen con el signo <code>_</code> (guion bajo, underscore), <strong>sin espacios</strong>.</p>
+    <div class="example-row">
+      <div class="example-box ok">
+        <div class="ex-label">&#10003; Correcto</div>
+        /mi<strong>_</strong>tarjeta<br>
+        /buscar<strong>_</strong>profesional<br>
+        /mi<strong>_</strong>perfil<br>
+        nro<strong>_</strong>kdt
+      </div>
+      <div class="example-box bad">
+        <div class="ex-label">&#10007; Incorrecto</div>
+        /mi tarjeta<br>
+        /buscar profesional<br>
+        /mi perfil<br>
+        nro kdt
+      </div>
+    </div>
+    <p style="margin-top:.5rem">El guion bajo <code>_</code> reemplaza al espacio. Si escribes <code>/mi tarjeta</code> con espacio, el bot solo leera <code>/mi</code> y no entendera el comando.</p>
+  </div>
+
+  <div class="rule-card accent" data-step>
+    <h4>&#9757;&#65039; Regla 3: Cada variable se ingresa una a la vez</h4>
+    <p>Debes enviar <strong>un mensaje por cada campo</strong> que quieras completar. No se pueden combinar varias variables en un solo mensaje.</p>
+    <div class="example-row">
+      <div class="example-box ok">
+        <div class="ex-label">&#10003; Correcto &mdash; Un campo por mensaje</div>
+        /mi_tarjeta profesion Ingeniero<br>
+        <span style="opacity:.4">&#8629; Enviar y esperar &#10004;</span><br>
+        /mi_tarjeta empresa ACME SpA<br>
+        <span style="opacity:.4">&#8629; Enviar y esperar &#10004;</span><br>
+        /mi_tarjeta ciudad Santiago<br>
+        <span style="opacity:.4">&#8629; Enviar y esperar &#10004;</span>
+      </div>
+      <div class="example-box bad">
+        <div class="ex-label">&#10007; Incorrecto &mdash; Todo junto</div>
+        /mi_tarjeta profesion Ingeniero<br>
+        empresa ACME SpA ciudad Santiago<br><br>
+        <span style="opacity:.5;font-family:'Outfit',sans-serif;font-size:.75rem">El bot solo leera "profesion" y el resto se perdera</span>
+      </div>
+    </div>
+    <p style="margin-top:.5rem">Envia cada campo como un <strong>mensaje separado</strong>. El bot confirmara cada uno con un &#10004; antes de continuar con el siguiente.</p>
+  </div>
+
+  <div class="rule-card info" data-step>
+    <h4>&#128203; Las 8 Variables de /mi_tarjeta</h4>
+    <p style="margin-bottom:.6rem">Estos son todos los campos disponibles. Cada uno se escribe despues de <code>/mi_tarjeta</code>:</p>
+    <table class="var-table">
+      <thead><tr><th>Variable</th><th>Para que sirve</th><th>Ejemplo de valor</th></tr></thead>
+      <tbody>
+        <tr><td>profesion</td><td>Tu titulo profesional o cargo actual</td><td>Ingeniero Civil Industrial</td></tr>
+        <tr><td>empresa</td><td>Empresa u organizacion donde trabajas</td><td>Naviera Global SpA</td></tr>
+        <tr><td>servicios</td><td>Descripcion de lo que ofreces profesionalmente</td><td>Consultoria en logistica maritima</td></tr>
+        <tr><td>telefono</td><td>Tu numero de contacto (idealmente con +56)</td><td>+56912345678</td></tr>
+        <tr><td>email</td><td>Tu correo electronico de contacto</td><td>juan.perez@correo.com</td></tr>
+        <tr><td>ciudad</td><td>Tu ciudad de residencia o trabajo</td><td>Valparaiso</td></tr>
+        <tr><td>linkedin</td><td>URL de tu perfil en LinkedIn</td><td>linkedin.com/in/juanperez</td></tr>
+        <tr><td>nro_kdt</td><td>Tu numero de Kadete (Escuela Naval). Nota: lleva guion bajo entre "nro" y "kdt"</td><td>322</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:.6rem;font-size:.85rem">&#128204; <strong>Todos los campos son opcionales.</strong> Puedes completar solo los que quieras. Mientras mas completes, mas util sera tu tarjeta en el directorio.</p>
+  </div>
+</section>
+
+<!-- PASO A PASO -->
+<section class="steps-section" id="pasos">
+  <div class="section-title">&#128199; Paso a Paso</div>
+  <div class="section-sub">Ahora si, manos a la obra &mdash; cada campo es opcional</div>
+
+  <div class="step" data-step>
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <h3>&#128640; Abre el chat con el Bot</h3>
+      <p>Busca <strong>@Cofradia_Premium_Bot</strong> en Telegram y abre el chat privado. Si es tu primera vez, escribe <span class="cmd">/start</span> para activar tu cuenta.</p>
+      <div class="phone-mock">
+        <div class="phone-top"><div class="phone-avatar"></div><div><div class="phone-name">Cofradia Premium Bot</div><div class="phone-sub">en linea</div></div></div>
+        <div class="chat-area">
+          <div class="chat-bubble bot">&#128075; Bienvenido a la Cofradia de Networking! Tu cuenta esta activa. Escribe /ayuda para ver los comandos.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <h3>&#128221; Agrega tu Profesion</h3>
+      <p>Escribe el comando con tu profesion. Este es el campo mas importante:</p>
+      <div class="phone-mock">
+        <div class="chat-area">
+          <div class="chat-bubble user">/mi_tarjeta profesion Ingeniero Civil Industrial</div>
+          <div class="chat-bubble bot">&#10004; Campo <strong>profesion</strong> actualizado: Ingeniero Civil Industrial</div>
+        </div>
+      </div>
+      <div class="tip-box">
+        <strong>&#128161; Tip:</strong> Usa tu titulo completo. Ejemplos: "Ingeniero Comercial", "Capitan de Navio (R)", "Abogado Corporativo", "Gerente de Operaciones"<br><br>
+        <strong>&#9888;&#65039; Recuerda:</strong> La variable <code>profesion</code> se escribe <strong>sin tilde</strong>. El valor si puede llevar tildes.
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <h3>&#127970; Agrega tu Empresa</h3>
+      <p>Indica donde trabajas actualmente o tu emprendimiento:</p>
+      <div class="phone-mock">
+        <div class="chat-area">
+          <div class="chat-bubble user">/mi_tarjeta empresa Naviera Global SpA</div>
+          <div class="chat-bubble bot">&#10004; Campo <strong>empresa</strong> actualizado: Naviera Global SpA</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <h3>&#128736;&#65039; Agrega tus Servicios</h3>
+      <p>Describe brevemente que ofreces profesionalmente:</p>
+      <div class="phone-mock">
+        <div class="chat-area">
+          <div class="chat-bubble user">/mi_tarjeta servicios Consultoria en logistica maritima y cadena de suministro</div>
+          <div class="chat-bubble bot">&#10004; Campo <strong>servicios</strong> actualizado</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">5</div>
+    <div class="step-content">
+      <h3>&#128241; Completa los datos de contacto</h3>
+      <p>Agrega telefono, email, ciudad y LinkedIn. Recuerda: <strong>un campo por mensaje</strong>, enviando cada uno por separado:</p>
+      <div class="cmd-block">
+/mi_tarjeta telefono +56912345678<br>
+<span class="send-mark">&#8629; Enviar y esperar &#10004;</span><br>
+/mi_tarjeta email juan.perez@correo.com<br>
+<span class="send-mark">&#8629; Enviar y esperar &#10004;</span><br>
+/mi_tarjeta ciudad Santiago<br>
+<span class="send-mark">&#8629; Enviar y esperar &#10004;</span><br>
+/mi_tarjeta linkedin linkedin.com/in/juanperez
+      </div>
+      <div class="tip-box">
+        <strong>&#128161; Tip:</strong> Tambien puedes agregar tu numero KDT con: <span class="cmd">/mi_tarjeta nro_kdt 322</span><br><br>
+        <strong>&#9757;&#65039; Importante:</strong> Envia <strong>un campo por mensaje</strong>. Espera la confirmacion &#10004; del bot antes de enviar el siguiente. Las variables <code>telefono</code> y <code>nro_kdt</code> van <strong>sin tilde</strong> y con <strong>guion bajo</strong>.
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">6</div>
+    <div class="step-content">
+      <h3>&#127881; Visualiza tu Tarjeta</h3>
+      <p>Escribe <span class="cmd">/mi_tarjeta</span> sin argumentos para ver el resultado. Recibiras:</p>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:1rem">
+        <div style="flex:1;min-width:200px">
+          <div class="card-preview">
+            <div class="cp-header"><div class="cp-avatar">JP</div><div><div class="cp-name">Juan Perez Contreras</div><div class="cp-title">Ingeniero Civil Industrial</div></div></div>
+            <div class="cp-row"><span>&#127970;</span> Naviera Global SpA</div>
+            <div class="cp-row"><span>&#128736;</span> Consultoria logistica maritima</div>
+            <div class="cp-row"><span>&#128205;</span> Santiago</div>
+            <div class="cp-row"><span>&#128241;</span> +56912345678</div>
+            <div class="cp-row"><span>&#128231;</span> juan.perez@correo.com</div>
+            <div class="cp-row"><span>&#128279;</span> linkedin.com/in/juanperez</div>
+            <div class="cp-qr">[ QR ]</div>
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <p style="font-size:.9rem;margin-bottom:.8rem"><strong>Recibes 3 archivos:</strong></p>
+          <div style="display:flex;flex-direction:column;gap:.5rem">
+            <div style="background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);border-radius:8px;padding:.6rem .8rem;font-size:.8rem">
+              &#128444;&#65039; <strong>Imagen PNG</strong><br><span style="color:var(--text-dim)">Tarjeta visual para compartir</span></div>
+            <div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:.6rem .8rem;font-size:.8rem">
+              &#128241; <strong>Archivo .vcf</strong><br><span style="color:var(--text-dim)">Contacto para guardar en agenda</span></div>
+            <div style="background:rgba(201,168,76,.08);border:1px solid rgba(201,168,76,.2);border-radius:8px;padding:.6rem .8rem;font-size:.8rem">
+              &#127822; <strong>Apple/Android</strong><br><span style="color:var(--text-dim)">Compatible con Wallet y Contacts</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">7</div>
+    <div class="step-content">
+      <h3>&#9999;&#65039; Editar un campo</h3>
+      <p>Para modificar cualquier campo, simplemente vuelve a escribir el comando con el nuevo valor:</p>
+      <div class="phone-mock">
+        <div class="chat-area">
+          <div class="chat-bubble user">/mi_tarjeta empresa Nueva Empresa Ltda.</div>
+          <div class="chat-bubble bot">&#10004; Campo <strong>empresa</strong> actualizado: Nueva Empresa Ltda.</div>
+        </div>
+      </div>
+      <div class="tip-box">
+        <strong>&#128203; Campos editables:</strong> profesion, empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt<br><br>
+        <strong>&#128204; Recuerda las 3 reglas:</strong> Sin tildes en las variables (profesion, no profesi&oacute;n) &middot; Palabras unidas con _ (nro_kdt, no nro kdt) &middot; Un campo por mensaje.
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step>
+    <div class="step-num">&#10003;</div>
+    <div class="step-content">
+      <h3>&#128203; Resumen de Comandos</h3>
+      <div class="cmd-block" style="border-left-color:var(--gold);color:var(--gold)">
+/mi_tarjeta &rarr; Ver tu tarjeta completa<br>
+/mi_tarjeta profesion [texto] &rarr; Tu profesion<br>
+/mi_tarjeta empresa [texto] &rarr; Tu empresa<br>
+/mi_tarjeta servicios [texto] &rarr; Que ofreces<br>
+/mi_tarjeta telefono [+569...] &rarr; Tu telefono<br>
+/mi_tarjeta email [correo] &rarr; Tu email<br>
+/mi_tarjeta ciudad [ciudad] &rarr; Tu ciudad<br>
+/mi_tarjeta linkedin [url] &rarr; Tu perfil LinkedIn<br>
+/mi_tarjeta nro_kdt [numero] &rarr; Tu numero KDT
+      </div>
+      <div class="tip-box warn" style="margin-top:1rem">
+        <strong>&#9888;&#65039; Recuerda las 3 reglas de oro:</strong><br>
+        1. Las variables van <strong>sin tilde</strong>: profesion, telefono (no profesi&oacute;n, tel&eacute;fono)<br>
+        2. Las palabras compuestas van unidas con <strong>guion bajo _</strong> : mi_tarjeta, nro_kdt<br>
+        3. Ingresa <strong>un campo por mensaje</strong>. Espera el &#10004; antes de enviar el siguiente.
+      </div>
+      <p style="margin-top:1rem;color:var(--text-dim);font-size:.9rem">&#127919; Tu tarjeta aparece en el <strong>directorio</strong> de la Cofradia. Otros cofrades pueden encontrarte con <span class="cmd">/directorio</span> y <span class="cmd">/conectar</span>.</p>
+    </div>
+  </div>
+</section>
+
+<div class="footer">&#9875; <b>Cofradia de Networking</b> &mdash; Tutorial creado para @Cofradia_de_Networking</div>
+<div class="scroll-indicator" onclick="scrollNext()" id="scrollBtn">&#8595;</div>
+
+<script>
+var steps=document.querySelectorAll('[data-step]');
+var obs=new IntersectionObserver(function(entries){
+  entries.forEach(function(e,i){
+    if(e.isIntersecting) setTimeout(function(){e.target.classList.add('visible')},i*100);
+  });
+},{threshold:0.15});
+steps.forEach(function(s){obs.observe(s)});
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;
+  var pct=(h.scrollTop/(h.scrollHeight-h.clientHeight))*100;
+  document.getElementById('progress').style.width=pct+'%';
+  document.getElementById('scrollBtn').style.opacity=pct>90?'0':'1';
+});
+var cur=-1;
+function scrollNext(){
+  cur++;
+  var a=Array.from(steps);
+  if(cur<a.length) a[cur].scrollIntoView({behavior:'smooth',block:'center'});
+  else{cur=-1;document.getElementById('top').scrollIntoView({behavior:'smooth'});}
+}
+</script>
+</body>
+</html>
