@@ -6806,6 +6806,9 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         
         # BÚSQUEDA UNIFICADA usando query mejorada
+        # FASE 9 (revertido): limit_rag=25 mantiene cobertura completa de respuestas
+        # NO reducir — se prefiere respuesta exhaustiva. La velocidad se mejora por
+        # otros lados (cache RAG, normalización SQL, paralelización TTS).
         resultados_unificados = busqueda_unificada(pregunta_mejorada, limit_historial=10, limit_rag=25)
         contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta_mejorada)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
@@ -6871,20 +6874,40 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
         if respuesta:
             respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
             await enviar_mensaje_largo(update, respuesta_limpia)
-            # Enviar también como audio (TTS)
-            try:
-                audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
-                if audio_path and os.path.exists(audio_path):
-                    with open(audio_path, 'rb') as af:
-                        await update.message.reply_voice(voice=af)
-                    os.remove(audio_path)
-            except Exception as _tts_e:
-                logger.debug(f"TTS mencion: {_tts_e}")
-            # Mejora 4: Botones de feedback
+            
+            # FIX FASE 9: TTS en paralelo con botones feedback (no secuencial)
+            # Antes: enviar texto → esperar TTS (5-10s) → enviar botones
+            # Ahora: enviar texto → lanzar TTS en background → enviar botones inmediatamente
+            async def _tts_paralelo():
+                try:
+                    audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
+                    if audio_path and os.path.exists(audio_path):
+                        with open(audio_path, 'rb') as af:
+                            await update.message.reply_voice(voice=af)
+                        try:
+                            os.remove(audio_path)
+                        except Exception:
+                            pass
+                except Exception as _tts_e:
+                    logger.debug(f"TTS mencion: {_tts_e}")
+            
+            # Lanzar TTS sin bloquear, mientras tanto se envían los botones
+            tts_task = asyncio.create_task(_tts_paralelo())
+            
+            # Mejora 4: Botones de feedback (instantáneo, no espera TTS)
             try:
                 await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('mencion'))
             except Exception:
                 pass
+            
+            # Esperar a que el TTS termine (máximo 25s) antes de continuar el flujo
+            try:
+                await asyncio.wait_for(tts_task, timeout=25)
+            except asyncio.TimeoutError:
+                logger.warning("TTS timeout 25s, continuando sin audio")
+            except Exception:
+                pass
+            
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
             await update.message.reply_text(
@@ -11898,24 +11921,38 @@ def buscar_rag(query, limit=5):
         docs_fase1 = []    # sources encontrados en fase 1
         chunks_fase1 = []  # (texto, score, source) con score alto
         
+        # ═══════════════════════════════════════════════════════════════
+        # FIX FASE 9 CRÍTICO: NORMALIZACIÓN BIDIRECCIONAL (tildes)
+        # ANTES: SQL `LOWER(source) LIKE '%inflacion%'` NO matcheaba
+        # source "El fin de la inflación.pdf" porque BD conserva la tilde.
+        # SOLUCION: pre-cargar TODOS los sources, normalizar EN PYTHON, y
+        # comparar en memoria — instantáneo (todos los sources caben en RAM).
+        # Esto resuelve el caso real del libro de Milei (inflación con tilde).
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            else:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            todos_sources_db = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+            # Pre-normalizar TODOS los sources (sin tildes, lowercase): lista de tuples (norm, original)
+            sources_normalizados = [(normalizar(s), s) for s in todos_sources_db if s]
+            logger.info(f"🔎 RAG: {len(sources_normalizados)} sources cargados para matching normalizado")
+        except Exception as _e_load:
+            logger.warning(f"Error cargando sources: {_e_load}")
+            sources_normalizados = []
+        
+        # MATCH 1: Búsqueda exacta de cada palabra clave en sources NORMALIZADOS
         for palabra in palabras_clave:
             if len(palabra) < 3:
                 continue
-            try:
-                if DATABASE_URL:
-                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE LOWER(source) LIKE %s LIMIT 5",
-                             (f'%{palabra}%',))
-                else:
-                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE LOWER(source) LIKE ? LIMIT 5",
-                             (f'%{palabra}%',))
-                sources_encontrados = c.fetchall()
-                for row in sources_encontrados:
-                    src = row['source'] if DATABASE_URL else row[0]
-                    if src and src not in docs_fase1:
-                        docs_fase1.append(src)
-                        logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src}'")
-            except Exception as e:
-                logger.debug(f"Error fase1 RAG: {e}")
+            for src_norm, src_orig in sources_normalizados:
+                if src_orig in docs_fase1:
+                    continue
+                # Match substring NORMALIZADO (sin tildes, lowercase) — resuelve "inflacion"↔"inflación"
+                if palabra in src_norm:
+                    docs_fase1.append(src_orig)
+                    logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
         
         # FASE 6 OPTIMIZADA: Fuzzy fallback REACTIVO — solo si Fase 1 exact no encontró NADA
         # y la palabra es de longitud razonable (>= 5 letras, candidata a nombre propio)
@@ -12341,6 +12378,68 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
         resultados['rag_score_max'] = score_max
         
+        # ═══════════════════════════════════════════════════════════════
+        # FIX FASE 9: PRE-FILTRO ESPECIFICIDAD DEL QUERY
+        # Si el query tiene NOMBRES PROPIOS o términos muy específicos (>= 5 letras
+        # capitalizadas o palabras únicas) que NO aparecen en NINGUN source de los
+        # chunks retornados, los chunks son IRRELEVANTES — el LLM debe responder
+        # desde su conocimiento propio, no inventar respuestas con fragmentos no relacionados.
+        #
+        # Ejemplo: query "libro de Javier Milei sobre inflación" trae chunks con
+        # "inflación" pero ningún source dice "milei" → marcamos irrelevante.
+        # ═══════════════════════════════════════════════════════════════
+        if chunks_rag and score_max < 45.0:  # solo aplicar si NO es Fase 1 hit
+            import unicodedata as _uni_pre, re as _re_pre
+            def _np(t):
+                t = _uni_pre.normalize('NFKD', (t or '').lower())
+                return ''.join(c for c in t if not _uni_pre.combining(c))
+            
+            # Detectar términos específicos del query: palabras de 5+ letras NO comunes
+            STOP_PRE = {'libro','libros','sobre','acerca','habla','dice','cuentame','cuál','cual',
+                        'como','que','del','para','con','este','esta','estos','estas','muy',
+                        'libro','autor','escritor','tema','sobre','tratan','trata','hacer'}
+            query_norm_pre = _np(query)
+            terminos_especificos = [
+                w for w in _re_pre.findall(r'\b\w{5,}\b', query_norm_pre)
+                if w not in STOP_PRE
+            ]
+            
+            if terminos_especificos:
+                # Verificar si AL MENOS UN término específico aparece en algún source
+                sources_chunks = set()
+                for item in chunks_rag:
+                    src = (item[1] if isinstance(item, tuple) else '')
+                    src_norm = _np(src.replace('PDF:', '').replace('EXCEL:', '').replace('_', ' '))
+                    sources_chunks.update(w for w in src_norm.split() if len(w) >= 4)
+                
+                # Match exacto + fuzzy (prefijo 5 chars para términos mas largos)
+                hay_match_source = False
+                for t in terminos_especificos:
+                    for s in sources_chunks:
+                        if t == s:
+                            hay_match_source = True
+                            break
+                        # fuzzy: si comparten 5+ chars iniciales
+                        if len(t) >= 5 and len(s) >= 5 and (t.startswith(s[:5]) or s.startswith(t[:5])):
+                            hay_match_source = True
+                            break
+                    if hay_match_source:
+                        break
+                
+                if not hay_match_source:
+                    # Query menciona algo específico (ej: "Milei") pero NO está en sources
+                    # → marcar irrelevante para que LLM use su conocimiento
+                    logger.info(
+                        f"⚠️ FASE 9 PRE-FILTRO: query menciona {terminos_especificos[:3]} "
+                        f"pero NINGÚN source lo contiene → marcando RAG irrelevante "
+                        f"(sources disponibles: {list(sources_chunks)[:5]})"
+                    )
+                    chunks_rag = []  # vaciar chunks irrelevantes
+                    score_max = 0.0
+                    resultados['rag_score_max'] = 0.0
+                    resultados['rag_confianza'] = 'irrelevante'
+                    resultados['rag_tematica'] = 'irrelevante_pre_filtro'
+        
         if score_max >= 45.0:
             resultados['rag_confianza'] = 'alta'
         elif score_max >= 8.0:
@@ -12488,8 +12587,8 @@ def formatear_contexto_unificado(resultados, query):
             contexto += f"📄 DOCUMENTO: \"{titulo_limpio}\"\n"
             contexto += f"   (archivo: {doc_nombre})\n"
             contexto += f"{'─'*50}\n"
-            # FASE 3 FIX: aumentado de 5→10 chunks por doc, 500→700 chars
-            # (Fase 3A original fue demasiado agresivo, perdia info relevante)
+            # FASE 9 (revertido): 10 chunks × 700 chars — mantiene contexto completo.
+            # Usuario pidió NO reducir chunks porque podría dejar fuera info relevante.
             for i, chunk in enumerate(chunks[:10], 1):
                 contexto += f"[Fragmento {i}]:\n{chunk[:700]}\n\n"
             contexto += "\n"

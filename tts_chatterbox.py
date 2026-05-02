@@ -24,8 +24,21 @@ VOICE_LANGUAGE = "es-US"
 SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.85"))  # más pausada = más natural
 PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-4.0"))  # más grave = más cálida
 
-# FASE 7: SSML toggle (default OFF para mantener v91 estable)
-USE_SSML = os.getenv("GOOGLE_TTS_SSML", "false").lower() == "true"
+# FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
+# Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
+_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "false").strip().lower()
+USE_SSML = _ssml_raw in ("true", "1", "yes", "si", "on", "y", "s")
+
+# LOG INMEDIATO al cargar el modulo: visible al iniciar bot
+print(f"━━━ [TTS_CHATTERBOX] CONFIG ━━━")
+print(f"  GOOGLE_TTS_KEY: {'CONFIGURADA' if GOOGLE_TTS_KEY else 'NO CONFIGURADA'}")
+print(f"  VOICE_NAME    : {VOICE_NAME}")
+print(f"  SPEAKING_RATE : {SPEAKING_RATE}")
+print(f"  PITCH         : {PITCH}")
+print(f"  GOOGLE_TTS_SSML (raw env): '{os.getenv('GOOGLE_TTS_SSML', '<no_set>')}'")
+print(f"  USE_SSML detectado: {USE_SSML}  {'✅ SSML ACTIVADO' if USE_SSML else '⚠️ SSML DESACTIVADO (modo v91 plano)'}")
+print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+logger.info(f"[TTS] SSML={USE_SSML} (env raw='{os.getenv('GOOGLE_TTS_SSML', '<no_set>')}')")
 
 CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_gtts"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
