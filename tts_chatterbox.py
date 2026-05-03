@@ -21,23 +21,27 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-# FASE 12: Default Neural2-A es la voz femenina más natural disponible para español.
-# Si el usuario quiere experimentar con otras voces, puede cambiar GOOGLE_TTS_VOICE en Render:
-#   - es-US-Neural2-A: femenina natural (default actual)
-#   - es-US-Neural2-C: femenina alternativa
-#   - es-US-Neural2-B: masculina
-#   - es-ES-Neural2-D: femenina con acento España (más entonada)
-#   - en-US-Studio-O: voz STUDIO (premium, máxima calidad - INGLÉS solamente)
+# FASE 12 (USUARIO ELIGIÓ): Default Neural2-C masculina, la voz más natural y cálida
+# para Cofradía según pruebas comparativas del comando /test_tts.
+# Otras opciones disponibles cambiando GOOGLE_TTS_VOICE en Render:
+#   - es-US-Neural2-A: femenina latina natural
+#   - es-US-Neural2-C: MASCULINA cálida (default actual elegido por usuario) ✅
+#   - es-US-Neural2-B: masculina alternativa
+#   - es-ES-Neural2-D: femenina con acento España
 # IMPORTANTE: Studio voices NO existen en español todavía. Para máxima naturalidad
 # en español, Neural2 es la opción más alta. Wavenet sonaba más robótica.
-VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-C")
 VOICE_LANGUAGE = os.getenv("GOOGLE_TTS_LANG", "es-US")
 # FASE 12: Parámetros ajustados a valores que Google TTS pronuncia con mayor naturalidad
 # Velocidad 1.0 = velocidad normal humana. 0.95 = ligeramente pausada (recomendado para naturalidad)
 SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.95"))
 # Pitch 0 = neutral. Valores negativos = más grave; positivos = más agudo.
-# Neural2-A femenina ya tiene un pitch alto natural; -1.0 le da calidez sin sonar grave
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-1.0"))
+# FASE 12 (USUARIO ELIGIÓ Neural2-C masculina): pitch 0.0 = tono natural masculino.
+# Si quieres ajustar, cambia GOOGLE_TTS_PITCH en Render:
+#   0.0 = natural (recomendado para Neural2-C)
+#   +1.0 a +2.0 = ligeramente más agudo (suaviza voz masculina)
+#   -1.0 a -2.0 = más grave (autoritario)
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "0.0"))
 
 # FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
 # Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
