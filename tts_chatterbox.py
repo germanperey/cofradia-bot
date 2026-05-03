@@ -66,7 +66,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v14-pronunciacion-forzada-2026-05-03"
+TTS_VERSION_TAG = "v16-pronunciacion-expandida-2026-05-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -157,6 +157,12 @@ def _texto_a_ssml(texto: str) -> str:
         'Kast': 'Kast',
         'Piñera': 'Piñera',
         'Bachelet': 'Báchelet',
+        'Goleman': 'Góulman',        # autor "Inteligencia Emocional"
+        'Oppenheimer': 'Oppenjáimer',
+        'Drucker': 'Drácker',
+        'Buffett': 'Báfet',
+        'Munger': 'Mánguer',
+        'Soros': 'Sóros',
         # Términos navales chilenos
         'Cofradía': 'Cofradíia',     # alargar tilde
         'cofradía': 'cofradíia',
@@ -172,6 +178,35 @@ def _texto_a_ssml(texto: str) -> str:
         'América': 'Améerica',
         'Argentina': 'Argentíina',
         'Chile': 'Chíile',
+        # FASE 16: palabras chilenas con acentos comúnmente mal pronunciadas
+        'Andrés': 'Andréesss',
+        'Sebastián': 'Sebastiáan',
+        'Cristóbal': 'Cristóobal',
+        'José': 'Joséee',
+        'Tomás': 'Tomáasss',
+        'Nicolás': 'Nicoláasss',
+        'Martín': 'Martíiin',
+        'Joaquín': 'Joakíiin',
+        'Iván': 'Iváaan',
+        'Inés': 'Inéesss',
+        'María': 'Maríia',
+        'Ramón': 'Ramóoon',
+        'Simón': 'Simóoon',
+        'Adrián': 'Adriáaan',
+        'Hernán': 'Jernáaan',
+        'Julián': 'Juliáaan',
+        'Fabián': 'Fabiáaan',
+        'estás': 'estáasss',
+        'estáis': 'estáais',
+        'háblame': 'jáblame',
+        'cuéntame': 'kuéntame',
+        'háganos': 'jáganos',
+        'búsqueda': 'bússkeda',
+        'préstamo': 'préestamo',
+        'táctica': 'tákktica',
+        'práctica': 'práaktica',
+        'logística': 'lojíistika',
+        'estratégica': 'estratéejika',
         # Cargos/títulos
         'doctor': 'doctór',
         'ingeniero': 'injeniero',
