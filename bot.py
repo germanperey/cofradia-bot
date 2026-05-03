@@ -1113,8 +1113,10 @@ if GROQ_API_KEY:
 else:
     logger.warning("⚠️ GROQ_API_KEY no configurada")
 
-# Gemini 2.0 Flash — fallback gratuito (reemplaza DeepSeek)
-deepseek_disponible = False
+# Gemini 2.0 Flash — fallback gratuito
+# FASE 20: deepseek_disponible se basa en si la variable de entorno está configurada
+# (la integración real está en función llamar_deepseek con cascada de modelos)
+deepseek_disponible = bool(DEEPSEEK_API_KEY)
 gemini_texto_disponible = False
 if GEMINI_API_KEY:
     gemini_disponible = True
@@ -4450,6 +4452,76 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': str(e)}, status=500)
             return
         
+        # FASE 21: API editar usuario (Nombre, Username, Profesión)
+        if path == '/api/usuarios/editar':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                
+                user_id = body.get('user_id')
+                if not user_id:
+                    self._send_json({'error': 'missing user_id'}, status=400)
+                    return
+                
+                # Solo se aceptan estos 3 campos por seguridad
+                campos = {}
+                if 'nombre' in body:
+                    campos['nombre'] = str(body.get('nombre', '')).strip()[:200]
+                if 'username' in body:
+                    campos['username'] = str(body.get('username', '')).strip().lstrip('@')[:60]
+                if 'profesion' in body:
+                    campos['profesion'] = str(body.get('profesion', '')).strip()[:200]
+                
+                if not campos:
+                    self._send_json({'error': 'no fields to update'}, status=400)
+                    return
+                
+                ok, mensaje = editar_usuario_admin(user_id, campos)
+                self._send_json({'ok': ok, 'mensaje': mensaje, 'user_id': user_id, 'cambios': campos})
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/editar: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 21: API enviar invitación de tarjeta a usuario sin tarjeta
+        if path == '/api/usuarios/invitar_tarjeta':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                
+                user_id = body.get('user_id')
+                if not user_id:
+                    self._send_json({'error': 'missing user_id'}, status=400)
+                    return
+                
+                ok, mensaje = enviar_invitacion_tarjeta_admin(int(user_id))
+                self._send_json({'ok': ok, 'mensaje': mensaje, 'user_id': user_id})
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/invitar_tarjeta: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 21: Normalizar todos los nombres y usernames de la BD
+        if path == '/api/usuarios/normalizar_todos':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                resultado = normalizar_nombres_usernames_bd()
+                self._send_json(resultado)
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/normalizar_todos: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
         # Default
         self.send_response(404)
         self.send_header('Content-type', 'text/plain')
@@ -4536,6 +4608,45 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 .loading{text-align:center;padding:30px;opacity:.6}
 .error{background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.4);color:#e74c3c;padding:12px;border-radius:8px;margin:12px 0}
 @media(max-width:680px){body{padding:12px}.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}.tab{flex-shrink:0}}
+/* FASE 21: estilos editor usuarios */
+.user-id-cell{font-size:.95em !important;color:#c3a55a !important;font-weight:600;letter-spacing:.3px}
+.btn-editar,.btn-invitar{background:rgba(195,165,90,.15);color:#c3a55a;border:1px solid rgba(195,165,90,.4);
+padding:5px 10px;border-radius:6px;cursor:pointer;font-size:.82em;font-weight:600;transition:.18s;white-space:nowrap}
+.btn-editar:hover{background:rgba(195,165,90,.25)}
+.btn-invitar{background:rgba(56,189,248,.12);color:#38bdf8;border-color:rgba(56,189,248,.4)}
+.btn-invitar:hover{background:rgba(56,189,248,.22)}
+.btn-invitar:disabled{opacity:.6;cursor:not-allowed}
+.btn-normalizar{background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.4);
+padding:8px 14px;border-radius:8px;cursor:pointer;font-size:.88em;font-weight:600;margin-left:8px}
+.btn-normalizar:hover{background:rgba(167,139,250,.25)}
+.btn-normalizar:disabled{opacity:.6;cursor:not-allowed}
+/* Modal editor */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;
+justify-content:center;z-index:9999;backdrop-filter:blur(6px);animation:fadeIn .2s}
+.modal-box{background:#0f2f59;border:1px solid rgba(195,165,90,.4);border-radius:14px;width:92%;
+max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal-header{padding:18px 22px;border-bottom:1px solid rgba(195,165,90,.2);display:flex;
+justify-content:space-between;align-items:center}
+.modal-header h3{color:#c3a55a;margin:0;font-size:1.1em}
+.modal-close{background:transparent;color:#e0e6ed;border:none;font-size:1.7em;cursor:pointer;
+line-height:1;padding:0;width:32px;height:32px;border-radius:50%;transition:.15s}
+.modal-close:hover{background:rgba(231,76,60,.2);color:#e74c3c}
+.modal-body{padding:22px}
+.modal-body label{display:block;color:#c3a55a;font-weight:600;font-size:.85em;letter-spacing:.3px;
+text-transform:uppercase;margin-bottom:18px}
+.modal-body input{width:100%;padding:10px 13px;background:#0a1628;border:1px solid rgba(195,165,90,.25);
+border-radius:8px;color:#e0e6ed;font-size:.95em;margin-top:6px;font-family:inherit;transition:.15s}
+.modal-body input:focus{outline:none;border-color:#c3a55a;background:#0d1a30}
+.modal-body small{display:block;color:#8899aa;font-size:.78em;font-weight:400;text-transform:none;
+letter-spacing:0;margin-top:5px}
+.modal-footer{padding:14px 22px 18px;border-top:1px solid rgba(195,165,90,.2);display:flex;
+justify-content:flex-end;gap:10px}
+.btn-cancel{background:transparent;color:#8899aa;border:1px solid rgba(255,255,255,.15);
+padding:9px 18px;border-radius:8px;cursor:pointer;font-weight:600;font-size:.9em}
+.btn-cancel:hover{background:rgba(255,255,255,.05);color:#e0e6ed}
+.btn-save{background:#c3a55a;color:#0a1628;border:none;padding:9px 18px;border-radius:8px;
+cursor:pointer;font-weight:700;font-size:.9em;transition:.15s}
+.btn-save:hover{background:#d4b86a;transform:translateY(-1px)}
 </style>
 </head>
 <body>
@@ -4559,6 +4670,8 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 
 <div id="usuarios" class="tab-content">
 <button class="refresh-btn" onclick="cargarUsuarios()">↻ Refrescar</button>
+<button id="btn-normalizar-todos" class="btn-normalizar" onclick="normalizarTodos()" 
+  style="float:right" title="Normalizar todos los nombres y usernames vacíos o incompletos">🔄 Normalizar todos</button>
 <h3 style="color:#c3a55a;margin-top:0">👥 Usuarios Registrados (Activos)</h3>
 <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <input id="filtro-usuarios" type="text" placeholder="🔍 Filtrar por nombre, username o ID..." 
@@ -4596,6 +4709,9 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 <tr><td><code>GET</code></td><td><code>/health</code></td><td>Status del bot (público, sin auth)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/empresas</code></td><td>Lista empresas registradas</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/usuarios</code></td><td>Lista usuarios activos (FASE 20)</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/usuarios/editar</code></td><td>Editar nombre, username, profesión (FASE 21)</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/usuarios/invitar_tarjeta</code></td><td>Invitar a crear tarjeta (FASE 21)</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/usuarios/normalizar_todos</code></td><td>Normalizar nombres/usernames (FASE 21)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/saldos</code></td><td>Saldo DeepSeek y estado LLMs (FASE 20)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/analytics</code></td><td>Analytics del tenant default</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/analytics/{tenant_id}</code></td><td>Analytics de tenant específico</td></tr>
@@ -4843,30 +4959,190 @@ function filtrarUsuarios(){
   // Tabla
   html += '<div class="card"><table><thead><tr>';
   html += '<th>Nombre</th><th>Username</th><th>ID</th><th>Profesión</th>';
-  html += '<th>Fecha alta</th><th>Mensajes</th><th>Tarjeta</th><th>Estado</th>';
+  html += '<th>Fecha alta</th><th>Mensajes</th><th>Tarjeta</th><th>Estado</th><th>Acciones</th>';
   html += '</tr></thead><tbody>';
   
   lista.forEach(u => {
-    const tieneTarj = u.tiene_tarjeta ? '✓' : '—';
     const username = u.username ? `@${escapeHtml(u.username)}` : '—';
     const profesion = u.profesion ? escapeHtml(u.profesion) : '—';
     const fecha = u.fecha_alta || '—';
     const estadoIcon = u.es_admin ? '👑 Admin' : (u.es_activo ? '🟢 Activo' : '⚪ Inactivo');
     
-    html += `<tr>
+    // Columna Tarjeta: si NO tiene → botón invitar; si tiene → check
+    let tarjetaCell;
+    if(u.tiene_tarjeta){
+      tarjetaCell = '<span style="color:#2ecc71;font-size:1.1em">✓</span>';
+    } else {
+      tarjetaCell = `<button class="btn-invitar" data-uid="${u.user_id}" 
+        onclick="invitarTarjeta(${u.user_id}, '${escapeHtml(u.nombre||'').replace(/'/g,"\\'")}')"
+        title="Enviar mensaje invitando a crear tarjeta">📩 Invitar</button>`;
+    }
+    
+    // Acciones: botón Editar
+    const acciones = `<button class="btn-editar" 
+      onclick='abrirEditor(${JSON.stringify(u).replace(/'/g,"&#39;")})'
+      title="Editar nombre, username o profesión">✏️ Editar</button>`;
+    
+    html += `<tr data-uid="${u.user_id}">
       <td><strong>${escapeHtml(u.nombre||'(sin nombre)')}</strong></td>
       <td>${username}</td>
-      <td><code style="font-size:.8em;color:#8899aa">${u.user_id||'—'}</code></td>
+      <td><code class="user-id-cell">${u.user_id||'—'}</code></td>
       <td>${profesion}</td>
       <td>${escapeHtml(fecha)}</td>
       <td style="text-align:right">${(u.mensajes||0).toLocaleString()}</td>
-      <td style="text-align:center">${tieneTarj}</td>
+      <td style="text-align:center">${tarjetaCell}</td>
       <td>${estadoIcon}</td>
+      <td>${acciones}</td>
     </tr>`;
   });
   
   html += '</tbody></table></div>';
   cont.innerHTML = html;
+}
+
+// ════════════════════════════════════════════════════════════════
+// FASE 21: EDITOR INLINE de usuarios (Nombre, Username, Profesión)
+// ════════════════════════════════════════════════════════════════
+function abrirEditor(usuario){
+  const u = usuario;
+  // Construir modal en el body
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>✏️ Editar usuario · <span style="color:#8899aa;font-size:.8em">ID ${u.user_id}</span></h3>
+        <button class="modal-close" onclick="cerrarEditor()">×</button>
+      </div>
+      <div class="modal-body">
+        <label>Nombre completo
+          <input id="edit-nombre" type="text" value="${escapeHtml(u.nombre||'')}" 
+            placeholder="Ej: Juan Andrés Pérez Soto" maxlength="200">
+          <small>Formato sugerido para nuevos: [Nombre] [Nombre2] [PrimerApellido] [SegundoApellido]</small>
+        </label>
+        <label>Username (sin el @)
+          <input id="edit-username" type="text" value="${escapeHtml(u.username||'')}"
+            placeholder="Ej: Juan_Perez" maxlength="60">
+          <small>Estructura recomendada: Nombre_PrimerApellido</small>
+        </label>
+        <label>Profesión
+          <input id="edit-profesion" type="text" value="${escapeHtml(u.profesion||'')}"
+            placeholder="Ej: Ingeniero Civil Industrial" maxlength="200">
+          <small>${u.tiene_tarjeta ? 'Se actualiza en su tarjeta profesional' : 'Se creará registro mínimo en tarjetas'}</small>
+        </label>
+        <div id="edit-status" style="margin-top:14px;font-size:.9em;min-height:20px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="cerrarEditor()">Cancelar</button>
+        <button class="btn-save" onclick="guardarEdicion(${u.user_id})">💾 Guardar cambios</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  // Foco en primer input
+  setTimeout(() => document.getElementById('edit-nombre').focus(), 50);
+}
+
+function cerrarEditor(){
+  const ov = document.querySelector('.modal-overlay');
+  if(ov) ov.remove();
+}
+
+async function guardarEdicion(userId){
+  const nombre = document.getElementById('edit-nombre').value.trim();
+  const username = document.getElementById('edit-username').value.trim().replace(/^@/, '');
+  const profesion = document.getElementById('edit-profesion').value.trim();
+  const status = document.getElementById('edit-status');
+  
+  status.innerHTML = '<span style="color:#c3a55a">Guardando...</span>';
+  
+  try {
+    const r = await fetch('/api/usuarios/editar', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({user_id: userId, nombre, username, profesion})
+    });
+    const data = await r.json();
+    if(data.ok){
+      status.innerHTML = '<span style="color:#2ecc71">✓ ' + escapeHtml(data.mensaje||'Guardado') + '</span>';
+      setTimeout(() => {
+        cerrarEditor();
+        cargarUsuarios();
+      }, 800);
+    } else {
+      status.innerHTML = '<span style="color:#e74c3c">✗ ' + escapeHtml(data.error || data.mensaje || 'Error desconocido') + '</span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:#e74c3c">✗ Error: ' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+async function invitarTarjeta(userId, nombre){
+  if(!confirm(`¿Enviar mensaje a ${nombre || 'este usuario'} invitándolo a crear su tarjeta profesional?\n\nIncluirá:\n• Beneficios de tener la tarjeta\n• Las 3 reglas importantes\n• Tutorial HTML adjunto`)){
+    return;
+  }
+  
+  // Cambiar el botón a "Enviando..."
+  const btn = document.querySelector(`button.btn-invitar[data-uid="${userId}"]`);
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ Enviando...';
+  }
+  
+  try {
+    const r = await fetch('/api/usuarios/invitar_tarjeta', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({user_id: userId})
+    });
+    const data = await r.json();
+    if(data.ok){
+      if(btn){
+        btn.textContent = '✓ Enviado';
+        btn.style.background = 'rgba(46,204,113,.2)';
+        btn.style.color = '#2ecc71';
+      }
+      setTimeout(() => alert('✅ Invitación enviada correctamente a ' + (nombre || userId)), 100);
+    } else {
+      if(btn){
+        btn.disabled = false;
+        btn.textContent = '📩 Invitar';
+      }
+      alert('❌ Error: ' + (data.error || data.mensaje || 'No se pudo enviar'));
+    }
+  } catch(e) {
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = '📩 Invitar';
+    }
+    alert('❌ Error: ' + e.message);
+  }
+}
+
+async function normalizarTodos(){
+  if(!confirm('¿Normalizar TODOS los nombres y usernames vacíos o incompletos?\n\nEsto:\n• Completará nombres con datos de tarjetas profesionales (cuando estén)\n• Generará usernames vacíos como Nombre_PrimerApellido\n• NO modifica usernames reales de Telegram que ya existan\n\n¿Continuar?')){
+    return;
+  }
+  
+  const btn = document.getElementById('btn-normalizar-todos');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Procesando...'; }
+  
+  try {
+    const r = await fetch('/api/usuarios/normalizar_todos', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+    });
+    const data = await r.json();
+    if(data.error){
+      alert('❌ Error: ' + data.error);
+    } else {
+      alert(`✅ Normalización completada\n\nRevisados: ${data.total_revisados}\nNombres actualizados: ${data.nombres_actualizados}\nUsernames actualizados: ${data.usernames_actualizados}\nErrores: ${data.errores || 0}`);
+      cargarUsuarios();
+    }
+  } catch(e) {
+    alert('❌ Error: ' + e.message);
+  }
+  
+  if(btn){ btn.disabled = false; btn.textContent = '🔄 Normalizar todos'; }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -11849,6 +12125,381 @@ def listar_usuarios_activos():
         logger.warning(f"Error listando usuarios: {e}")
     
     return usuarios
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 21: FUNCIONES DE ADMINISTRACIÓN DE USUARIOS DESDE PANEL
+# ════════════════════════════════════════════════════════════════════════
+
+def normalizar_nombre_completo(nombre_raw):
+    """Normaliza un nombre raw a formato 'Nombre Primer_Apellido'.
+    
+    Reglas FASE 21:
+    - Si tiene >= 2 palabras → toma primera palabra (Nombre) + última palabra (PrimerApellido)
+    - Si tiene solo 1 palabra → la deja como está (no inventa apellido)
+    - Si está vacío → retorna cadena vacía
+    
+    Capitaliza cada palabra apropiadamente.
+    """
+    if not nombre_raw:
+        return ''
+    palabras = [p.strip() for p in str(nombre_raw).strip().split() if p.strip()]
+    if not palabras:
+        return ''
+    
+    if len(palabras) == 1:
+        return palabras[0].capitalize()
+    
+    # Tomar primer nombre + último apellido
+    nombre = palabras[0].capitalize()
+    apellido = palabras[-1].capitalize()
+    return f"{nombre} {apellido}"
+
+
+def generar_username_normalizado(nombre_completo):
+    """Genera un username con estructura @Nombre_PrimerApellido.
+    
+    Reglas FASE 21:
+    - 'Juan Perez' → 'Juan_Perez'
+    - 'Juan Andres Perez Soto' → 'Juan_Perez' (toma primer nombre + primer apellido)
+    - Solo 1 palabra → 'Juan'
+    - Vacío → ''
+    
+    No incluye el @ (Telegram lo agrega visualmente).
+    """
+    if not nombre_completo:
+        return ''
+    palabras = [p.strip() for p in str(nombre_completo).strip().split() if p.strip()]
+    if not palabras:
+        return ''
+    
+    # Limpiar caracteres especiales (Telegram solo permite [a-zA-Z0-9_])
+    import unicodedata
+    def limpiar(s):
+        s = unicodedata.normalize('NFD', s)
+        s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')  # quitar tildes
+        s = ''.join(c for c in s if c.isalnum() or c == '_')
+        return s
+    
+    if len(palabras) == 1:
+        return limpiar(palabras[0])
+    
+    # Estructura: PrimerNombre + PrimerApellido (no último, sino el que está después de los nombres)
+    # Si tiene 2 palabras: nombre + apellido
+    # Si tiene 3+ palabras: asumimos [Nombre1 Nombre2 PrimerApellido (SegundoApellido)]
+    # → tomamos palabras[0] como Nombre, y la del medio como PrimerApellido
+    if len(palabras) == 2:
+        return f"{limpiar(palabras[0])}_{limpiar(palabras[1])}"
+    elif len(palabras) == 3:
+        # Probablemente [Nombre PrimerApellido SegundoApellido]
+        return f"{limpiar(palabras[0])}_{limpiar(palabras[1])}"
+    else:
+        # 4+ palabras: [Nombre1 Nombre2 PrimerApellido SegundoApellido]
+        # PrimerApellido = palabras[-2]
+        return f"{limpiar(palabras[0])}_{limpiar(palabras[-2])}"
+
+
+def editar_usuario_admin(user_id, campos):
+    """Edita los campos permitidos de un usuario desde el panel admin.
+    
+    Args:
+        user_id: ID de Telegram del usuario
+        campos: dict con keys posibles 'nombre', 'username', 'profesion'
+    
+    Retorna: (ok: bool, mensaje: str)
+    """
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        return False, 'user_id inválido'
+    
+    if not campos:
+        return False, 'No hay cambios'
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False, 'No hay conexión a BD'
+        c = conn.cursor()
+        
+        cambios_aplicados = []
+        
+        # 1. Nombre y Username → tabla suscripciones
+        sets_susc = []
+        params_susc = []
+        if 'nombre' in campos:
+            sets_susc.append("first_name = %s")
+            params_susc.append(campos['nombre'])
+            cambios_aplicados.append(f"Nombre: {campos['nombre']}")
+        if 'username' in campos:
+            sets_susc.append("username = %s")
+            params_susc.append(campos['username'])
+            cambios_aplicados.append(f"Username: @{campos['username']}")
+        
+        if sets_susc:
+            params_susc.append(user_id)
+            sql_susc = f"UPDATE suscripciones SET {', '.join(sets_susc)} WHERE user_id = %s"
+            c.execute(sql_susc, params_susc)
+        
+        # 2. Profesión → tabla tarjetas_profesional (si existe registro)
+        if 'profesion' in campos:
+            # Verificar si tiene tarjeta primero
+            c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+            tiene_tarjeta = c.fetchone() is not None
+            
+            if tiene_tarjeta:
+                # Update
+                c.execute("UPDATE tarjetas_profesional SET profesion = %s, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = %s",
+                         (campos['profesion'], user_id))
+            else:
+                # Crear registro mínimo (ya que no hay tarjeta aún)
+                c.execute("""INSERT INTO tarjetas_profesional 
+                             (user_id, nombre_completo, profesion) 
+                             VALUES (%s, %s, %s)""",
+                         (user_id, campos.get('nombre', ''), campos['profesion']))
+            cambios_aplicados.append(f"Profesión: {campos['profesion']}")
+        
+        # 3. Si se editó el nombre y el usuario tiene tarjeta, actualizar también ahí
+        if 'nombre' in campos:
+            try:
+                c.execute("""UPDATE tarjetas_profesional 
+                             SET nombre_completo = %s, fecha_actualizacion = CURRENT_TIMESTAMP 
+                             WHERE user_id = %s""",
+                         (campos['nombre'], user_id))
+            except Exception as _e:
+                logger.debug(f"No se actualizó nombre en tarjetas: {_e}")
+        
+        conn.commit()
+        conn.close()
+        
+        msg = "Cambios aplicados: " + ", ".join(cambios_aplicados)
+        logger.info(f"✏️ Admin editó usuario {user_id}: {msg}")
+        return True, msg
+    
+    except Exception as e:
+        logger.warning(f"Error editar_usuario_admin {user_id}: {e}")
+        return False, f'Error: {str(e)[:200]}'
+
+
+def normalizar_nombres_usernames_bd():
+    """FASE 21: normaliza todos los nombres y usernames existentes en la BD.
+    
+    - Nombre vacío o 1 palabra → busca nombre_completo en tarjetas_profesional
+    - Username → genera @Nombre_PrimerApellido a partir del nombre
+    - Solo modifica si NO tiene username de Telegram real (los reales son inmutables)
+    
+    Retorna dict con stats: total_revisados, nombres_actualizados, usernames_actualizados.
+    """
+    stats = {
+        'total_revisados': 0,
+        'nombres_actualizados': 0,
+        'usernames_actualizados': 0,
+        'errores': 0,
+        'detalle': [],
+    }
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {**stats, 'error': 'No hay conexión a BD'}
+        c = conn.cursor()
+        
+        # Obtener todos los usuarios + sus tarjetas (si tienen)
+        c.execute("""
+            SELECT s.user_id, s.first_name, s.username,
+                   COALESCE(t.nombre_completo, '') as nombre_tarjeta
+            FROM suscripciones s
+            LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+        """)
+        rows = c.fetchall()
+        
+        for r in rows:
+            stats['total_revisados'] += 1
+            try:
+                if isinstance(r, tuple):
+                    uid, fname, uname, nombre_tarjeta = r
+                else:
+                    uid = r['user_id']
+                    fname = r['first_name']
+                    uname = r['username']
+                    nombre_tarjeta = r['nombre_tarjeta']
+                
+                fname = (fname or '').strip()
+                uname_actual = (uname or '').strip()
+                nombre_tarjeta = (nombre_tarjeta or '').strip()
+                
+                # ═══ NORMALIZAR NOMBRE ═══
+                # Solo modificar si está vacío o tiene 1 palabra Y la tarjeta tiene nombre completo
+                palabras_fname = len([p for p in fname.split() if p.strip()])
+                
+                nuevo_nombre = None
+                if not fname or palabras_fname <= 1:
+                    if nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
+                        # Usar el nombre de la tarjeta (formato Nombre PrimerApellido)
+                        nuevo_nombre = normalizar_nombre_completo(nombre_tarjeta)
+                
+                if nuevo_nombre and nuevo_nombre != fname:
+                    c.execute("UPDATE suscripciones SET first_name = %s WHERE user_id = %s",
+                             (nuevo_nombre, uid))
+                    stats['nombres_actualizados'] += 1
+                    stats['detalle'].append({
+                        'user_id': uid,
+                        'campo': 'nombre',
+                        'antes': fname or '(vacío)',
+                        'despues': nuevo_nombre,
+                    })
+                    fname = nuevo_nombre  # Para usar abajo
+                
+                # ═══ NORMALIZAR USERNAME ═══
+                # Solo si está vacío (no tocar usernames reales de Telegram)
+                # IMPORTANTE: el username de Telegram NO se puede modificar en realidad,
+                # solo lo que se guarda en nuestra BD. Si el usuario no tiene username
+                # en Telegram, generamos uno representativo.
+                if not uname_actual and (fname or nombre_tarjeta):
+                    base_nombre = fname if (fname and len(fname.split()) >= 2) else nombre_tarjeta
+                    if base_nombre:
+                        nuevo_username = generar_username_normalizado(base_nombre)
+                        if nuevo_username:
+                            c.execute("UPDATE suscripciones SET username = %s WHERE user_id = %s",
+                                     (nuevo_username, uid))
+                            stats['usernames_actualizados'] += 1
+                            stats['detalle'].append({
+                                'user_id': uid,
+                                'campo': 'username',
+                                'antes': '(vacío)',
+                                'despues': f'@{nuevo_username}',
+                            })
+            except Exception as _e:
+                stats['errores'] += 1
+                logger.debug(f"Error normalizando user {r}: {_e}")
+                continue
+        
+        conn.commit()
+        conn.close()
+        
+        # Limitar detalle a primeros 50 para no devolver demasiado
+        stats['detalle'] = stats['detalle'][:50]
+        logger.info(f"🔄 Normalización completa: {stats['nombres_actualizados']} nombres, {stats['usernames_actualizados']} usernames")
+        return stats
+    
+    except Exception as e:
+        logger.warning(f"Error normalizar_nombres_usernames_bd: {e}")
+        return {**stats, 'error': str(e)}
+
+
+async def enviar_invitacion_tarjeta_async(user_id):
+    """FASE 21: Envía mensaje motivador + tutorial HTML para crear tarjeta profesional.
+    
+    Solo se envía a usuarios que NO tienen tarjeta creada todavía.
+    """
+    try:
+        from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+        bot_instance = Bot(token=TOKEN_BOT)
+        
+        mensaje = (
+            "🎖️ *¡Hola! Te invito a crear tu Tarjeta Profesional*\n\n"
+            "Tu *Tarjeta de Presentación* es también tu *Credencial Personalizada de Cofradía*. "
+            "Es **gratuita**, **editable cuando quieras**, y te identifica como parte oficial de la comunidad.\n\n"
+            "🌟 *Beneficios de tener tu tarjeta:*\n\n"
+            "✅ *Identidad oficial* en todos los eventos presenciales de Networking\n"
+            "✅ *Acceso a Convenios vigentes* con empresas (descuentos y beneficios exclusivos)\n"
+            "✅ *Visibilidad profesional* — otros miembros pueden encontrarte cuando buscan tu profesión\n"
+            "✅ *Información de contacto* compartible con un solo botón\n"
+            "✅ *Diseño premium* — se ve profesional al presentarla\n"
+            "✅ *Descargable en PDF* para imprimirla o compartirla por email\n"
+            "✅ *Editable en cualquier momento* desde tu perfil privado\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📋 *3 cosas IMPORTANTES que debes saber antes:*\n\n"
+            "1️⃣ *La tarjeta se crea desde TU CHAT PRIVADO con el bot* — NO desde el grupo.\n"
+            "   Hazme click [aquí](https://t.me/CofradiaPremiumBot) para abrir un chat privado.\n\n"
+            "2️⃣ *Cada dato se ingresa por separado*, con un comando por cada uno:\n"
+            "   • `/mi_tarjeta nombre Juan Pérez`\n"
+            "   • `/mi_tarjeta profesion Ingeniero Civil`\n"
+            "   • `/mi_tarjeta telefono +56912345678`\n"
+            "   _(Hay un comando por variable, no se ingresan todos juntos)_\n\n"
+            "3️⃣ *El campo `nro_kdt` es OBLIGATORIO* — es tu número único de Cofradía y aparece "
+            "en la *esquina superior derecha* de tu tarjeta. Si no lo conoces, pídelo a Germán.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📎 *Adjunto el tutorial completo* con todos los pasos detallados.\n\n"
+            "Si tienes dudas, escríbeme directamente: @german_perey 🤝"
+        )
+        
+        # Botón directo al chat privado
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Abrir chat privado para crear mi tarjeta",
+                                  url="https://t.me/CofradiaPremiumBot")],
+        ])
+        
+        # 1) Enviar mensaje principal
+        await bot_instance.send_message(
+            chat_id=user_id,
+            text=mensaje,
+            parse_mode='Markdown',
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
+        
+        # 2) Enviar el tutorial HTML como archivo adjunto
+        tutorial_path = os.path.join(os.path.dirname(__file__), 'tutorial_mi_tarjeta.html')
+        if not os.path.exists(tutorial_path):
+            # Intentar ruta alternativa
+            tutorial_path = '/opt/render/project/src/tutorial_mi_tarjeta.html'
+        
+        if os.path.exists(tutorial_path):
+            with open(tutorial_path, 'rb') as f:
+                await bot_instance.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename='Tutorial_Crear_Tarjeta_Cofradia.html',
+                    caption='📚 Tutorial paso a paso — ábrelo en tu navegador'
+                )
+        else:
+            logger.warning(f"tutorial_mi_tarjeta.html no encontrado")
+        
+        return True, "Invitación enviada"
+    
+    except Exception as e:
+        logger.warning(f"Error enviando invitación a {user_id}: {e}")
+        return False, f"Error: {str(e)[:200]}"
+
+
+def enviar_invitacion_tarjeta_admin(user_id):
+    """Wrapper síncrono que ejecuta la versión async desde HTTP handler."""
+    try:
+        # Verificar primero que el usuario no tenga tarjeta
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
+            tiene_tarjeta = c.fetchone() is not None
+            conn.close()
+            if tiene_tarjeta:
+                return False, 'El usuario ya tiene tarjeta'
+        
+        # Ejecutar la versión async
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Si hay loop corriendo, crear nuevo
+                future = asyncio.run_coroutine_threadsafe(
+                    enviar_invitacion_tarjeta_async(user_id),
+                    loop
+                )
+                return future.result(timeout=30)
+        except RuntimeError:
+            pass
+        
+        # No hay loop corriendo, crear uno nuevo
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            ok, msg = loop.run_until_complete(enviar_invitacion_tarjeta_async(user_id))
+            return ok, msg
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.warning(f"Error wrapper invitación tarjeta: {e}")
+        return False, f"Error: {str(e)[:200]}"
 
 
 def listar_empresas():
@@ -19954,8 +20605,11 @@ async def detectar_nuevo_miembro(update: Update, context: ContextTypes.DEFAULT_T
                     logger.info(f"✅ Bienvenida enviada para {nombre} {apellido}")
                     
                     # Registrar suscripción si no la tiene
+                    # FASE 21: nombre completo + username con estructura @Nombre_PrimerApellido
                     if not verificar_suscripcion_activa(user_id):
-                        registrar_usuario_suscripcion(user_id, nombre, miembro.username or '', 
+                        nombre_completo_reg = f"{nombre} {apellido}".strip()
+                        username_reg = miembro.username or generar_username_normalizado(nombre_completo_reg)
+                        registrar_usuario_suscripcion(user_id, nombre_completo_reg, username_reg, 
                                                      es_admin=False, last_name=apellido)
                 else:
                     # No fue aprobado por onboarding - pedir que complete el proceso
@@ -20213,16 +20867,34 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
             logger.warning(f"Error enviando tutorial HTML: {e_tut}")
         
         # Registrar al usuario con suscripción de prueba
+        # FASE 21: estructura de nombre completo: [Nombre1] [Nombre2?] [PrimerApellido] [SegundoApellido]
+        # Tomamos el nombre_completo COMPLETO (todas las palabras) para first_name
+        nombre_completo_full = context.user_data.get('onboard_nombre_completo', f"{nombre} {apellido}").strip()
+        
+        # Generar username automático con estructura @Nombre_PrimerApellido si no tiene uno
+        username_telegram = ''
+        try:
+            usuario_tg = await context.bot.get_chat(target_user_id)
+            username_telegram = usuario_tg.username or ''
+        except Exception:
+            pass
+        
+        # Si NO tiene username de Telegram, generar uno representativo
+        if not username_telegram:
+            username_generado = generar_username_normalizado(nombre_completo_full)
+        else:
+            username_generado = username_telegram  # respetar el real de Telegram
+        
         try:
             registrar_usuario_suscripcion(
                 user_id=target_user_id,
-                first_name=nombre,
-                username='',
+                first_name=nombre_completo_full,  # FASE 21: nombre COMPLETO (4 partes)
+                username=username_generado,
                 es_admin=False,
                 dias_gratis=DIAS_PRUEBA_GRATIS,
                 last_name=apellido
             )
-            logger.info(f"✅ Suscripción creada para {nombre} {apellido}")
+            logger.info(f"✅ Suscripción creada para {nombre_completo_full} (@{username_generado})")
         except Exception as e:
             logger.warning(f"Error registrando suscripción: {e}")
         
