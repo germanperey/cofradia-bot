@@ -12284,9 +12284,14 @@ def editar_usuario_admin(user_id, campos):
 def normalizar_nombres_usernames_bd():
     """FASE 21: normaliza todos los nombres y usernames existentes en la BD.
     
-    - Nombre vacío o 1 palabra → busca nombre_completo en tarjetas_profesional
-    - Username → genera @Nombre_PrimerApellido a partir del nombre
-    - Solo modifica si NO tiene username de Telegram real (los reales son inmutables)
+    FIX FASE 21.2: ahora consulta DOS fuentes para encontrar el nombre completo:
+      1. tarjetas_profesional.nombre_completo (si tiene tarjeta creada)
+      2. nuevos_miembros.nombre + nuevos_miembros.apellido (del onboarding)
+    
+    Reglas:
+      - Nombre vacío o 1 palabra → busca en las 2 fuentes y reconstruye
+      - Username → genera @Nombre_PrimerApellido a partir del nombre
+      - Solo modifica si el nombre actual es claramente incompleto
     
     Retorna dict con stats: total_revisados, nombres_actualizados, usernames_actualizados.
     """
@@ -12304,39 +12309,81 @@ def normalizar_nombres_usernames_bd():
             return {**stats, 'error': 'No hay conexión a BD'}
         c = conn.cursor()
         
-        # Obtener todos los usuarios + sus tarjetas (si tienen)
-        c.execute("""
-            SELECT s.user_id, s.first_name, s.username,
-                   COALESCE(t.nombre_completo, '') as nombre_tarjeta
-            FROM suscripciones s
-            LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
-        """)
+        # FIX FASE 21.2: query mejorada — combina suscripciones + tarjetas + nuevos_miembros
+        # Tomamos del onboarding (nuevos_miembros) como fuente prioritaria porque ahí
+        # está el nombre + apellido completo que el usuario ingresó al registrarse.
+        # Usamos MAX() agrupado para tomar la última solicitud de cada user_id (compatible PG/SQLite).
+        # Si la query falla (ej. tabla no existe), caemos al SELECT más simple.
+        try:
+            c.execute("""
+                SELECT s.user_id, s.first_name, s.username,
+                       COALESCE(t.nombre_completo, '') as nombre_tarjeta,
+                       COALESCE(nm.nombre, '') as nombre_onb,
+                       COALESCE(nm.apellido, '') as apellido_onb
+                FROM suscripciones s
+                LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                LEFT JOIN (
+                    SELECT user_id, MAX(nombre) as nombre, MAX(apellido) as apellido
+                    FROM nuevos_miembros
+                    WHERE nombre IS NOT NULL AND nombre != ''
+                    GROUP BY user_id
+                ) nm ON s.user_id = nm.user_id
+            """)
+        except Exception as _e_query:
+            logger.warning(f"Query con nuevos_miembros falló, usando query básica: {_e_query}")
+            # Re-conectar (la conexión puede estar en estado de error)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            c.execute("""
+                SELECT s.user_id, s.first_name, s.username,
+                       COALESCE(t.nombre_completo, '') as nombre_tarjeta,
+                       '' as nombre_onb,
+                       '' as apellido_onb
+                FROM suscripciones s
+                LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+            """)
         rows = c.fetchall()
         
         for r in rows:
             stats['total_revisados'] += 1
             try:
                 if isinstance(r, tuple):
-                    uid, fname, uname, nombre_tarjeta = r
+                    uid, fname, uname, nombre_tarjeta, nombre_onb, apellido_onb = r
                 else:
                     uid = r['user_id']
                     fname = r['first_name']
                     uname = r['username']
                     nombre_tarjeta = r['nombre_tarjeta']
+                    nombre_onb = r['nombre_onb']
+                    apellido_onb = r['apellido_onb']
                 
                 fname = (fname or '').strip()
                 uname_actual = (uname or '').strip()
                 nombre_tarjeta = (nombre_tarjeta or '').strip()
+                nombre_onb = (nombre_onb or '').strip()
+                apellido_onb = (apellido_onb or '').strip()
+                
+                # Construir el nombre completo desde onboarding si existe
+                nombre_completo_onb = ''
+                if nombre_onb and apellido_onb:
+                    nombre_completo_onb = f"{nombre_onb} {apellido_onb}".strip()
+                elif nombre_onb:
+                    nombre_completo_onb = nombre_onb
                 
                 # ═══ NORMALIZAR NOMBRE ═══
-                # Solo modificar si está vacío o tiene 1 palabra Y la tarjeta tiene nombre completo
+                # Modificar si está vacío o tiene 1 sola palabra
                 palabras_fname = len([p for p in fname.split() if p.strip()])
                 
                 nuevo_nombre = None
                 if not fname or palabras_fname <= 1:
-                    if nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
-                        # Usar el nombre de la tarjeta (formato Nombre PrimerApellido)
-                        nuevo_nombre = normalizar_nombre_completo(nombre_tarjeta)
+                    # PRIORIDAD 1: nombre completo del onboarding (más confiable)
+                    if nombre_completo_onb and len(nombre_completo_onb.split()) >= 2:
+                        nuevo_nombre = nombre_completo_onb
+                    # PRIORIDAD 2: nombre completo de la tarjeta profesional
+                    elif nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
+                        nuevo_nombre = nombre_tarjeta
                 
                 if nuevo_nombre and nuevo_nombre != fname:
                     c.execute("UPDATE suscripciones SET first_name = %s WHERE user_id = %s",
@@ -12348,27 +12395,31 @@ def normalizar_nombres_usernames_bd():
                         'antes': fname or '(vacío)',
                         'despues': nuevo_nombre,
                     })
-                    fname = nuevo_nombre  # Para usar abajo
+                    fname = nuevo_nombre  # Para usar abajo en username
                 
                 # ═══ NORMALIZAR USERNAME ═══
                 # Solo si está vacío (no tocar usernames reales de Telegram)
-                # IMPORTANTE: el username de Telegram NO se puede modificar en realidad,
-                # solo lo que se guarda en nuestra BD. Si el usuario no tiene username
-                # en Telegram, generamos uno representativo.
-                if not uname_actual and (fname or nombre_tarjeta):
-                    base_nombre = fname if (fname and len(fname.split()) >= 2) else nombre_tarjeta
-                    if base_nombre:
-                        nuevo_username = generar_username_normalizado(base_nombre)
-                        if nuevo_username:
-                            c.execute("UPDATE suscripciones SET username = %s WHERE user_id = %s",
-                                     (nuevo_username, uid))
-                            stats['usernames_actualizados'] += 1
-                            stats['detalle'].append({
-                                'user_id': uid,
-                                'campo': 'username',
-                                'antes': '(vacío)',
-                                'despues': f'@{nuevo_username}',
-                            })
+                # Generamos a partir del mejor nombre disponible
+                base_nombre = ''
+                if fname and len(fname.split()) >= 2:
+                    base_nombre = fname
+                elif nombre_completo_onb and len(nombre_completo_onb.split()) >= 2:
+                    base_nombre = nombre_completo_onb
+                elif nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
+                    base_nombre = nombre_tarjeta
+                
+                if not uname_actual and base_nombre:
+                    nuevo_username = generar_username_normalizado(base_nombre)
+                    if nuevo_username:
+                        c.execute("UPDATE suscripciones SET username = %s WHERE user_id = %s",
+                                 (nuevo_username, uid))
+                        stats['usernames_actualizados'] += 1
+                        stats['detalle'].append({
+                            'user_id': uid,
+                            'campo': 'username',
+                            'antes': '(vacío)',
+                            'despues': f'@{nuevo_username}',
+                        })
             except Exception as _e:
                 stats['errores'] += 1
                 logger.debug(f"Error normalizando user {r}: {_e}")
@@ -12391,36 +12442,39 @@ async def enviar_invitacion_tarjeta_async(user_id):
     """FASE 21: Envía mensaje motivador + tutorial HTML para crear tarjeta profesional.
     
     Solo se envía a usuarios que NO tienen tarjeta creada todavía.
+    FIX FASE 21.2: usa HTML en vez de Markdown porque Markdown V1 falla con
+    caracteres especiales (paréntesis, guiones, etc.) en mensajes largos.
     """
     try:
         from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
         bot_instance = Bot(token=TOKEN_BOT)
         
+        # Mensaje en formato HTML (mucho más robusto que Markdown para textos largos)
         mensaje = (
-            "🎖️ *¡Hola! Te invito a crear tu Tarjeta Profesional*\n\n"
-            "Tu *Tarjeta de Presentación* es también tu *Credencial Personalizada de Cofradía*. "
-            "Es **gratuita**, **editable cuando quieras**, y te identifica como parte oficial de la comunidad.\n\n"
-            "🌟 *Beneficios de tener tu tarjeta:*\n\n"
-            "✅ *Identidad oficial* en todos los eventos presenciales de Networking\n"
-            "✅ *Acceso a Convenios vigentes* con empresas (descuentos y beneficios exclusivos)\n"
-            "✅ *Visibilidad profesional* — otros miembros pueden encontrarte cuando buscan tu profesión\n"
-            "✅ *Información de contacto* compartible con un solo botón\n"
-            "✅ *Diseño premium* — se ve profesional al presentarla\n"
-            "✅ *Descargable en PDF* para imprimirla o compartirla por email\n"
-            "✅ *Editable en cualquier momento* desde tu perfil privado\n\n"
+            "🎖️ <b>¡Hola! Te invito a crear tu Tarjeta Profesional</b>\n\n"
+            "Tu <b>Tarjeta de Presentación</b> es también tu <b>Credencial Personalizada de Cofradía</b>. "
+            "Es <b>gratuita</b>, <b>editable cuando quieras</b>, y te identifica como parte oficial de la comunidad.\n\n"
+            "🌟 <b>Beneficios de tener tu tarjeta:</b>\n\n"
+            "✅ <b>Identidad oficial</b> en todos los eventos presenciales de Networking\n"
+            "✅ <b>Acceso a Convenios vigentes</b> con empresas (descuentos y beneficios exclusivos)\n"
+            "✅ <b>Visibilidad profesional</b> — otros miembros pueden encontrarte cuando buscan tu profesión\n"
+            "✅ <b>Información de contacto</b> compartible con un solo botón\n"
+            "✅ <b>Diseño premium</b> — se ve profesional al presentarla\n"
+            "✅ <b>Descargable en PDF</b> para imprimirla o compartirla por email\n"
+            "✅ <b>Editable en cualquier momento</b> desde tu perfil privado\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📋 *3 cosas IMPORTANTES que debes saber antes:*\n\n"
-            "1️⃣ *La tarjeta se crea desde TU CHAT PRIVADO con el bot* — NO desde el grupo.\n"
-            "   Hazme click [aquí](https://t.me/CofradiaPremiumBot) para abrir un chat privado.\n\n"
-            "2️⃣ *Cada dato se ingresa por separado*, con un comando por cada uno:\n"
-            "   • `/mi_tarjeta nombre Juan Pérez`\n"
-            "   • `/mi_tarjeta profesion Ingeniero Civil`\n"
-            "   • `/mi_tarjeta telefono +56912345678`\n"
-            "   _(Hay un comando por variable, no se ingresan todos juntos)_\n\n"
-            "3️⃣ *El campo `nro_kdt` es OBLIGATORIO* — es tu número único de Cofradía y aparece "
-            "en la *esquina superior derecha* de tu tarjeta. Si no lo conoces, pídelo a Germán.\n\n"
+            "📋 <b>3 cosas IMPORTANTES que debes saber antes:</b>\n\n"
+            "1️⃣ <b>La tarjeta se crea desde TU CHAT PRIVADO con el bot</b> — NO desde el grupo.\n"
+            "    Haz click <a href=\"https://t.me/CofradiaPremiumBot\">aquí</a> para abrir un chat privado conmigo.\n\n"
+            "2️⃣ <b>Cada dato se ingresa por separado</b>, con un comando por cada uno:\n"
+            "    • <code>/mi_tarjeta nombre Juan Pérez</code>\n"
+            "    • <code>/mi_tarjeta profesion Ingeniero Civil</code>\n"
+            "    • <code>/mi_tarjeta telefono +56912345678</code>\n"
+            "    <i>(Hay un comando por variable, no se ingresan todos juntos)</i>\n\n"
+            "3️⃣ <b>El campo</b> <code>nro_kdt</code> <b>es OBLIGATORIO</b> — es tu número único de Cofradía y aparece "
+            "en la <b>esquina superior derecha</b> de tu tarjeta. Si no lo conoces, pídelo a Germán.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📎 *Adjunto el tutorial completo* con todos los pasos detallados.\n\n"
+            "📎 <b>Adjunto el tutorial completo</b> con todos los pasos detallados.\n\n"
             "Si tienes dudas, escríbeme directamente: @german_perey 🤝"
         )
         
@@ -12430,11 +12484,11 @@ async def enviar_invitacion_tarjeta_async(user_id):
                                   url="https://t.me/CofradiaPremiumBot")],
         ])
         
-        # 1) Enviar mensaje principal
+        # 1) Enviar mensaje principal (HTML es más robusto que Markdown)
         await bot_instance.send_message(
             chat_id=user_id,
             text=mensaje,
-            parse_mode='Markdown',
+            parse_mode='HTML',
             disable_web_page_preview=True,
             reply_markup=kb,
         )
