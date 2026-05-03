@@ -2217,6 +2217,14 @@ COMANDOS_VOZ = {
     'estadisticas': 'estadisticas',
     'top usuarios': 'top_usuarios',
     'ranking': 'top_usuarios',
+    # FASE 13: aliases voz para /top10 (Top 10 Cofrades del mes)
+    'top10': 'top10',
+    'top 10': 'top10',
+    'top diez': 'top10',
+    'top diez del mes': 'top10',
+    'top 10 del mes': 'top10',
+    'top 10 cofrades': 'top10',
+    'top diez cofrades': 'top10',
     'mi perfil': 'mi_perfil',
     'perfil': 'mi_perfil',
     # Indicadores económicos
@@ -2459,6 +2467,7 @@ async def ejecutar_comando_voz(comando: str, argumentos: str, update: Update, co
             'estadisticas': estadisticas_comando,
             'indicadores': indicadores_comando,
             'top_usuarios': top_usuarios_comando,
+            'top10': top10_comando,
             'mi_perfil': mi_perfil_comando,
             'resumen': resumen_comando,
             'resumen_semanal': resumen_semanal_comando,
@@ -4349,6 +4358,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /estadisticas - Estadísticas generales
 /reporte_ejecutivo - Reporte ejecutivo HTML (admin)
 /top_usuarios - Ranking de participación
+/top10 - Top 10 Cofrades del mes con puntos 🏆
 /mi_perfil - Tu perfil, coins y trust score
 /cumpleanos_mes [1-12] - Cumpleaños del mes
 /categorias - Categorías de conversación
@@ -8191,6 +8201,180 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Error en top_usuarios: {e}")
         await update.message.reply_text("❌ Error obteniendo ranking")
+
+
+async def top10_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 13: Comando /top10 - Top 10 Cofrades más activos del mes actual.
+    Muestra ranking detallado con mensajes, puntos de gamificación, y medallas.
+    Combina datos de mensajes (cantidad) con puntos_usuario (gamificación) si existen.
+    """
+    msg = await update.message.reply_text("🏆 Calculando Top 10 del mes...")
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error conectando a la base de datos")
+            return
+        
+        c = conn.cursor()
+        mes_actual = _mes_actual_str()
+        
+        # Calcular fecha de inicio del mes actual (1ro del mes)
+        ahora = _ahora_chile()
+        fecha_inicio_mes = ahora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        fecha_iso = fecha_inicio_mes.strftime('%Y-%m-%d')
+        
+        # Top 10 por mensajes del MES actual (con nombre limpio)
+        if DATABASE_URL:
+            c.execute("""
+                SELECT 
+                    user_id,
+                    COALESCE(
+                        MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                            AND first_name IS NOT NULL THEN first_name ELSE NULL END) 
+                        || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), 
+                        MAX(first_name), 
+                        'Usuario') as nombre_completo,
+                    COUNT(*) as msgs_mes
+                FROM mensajes 
+                WHERE fecha >= %s
+                GROUP BY user_id 
+                ORDER BY msgs_mes DESC 
+                LIMIT 10
+            """, (fecha_iso,))
+            top10 = []
+            for r in c.fetchall():
+                top10.append({
+                    'user_id': r['user_id'],
+                    'nombre': (r['nombre_completo'] or 'Usuario').strip(),
+                    'msgs': int(r['msgs_mes'])
+                })
+        else:
+            c.execute("""
+                SELECT 
+                    user_id,
+                    COALESCE(
+                        MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') 
+                            AND first_name IS NOT NULL THEN first_name ELSE NULL END) 
+                        || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), 
+                        MAX(first_name), 
+                        'Usuario') as nombre_completo,
+                    COUNT(*) as msgs_mes
+                FROM mensajes 
+                WHERE fecha >= ?
+                GROUP BY user_id 
+                ORDER BY msgs_mes DESC 
+                LIMIT 10
+            """, (fecha_iso,))
+            top10 = []
+            for r in c.fetchall():
+                if isinstance(r, tuple):
+                    top10.append({'user_id': r[0], 'nombre': (r[1] or 'Usuario').strip(), 'msgs': int(r[2])})
+                else:
+                    top10.append({
+                        'user_id': r['user_id'],
+                        'nombre': (r['nombre_completo'] or 'Usuario').strip(),
+                        'msgs': int(r['msgs_mes'])
+                    })
+        
+        # Enriquecer con puntos de gamificación (si tabla existe y user tiene puntos)
+        if top10:
+            try:
+                user_ids = [u['user_id'] for u in top10]
+                if DATABASE_URL:
+                    placeholders = ','.join(['%s'] * len(user_ids))
+                    c.execute(f"""
+                        SELECT user_id, puntos_mes 
+                        FROM puntos_usuario 
+                        WHERE user_id IN ({placeholders}) AND mes_referencia = %s
+                    """, user_ids + [mes_actual])
+                    puntos_map = {r['user_id']: int(r['puntos_mes']) for r in c.fetchall()}
+                else:
+                    placeholders = ','.join(['?'] * len(user_ids))
+                    c.execute(f"""
+                        SELECT user_id, puntos_mes 
+                        FROM puntos_usuario 
+                        WHERE user_id IN ({placeholders}) AND mes_referencia = ?
+                    """, user_ids + [mes_actual])
+                    puntos_map = {(r[0] if isinstance(r, tuple) else r['user_id']): 
+                                  int(r[1] if isinstance(r, tuple) else r['puntos_mes']) 
+                                  for r in c.fetchall()}
+                for u in top10:
+                    u['puntos'] = puntos_map.get(u['user_id'], 0)
+            except Exception as _e_pts:
+                logger.debug(f"No se pudieron obtener puntos para top10 (no critico): {_e_pts}")
+                for u in top10:
+                    u['puntos'] = 0
+        
+        conn.close()
+        
+        if not top10:
+            await msg.edit_text(
+                f"📊 TOP 10 COFRADES — {mes_actual}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📭 Aún no hay actividad registrada este mes.\n\n"
+                f"💡 Publica mensajes en el grupo para entrar al ranking.\n"
+                f"   • 1 punto por mensaje\n"
+                f"   • 3 puntos por responder a otro Cofrade\n"
+                f"   • 10 puntos por crear/actualizar tu tarjeta profesional\n\n"
+                f"🏆 ¡El próximo mes podrías ser tú en el top 10!"
+            )
+            return
+        
+        # Construir mensaje formateado
+        medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
+        nombre_mes_es = {
+            '01': 'Enero', '02': 'Febrero', '03': 'Marzo', '04': 'Abril',
+            '05': 'Mayo', '06': 'Junio', '07': 'Julio', '08': 'Agosto',
+            '09': 'Septiembre', '10': 'Octubre', '11': 'Noviembre', '12': 'Diciembre'
+        }
+        anio_str, mes_str = mes_actual.split('-')
+        nombre_mes_legible = f"{nombre_mes_es.get(mes_str, mes_str)} {anio_str}"
+        
+        lineas = [
+            f"🏆 TOP 10 COFRADES — {nombre_mes_legible}",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f""
+        ]
+        
+        total_msgs_top10 = sum(u['msgs'] for u in top10)
+        
+        for i, u in enumerate(top10):
+            medalla = medallas[i] if i < 10 else f"{i+1}."
+            try:
+                nombre_limpio = limpiar_nombre_display(u['nombre'])
+            except Exception:
+                nombre_limpio = u['nombre']
+            
+            linea = f"{medalla} {nombre_limpio}\n"
+            linea += f"     💬 {u['msgs']:,} mensajes"
+            if u.get('puntos', 0) > 0:
+                linea += f"  •  ⭐ {u['puntos']:,} pts"
+            lineas.append(linea)
+        
+        lineas.append("")
+        lineas.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lineas.append(f"📊 Total mensajes Top 10: {total_msgs_top10:,}")
+        lineas.append(f"📅 Mes: {nombre_mes_legible}")
+        lineas.append(f"")
+        lineas.append(f"🏅 El día 1 del próximo mes los Top 10 reciben")
+        lineas.append(f"   la insignia 'Top 10 del Mes' automáticamente.")
+        lineas.append(f"")
+        lineas.append(f"💡 Comandos relacionados:")
+        lineas.append(f"   /ranking - Ranking detallado con puntos históricos")
+        lineas.append(f"   /estadisticas - Estadísticas completas del grupo")
+        lineas.append(f"   /mis_puntos - Ver tus puntos personales")
+        
+        mensaje_final = "\n".join(lineas)
+        await msg.edit_text(mensaje_final)
+        
+        registrar_servicio_usado(update.effective_user.id, 'top10')
+        
+    except Exception as e:
+        logger.error(f"Error en top10_comando: {e}", exc_info=True)
+        try:
+            await msg.edit_text(f"❌ Error generando Top 10.\n\nDetalle: {str(e)[:150]}")
+        except Exception:
+            pass
 
 
 @requiere_suscripcion
@@ -18188,6 +18372,7 @@ CATALOGO_COMANDOS_INTENCION = {
     'estadisticas': 'Estadísticas generales del grupo',
     'graficos': 'Gráficos de actividad y KPIs',
     'top_usuarios': 'Ranking de participación',
+    'top10': 'Top 10 Cofrades más activos del mes actual con puntos de gamificación',
     'dotacion': 'Lista de miembros del grupo',
     'cumpleanos_mes': 'Cumpleaños del mes',
     # Desarrollo profesional
@@ -18499,6 +18684,7 @@ async def ejecutar_comando_desde_intencion(
             'estadisticas': 'estadisticas_comando',
             'graficos': 'graficos_comando',
             'top_usuarios': 'top_usuarios_comando',
+            'top10': 'top10_comando',
             'dotacion': 'dotacion_comando',
             'cumpleanos_mes': 'cumpleanos_mes_comando',
             'generar_cv': 'generar_cv_comando',
@@ -23948,6 +24134,7 @@ def main():
             BotCommand("graficos", "Ver graficos de actividad"),
             BotCommand("estadisticas", "Estadisticas del grupo"),
             BotCommand("top_usuarios", "Ranking de participacion"),
+            BotCommand("top10", "Top 10 Cofrades del mes"),
             BotCommand("mi_perfil", "Tu perfil de actividad"),
             BotCommand("mi_cuenta", "Estado de tu suscripcion"),
             BotCommand("cumpleanos_mes", "Cumpleanos del mes"),
@@ -23987,6 +24174,7 @@ def main():
                     BotCommand("estadisticas", "Estadisticas del grupo"),
                     BotCommand("indicadores", "Indicadores economicos Chile"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
+                    BotCommand("top10", "Top 10 Cofrades del mes"),
                     BotCommand("mi_perfil", "Tu perfil de actividad"),
                     BotCommand("dotacion", "Total de integrantes"),
                     BotCommand("ayuda", "Ver todos los comandos"),
@@ -24061,6 +24249,8 @@ def main():
     application.add_handler(CommandHandler("estadisticas", estadisticas_comando))
     application.add_handler(CommandHandler("indicadores", indicadores_comando))
     application.add_handler(CommandHandler("top_usuarios", top_usuarios_comando))
+    # FASE 13: comando /top10 (Top 10 Cofrades del mes con puntos de gamificación)
+    application.add_handler(CommandHandler("top10", top10_comando))
     application.add_handler(CommandHandler("categorias", categorias_comando))
     application.add_handler(CommandHandler("mi_perfil", mi_perfil_comando))
     
@@ -24409,6 +24599,7 @@ def main():
                 f"🔹 /graficos - Gráficos de actividad y KPIs\n"
                 f"🔹 /estadisticas - Estadísticas generales\n"
                 f"🔹 /top_usuarios - Ranking de participación\n"
+                f"🔹 /top10 - Top 10 Cofrades del mes con puntos 🏆\n"
                 f"🔹 /mi_perfil - Tu perfil de actividad\n"
                 f"🔹 /categorias - Categorías de mensajes\n\n"
                 f"💡 Recuerda: los comandos empiezan con / las palabras no llevan tilde y van unidas por _"
