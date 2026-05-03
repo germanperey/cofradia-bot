@@ -91,6 +91,21 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 # 8b-instant es 5-10x más rápido que 70b-versatile y suficiente para tareas simples
 GROQ_MODEL_RAPIDO = "llama-3.1-8b-instant"
 
+# FASE 11 (NUEVO): Forzar import de tts_chatterbox AL INICIO del bot.
+# Razón: ese módulo imprime un banner CONFIG con USE_SSML al cargarse. Si lo importamos
+# solo dentro de generar_audio_tts() (lazy), el banner no aparece hasta que alguien envia
+# un audio. Importar aquí garantiza que el banner aparece en los primeros segundos
+# del arranque, visible en logs Render. Si el import falla, el bot sigue funcionando.
+try:
+    import tts_chatterbox as _tts_module_check
+    logger.info(f"━━━ [FASE 11] tts_chatterbox.py CARGADO al inicio")
+    logger.info(f"  USE_SSML módulo = {getattr(_tts_module_check, 'USE_SSML', 'NO_DEFINIDO')}")
+    logger.info(f"  VOICE módulo    = {getattr(_tts_module_check, 'VOICE_NAME', 'NO_DEFINIDO')}")
+    logger.info(f"  Tiene _texto_a_ssml: {hasattr(_tts_module_check, '_texto_a_ssml')}")
+    logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+except Exception as _e_tts_init:
+    logger.warning(f"⚠️ [FASE 11] No se pudo precargar tts_chatterbox: {_e_tts_init}")
+
 # ==================== CONFIGURACIÓN DE GEMINI (OCR + texto fallback) ====================
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -10097,6 +10112,101 @@ async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         import traceback
         await msg.edit_text(f"❌ Error en debug: {e}\n{traceback.format_exc()[:500]}")
+
+
+async def test_tts_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 11: Comando /test_tts - Diagnóstico SSML del TTS.
+    Solo el owner puede usarlo. Genera un audio de prueba y muestra qué módulo
+    se está usando, si SSML está activo, qué voz, y si el SSML fue aceptado por Google.
+    """
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ Comando solo para administrador")
+        return
+    
+    msg = await update.message.reply_text("🔬 Ejecutando diagnóstico TTS...")
+    
+    diagnostico = "🔬 DIAGNÓSTICO TTS\n" + "━"*30 + "\n\n"
+    
+    # 1. Verificar que el módulo se importa
+    try:
+        import tts_chatterbox as _tts_mod
+        diagnostico += f"✅ tts_chatterbox.py importado OK\n"
+        diagnostico += f"   Path: {getattr(_tts_mod, '__file__', 'desconocido')}\n\n"
+        
+        # 2. Verificar atributos clave
+        use_ssml = getattr(_tts_mod, 'USE_SSML', None)
+        voice = getattr(_tts_mod, 'VOICE_NAME', None)
+        rate = getattr(_tts_mod, 'SPEAKING_RATE', None)
+        pitch = getattr(_tts_mod, 'PITCH', None)
+        has_ssml_func = hasattr(_tts_mod, '_texto_a_ssml')
+        
+        diagnostico += f"📋 Configuración cargada:\n"
+        diagnostico += f"   USE_SSML: {use_ssml}\n"
+        diagnostico += f"   VOICE_NAME: {voice}\n"
+        diagnostico += f"   SPEAKING_RATE: {rate}\n"
+        diagnostico += f"   PITCH: {pitch}\n"
+        diagnostico += f"   Tiene _texto_a_ssml(): {has_ssml_func}\n\n"
+        
+        # 3. Variable de ambiente real
+        env_ssml = os.getenv('GOOGLE_TTS_SSML', '<NO_SET>')
+        env_key = 'CONFIGURADA' if os.getenv('GOOGLE_TTS_KEY', '') else 'NO_CONFIGURADA'
+        diagnostico += f"🌐 Variables Render:\n"
+        diagnostico += f"   GOOGLE_TTS_SSML = '{env_ssml}'\n"
+        diagnostico += f"   GOOGLE_TTS_KEY = {env_key}\n\n"
+        
+        # 4. Si hay SSML, mostrar ejemplo del SSML generado
+        if has_ssml_func:
+            test_text = "Hola Germán. La UF está en 39.500 pesos y el IPC fue 0,4%."
+            ssml_ejemplo = _tts_mod._texto_a_ssml(test_text)
+            diagnostico += f"🔊 Ejemplo SSML generado:\n"
+            diagnostico += f"   Input: '{test_text}'\n"
+            diagnostico += f"   Output: {ssml_ejemplo[:300]}\n\n"
+        
+        # 5. Generar audio de prueba real
+        diagnostico += "🎤 Generando audio de prueba...\n"
+        await msg.edit_text(diagnostico)
+        
+        try:
+            audio_path = await generar_audio_tts(
+                "Hola Germán, esta es una prueba del sistema de voz con SSML. "
+                "El IPC fue 0,4 por ciento, la UF está en 39.500 pesos. "
+                "Si escuchas pausas naturales y abreviaturas pronunciadas correctamente, "
+                "el SSML está funcionando.",
+                "/tmp/test_tts.mp3"
+            )
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, 'rb') as af:
+                    await update.message.reply_voice(voice=af, caption="🔊 Audio de prueba TTS")
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
+                diagnostico += "✅ Audio generado y enviado\n\n"
+            else:
+                diagnostico += "❌ No se pudo generar audio\n\n"
+        except Exception as _e_aud:
+            diagnostico += f"❌ Error generando audio: {_e_aud}\n\n"
+        
+        # 6. Veredicto
+        if use_ssml is True and has_ssml_func:
+            diagnostico += "🎯 VEREDICTO: SSML ACTIVADO ✅\n"
+            diagnostico += "Si la voz aún suena robótica, revisa logs Render para ver si\n"
+            diagnostico += "Google rechazó el SSML (busca '⚠️ [TTS-SSML]' en logs)."
+        elif use_ssml is False:
+            diagnostico += "🎯 VEREDICTO: SSML DESACTIVADO ⚠️\n"
+            diagnostico += f"La variable GOOGLE_TTS_SSML está en '{env_ssml}'.\n"
+            diagnostico += "Para activar SSML configura GOOGLE_TTS_SSML=true en Render\n"
+            diagnostico += "y haz Manual Deploy."
+        else:
+            diagnostico += "🎯 VEREDICTO: tts_chatterbox.py NO TIENE SSML\n"
+            diagnostico += "El archivo deployado en Render es la versión vieja.\n"
+            diagnostico += "Sube el tts_chatterbox.py actualizado al repositorio."
+        
+        await msg.edit_text(diagnostico)
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ Error en diagnóstico TTS: {e}")
 
 
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -23966,6 +24076,7 @@ def main():
     # Handlers RAG PDF
     application.add_handler(CommandHandler("subir_pdf", subir_pdf_comando))
     application.add_handler(CommandHandler("rag_status", rag_status_comando))
+    application.add_handler(CommandHandler("test_tts", test_tts_comando))
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))

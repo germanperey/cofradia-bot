@@ -3,12 +3,15 @@ TTS — Google Cloud Text-to-Speech
 Voz: es-US-Neural2-A (femenina, latinoamericana, natural)
 Gratuito: 1,000,000 caracteres/mes
 
-FASE 7 (NUEVO, OPCIONAL): SSML profesional para mayor naturalidad.
-- Activacion: env var GOOGLE_TTS_SSML=true (default: false, mantiene comportamiento v91)
-- Mejoras al activarlo: pausas naturales, abreviaturas chilenas (UF, IPC, TPM),
-  números/montos pronunciados correctamente, énfasis en saludos.
-- Si SSML falla, fallback automatico a texto plano sin que el usuario lo note.
-- Cache blindado: cada texto+voz+config se cachea para minimizar llamadas a Google.
+FASE 11 (FIX CRITICO SSML): Resuelve problemas de SSML detectados:
+- Eliminado prosody ANIDADO (Google rechazaba el SSML silenciosamente)
+- audioConfig.speakingRate/pitch NO se duplica con SSML (causaba doble efecto y
+  rechazos)
+- effectsProfileId solo se usa en modo texto plano (incompatible con SSML en
+  algunos casos)
+- Voz default Neural2-A (mejor para SSML que Wavenet)
+- Si SSML falla, fallback automatico a texto plano sin que el usuario lo note
+- Cache blindado: cada texto+voz+config se cachea para minimizar llamadas a Google
 """
 import os, io, logging, asyncio, hashlib, base64, requests, re
 from pathlib import Path
@@ -18,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-# es-US-Wavenet-A: voz femenina más cálida y natural que Neural2
-VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Wavenet-A")
+# FASE 11: Default Neural2-A (mejor manejo de SSML que Wavenet, más natural)
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")
 VOICE_LANGUAGE = "es-US"
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.85"))  # más pausada = más natural
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-4.0"))  # más grave = más cálida
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.92"))  # 0.92 = pausada pero natural (0.85 era muy lento)
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-2.0"))  # -2.0 = ligeramente grave (era -4.0, muy grave)
 
 # FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
 # Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
@@ -58,39 +61,49 @@ def _limpiar_texto(texto: str) -> str:
 
 
 def _texto_a_ssml(texto: str) -> str:
-    """FASE 7: Convierte texto plano a SSML enriquecido para Google TTS.
+    """FASE 11: SSML SIMPLIFICADO Y ROBUSTO para Google TTS.
+    
+    SOLUCIONA los 4 problemas que causaban rechazo silencioso:
+    - SIN prosody anidado (causaba rechazo en algunos casos)
+    - SIN tags experimentales <emphasis> 
+    - <break> y <say-as> son los más confiables
+    - Escape XML correcto de & < > " '
     
     Aplica:
     - Expansión de abreviaturas chilenas (UF→"U F", IPC→"I P C", etc.)
     - Pronunciación correcta de números/montos con <say-as>
     - Pausas naturales en puntuación (<break>)
-    - Énfasis cálido en saludos iniciales
     """
     if not texto:
         return texto
     
-    # 1. ESCAPE caracteres XML (importante!)
-    t = texto.replace('&', ' y ').replace('<', '').replace('>', '')
+    # 1. ESCAPE XML estricto (CRÍTICO — un solo & sin escapar rompe todo el SSML)
+    t = (texto
+         .replace('&', '&amp;')
+         .replace('<', '&lt;')
+         .replace('>', '&gt;')
+         .replace('"', '&quot;')
+         .replace("'", '&apos;'))
     
-    # 2. EXPANSIONES DE ABREVIATURAS CHILENAS
+    # 2. EXPANSIONES DE ABREVIATURAS CHILENAS (en texto, ANTES de tags)
     abreviaturas = [
-        (r'\bUF\b', 'U F'),
+        (r'\bUF\b', 'U efe'),
         (r'\bCLP\b', 'pesos chilenos'),
         (r'\bUSD\b', 'dólares'),
         (r'\bEUR\b', 'euros'),
-        (r'\bUTM\b', 'U T M'),
-        (r'\bIPC\b', 'I P C'),
-        (r'\bTPM\b', 'T P M'),
-        (r'\bAFP\b', 'A F P'),
-        (r'\bAPV\b', 'A P V'),
-        (r'\bTMC\b', 'T M C'),
-        (r'\bCMF\b', 'C M F'),
-        (r'\bINE\b', 'I N E'),
+        (r'\bUTM\b', 'U te eme'),
+        (r'\bIPC\b', 'I pe ce'),
+        (r'\bTPM\b', 'te pe eme'),
+        (r'\bAFP\b', 'a efe pe'),
+        (r'\bAPV\b', 'a pe ve'),
+        (r'\bTMC\b', 'te eme ce'),
+        (r'\bCMF\b', 'ce eme efe'),
+        (r'\bINE\b', 'I ene e'),
         (r'\bBCCh\b', 'Banco Central'),
-        (r'\bSII\b', 'S I I'),
-        (r'\bIVA\b', 'IVA'),
-        (r'\bPYME[Ss]?\b', 'PYMES'),
-        (r'\bRUT\b', 'RUT'),
+        (r'\bSII\b', 'ese i i'),
+        (r'\bIVA\b', 'iva'),
+        (r'\bPYME[Ss]?\b', 'pymes'),
+        (r'\bRUT\b', 'rut'),
     ]
     for patt, repl in abreviaturas:
         t = re.sub(patt, repl, t)
@@ -98,59 +111,59 @@ def _texto_a_ssml(texto: str) -> str:
     # 3. NÚMEROS Y MONTOS — usar <say-as> para pronunciación correcta
     def _format_monto(m):
         num = m.group(1).replace('.', '').replace(',', '')
-        return f'<say-as interpret-as="cardinal">{num}</say-as> pesos'
+        if num.isdigit():
+            return f'<say-as interpret-as="cardinal">{num}</say-as> pesos'
+        return m.group(0)
     t = re.sub(r'\$\s*([\d.,]+)', _format_monto, t)
     
     def _format_pct(m):
         num = m.group(1).replace(',', '.')
-        try:
-            return f'<say-as interpret-as="cardinal">{num}</say-as> por ciento'
-        except Exception:
-            return m.group(0)
+        return f'{num} por ciento'  # más simple, no usar say-as con decimales
     t = re.sub(r'(\d+[,\.]?\d*)\s*%', _format_pct, t)
     
-    # 4. PAUSAS NATURALES con <break>
+    # 4. PAUSAS NATURALES con <break> (separadas con espacios para evitar adyacencia)
     t = t.replace('. ', '. <break time="500ms"/> ')
-    t = t.replace(': ', ': <break time="400ms"/> ')
-    t = t.replace('; ', '; <break time="400ms"/> ')
+    t = t.replace(': ', ': <break time="350ms"/> ')
+    t = t.replace('; ', '; <break time="350ms"/> ')
     t = t.replace(', ', ', <break time="200ms"/> ')
     t = t.replace('? ', '? <break time="500ms"/> ')
     t = t.replace('! ', '! <break time="500ms"/> ')
     
-    # 5. ÉNFASIS CÁLIDO en saludos iniciales
-    if any(t.startswith(s) for s in ('Hola', 'Estimado', 'Buenos', '¡Hola', '¡Buenos')):
-        first_period = t.find('.')
-        if 5 < first_period < 100:
-            t = f'<prosody rate="0.95" pitch="+1st">{t[:first_period+1]}</prosody>{t[first_period+1:]}'
-    
-    # 6. WRAP en <speak> con prosody global
-    ssml = (
-        f'<speak>'
-        f'<prosody rate="{SPEAKING_RATE}" pitch="{int(PITCH)}st">'
-        f'{t}'
-        f'</prosody>'
-        f'</speak>'
-    )
+    # 5. WRAP EN <speak> SIMPLE — SIN prosody (evita conflicto con audioConfig)
+    # CRITICO: NO duplicar rate/pitch aquí, se aplican via audioConfig
+    ssml = f'<speak>{t}</speak>'
     return ssml
 
 
 def _llamar_google_tts(texto: str) -> Optional[bytes]:
-    """FASE 7: Si USE_SSML=true, intenta SSML primero. Fallback automatico a texto plano."""
+    """FASE 11: Llamada robusta a Google TTS con SSML opcional.
+    
+    Cuando USE_SSML=True:
+    - Envía SSML en input.ssml
+    - audioConfig SIN speakingRate/pitch duplicado (ya que <prosody> los manejaría
+      pero ahora no usamos <prosody>, así que aplicamos rate/pitch via audioConfig)
+    - SIN effectsProfileId (incompatible con SSML en algunos casos)
+    
+    Cuando USE_SSML=False (modo v91):
+    - Texto plano + audioConfig completo con effectsProfileId
+    """
     url = f"{GOOGLE_TTS_URL}?key={GOOGLE_TTS_KEY}"
     
-    # FASE 7: Intentar SSML si está activado
+    # FASE 11: Intentar SSML si está activado — payload SIMPLIFICADO
     if USE_SSML:
         try:
             ssml = _texto_a_ssml(texto)
+            # Logging del SSML para diagnóstico (primeros 200 chars)
+            print(f"🔊 [TTS-SSML] Generando SSML: {ssml[:200]}...")
             payload_ssml = {
                 "input": {"ssml": ssml},
                 "voice": {"languageCode": VOICE_LANGUAGE, "name": VOICE_NAME},
                 "audioConfig": {
                     "audioEncoding":    "MP3",
-                    "speakingRate":     SPEAKING_RATE,
-                    "pitch":            PITCH,
-                    "volumeGainDb":     1.0,
-                    "effectsProfileId": ["headphone-class-device"],
+                    "speakingRate":     SPEAKING_RATE,  # rate aplicado aquí (sin prosody en SSML)
+                    "pitch":            PITCH,           # pitch aplicado aquí
+                    "volumeGainDb":     2.0,             # ligero boost
+                    # NO usar effectsProfileId con SSML — causa rechazos en Neural2
                 }
             }
             r = requests.post(url, json=payload_ssml, timeout=15)
@@ -160,14 +173,16 @@ def _llamar_google_tts(texto: str) -> Optional[bytes]:
                     print(f"✅ [TTS-SSML] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
                     logger.info(f"✅ [TTS-SSML] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
                     return audio
-            # SSML rechazado → caer a texto plano sin alarmar
-            print(f"⚠️ [TTS-SSML] Google rechazó SSML ({r.status_code}), usando texto plano")
-            logger.warning(f"Google TTS SSML rechazado {r.status_code}: {r.text[:200]}")
+            # SSML rechazado → loggear DETALLE COMPLETO para diagnóstico
+            err_text = r.text[:500] if r.text else 'sin detalle'
+            print(f"⚠️ [TTS-SSML] Google rechazó SSML ({r.status_code}): {err_text}")
+            logger.warning(f"Google TTS SSML rechazado HTTP {r.status_code}: {err_text}")
+            print(f"⚠️ [TTS-SSML] Cayendo a TEXTO PLANO automáticamente")
         except Exception as e:
-            print(f"⚠️ [TTS-SSML] error: {e}, usando texto plano")
-            logger.warning(f"Google TTS SSML error: {e}")
+            print(f"⚠️ [TTS-SSML] excepción: {e}, usando texto plano")
+            logger.warning(f"Google TTS SSML excepción: {e}")
     
-    # MODO TEXTO PLANO (default v91 si SSML=false, o fallback si SSML falló)
+    # MODO TEXTO PLANO (default si SSML=false, o fallback si SSML falló)
     payload = {
         "input": {"text": texto},
         "voice": {
@@ -187,8 +202,8 @@ def _llamar_google_tts(texto: str) -> Optional[bytes]:
         if r.status_code == 200:
             audio = base64.b64decode(r.json().get("audioContent", ""))
             if audio:
-                print(f"✅ [TTS] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
-                logger.info(f"✅ [TTS] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
+                print(f"✅ [TTS] Google {VOICE_NAME} OK texto-plano ({len(audio):,} bytes)")
+                logger.info(f"✅ [TTS] Google {VOICE_NAME} OK texto-plano ({len(audio):,} bytes)")
                 return audio
         else:
             print(f"❌ [TTS] Google TTS {r.status_code}: {r.text[:200]}")
