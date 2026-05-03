@@ -2321,19 +2321,6 @@ COMANDOS_VOZ = {
     'tarjeta web': 'web_tarjeta',
     'buscar web': 'buscar_web',
     'busqueda web': 'buscar_web',
-    # FASE 14/15: aliases para comandos de conocimiento institucional
-    'expertise': 'expertise',
-    'experto': 'expertise',
-    'expertos': 'expertise',
-    'buscar experto': 'expertise',
-    'buscar expertos': 'expertise',
-    'quien sabe': 'expertise',
-    'quién sabe': 'expertise',
-    'capturar conocimiento': 'capturar_conocimiento',
-    'capturar': 'capturar_conocimiento',
-    'aportar conocimiento': 'capturar_conocimiento',
-    'guardar conocimiento': 'capturar_conocimiento',
-    'know how': 'capturar_conocimiento',
 }
 
 
@@ -2580,45 +2567,20 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        # FASE 17: FILTRO MEJORADO — Solo en GRUPOS se requiere mencionar al bot
-        # para no interrumpir conversaciones. En chat PRIVADO siempre responde.
-        # 
-        # Activadores aceptados (palabra suelta, sin distinguir mayúsculas/tildes):
-        #   - "bot" (atajo corto y simple)
-        #   - "cofradía" / "cofradia" (nombre del grupo)
-        #   - "asistente"
-        #   - "claude"
-        # 
-        # Whisper a veces transcribe mal "bot" como "vot", "boot", "vote" — agregamos
-        # variantes comunes de mala transcripción para que el bot responda igual.
+        # FILTRO: Solo en GRUPOS se requiere mencionar "bot" para no interrumpir conversaciones
+        # En chat PRIVADO el bot siempre responde (el usuario le habla directamente)
         if not es_privado:
-            # Normalizar: quitar puntuación + tildes + lowercase
-            import unicodedata as _uni_voz
-            texto_check_raw = texto_transcrito.lower()
-            texto_check = re.sub(r'[,.:;!?¿¡\-–—\"\'()…]', ' ', texto_check_raw)
-            texto_check = _uni_voz.normalize('NFKD', texto_check)
-            texto_check = ''.join(c for c in texto_check if not _uni_voz.combining(c))
+            texto_check = re.sub(r'[,.:;!?¿¡\-–—\"\'()…]', ' ', texto_transcrito.lower())
             palabras_audio = texto_check.split()
-            
-            # Activadores principales + variantes de mala transcripción Whisper
-            activadores = {
-                'bot', 'cofradia', 'asistente', 'claude',
-                # Variantes que Whisper a veces produce por "bot"
-                'vot', 'boot', 'vote', 'bots',
-            }
-            
-            invocado_por_voz = any(p in activadores for p in palabras_audio)
-            
-            if not invocado_por_voz:
-                # No lo nombraron — silenciosamente ignorar
-                logger.debug(f"🎤 Audio de grupo IGNORADO (sin activador): '{texto_transcrito[:60]}'")
+            # Aceptar "bot", "cofradía", "asistente" o "cofradia" como activadores
+            activadores = {'bot', 'cofradía', 'cofradia', 'asistente'}
+            if not any(p in activadores for p in palabras_audio):
+                # No lo nombraron — silenciosamente ignorar y borrar mensaje de "escuchando"
                 try:
                     await msg.delete()
                 except:
                     pass
                 return
-            else:
-                logger.info(f"🎤 Audio de grupo ACTIVADO por voz — transcripción: '{texto_transcrito[:80]}'")
         
         await msg.edit_text(f"🧠 Procesando: \"{texto_transcrito[:80]}{'...' if len(texto_transcrito) > 80 else ''}\"")
         
@@ -7608,9 +7570,29 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 
         respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
+            logger.warning(f"⚠️ Groq falló en mención de '{user_name}' — fallback Gemini")
             respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
+            logger.warning(f"⚠️ Gemini falló — fallback GLM5")
             respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
+        
+        # FASE 18: Si los 3 LLMs fallaron, intentar con prompt SIMPLIFICADO
+        # (causa común: prompt demasiado largo + rate limit de Groq combinados)
+        if not respuesta:
+            logger.warning(f"⚠️ Los 3 LLMs fallaron — intentando prompt simplificado")
+            try:
+                prompt_simple = (
+                    f"Responde de forma clara y útil a {user_name} (estás en la Cofradía "
+                    f"de Networking, comunidad chilena profesional). Su pregunta:\n\n"
+                    f"\"{pregunta}\"\n\n"
+                    f"Si conoces el tema, responde con tu conocimiento general. "
+                    f"Sé cordial, máximo 3 párrafos, sin asteriscos."
+                )
+                respuesta = llamar_groq(prompt_simple, max_tokens=800, temperature=0.6)
+                if not respuesta:
+                    respuesta = llamar_gemini_texto(prompt_simple, max_tokens=800, temperature=0.6)
+            except Exception as _e_retry:
+                logger.warning(f"Retry simplificado también falló: {_e_retry}")
         
         await msg.delete()
         
@@ -7653,13 +7635,14 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
+            # FASE 18: mensaje más útil cuando TODO falla (caso muy raro: 3 LLMs caídos)
             await update.message.reply_text(
-                "❌ No pude generar respuesta.\n\n"
-                "Comandos útiles:\n"
-                "/buscar_profesional [profesión]\n"
-                "/empleo [cargo]\n"
-                "/buscar_ia [tema]\n"
-                "/rag_consulta [tema]"
+                f"⏱️ {user_name}, los servicios de IA están momentáneamente saturados.\n"
+                f"Por favor reintenta en unos segundos, o usa estos comandos directos:\n\n"
+                f"/rag_consulta {pregunta[:50]}\n"
+                f"/buscar_ia {pregunta[:50]}\n"
+                f"/buscar_web {pregunta[:50]}\n\n"
+                f"Si el problema persiste, escríbele a Germán."
             )
             
     except Exception as e:
@@ -7673,17 +7656,17 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 
 async def _agente_participar_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                      temas: list, texto_trigger: str, nombre_usuario: str):
-    """FASE 16: Agente conversacional que SOLO se activa cuando es invocado
-    explícitamente (mención, reply o palabra gatillo). Responde de forma cordial
-    y contextual a la conversación real, NO inyecta libros random.
+    """Agente conversacional que participa naturalmente en el grupo cuando es invocado.
+    
+    FASE 18: prompt mejorado para NO inventar libros/autores sin relación al tema real.
+    Usa RAG SOLO si la confianza es alta y el tema relevante.
     """
     try:
         # Obtener contexto conversacional
         conversacion_reciente = grupo_memory.get_recent_context(8)
         
-        # FASE 16: SOLO buscar RAG si el tema es claramente accionable Y la pregunta
-        # es una consulta real (no un saludo o comentario casual)
-        # Antes: siempre buscaba RAG → traía libros sin relación
+        # FASE 18: Buscar RAG solo si es una pregunta real (no un comentario casual)
+        # y filtrar por confianza alta + relevancia
         rag_context = ""
         es_pregunta_real = '?' in texto_trigger or any(
             p in texto_trigger.lower() for p in 
@@ -7692,29 +7675,28 @@ async def _agente_participar_grupo(update: Update, context: ContextTypes.DEFAULT
              'explica', 'cuenta', 'dime', 'busca', 'encuentra']
         )
         
-        if es_pregunta_real and 'general' not in temas:
+        if es_pregunta_real:
             try:
                 from concurrent.futures import ThreadPoolExecutor as _TPE_agente
                 with _TPE_agente(max_workers=1) as pool:
                     fut = pool.submit(busqueda_unificada, texto_trigger, 3, 6)
-                    rag_results = fut.result(timeout=5)  # FASE 16: timeout estricto
+                    rag_results = fut.result(timeout=5)  # FASE 18: timeout 5s
                 
-                # CRÍTICO: solo usar RAG si es CLARAMENTE relevante (alta confianza)
+                # CRÍTICO: solo usar RAG si la confianza es alta Y el tema es relevante
                 rag_conf = rag_results.get('rag_confianza', 'ninguna')
                 rag_tema = rag_results.get('rag_tematica', 'desconocida')
                 
                 if (rag_results.get('rag') and 
-                    rag_conf in ('alta',) and  # solo "alta", no "media"
-                    rag_tema in ('relevante',)):  # solo "relevante", no "posible"
+                    rag_conf == 'alta' and rag_tema == 'relevante'):
                     rag_context = formatear_contexto_unificado(rag_results, texto_trigger)[:1500]
                     logger.info(f"🤖 Agente: RAG relevante encontrado para '{texto_trigger[:40]}'")
                 else:
-                    logger.info(f"🤖 Agente: NO se usa RAG (conf={rag_conf}, tema={rag_tema}) "
-                                f"para evitar respuestas sin contexto")
+                    logger.info(f"🤖 Agente: SIN RAG relevante (conf={rag_conf}, tema={rag_tema}) — "
+                                f"responde desde conocimiento general")
             except Exception:
                 pass
         
-        # Construir información de comandos sugeridos según el tema
+        # Comandos sugeridos según tema
         comandos_utiles = []
         for tema in temas:
             info = _TEMAS_ACCIONABLES.get(tema, {})
@@ -7722,32 +7704,32 @@ async def _agente_participar_grupo(update: Update, context: ContextTypes.DEFAULT
                 comandos_utiles.extend(info.get('comandos', [])[:2])
         comandos_str = ', '.join(comandos_utiles[:3]) if comandos_utiles else ''
         
-        # FASE 16: prompt RECONSTRUIDO para respuestas cordiales y CONTEXTUALES
+        # FASE 18: prompt RECONSTRUIDO — cordial, contextual, sin libros inventados
         prompt = f"""Eres el asistente de la Cofradía de Networking, una comunidad profesional chilena.
 
-⚠️ {nombre_usuario} TE INVOCÓ EXPLÍCITAMENTE en el grupo. Tu respuesta debe:
-1. Ser CORDIAL y dirigida a {nombre_usuario} por su nombre
-2. Responder al CONTEXTO REAL de la conversación (no inventar temas)
-3. Si NO tienes información clara y relevante para aportar, simplemente saluda
-   amablemente y pregunta cómo puedes ayudar
-4. NUNCA cites libros o autores que NO tengan relación directa con lo que se habla
-5. Máximo 3-4 líneas, tono natural
+⚠️ {nombre_usuario} TE INVOCÓ EXPLÍCITAMENTE en el grupo. Responde así:
+1. Sé CORDIAL y dirígete a {nombre_usuario} por su nombre
+2. Responde al CONTEXTO REAL del mensaje (no inventes temas)
+3. Si NO tienes información clara para aportar, simplemente saluda amablemente
+   y pregunta cómo puedes ayudar
+4. NUNCA cites libros o autores que NO tengan relación directa con lo hablado
+5. Máximo 3-4 líneas, tono natural y profesional
 
-CONVERSACIÓN RECIENTE EN EL GRUPO:
+CONVERSACIÓN RECIENTE DEL GRUPO:
 {conversacion_reciente}
 
 MENSAJE QUE TE INVOCÓ (de {nombre_usuario}):
 "{texto_trigger}"
 
-{('INFORMACIÓN ÚTIL ENCONTRADA EN BIBLIOTECA (úsala SOLO si es claramente relevante):' + chr(10) + rag_context) if rag_context else 'No tienes documentos relevantes para esta consulta — responde desde tu rol como asistente.'}
+{('INFORMACIÓN ÚTIL ENCONTRADA EN BIBLIOTECA (úsala SOLO si es claramente relevante):' + chr(10) + rag_context) if rag_context else 'No tienes documentos relevantes para esta consulta — responde desde tu conocimiento general como asistente.'}
 
 {f'COMANDOS QUE PODRÍAS SUGERIR si vienen al caso: {comandos_str}' if comandos_str else ''}
 
 REGLAS FINALES:
-- Si el mensaje fue solo un saludo o mención casual: responde con cortesía breve.
+- Si fue solo un saludo o mención casual: responde con cortesía breve.
 - Si fue una pregunta real: respóndela directa y útil.
-- NO inventes ni cites información que no esté en el contexto explícito de arriba.
-- NO uses asteriscos, NO uses markdown.
+- NO inventes ni cites información que no esté en el contexto explícito.
+- NO uses asteriscos ni markdown.
 - Responde en máximo 80 palabras.
 
 Tu respuesta breve a {nombre_usuario}:"""
@@ -7759,7 +7741,7 @@ Tu respuesta breve a {nombre_usuario}:"""
         # Limpiar respuesta
         respuesta_limpia = respuesta.replace('*', '').replace('_', ' ').strip()
         
-        # Si la respuesta es demasiado larga, truncar (señal de que el LLM se descontroló)
+        # Si la respuesta es excesivamente larga, truncar (señal de que el LLM divagó)
         if len(respuesta_limpia) > 600:
             respuesta_limpia = respuesta_limpia[:580].rsplit('.', 1)[0] + '.'
         
@@ -7774,7 +7756,7 @@ Tu respuesta breve a {nombre_usuario}:"""
         
         # Marcar participación para cooldown
         grupo_memory.mark_bot_participated()
-        logger.info(f"🤖 Agente respondió en grupo a {nombre_usuario} — temas: {temas}")
+        logger.info(f"🤖 Agente respondió a {nombre_usuario} — temas: {temas}")
         
     except Exception as e:
         logger.debug(f"Error agente grupo: {e}")
@@ -7881,27 +7863,21 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
     # ══════════════════════════════════════════════════════════════════
     # ═══  AGENTE CONVERSACIONAL: Detectar temas y participar  ═══════
     # ══════════════════════════════════════════════════════════════════
-    # FASE 16 (FIX CRÍTICO): el bot NO debe inyectar respuestas IA en
-    # conversaciones que NO van dirigidas a él. Esto era letal para la
-    # propuesta empresarial — un bot que se auto-invita con respuestas
-    # sin contexto rompe la confianza del usuario.
+    # FASE 18 (FIX CRÍTICO): bot NO debe auto-invitarse en conversaciones
+    # entre usuarios. Antes detectaba "tarjeta" → buscaba RAG → opinaba con
+    # libros sin relación. Esto rompía la confianza para propuesta empresarial.
     # 
-    # FASE 17: gatillos simplificados — el usuario puede invocar al bot con
-    # cualquiera de estas formas (más cortas y simples):
-    #   1. @bot ... (atajo corto, fácil de tipear)
-    #   2. @CofradiaPremiumBot ... (mención formal de Telegram, también funciona)
-    #   3. Reply directo a un mensaje del bot
-    #   4. Mensaje empieza con "bot ", "Bot ", "BOT ", "bot," (palabra suelta al inicio)
-    #   5. Mensaje contiene "bot " como palabra completa (cualquier posición)
-    #      pero SOLO si el mensaje es relativamente corto (típico de invocación)
+    # Ahora SOLO participa si es EXPLÍCITAMENTE invocado:
+    #   - @mención al bot (@CofradiaPremiumBot, @bot)
+    #   - Reply a un mensaje del bot
+    #   - Palabra "bot", "claude", "asistente" como gatillo en mensaje corto
     # 
-    # Antes: cualquier mensaje con ≥6 palabras y un tema accionable
-    #   disparaba al agente. Esto generaba respuestas absurdas como
-    #   responder "Crear o Morir" cuando alguien mencionaba "tarjeta".
+    # La función responder_mencion() ya maneja @menciones — esta lógica es
+    # solo para evitar el auto-invitarse cuando NO hay mención explícita.
     # ══════════════════════════════════════════════════════════════════
     try:
         texto_msg = update.message.text
-        # 1. Detectar temas del mensaje (sigue siendo útil para analytics y memoria)
+        # 1. Detectar temas del mensaje (sigue siendo útil para memoria/analytics)
         temas = detectar_temas(texto_msg)
         
         # 2. Agregar a memoria conversacional (siempre, no afecta participación)
@@ -7912,98 +7888,52 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
             topics=temas
         )
         
-        # 3. ÚNICAMENTE participar si fue EXPLÍCITAMENTE invocado
+        # 3. FASE 18: VERIFICAR INVOCACIÓN EXPLÍCITA antes de cualquier participación
         bot_fue_invocado = False
-        razon_invocacion = ""
-        
-        # FASE 17: normalizar texto para detección flexible (sin tildes, lowercase)
         try:
-            import unicodedata as _uni_inv
-            texto_norm_inv = _uni_inv.normalize('NFKD', (texto_msg or '').lower())
-            texto_norm_inv = ''.join(c for c in texto_norm_inv if not _uni_inv.combining(c))
-        except Exception:
-            texto_norm_inv = (texto_msg or '').lower()
-        
-        # 3a. ¿Atajo @bot ? (forma corta y simple, NO requiere autocompletado de Telegram)
-        # @bot, @Bot, @BOT — todos cuentan
-        try:
-            # Buscar @bot como palabra completa (no como prefijo de otra palabra)
-            # \b funciona con UTF-8 en Python regex
-            if re.search(r'(?:^|\s)@bot\b', texto_norm_inv):
-                bot_fue_invocado = True
-                razon_invocacion = "atajo_@bot"
-        except Exception:
-            pass
-        
-        # 3b. ¿Mención formal del bot? (@CofradiaPremiumBot)
-        try:
-            if not bot_fue_invocado and context and context.bot:
+            import unicodedata as _uni_inv18
+            texto_norm_inv = _uni_inv18.normalize('NFKD', (texto_msg or '').lower())
+            texto_norm_inv = ''.join(c for c in texto_norm_inv if not _uni_inv18.combining(c))
+            
+            # 3a. ¿@mención al bot? (formal o atajo @bot)
+            if context and context.bot:
                 bot_username = (context.bot.username or '').lower()
                 if bot_username and f'@{bot_username}' in texto_norm_inv:
                     bot_fue_invocado = True
-                    razon_invocacion = "mencion_formal"
-        except Exception:
-            pass
-        
-        # 3c. ¿Reply directo a un mensaje del bot?
-        try:
-            if not bot_fue_invocado and (
-                update.message.reply_to_message and 
+            if not bot_fue_invocado and re.search(r'(?:^|\s)@bot\b', texto_norm_inv):
+                bot_fue_invocado = True
+            
+            # 3b. ¿Reply directo a un mensaje del bot?
+            if (not bot_fue_invocado and update.message.reply_to_message and
                 update.message.reply_to_message.from_user and
                 update.message.reply_to_message.from_user.is_bot):
                 bot_fue_invocado = True
-                razon_invocacion = "reply_al_bot"
-        except Exception:
-            pass
-        
-        # 3d. ¿Palabra "bot" como gatillo? (FASE 17: detección más flexible)
-        # Casos que SÍ activan:
-        #   - "bot ¿cuánto vale el dólar?" (al inicio sin coma)
-        #   - "Bot, dime sobre Milei" (al inicio con coma)
-        #   - "Hola bot, ayúdame" (después de saludo corto)
-        #   - "claude, qué opinas" / "asistente, recomiéndame"
-        # Casos que NO activan:
-        #   - "compré un robot ayer" (robot ≠ bot — usamos word boundary)
-        #   - "el bot que mencionaste tiene problemas" (mensaje LARGO sobre bots, 
-        #     no una invocación directa)
-        try:
+            
+            # 3c. ¿Palabra gatillo? (mensaje corto con "bot"/"claude"/"asistente")
             if not bot_fue_invocado:
-                # Solo si el mensaje es "corto" (típico de invocación al bot)
-                # Mensajes largos hablando "del bot" no son invocaciones
                 num_palabras = len(texto_msg.split())
-                
-                # Patrón 1: empieza con palabra gatillo seguida de espacio, coma, o dos puntos
-                gatillos_inicio = ['bot ', 'bot,', 'bot:', 'bot ',
-                                   'claude ', 'claude,', 'claude:',
-                                   'cofradia,', 'cofradia ',
-                                   'asistente ', 'asistente,', 'asistente:']
-                primeras = texto_norm_inv.strip()[:30]
-                if any(primeras.startswith(g) for g in gatillos_inicio):
+                gatillos_inicio = ['bot ', 'bot,', 'bot:', 'claude ', 'claude,',
+                                   'claude:', 'asistente ', 'asistente,', 'asistente:']
+                if any(texto_norm_inv.strip()[:30].startswith(g) for g in gatillos_inicio):
                     bot_fue_invocado = True
-                    razon_invocacion = "gatillo_inicio"
-                
-                # Patrón 2: si el mensaje es CORTO (≤25 palabras) y contiene "bot" como
-                # palabra suelta — es una invocación directa al bot
-                # Ej: "Hola bot, dame el dólar" / "Pregunta para el bot: ¿qué hora es?"
                 elif num_palabras <= 25 and re.search(r'\bbot\b', texto_norm_inv):
                     bot_fue_invocado = True
-                    razon_invocacion = "palabra_bot_en_mensaje_corto"
         except Exception:
             pass
         
-        # 4. Si fue invocado Y respeta cooldown → participar
-        # FASE 17: ya NO requerimos que haya temas detectados — si el usuario
-        # invoca al bot directamente, debe responder algo aunque no haya tema claro.
-        if bot_fue_invocado and grupo_memory.should_bot_participate() and ia_disponible:
+        # 4. SOLO participar si fue invocado Y respeta cooldown
+        # IMPORTANTE: si fue invocado por @mención, responder_mencion() ya respondió
+        # arriba — este agente sería un duplicado. Solo participa si fue invocado
+        # por palabra gatillo (sin @mención formal).
+        if (bot_fue_invocado and temas and 
+            grupo_memory.should_bot_participate() and ia_disponible):
             temas_accionables = [t for t in temas if t in _TEMAS_ACCIONABLES]
-            # Si no hay temas detectados, responde como asistente general
-            if not temas_accionables:
-                temas_accionables = ['general']
-            logger.info(f"🤖 Agente invocado en grupo por '{razon_invocacion}' "
-                        f"— temas: {temas_accionables} | mensaje: '{texto_msg[:60]}'")
-            asyncio.create_task(
-                _agente_participar_grupo(update, context, temas_accionables, texto_msg, f"{first_name}")
-            )
+            if temas_accionables:
+                if len(texto_msg.split()) >= 4:  # mensaje mínimo de 4 palabras
+                    logger.info(f"🤖 Agente invocado explícitamente — temas: {temas_accionables}")
+                    asyncio.create_task(
+                        _agente_participar_grupo(update, context, temas_accionables, texto_msg, f"{first_name}")
+                    )
     except Exception as _e_agent:
         logger.debug(f"Error agente conversacional: {_e_agent}")
 
@@ -12250,32 +12180,25 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = await update.message.reply_text(f"🧠 Buscando en todas las fuentes: {query}...")
     
     try:
-        # FASE 16: Búsqueda unificada con OPTIMIZACIÓN DE VELOCIDAD
-        # Antes: limit_rag=30, max_tokens=2000, contexto_completo sin truncar
-        #   → respuestas tomaban 8-15 segundos (frustrante para usuario)
-        # Ahora: limit_rag=20, max_tokens=1200, contexto truncado a 5500 chars
-        #   → respuestas en 4-7 segundos (3x más rápido) sin perder calidad
-        # 
-        # 20 chunks × 700 chars = 14,000 chars de contexto = SUFICIENTE para
-        # síntesis completa. El LLM no procesa mejor con 30 chunks que con 20.
-        import time as _t_rag
-        _t0_rag = _t_rag.time()
-        
-        # Ejecutar búsqueda en thread con timeout para evitar bloqueos largos
-        from concurrent.futures import ThreadPoolExecutor as _TPE_rag, TimeoutError as _TE_rag
+        # FASE 18: búsqueda con TIMEOUT ESTRICTO de 12s para evitar cuelgues largos.
+        # limit_rag=20 (antes 30): suficiente para síntesis completa, ~30% más rápido.
+        # 20 chunks × 700 chars = 14,000 chars = contexto rico SIN ser excesivo.
+        import time as _t_rag18
+        _t0_rag = _t_rag18.time()
+        from concurrent.futures import ThreadPoolExecutor as _TPE_rag18, TimeoutError as _TE_rag18
         try:
-            with _TPE_rag(max_workers=1) as _pool_rag:
+            with _TPE_rag18(max_workers=1) as _pool_rag:
                 _fut_rag = _pool_rag.submit(busqueda_unificada, query, 8, 20)
-                resultados = _fut_rag.result(timeout=12)  # máx 12s para búsqueda
-        except _TE_rag:
+                resultados = _fut_rag.result(timeout=12)
+        except _TE_rag18:
             logger.warning(f"⚠️ Búsqueda RAG timeout (>12s) para: {query[:40]}")
             await msg.edit_text(
                 "⏱️ La búsqueda está tardando más de lo esperado.\n"
-                "Por favor intenta con palabras clave más específicas o usa /rag_status."
+                "Por favor intenta con palabras más específicas o usa /rag_status para ver documentos."
             )
             return
-        
-        _t_busq = _t_rag.time() - _t0_rag
+        _t_busq = _t_rag18.time() - _t0_rag
+        logger.info(f"⏱️ RAG búsqueda: {_t_busq:.1f}s para '{query[:40]}'")
         
         tiene_historial = bool(resultados.get('historial'))
         tiene_rag = bool(resultados.get('rag'))
@@ -12362,12 +12285,9 @@ RECORDATORIO FINAL: el usuario llama Germán (con tilde en la "a"). Si te dirige
 respeta esa grafía. Sintetiza los fragmentos en una respuesta valiosa, completa y
 fluida, como si estuvieras conversando."""
             
-            # FASE 16: max_tokens reducido de 2000 → 1200 (suficiente para 400-500 palabras
-            # que es ideal para chat). Esto reduce ~40% el tiempo de generación del LLM.
-            _t1_rag = _t_rag.time()
-            respuesta = llamar_groq(prompt, max_tokens=1200, temperature=0.3)
-            _t_llm = _t_rag.time() - _t1_rag
-            logger.info(f"⏱️ RAG: búsqueda={_t_busq:.1f}s + LLM={_t_llm:.1f}s = {_t_busq+_t_llm:.1f}s total para '{query[:40]}'")
+            # FASE 18: max_tokens reducido de 2000 → 1500 para 2-3s más rápido
+            # 1500 tokens = ~600 palabras = ideal para chat (suficiente y completo)
+            respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.3)
             
             if respuesta:
                 respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
@@ -20128,9 +20048,6 @@ CATALOGO_COMANDOS_INTENCION = {
     'tarea': 'Crear nueva tarea de networking',
     'mis_tareas': 'Ver tareas de networking pendientes',
     'mis_coins': 'Ver saldo de Cofra-Coins',
-    # FASE 14/15: Conocimiento institucional y expertos
-    'capturar_conocimiento': 'Aportar conocimiento experto al RAG (formato: tema | contenido)',
-    'expertise': 'Encontrar QUIÉN sabe de un tema (busca en tarjetas, conocimiento, historial y Drive)',
     # Emergencia
     'emergencia': 'Reportar emergencia (4 tipos) con alerta a todos',
     'ayuda': 'Ver todos los comandos disponibles',
