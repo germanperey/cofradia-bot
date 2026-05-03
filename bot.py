@@ -10409,6 +10409,397 @@ async def test_tts_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(diagnostico)
 
 
+# ════════════════════════════════════════════════════════════════════════
+# FASE 14: CAPTURA DE CONOCIMIENTO INSTITUCIONAL
+# Atributo clave de IntelliBot: que el conocimiento de los expertos NO se pierda
+# cuando se van. Permite a cualquier miembro registrar conocimiento experto que
+# se indexa automáticamente al RAG con metadata (autor, fecha, tema).
+# Caso de uso para empresas: "antes que se jubile el ingeniero senior, captura
+# su know-how". Caso de uso para Cofradía: experiencias profesionales únicas.
+# ════════════════════════════════════════════════════════════════════════
+
+async def capturar_conocimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /capturar_conocimiento - Registra conocimiento experto al RAG.
+    
+    Uso: /capturar_conocimiento [tema] | [contenido]
+    
+    Ejemplo:
+    /capturar_conocimiento Mantenimiento turbinas Westinghouse | Para inspección
+    semestral de turbinas modelo X-200, primero verificar nivel de aceite con la
+    sonda B. Si está bajo 15mm aplicar protocolo Y-450. Importante: nunca abrir
+    válvula 3 sin haber cerrado válvula 1 — generaría sobrepresión.
+    """
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "Usuario"
+    user_full = f"{user_name} {update.effective_user.last_name or ''}".strip()
+    
+    if not context.args:
+        ejemplo = (
+            "📚 CAPTURA DE CONOCIMIENTO INSTITUCIONAL\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Registra conocimiento experto que NO se debe perder.\n"
+            "Queda indexado al RAG y disponible para todos.\n\n"
+            "📝 USO:\n"
+            "/capturar_conocimiento [tema] | [contenido]\n\n"
+            "💡 EJEMPLO:\n"
+            "/capturar_conocimiento Networking en eventos navales | "
+            "Cuando vayas a una ceremonia oficial, llega 15 min antes. "
+            "El protocolo es saludar primero al oficial de mayor grado. "
+            "Las tarjetas de presentación se entregan con dos manos al final.\n\n"
+            "🎯 IDEAL PARA:\n"
+            "  • Experiencias profesionales únicas\n"
+            "  • Procedimientos técnicos no documentados\n"
+            "  • Lecciones aprendidas\n"
+            "  • Contactos clave y sus contextos\n"
+            "  • Cualquier conocimiento que un experto va a perderse"
+        )
+        await update.message.reply_text(ejemplo)
+        return
+    
+    texto_completo = ' '.join(context.args)
+    if '|' not in texto_completo:
+        await update.message.reply_text(
+            "❌ Falta el separador '|' entre tema y contenido.\n\n"
+            "Formato: /capturar_conocimiento [tema] | [contenido]"
+        )
+        return
+    
+    partes = texto_completo.split('|', 1)
+    tema = partes[0].strip()
+    contenido = partes[1].strip()
+    
+    if not tema or len(tema) < 5:
+        await update.message.reply_text("❌ El tema debe tener al menos 5 caracteres.")
+        return
+    if not contenido or len(contenido) < 30:
+        await update.message.reply_text(
+            "❌ El contenido debe tener al menos 30 caracteres.\n"
+            "💡 Sé específico para que sea útil: incluye cómo, cuándo, por qué."
+        )
+        return
+    
+    msg = await update.message.reply_text("📚 Indexando conocimiento al RAG...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión a BD")
+            return
+        c = conn.cursor()
+        
+        # Crear tabla si no existe (idempotente)
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS conocimiento_capturado (
+                        id SERIAL PRIMARY KEY,
+                        tema TEXT NOT NULL,
+                        contenido TEXT NOT NULL,
+                        autor_user_id BIGINT,
+                        autor_nombre TEXT,
+                        fecha_captura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        keywords TEXT
+                    )
+                """)
+            else:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS conocimiento_capturado (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tema TEXT NOT NULL,
+                        contenido TEXT NOT NULL,
+                        autor_user_id INTEGER,
+                        autor_nombre TEXT,
+                        fecha_captura TEXT DEFAULT CURRENT_TIMESTAMP,
+                        keywords TEXT
+                    )
+                """)
+            conn.commit()
+        except Exception as _e_table:
+            logger.debug(f"Tabla conocimiento_capturado: {_e_table}")
+        
+        # Generar keywords automáticamente desde tema + primeras palabras
+        import unicodedata as _uni_kw
+        def _norm_kw(t):
+            t = _uni_kw.normalize('NFKD', t.lower())
+            return ''.join(c for c in t if not _uni_kw.combining(c))
+        keywords_auto = ' '.join(set(_norm_kw(tema + ' ' + contenido[:200]).split()))[:500]
+        
+        # Insertar registro
+        if DATABASE_URL:
+            c.execute("""
+                INSERT INTO conocimiento_capturado (tema, contenido, autor_user_id, autor_nombre, keywords)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (tema, contenido, user_id, user_full, keywords_auto))
+            row = c.fetchone()
+            registro_id = row['id'] if row else 0
+        else:
+            c.execute("""
+                INSERT INTO conocimiento_capturado (tema, contenido, autor_user_id, autor_nombre, keywords)
+                VALUES (?, ?, ?, ?, ?)
+            """, (tema, contenido, user_id, user_full, keywords_auto))
+            registro_id = c.lastrowid
+        
+        # ALSO insertar en tabla rag_chunks para que sea buscable inmediatamente
+        try:
+            source_label = f"PDF:Conocimiento-{user_full.replace(' ','_')}-{tema[:50].replace(' ','_')}"
+            chunk_text_full = f"TEMA: {tema}\n\nCONOCIMIENTO CAPTURADO POR {user_full}:\n{contenido}"
+            
+            if DATABASE_URL:
+                c.execute("""
+                    INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
+                    VALUES (%s, %s, %s, %s)
+                """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}'))
+            else:
+                c.execute("""
+                    INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
+                    VALUES (?, ?, ?, ?)
+                """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}'))
+        except Exception as _e_rag:
+            logger.warning(f"No se pudo insertar en rag_chunks (continuando): {_e_rag}")
+        
+        conn.commit()
+        conn.close()
+        
+        # Invalidar cache RAG para que la búsqueda incluya el nuevo conocimiento
+        try:
+            if '_FASE6_RAG_CACHE' in globals():
+                globals()['_FASE6_RAG_CACHE'].clear()
+        except Exception:
+            pass
+        
+        confirmacion = (
+            f"✅ CONOCIMIENTO CAPTURADO\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📚 Tema: {tema}\n"
+            f"👤 Autor: {user_full}\n"
+            f"🆔 Registro #{registro_id}\n"
+            f"📊 Caracteres: {len(contenido):,}\n\n"
+            f"🔍 Ya está disponible para todos:\n"
+            f"   /rag_consulta {tema[:40]}\n"
+            f"   /buscar_ia {tema[:40]}\n\n"
+            f"💡 Otros pueden encontrar este conocimiento\n"
+            f"   buscando temas relacionados.\n\n"
+            f"🙏 Gracias {user_name} por aportar al saber colectivo."
+        )
+        await msg.edit_text(confirmacion)
+        registrar_servicio_usado(user_id, 'capturar_conocimiento')
+        
+    except Exception as e:
+        logger.error(f"Error en capturar_conocimiento: {e}", exc_info=True)
+        try:
+            await msg.edit_text(f"❌ Error indexando: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
+async def expertise_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /expertise - Encuentra QUIÉN sabe de un tema.
+    
+    Busca expertos en la comunidad cruzando:
+    1. Tarjetas profesionales (especialidades declaradas)
+    2. Conocimiento capturado (autores que escribieron sobre el tema)
+    3. Historial de mensajes (quién habla más del tema)
+    
+    Uso: /expertise [tema]
+    Ejemplo: /expertise inversiones inmobiliarias
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "🎯 BUSCAR EXPERTOS EN LA COMUNIDAD\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Encuentra QUIÉN en la Cofradía sabe de un tema.\n\n"
+            "📝 USO:\n"
+            "/expertise [tema]\n\n"
+            "💡 EJEMPLOS:\n"
+            "/expertise inversiones inmobiliarias\n"
+            "/expertise tecnología naval\n"
+            "/expertise emprendimiento digital\n\n"
+            "🔍 Busca en:\n"
+            "  • Tarjetas profesionales\n"
+            "  • Conocimiento capturado\n"
+            "  • Historial del grupo"
+        )
+        return
+    
+    tema = ' '.join(context.args).strip()
+    if len(tema) < 3:
+        await update.message.reply_text("❌ El tema debe tener al menos 3 caracteres.")
+        return
+    
+    msg = await update.message.reply_text(f"🔍 Buscando expertos en '{tema}'...")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Error de conexión a BD")
+            return
+        c = conn.cursor()
+        
+        import unicodedata as _uni_e
+        tema_norm = _uni_e.normalize('NFKD', tema.lower())
+        tema_norm = ''.join(c2 for c2 in tema_norm if not _uni_e.combining(c2))
+        palabras_tema = [p for p in tema_norm.split() if len(p) >= 3]
+        
+        if not palabras_tema:
+            await msg.edit_text("❌ Términos demasiado cortos. Usa palabras de 3+ letras.")
+            return
+        
+        expertos = {}  # user_id → {nombre, score, fuentes:[]}
+        
+        # 1. TARJETAS PROFESIONALES
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    SELECT user_id, nombre, profesion, especialidad, descripcion
+                    FROM tarjetas_profesional
+                    WHERE LOWER(profesion || ' ' || COALESCE(especialidad,'') || ' ' || COALESCE(descripcion,'')) LIKE %s
+                    LIMIT 20
+                """, (f'%{tema_norm}%',))
+            else:
+                c.execute("""
+                    SELECT user_id, nombre, profesion, especialidad, descripcion
+                    FROM tarjetas_profesional
+                    WHERE LOWER(profesion || ' ' || COALESCE(especialidad,'') || ' ' || COALESCE(descripcion,'')) LIKE ?
+                    LIMIT 20
+                """, (f'%{tema_norm}%',))
+            for row in c.fetchall():
+                if DATABASE_URL:
+                    uid = row['user_id']; nom = row['nombre']
+                    prof = row.get('profesion', ''); esp = row.get('especialidad', '')
+                else:
+                    uid, nom, prof, esp = row[0], row[1], row[2] or '', row[3] or ''
+                if uid not in expertos:
+                    expertos[uid] = {'nombre': nom, 'score': 0, 'fuentes': []}
+                expertos[uid]['score'] += 10
+                fuente_descr = f"Tarjeta: {prof}"
+                if esp:
+                    fuente_descr += f" / {esp[:60]}"
+                expertos[uid]['fuentes'].append(fuente_descr)
+        except Exception as _e_tar:
+            logger.debug(f"Búsqueda tarjetas (no critico): {_e_tar}")
+        
+        # 2. CONOCIMIENTO CAPTURADO
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    SELECT autor_user_id, autor_nombre, tema, COUNT(*) as cnt
+                    FROM conocimiento_capturado
+                    WHERE LOWER(tema || ' ' || contenido) LIKE %s
+                    GROUP BY autor_user_id, autor_nombre, tema
+                    LIMIT 10
+                """, (f'%{tema_norm}%',))
+            else:
+                c.execute("""
+                    SELECT autor_user_id, autor_nombre, tema, COUNT(*) as cnt
+                    FROM conocimiento_capturado
+                    WHERE LOWER(tema || ' ' || contenido) LIKE ?
+                    GROUP BY autor_user_id, autor_nombre, tema
+                    LIMIT 10
+                """, (f'%{tema_norm}%',))
+            for row in c.fetchall():
+                if DATABASE_URL:
+                    uid = row['autor_user_id']; nom = row['autor_nombre']
+                    t_cap = row['tema']
+                else:
+                    uid, nom, t_cap = row[0], row[1], row[2]
+                if uid not in expertos:
+                    expertos[uid] = {'nombre': nom, 'score': 0, 'fuentes': []}
+                expertos[uid]['score'] += 15  # peso alto: capturó conocimiento explícito
+                expertos[uid]['fuentes'].append(f"Conocimiento: {t_cap[:60]}")
+        except Exception as _e_con:
+            logger.debug(f"Búsqueda conocimiento (no crítico, tabla puede no existir): {_e_con}")
+        
+        # 3. HISTORIAL DE MENSAJES (quién habla más del tema)
+        try:
+            placeholders_hist = ' OR '.join([
+                "LOWER(texto) LIKE %s" if DATABASE_URL else "LOWER(texto) LIKE ?"
+                for _ in palabras_tema[:3]
+            ])
+            params_hist = [f'%{p}%' for p in palabras_tema[:3]]
+            if DATABASE_URL:
+                c.execute(f"""
+                    SELECT user_id, MAX(first_name) as nombre, COUNT(*) as cnt
+                    FROM mensajes
+                    WHERE ({placeholders_hist})
+                      AND first_name NOT IN ('Group','Grupo','Channel','Canal','')
+                      AND first_name IS NOT NULL
+                    GROUP BY user_id
+                    HAVING COUNT(*) >= 2
+                    ORDER BY cnt DESC LIMIT 5
+                """, params_hist)
+            else:
+                c.execute(f"""
+                    SELECT user_id, MAX(first_name) as nombre, COUNT(*) as cnt
+                    FROM mensajes
+                    WHERE ({placeholders_hist})
+                      AND first_name NOT IN ('Group','Grupo','Channel','Canal','')
+                      AND first_name IS NOT NULL
+                    GROUP BY user_id
+                    HAVING COUNT(*) >= 2
+                    ORDER BY cnt DESC LIMIT 5
+                """, params_hist)
+            for row in c.fetchall():
+                if DATABASE_URL:
+                    uid = row['user_id']; nom = row['nombre']; cnt = int(row['cnt'])
+                else:
+                    uid, nom, cnt = row[0], row[1], int(row[2])
+                if uid not in expertos:
+                    expertos[uid] = {'nombre': nom, 'score': 0, 'fuentes': []}
+                expertos[uid]['score'] += min(cnt, 8)
+                expertos[uid]['fuentes'].append(f"Habla del tema: {cnt} veces en el grupo")
+        except Exception as _e_hist:
+            logger.debug(f"Búsqueda historial (no crítico): {_e_hist}")
+        
+        conn.close()
+        
+        if not expertos:
+            await msg.edit_text(
+                f"🔍 No encontré expertos en '{tema}' con datos suficientes.\n\n"
+                f"💡 Sugerencias:\n"
+                f"  • Prueba con palabras más generales\n"
+                f"  • Usa /buscar_profesional para buscar por profesión\n"
+                f"  • Usa /capturar_conocimiento si tú sabes del tema\n"
+                f"    para que aparezcas en futuras búsquedas"
+            )
+            return
+        
+        # Ordenar por score
+        ranking = sorted(expertos.items(), key=lambda x: x[1]['score'], reverse=True)[:8]
+        
+        lineas = [
+            f"🎯 EXPERTOS EN: {tema}",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f""
+        ]
+        medallas = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣']
+        for i, (uid, data) in enumerate(ranking):
+            try:
+                nombre_limpio = limpiar_nombre_display(data['nombre'])
+            except Exception:
+                nombre_limpio = data['nombre'] or 'Usuario'
+            lineas.append(f"{medallas[i]} {nombre_limpio}  (relevancia: {data['score']})")
+            for f in data['fuentes'][:3]:
+                lineas.append(f"     • {f}")
+            lineas.append("")
+        
+        lineas.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lineas.append(f"💡 Para conectar con un experto:")
+        lineas.append(f"   /buscar_profesional [nombre]")
+        lineas.append(f"")
+        lineas.append(f"🧠 Para ver lo que han escrito sobre el tema:")
+        lineas.append(f"   /rag_consulta {tema}")
+        
+        await msg.edit_text("\n".join(lineas))
+        registrar_servicio_usado(update.effective_user.id, 'expertise')
+        
+    except Exception as e:
+        logger.error(f"Error en expertise_comando: {e}", exc_info=True)
+        try:
+            await msg.edit_text(f"❌ Error buscando expertos: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /rag_status - Ver estado del sistema RAG (paginado para 100+ PDFs)"""
     msg = await update.message.reply_text("🔍 Consultando estado del sistema RAG...")
@@ -10620,30 +11011,72 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             rag_conf = resultados.get('rag_confianza', 'ninguna')
             total_rag = len(resultados.get('rag', []))
             
-            prompt = f"""Eres el asistente IA de la Cofradía de Networking.
+            # FASE 14: Extraer NOMBRES EXACTOS de documentos para forzar al LLM a citarlos
+            # textualmente. Antes el LLM escribía "Meli" en vez de "Milei" porque no
+            # tenía indicación explícita de respetar la grafía exacta.
+            nombres_docs_exactos = []
+            try:
+                for item in resultados.get('rag', []):
+                    src = item[1] if isinstance(item, tuple) else ''
+                    if src:
+                        # Limpiar prefijos PDF:/EXCEL: y extensión
+                        src_limpio = src.replace('PDF:', '').replace('EXCEL:', '').strip()
+                        import re as _re_n
+                        src_limpio = _re_n.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', src_limpio, flags=_re_n.IGNORECASE)
+                        src_limpio = src_limpio.replace('_', ' ').strip()
+                        if src_limpio and src_limpio not in nombres_docs_exactos:
+                            nombres_docs_exactos.append(src_limpio)
+            except Exception:
+                pass
+            
+            nombres_docs_str = "\n".join(f'  • "{n}"' for n in nombres_docs_exactos[:5]) if nombres_docs_exactos else "(varios documentos)"
+            
+            prompt = f"""Eres el asistente experto de la Cofradía de Networking, una comunidad profesional chilena de alto nivel.
 
-CONSULTA: "{query}"
+CONSULTA DEL USUARIO: "{query}"
 
-{"━"*50}
-⚠️ INSTRUCCIÓN CRÍTICA — DEBES SEGUIRLA AL PIE DE LA LETRA:
+DOCUMENTOS RELEVANTES ENCONTRADOS ({total_rag} fragmentos, confianza {rag_conf.upper()}):
+{nombres_docs_str}
 
-El motor de búsqueda encontró {total_rag} fragmentos con confianza {rag_conf.upper()}.
-ESTOS FRAGMENTOS CONTIENEN LA INFORMACIÓN QUE EL USUARIO BUSCA.
+═══════════════════════════════════════════════════════════
+INSTRUCCIONES OBLIGATORIAS PARA RESPONDER:
+═══════════════════════════════════════════════════════════
 
-TU TAREA:
-1. LEE cada fragmento del contexto con atención
-2. SINTETIZA el contenido en una respuesta completa y útil
-3. NUNCA digas "no encontré información" — la información ESTÁ en los fragmentos
-4. Si los fragmentos hablan de economía/inflación → ÚSALOS aunque no repitan el nombre del autor en cada línea
-5. Identifica el tema central de cada documento por su NOMBRE DE ARCHIVO y su CONTENIDO
-6. Responde en español, claro, completo, máximo 600 palabras
-7. Sin asteriscos ni markdown
-{"━"*50}
+1. RESPETAR GRAFÍA EXACTA: copia los nombres propios, autores, conceptos y términos
+   técnicos EXACTAMENTE como aparecen en el contexto. NO los modifiques (ejemplo: si
+   el documento dice "Milei", NUNCA escribas "Meli" o "Mile"; si dice "Germán",
+   NO escribas "German" sin tilde).
 
-CONTEXTO COMPLETO:
+2. USAR LOS FRAGMENTOS: el sistema YA validó que estos fragmentos contienen información
+   relevante. Tu trabajo es SINTETIZARLOS, no rechazarlos.
+   PROHIBIDO decir frases como "no tengo información sobre", "no encuentro",
+   "lamentablemente no puedo", "los fragmentos no mencionan".
+
+3. ESTRUCTURA DE RESPUESTA:
+   - Comienza directo con la respuesta (sin preámbulos largos)
+   - Da una visión general en el primer párrafo
+   - Profundiza con detalles específicos en párrafos siguientes
+   - Cita pasajes clave entre comillas cuando sea ilustrativo
+   - Cierra con una conclusión útil o invitación a profundizar
+
+4. TONO Y EXTENSIÓN:
+   - Cálido, profesional, como un experto que domina el tema
+   - Entre 250 y 500 palabras (suficiente para ser completo, sin ser pesado)
+   - Sin asteriscos, sin markdown, sin viñetas exageradas
+   - Usa puntuación clara para que la respuesta fluya como conversación natural
+
+5. SI HAY CONFLICTO ENTRE FRAGMENTOS: prefiere los que aparezcan más veces o sean
+   más específicos. Menciona la fuente cuando agregue valor (ej: "según el libro X...").
+
+═══════════════════════════════════════════════════════════
+CONTEXTO COMPLETO DE LOS DOCUMENTOS:
+═══════════════════════════════════════════════════════════
 {contexto_completo}
 
-REGLA FINAL: Si el sistema dice que estos fragmentos son del tema buscado → CONFÍA en el sistema y ÚSALOS."""
+═══════════════════════════════════════════════════════════
+RECORDATORIO FINAL: el usuario llama Germán (con tilde en la "a"). Si te diriges a él,
+respeta esa grafía. Sintetiza los fragmentos en una respuesta valiosa, completa y
+fluida, como si estuvieras conversando."""
             
             respuesta = llamar_groq(prompt, max_tokens=2000, temperature=0.3)
             
@@ -24135,6 +24568,8 @@ def main():
             BotCommand("estadisticas", "Estadisticas del grupo"),
             BotCommand("top_usuarios", "Ranking de participacion"),
             BotCommand("top10", "Top 10 Cofrades del mes"),
+            BotCommand("expertise", "Buscar expertos en un tema"),
+            BotCommand("capturar_conocimiento", "Aportar conocimiento experto"),
             BotCommand("mi_perfil", "Tu perfil de actividad"),
             BotCommand("mi_cuenta", "Estado de tu suscripcion"),
             BotCommand("cumpleanos_mes", "Cumpleanos del mes"),
@@ -24175,6 +24610,8 @@ def main():
                     BotCommand("indicadores", "Indicadores economicos Chile"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
                     BotCommand("top10", "Top 10 Cofrades del mes"),
+                    BotCommand("expertise", "Buscar expertos en un tema"),
+                    BotCommand("capturar_conocimiento", "Aportar conocimiento experto"),
                     BotCommand("mi_perfil", "Tu perfil de actividad"),
                     BotCommand("dotacion", "Total de integrantes"),
                     BotCommand("ayuda", "Ver todos los comandos"),
@@ -24283,6 +24720,10 @@ def main():
     application.add_handler(CommandHandler("subir_pdf", subir_pdf_comando))
     application.add_handler(CommandHandler("rag_status", rag_status_comando))
     application.add_handler(CommandHandler("test_tts", test_tts_comando))
+    # FASE 14: comandos de captura de conocimiento institucional y búsqueda de expertos
+    # Atributos clave para propuesta IntelliBot a empresas: que el conocimiento NO se pierda
+    application.add_handler(CommandHandler("capturar_conocimiento", capturar_conocimiento_comando))
+    application.add_handler(CommandHandler("expertise", expertise_comando))
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
@@ -24712,9 +25153,33 @@ def main():
             
             if docs_son_relevantes:
                 # MODO A: documentos del RAG son sobre el tema → sintetizar
+                # FASE 14: extraer nombres EXACTOS de documentos para evitar alucinaciones
+                # como "Meli" en vez de "Milei"
+                nombres_docs_exactos_chat = []
+                try:
+                    for item in resultados_busq.get('rag', []):
+                        src = item[1] if isinstance(item, tuple) else ''
+                        if src:
+                            sl = src.replace('PDF:', '').replace('EXCEL:', '').strip()
+                            import re as _re_nc
+                            sl = _re_nc.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', sl, flags=_re_nc.IGNORECASE)
+                            sl = sl.replace('_', ' ').strip()
+                            if sl and sl not in nombres_docs_exactos_chat:
+                                nombres_docs_exactos_chat.append(sl)
+                except Exception:
+                    pass
+                docs_str_chat = "\n".join(f'  • "{n}"' for n in nombres_docs_exactos_chat[:5]) if nombres_docs_exactos_chat else ""
+                
                 instruccion = (
-                    f"El sistema encontró {total_rag} fragmentos de documentos relevantes "
-                    f"para esta consulta. LÉELOS y sintetiza una respuesta completa basándote en ellos."
+                    f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
+                    f"OBLIGATORIO:\n"
+                    f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
+                    f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
+                    f"2. SINTETIZA los fragmentos en respuesta completa y fluida (300-500 palabras).\n"
+                    f"3. PROHIBIDO decir 'no tengo información' o 'no encuentro' — los fragmentos SÍ "
+                    f"contienen lo que el usuario pregunta.\n"
+                    f"4. Comienza directo con la respuesta. Cita pasajes clave entre comillas cuando "
+                    f"sea ilustrativo. Cierra con conclusión útil."
                 )
                 ctx_rag = contexto_completo[:7000]
                 fuentes_str_final = fuentes_str
@@ -24731,16 +25196,18 @@ def main():
                 logger.info(f"💬 Modo LLM para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
-            prompt = f"""Eres el asistente IA de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
+            prompt = f"""Eres el asistente experto de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
 
-Responde a {user_name} empezando con "{user_name}," de forma directa y natural.{intent_hint}
+Responde a {user_name} empezando con "{user_name}," de forma directa, natural y profesional.{intent_hint}
 
-INSTRUCCIÓN: {instruccion}
+INSTRUCCIÓN PRINCIPAL: {instruccion}
 
-REGLAS:
-- Nunca digas "no tengo información" sobre temas que conoces hasta 2024
-- Nunca inventes personas de la Cofradía
-- Responde completo, útil, en español, sin asteriscos
+REGLAS GENERALES:
+- Nunca digas "no tengo información" sobre temas que el sistema confirma tener.
+- Respeta GRAFÍA EXACTA de nombres propios (Germán con tilde, Milei con i-e-i, etc.).
+- Estructura: introducción al tema → desarrollo con detalles → cierre útil.
+- Tono cálido y profesional, como un experto explicando a un colega.
+- En español, sin asteriscos, sin markdown excesivo.
 
 {ctx_rag}
 {contexto_tarjetas[:600] if contexto_tarjetas else ''}

@@ -66,7 +66,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v12-neural2-ssml-2026-05-03"
+TTS_VERSION_TAG = "v14-pronunciacion-forzada-2026-05-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -104,21 +104,78 @@ def _limpiar_texto(texto: str) -> str:
 
 
 def _texto_a_ssml(texto: str) -> str:
-    """FASE 11: SSML SIMPLIFICADO Y ROBUSTO para Google TTS.
+    """FASE 14: SSML mejorado con DICCIONARIO DE PRONUNCIACIONES FORZADAS.
     
-    SOLUCIONA los 4 problemas que causaban rechazo silencioso:
+    Resuelve el problema de Google TTS Neural2-C que pronuncia mal acentos
+    en nombres propios y términos específicos.
+    
+    Técnicas aplicadas:
     - SIN prosody anidado (causaba rechazo en algunos casos)
-    - SIN tags experimentales <emphasis> 
     - <break> y <say-as> son los más confiables
     - Escape XML correcto de & < > " '
+    - <sub alias="..."> para forzar pronunciación silábica correcta
+    - Diccionario chileno: nombres, lugares, términos navales/financieros
     
     Aplica:
     - Expansión de abreviaturas chilenas (UF→"U F", IPC→"I P C", etc.)
     - Pronunciación correcta de números/montos con <say-as>
     - Pausas naturales en puntuación (<break>)
+    - Pronunciación forzada de nombres propios con tildes
     """
     if not texto:
         return texto
+    
+    # ════════════════════════════════════════════════════════════════════
+    # FASE 14: DICCIONARIO DE PRONUNCIACIONES FORZADAS
+    # Google TTS Neural2-C a veces pronuncia mal palabras con acentos.
+    # Por ejemplo "Germán" → "Gérman" (acento en sílaba incorrecta).
+    # 
+    # SOLUCIÓN: usar <sub alias="..."> que reemplaza cómo el motor PRONUNCIA
+    # la palabra (sin cambiar cómo se escribe en pantalla).
+    # 
+    # El alias usa escritura fonética con tildes para forzar acentuación correcta:
+    #   "Germán" → alias "Jermán" (la J fuerza inicio fuerte y la tilde acentúa la á)
+    #   "Milei"  → alias "Milei" (ya está bien; lo dejamos para evitar leerlo "Meli")
+    # 
+    # IMPORTANTE: las claves son sensibles a tildes para evitar reemplazar
+    # palabras sin acento.
+    # ════════════════════════════════════════════════════════════════════
+    PRONUNCIACIONES_FORZADAS = {
+        # Nombres propios con tilde — fuerza acentuación correcta
+        'Germán': 'Jermán',         # evita "Gérman"
+        'germán': 'jermán',
+        'Pérey': 'Péreey',           # apellido del usuario (alargar para enfatizar tilde)
+        'pérey': 'péreey',
+        'Perey': 'Péreey',           # también si lo escribe sin tilde
+        'perey': 'péreey',
+        # Personajes / autores frecuentemente mencionados
+        'Milei': 'Mi-lei',           # evita "Meli" — separación silábica
+        'Friedman': 'Fríidman',      # apellido americano, fuerza pronunciación
+        'Hayek': 'Háyek',
+        'Keynes': 'Káines',
+        'Boric': 'Bóric',
+        'Kast': 'Kast',
+        'Piñera': 'Piñera',
+        'Bachelet': 'Báchelet',
+        # Términos navales chilenos
+        'Cofradía': 'Cofradíia',     # alargar tilde
+        'cofradía': 'cofradíia',
+        'náutico': 'nááutico',
+        'náutica': 'nááutica',
+        'capitán': 'capitáan',
+        'almirante': 'almirante',
+        # Términos financieros chilenos
+        'inflación': 'inflasión',    # variante chilena natural
+        'política': 'políitica',
+        'económico': 'ekonóomico',
+        'económica': 'ekonóomica',
+        'América': 'Améerica',
+        'Argentina': 'Argentíina',
+        'Chile': 'Chíile',
+        # Cargos/títulos
+        'doctor': 'doctór',
+        'ingeniero': 'injeniero',
+    }
     
     # 1. ESCAPE XML estricto (CRÍTICO — un solo & sin escapar rompe todo el SSML)
     t = (texto
@@ -128,7 +185,19 @@ def _texto_a_ssml(texto: str) -> str:
          .replace('"', '&quot;')
          .replace("'", '&apos;'))
     
-    # 2. EXPANSIONES DE ABREVIATURAS CHILENAS (en texto, ANTES de tags)
+    # 2. PRONUNCIACIONES FORZADAS — antes de cualquier otro tag, usando <sub>
+    # Procesamos primero las claves más largas para evitar matches parciales
+    claves_ordenadas = sorted(PRONUNCIACIONES_FORZADAS.keys(), key=len, reverse=True)
+    for palabra_original in claves_ordenadas:
+        alias_pronunciacion = PRONUNCIACIONES_FORZADAS[palabra_original]
+        # Usar word boundary para no matchear partes de otras palabras
+        # \b funciona con UTF-8 en Python regex
+        patron = r'\b' + re.escape(palabra_original) + r'\b'
+        # <sub alias="X">Y</sub>: muestra Y pero pronuncia X
+        reemplazo = f'<sub alias="{alias_pronunciacion}">{palabra_original}</sub>'
+        t = re.sub(patron, reemplazo, t)
+    
+    # 3. EXPANSIONES DE ABREVIATURAS CHILENAS (después de <sub>, no chocan)
     abreviaturas = [
         (r'\bUF\b', 'U efe'),
         (r'\bCLP\b', 'pesos chilenos'),
@@ -151,7 +220,7 @@ def _texto_a_ssml(texto: str) -> str:
     for patt, repl in abreviaturas:
         t = re.sub(patt, repl, t)
     
-    # 3. NÚMEROS Y MONTOS — usar <say-as> para pronunciación correcta
+    # 4. NÚMEROS Y MONTOS — usar <say-as> para pronunciación correcta
     def _format_monto(m):
         num = m.group(1).replace('.', '').replace(',', '')
         if num.isdigit():
@@ -164,7 +233,7 @@ def _texto_a_ssml(texto: str) -> str:
         return f'{num} por ciento'  # más simple, no usar say-as con decimales
     t = re.sub(r'(\d+[,\.]?\d*)\s*%', _format_pct, t)
     
-    # 4. PAUSAS NATURALES con <break> (separadas con espacios para evitar adyacencia)
+    # 5. PAUSAS NATURALES con <break> (separadas con espacios para evitar adyacencia)
     t = t.replace('. ', '. <break time="500ms"/> ')
     t = t.replace(': ', ': <break time="350ms"/> ')
     t = t.replace('; ', '; <break time="350ms"/> ')
@@ -172,7 +241,7 @@ def _texto_a_ssml(texto: str) -> str:
     t = t.replace('? ', '? <break time="500ms"/> ')
     t = t.replace('! ', '! <break time="500ms"/> ')
     
-    # 5. WRAP EN <speak> SIMPLE — SIN prosody (evita conflicto con audioConfig)
+    # 6. WRAP EN <speak> SIMPLE — SIN prosody (evita conflicto con audioConfig)
     # CRITICO: NO duplicar rate/pitch aquí, se aplican via audioConfig
     ssml = f'<speak>{t}</speak>'
     return ssml
