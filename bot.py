@@ -2121,7 +2121,11 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     texto_voz = texto_voz.replace(' vs ', ' versus ')
     texto_voz = re.sub(r'\s+', ' ', texto_voz).strip()
 
-    # ── INTENTO 1: Chatterbox vía Hugging Face Space (voz ultra-natural) ──
+    # ── INTENTO 1: Google TTS via tts_chatterbox (Neural2-A + SSML, ÚNICA voz oficial) ──
+    # FASE 12: ELIMINADO el fallback edge-tts/Catalina de bot.py.
+    # Razón: cuando Google fallaba, edge-tts producía Catalina (voz robotizada).
+    # Ahora el fallback edge-tts solo existe DENTRO de tts_chatterbox.py si
+    # GOOGLE_TTS_KEY no está configurada. Como SÍ está configurada, NUNCA debería caer ahí.
     try:
         from tts_chatterbox import texto_a_voz
         # FASE 10: Detectar si el módulo tiene SSML y loguear (1 sola vez por proceso)
@@ -2154,33 +2158,15 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
             with open(fname, "wb") as f:
                 f.write(audio_bytes)
             if os.path.getsize(fname) > 0:
-                logger.info(f"🎙️ Audio Chatterbox generado: {os.path.getsize(fname)} bytes")
+                logger.info(f"🎙️ Audio generado: {os.path.getsize(fname)} bytes (Google TTS Neural2-A + SSML)")
                 return fname
     except Exception as e:
-        logger.warning(f"⚠️ Chatterbox falló, usando Catalina: {e}")
-
-    # ── INTENTO 2: edge-TTS mejorado (Catalina más natural) ──
-    try:
-        import edge_tts
-        # Pausas naturales
-        texto_voz = texto_voz.replace('. ', '... ')
-        texto_voz = texto_voz.replace(': ', ':... ')
-        texto_voz = texto_voz.replace('; ', ';... ')
-
-        communicate = edge_tts.Communicate(
-            texto_voz,
-            VOZ_TTS,
-            rate  = "-18%",   # mas pausada, ritmo humano conversacional
-            pitch = "+2Hz",   # ligeramente mas agudo, voz femenina calida
-            volume = "+10%"   # presencia clara
-        )
-        await communicate.save(filename)
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            logger.info(f"🔊 Audio edge-TTS generado: {os.path.getsize(filename)} bytes")
-            return filename
-    except Exception as e:
-        logger.error(f"Error generando TTS: {e}")
-
+        logger.error(f"❌ tts_chatterbox falló: {e}")
+        # NO caer a edge-tts en bot.py: si tts_chatterbox falló, devolver None
+        # para que el bot envíe respuesta SIN audio en lugar de audio robotizado
+    
+    # FASE 12: Si Google TTS falla, NO generar audio (evita Catalina robótica)
+    logger.warning("⚠️ TTS no disponible — respuesta enviada sin audio")
     return None
 
 
@@ -10115,98 +10101,128 @@ async def rag_debug_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def test_tts_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 11: Comando /test_tts - Diagnóstico SSML del TTS.
-    Solo el owner puede usarlo. Genera un audio de prueba y muestra qué módulo
-    se está usando, si SSML está activo, qué voz, y si el SSML fue aceptado por Google.
+    """FASE 12: Comando /test_tts - Genera 3 audios COMPARATIVOS para identificar
+    qué voz suena mejor. El usuario escucha los 3 y elige la voz que prefiere.
+    Solo el owner puede usarlo.
     """
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
         await update.message.reply_text("⛔ Comando solo para administrador")
         return
     
-    msg = await update.message.reply_text("🔬 Ejecutando diagnóstico TTS...")
+    msg = await update.message.reply_text("🔬 Generando 3 audios comparativos con voces distintas...")
     
-    diagnostico = "🔬 DIAGNÓSTICO TTS\n" + "━"*30 + "\n\n"
+    # 1. Diagnóstico inicial
+    diagnostico = "🔬 DIAGNÓSTICO TTS COMPARATIVO\n" + "━"*30 + "\n\n"
     
-    # 1. Verificar que el módulo se importa
     try:
         import tts_chatterbox as _tts_mod
-        diagnostico += f"✅ tts_chatterbox.py importado OK\n"
-        diagnostico += f"   Path: {getattr(_tts_mod, '__file__', 'desconocido')}\n\n"
-        
-        # 2. Verificar atributos clave
-        use_ssml = getattr(_tts_mod, 'USE_SSML', None)
-        voice = getattr(_tts_mod, 'VOICE_NAME', None)
-        rate = getattr(_tts_mod, 'SPEAKING_RATE', None)
-        pitch = getattr(_tts_mod, 'PITCH', None)
-        has_ssml_func = hasattr(_tts_mod, '_texto_a_ssml')
-        
-        diagnostico += f"📋 Configuración cargada:\n"
-        diagnostico += f"   USE_SSML: {use_ssml}\n"
-        diagnostico += f"   VOICE_NAME: {voice}\n"
-        diagnostico += f"   SPEAKING_RATE: {rate}\n"
-        diagnostico += f"   PITCH: {pitch}\n"
-        diagnostico += f"   Tiene _texto_a_ssml(): {has_ssml_func}\n\n"
-        
-        # 3. Variable de ambiente real
+        diagnostico += f"✅ tts_chatterbox.py importado\n"
+        diagnostico += f"   Path: {getattr(_tts_mod, '__file__', '?')}\n"
+        diagnostico += f"   USE_SSML: {getattr(_tts_mod, 'USE_SSML', '?')}\n"
+        diagnostico += f"   Versión cache: {getattr(_tts_mod, 'TTS_VERSION_TAG', '?')}\n\n"
         env_ssml = os.getenv('GOOGLE_TTS_SSML', '<NO_SET>')
         env_key = 'CONFIGURADA' if os.getenv('GOOGLE_TTS_KEY', '') else 'NO_CONFIGURADA'
-        diagnostico += f"🌐 Variables Render:\n"
+        diagnostico += f"🌐 Render:\n"
         diagnostico += f"   GOOGLE_TTS_SSML = '{env_ssml}'\n"
         diagnostico += f"   GOOGLE_TTS_KEY = {env_key}\n\n"
-        
-        # 4. Si hay SSML, mostrar ejemplo del SSML generado
-        if has_ssml_func:
-            test_text = "Hola Germán. La UF está en 39.500 pesos y el IPC fue 0,4%."
-            ssml_ejemplo = _tts_mod._texto_a_ssml(test_text)
-            diagnostico += f"🔊 Ejemplo SSML generado:\n"
-            diagnostico += f"   Input: '{test_text}'\n"
-            diagnostico += f"   Output: {ssml_ejemplo[:300]}\n\n"
-        
-        # 5. Generar audio de prueba real
-        diagnostico += "🎤 Generando audio de prueba...\n"
-        await msg.edit_text(diagnostico)
-        
-        try:
-            audio_path = await generar_audio_tts(
-                "Hola Germán, esta es una prueba del sistema de voz con SSML. "
-                "El IPC fue 0,4 por ciento, la UF está en 39.500 pesos. "
-                "Si escuchas pausas naturales y abreviaturas pronunciadas correctamente, "
-                "el SSML está funcionando.",
-                "/tmp/test_tts.mp3"
-            )
-            if audio_path and os.path.exists(audio_path):
-                with open(audio_path, 'rb') as af:
-                    await update.message.reply_voice(voice=af, caption="🔊 Audio de prueba TTS")
-                try:
-                    os.remove(audio_path)
-                except Exception:
-                    pass
-                diagnostico += "✅ Audio generado y enviado\n\n"
-            else:
-                diagnostico += "❌ No se pudo generar audio\n\n"
-        except Exception as _e_aud:
-            diagnostico += f"❌ Error generando audio: {_e_aud}\n\n"
-        
-        # 6. Veredicto
-        if use_ssml is True and has_ssml_func:
-            diagnostico += "🎯 VEREDICTO: SSML ACTIVADO ✅\n"
-            diagnostico += "Si la voz aún suena robótica, revisa logs Render para ver si\n"
-            diagnostico += "Google rechazó el SSML (busca '⚠️ [TTS-SSML]' en logs)."
-        elif use_ssml is False:
-            diagnostico += "🎯 VEREDICTO: SSML DESACTIVADO ⚠️\n"
-            diagnostico += f"La variable GOOGLE_TTS_SSML está en '{env_ssml}'.\n"
-            diagnostico += "Para activar SSML configura GOOGLE_TTS_SSML=true en Render\n"
-            diagnostico += "y haz Manual Deploy."
-        else:
-            diagnostico += "🎯 VEREDICTO: tts_chatterbox.py NO TIENE SSML\n"
-            diagnostico += "El archivo deployado en Render es la versión vieja.\n"
-            diagnostico += "Sube el tts_chatterbox.py actualizado al repositorio."
-        
-        await msg.edit_text(diagnostico)
-        
     except Exception as e:
-        await msg.edit_text(f"❌ Error en diagnóstico TTS: {e}")
+        diagnostico += f"❌ Error importando tts_chatterbox: {e}\n\n"
+        await msg.edit_text(diagnostico)
+        return
+    
+    await msg.edit_text(diagnostico + "🎤 Generando audio 1/3...")
+    
+    # Texto de prueba (idéntico para las 3 voces — facilita comparación)
+    texto_prueba = (
+        "Hola Germán, esta es una prueba de calidad de voz. "
+        "El IPC fue de 0,4 por ciento, la UF está en 39.500 pesos. "
+        "Si la voz suena natural y cálida, esta es la indicada para la Cofradía."
+    )
+    
+    # Voces a comparar — las 3 mejores opciones para español
+    voces_test = [
+        ('es-US-Neural2-A', 'Neural2-A (femenina latina)'),
+        ('es-US-Neural2-C', 'Neural2-C (femenina alternativa)'),
+        ('es-ES-Neural2-D', 'Neural2-D (femenina España)'),
+    ]
+    
+    audios_generados = []
+    
+    for idx, (voz_id, voz_descr) in enumerate(voces_test, 1):
+        await msg.edit_text(diagnostico + f"🎤 Generando audio {idx}/3: {voz_descr}...")
+        
+        # Llamar a Google TTS DIRECTAMENTE con esta voz específica (no via tts_chatterbox)
+        try:
+            import requests as _req_tts
+            import base64 as _b64_tts
+            tts_url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={os.getenv('GOOGLE_TTS_KEY', '')}"
+            
+            # Generar SSML usando la función del módulo (si existe)
+            if hasattr(_tts_mod, '_texto_a_ssml') and getattr(_tts_mod, 'USE_SSML', False):
+                ssml = _tts_mod._texto_a_ssml(texto_prueba)
+                input_payload = {"ssml": ssml}
+            else:
+                input_payload = {"text": texto_prueba}
+            
+            payload = {
+                "input": input_payload,
+                "voice": {"languageCode": voz_id[:5], "name": voz_id},
+                "audioConfig": {
+                    "audioEncoding": "MP3",
+                    "speakingRate": 0.95,
+                    "pitch": -1.0,
+                    "volumeGainDb": 2.0,
+                }
+            }
+            r = _req_tts.post(tts_url, json=payload, timeout=20)
+            if r.status_code == 200:
+                audio_b64 = r.json().get("audioContent", "")
+                audio_bytes = _b64_tts.b64decode(audio_b64)
+                fpath = f"/tmp/test_tts_{idx}.mp3"
+                with open(fpath, 'wb') as f:
+                    f.write(audio_bytes)
+                audios_generados.append((fpath, voz_descr, voz_id, len(audio_bytes)))
+            else:
+                audios_generados.append((None, voz_descr, voz_id, 0))
+                logger.warning(f"Test voz {voz_id}: HTTP {r.status_code} - {r.text[:200]}")
+        except Exception as e:
+            audios_generados.append((None, voz_descr, voz_id, 0))
+            logger.error(f"Test voz {voz_id} error: {e}")
+    
+    # Enviar los audios al usuario
+    diagnostico += "🎤 AUDIOS GENERADOS:\n\n"
+    for idx, (fpath, descr, voz_id, size) in enumerate(audios_generados, 1):
+        if fpath and size > 0:
+            try:
+                with open(fpath, 'rb') as af:
+                    await update.message.reply_voice(
+                        voice=af,
+                        caption=f"🎙️ AUDIO {idx}/3: {descr}\nVOICE_ID: {voz_id}\nTamaño: {size:,} bytes"
+                    )
+                try:
+                    os.remove(fpath)
+                except:
+                    pass
+                diagnostico += f"   ✅ Audio {idx}: {descr} ({size:,} bytes)\n"
+            except Exception as e:
+                diagnostico += f"   ❌ Error enviando audio {idx}: {e}\n"
+        else:
+            diagnostico += f"   ❌ Audio {idx}: {descr} — falló\n"
+    
+    diagnostico += "\n" + "━"*30 + "\n"
+    diagnostico += "🎯 INSTRUCCIONES:\n\n"
+    diagnostico += "1. Escucha los 3 audios\n"
+    diagnostico += "2. Identifica cuál suena MÁS NATURAL\n"
+    diagnostico += "3. Para cambiar la voz default del bot:\n"
+    diagnostico += "   - Ve a Render → Environment\n"
+    diagnostico += "   - Edita o agrega GOOGLE_TTS_VOICE\n"
+    diagnostico += "   - Pon el VOICE_ID del audio que prefieras\n"
+    diagnostico += "   - Manual Deploy\n\n"
+    diagnostico += "💡 Si los 3 audios suenan igual de robóticos, el problema NO\n"
+    diagnostico += "está en la voz sino en el SSML o parámetros."
+    
+    await msg.edit_text(diagnostico)
 
 
 async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):

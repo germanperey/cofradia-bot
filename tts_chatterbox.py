@@ -21,11 +21,23 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-# FASE 11: Default Neural2-A (mejor manejo de SSML que Wavenet, más natural)
+# FASE 12: Default Neural2-A es la voz femenina más natural disponible para español.
+# Si el usuario quiere experimentar con otras voces, puede cambiar GOOGLE_TTS_VOICE en Render:
+#   - es-US-Neural2-A: femenina natural (default actual)
+#   - es-US-Neural2-C: femenina alternativa
+#   - es-US-Neural2-B: masculina
+#   - es-ES-Neural2-D: femenina con acento España (más entonada)
+#   - en-US-Studio-O: voz STUDIO (premium, máxima calidad - INGLÉS solamente)
+# IMPORTANTE: Studio voices NO existen en español todavía. Para máxima naturalidad
+# en español, Neural2 es la opción más alta. Wavenet sonaba más robótica.
 VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")
-VOICE_LANGUAGE = "es-US"
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.92"))  # 0.92 = pausada pero natural (0.85 era muy lento)
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-2.0"))  # -2.0 = ligeramente grave (era -4.0, muy grave)
+VOICE_LANGUAGE = os.getenv("GOOGLE_TTS_LANG", "es-US")
+# FASE 12: Parámetros ajustados a valores que Google TTS pronuncia con mayor naturalidad
+# Velocidad 1.0 = velocidad normal humana. 0.95 = ligeramente pausada (recomendado para naturalidad)
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.95"))
+# Pitch 0 = neutral. Valores negativos = más grave; positivos = más agudo.
+# Neural2-A femenina ya tiene un pitch alto natural; -1.0 le da calidez sin sonar grave
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-1.0"))
 
 # FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
 # Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
@@ -47,10 +59,37 @@ CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_gtts"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 
+# FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
+# Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
+# y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
+TTS_VERSION_TAG = "v12-neural2-ssml-2026-05-03"
+
+# FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
+# Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
+try:
+    import time as _t_purge
+    _ahora_purge = _t_purge.time()
+    _purgados = 0
+    for _f in CACHE_DIR.glob("*.mp3"):
+        # Si el archivo es de antes del deploy de Fase 12 → eliminar
+        if _ahora_purge - _f.stat().st_mtime > 0:  # cualquier archivo previo
+            try:
+                _f.unlink()
+                _purgados += 1
+            except Exception:
+                pass
+    if _purgados > 0:
+        print(f"🗑️ [TTS] Caché viejo purgado: {_purgados} archivos eliminados")
+        logger.info(f"🗑️ [TTS] Caché viejo purgado: {_purgados} archivos al iniciar")
+except Exception as _e_purge:
+    pass
+
 
 def _cache_key(texto: str) -> str:
-    # FASE 7: incluir SSML en clave para no mezclar caches
-    return hashlib.md5(f"{texto}_{VOICE_NAME}_{SPEAKING_RATE}_{PITCH}_{USE_SSML}".encode()).hexdigest()
+    # FASE 12: incluir VERSION_TAG en clave para invalidar caches viejos
+    return hashlib.md5(
+        f"{TTS_VERSION_TAG}_{texto}_{VOICE_NAME}_{SPEAKING_RATE}_{PITCH}_{USE_SSML}".encode()
+    ).hexdigest()
 
 
 def _limpiar_texto(texto: str) -> str:
@@ -245,13 +284,20 @@ async def texto_a_voz(
     if len(texto_limpio) > 4500:
         texto_limpio = texto_limpio[:4497] + "..."
 
-    print(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'} | voz={VOICE_NAME} | SSML={USE_SSML}")
-    logger.info(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'} | SSML={USE_SSML}")
+    # FASE 12: Banner mejorado por cada llamada — identifica EXACTAMENTE qué voz se usa
+    print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"🎤 [TTS REQUEST] versión={TTS_VERSION_TAG}")
+    print(f"🎤   GOOGLE_TTS_KEY: {'CONFIGURADA' if GOOGLE_TTS_KEY else 'NO_CONFIGURADA'}")
+    print(f"🎤   VOICE_NAME    : {VOICE_NAME}")
+    print(f"🎤   USE_SSML      : {USE_SSML}")
+    print(f"🎤   Texto (primeros 80 chars): '{texto_limpio[:80]}'")
+    logger.info(f"🎤 [TTS REQUEST] voz={VOICE_NAME} ssml={USE_SSML} key={'SI' if GOOGLE_TTS_KEY else 'NO'}")
 
     if USE_CACHE:
         f_cache = CACHE_DIR / f"{_cache_key(texto_limpio)}.mp3"
         if f_cache.exists():
-            print("🎵 [TTS] Audio desde caché")
+            print(f"🎵 [TTS] Audio desde caché ({f_cache.stat().st_size:,} bytes)")
+            print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return f_cache.read_bytes()
 
     if GOOGLE_TTS_KEY:
@@ -260,12 +306,21 @@ async def texto_a_voz(
         if audio:
             if USE_CACHE:
                 f_cache.write_bytes(audio)
+            print(f"🎤 [TTS RESULT] ✅ GOOGLE TTS → {len(audio):,} bytes generados")
+            print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return audio
-        return await _edge_tts_fallback(texto_limpio)
+        # Google TTS falló → fallback a edge-tts Catalina
+        print(f"🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina (sonará más robótica)")
+        logger.warning(f"⚠️ Google TTS falló — usando edge-tts Catalina como fallback")
+        result = await _edge_tts_fallback(texto_limpio)
+        print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return result
     else:
-        print("⏭️ [TTS] Sin GOOGLE_TTS_KEY → Catalina")
-        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada")
-        return await _edge_tts_fallback(texto_limpio)
+        print(f"⏭️ [TTS] Sin GOOGLE_TTS_KEY → usando edge-tts Catalina")
+        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada — usando Catalina como fallback")
+        result = await _edge_tts_fallback(texto_limpio)
+        print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return result
 
 
 async def limpiar_cache_tts(dias: int = 7):
