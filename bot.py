@@ -5077,7 +5077,7 @@ async function guardarEdicion(userId){
 }
 
 async function invitarTarjeta(userId, nombre){
-  if(!confirm(`¿Enviar mensaje a ${nombre || 'este usuario'} invitándolo a crear su tarjeta profesional?\n\nIncluirá:\n• Beneficios de tener la tarjeta\n• Las 3 reglas importantes\n• Tutorial HTML adjunto`)){
+  if(!confirm("¿Enviar mensaje a " + (nombre || 'este usuario') + " invitándolo a crear su tarjeta profesional?\\n\\nIncluirá:\\n• Beneficios de tener la tarjeta\\n• Las 3 reglas importantes\\n• Tutorial HTML adjunto")){
     return;
   }
   
@@ -5119,7 +5119,7 @@ async function invitarTarjeta(userId, nombre){
 }
 
 async function normalizarTodos(){
-  if(!confirm('¿Normalizar TODOS los nombres y usernames vacíos o incompletos?\n\nEsto:\n• Completará nombres con datos de tarjetas profesionales (cuando estén)\n• Generará usernames vacíos como Nombre_PrimerApellido\n• NO modifica usernames reales de Telegram que ya existan\n\n¿Continuar?')){
+  if(!confirm("¿Normalizar TODOS los nombres y usernames vacíos o incompletos?\\n\\nEsto:\\n• Completará nombres con datos de tarjetas profesionales (cuando estén)\\n• Generará usernames vacíos como Nombre_PrimerApellido\\n• NO modifica usernames reales de Telegram que ya existan\\n\\n¿Continuar?")){
     return;
   }
   
@@ -5135,7 +5135,7 @@ async function normalizarTodos(){
     if(data.error){
       alert('❌ Error: ' + data.error);
     } else {
-      alert(`✅ Normalización completada\n\nRevisados: ${data.total_revisados}\nNombres actualizados: ${data.nombres_actualizados}\nUsernames actualizados: ${data.usernames_actualizados}\nErrores: ${data.errores || 0}`);
+      alert("✅ Normalización completada\\n\\nRevisados: " + data.total_revisados + "\\nNombres actualizados: " + data.nombres_actualizados + "\\nUsernames actualizados: " + data.usernames_actualizados + "\\nErrores: " + (data.errores || 0));
       cargarUsuarios();
     }
   } catch(e) {
