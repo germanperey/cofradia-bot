@@ -157,8 +157,29 @@ def _cache_set(clave, valor):
         _cmd_cache_dia['datos'] = {}
     _cmd_cache_dia['datos'][clave] = valor
 
-# GLM-5 API (Z.AI) — tercer LLM fallback gratuito (744B params)
+# GLM API (Z.AI) — tercer LLM fallback gratuito
+# FASE 19: glm-4-flash original DEPRECADO (causaba error 400 en logs).
+# Modelos actuales verificados (Mayo 2026): glm-4.5-air, glm-4.7-flash, glm-4.7
 GLM_API_KEY = os.environ.get('GLM_API_KEY', '')
+
+# FASE 20: DeepSeek API — Configuración de alertas de saldo
+# La variable DEEPSEEK_API_KEY ya está definida arriba en línea 74.
+# DeepSeek requiere SALDO recargado (no es free tier ilimitado).
+# Free tier: 5M tokens al alta + 500M/mes después (pero requieren cuenta nueva)
+# Endpoint OpenAI-compatible: https://api.deepseek.com/chat/completions
+# Modelos: deepseek-v4-flash (rápido), deepseek-v4-pro (premium)
+# 
+# UMBRALES DE ALERTA AL ADMIN (Germán):
+#   - Saldo < $1.00 USD → alerta "saldo bajo"
+#   - Saldo == $0.00 USD → alerta "saldo agotado"
+# El job alert_deepseek_balance se ejecuta cada 6 horas via APScheduler
+
+# Umbrales configurables por env
+DEEPSEEK_ALERTA_SALDO_BAJO = float(os.environ.get('DEEPSEEK_ALERTA_SALDO_BAJO', '1.0'))  # USD
+DEEPSEEK_ALERTA_SALDO_AGOTADO = float(os.environ.get('DEEPSEEK_ALERTA_SALDO_AGOTADO', '0.10'))  # USD
+
+# Cache de la última alerta enviada (evita spam)
+_DEEPSEEK_ALERT_CACHE = {'ultima_alerta_bajo': None, 'ultima_alerta_agotado': None, 'ultimo_saldo': None}
 
 def _safe_call(fn, *args, **kwargs):
     """Ejecuta una función capturando excepciones (para uso en ThreadPoolExecutor)"""
@@ -1984,11 +2005,6 @@ Tu personalidad:
     return llamar_gemini_texto(prompt, max_tokens, temperature)
 
 
-def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Redirige a Gemini 2.0 Flash."""
-    return llamar_gemini_texto(prompt, max_tokens, temperature)
-
-
 def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
     """Gemini 2.0 Flash — fallback de Groq (1500 req/día, gratis)."""
     if not GEMINI_API_KEY:
@@ -2026,32 +2042,320 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
 
 
 def llamar_glm5(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """GLM-5 (Z.AI) — LLM gratuito 744B params, tercer fallback después de Groq y Gemini."""
+    """GLM (Z.AI) — tercer fallback LLM después de Groq y Gemini.
+    
+    FASE 19: el modelo original 'glm-4-flash' fue DEPRECADO (causaba error 400 en logs).
+    Esta versión prueba múltiples modelos VERIFICADOS de Z.AI en orden de preferencia.
+    Modelos comprobados disponibles (Mayo 2026):
+      - glm-4.5-air: free tier estable, 9B params
+      - glm-4.7-flash: free tier mas reciente y eficiente
+      - glm-4.7: flagship con coding/reasoning mejorado
+    Si Z.AI deprecia uno, el codigo automaticamente prueba el siguiente.
+    """
     if not GLM_API_KEY:
         return None
-    try:
-        url = "https://api.z.ai/api/paas/v4/chat/completions"
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GLM_API_KEY}"}
-        payload = {
-            "model": "glm-4-flash",
-            "messages": [
-                {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena. Responde en español, profesional y cercano."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        r = requests.post(url, json=payload, headers=headers, timeout=25)
-        if r.status_code == 200:
-            texto = r.json()["choices"][0]["message"]["content"]
-            if texto and texto.strip():
-                logger.info("✅ Respuesta GLM-5 (Z.AI)")
-                return texto.strip()
-        else:
-            logger.warning(f"GLM-5 error: {r.status_code}")
-    except Exception as e:
-        logger.warning(f"Error GLM-5: {e}")
+    
+    # Lista de modelos según indicación del usuario (orden: más rápido primero)
+    modelos_glm = [
+        "glm-4.7-flash",   # Free tier eficiente, primera opción (rápido)
+        "glm-4.7",         # Flagship si flash falla
+    ]
+    
+    url = "https://api.z.ai/api/paas/v4/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GLM_API_KEY}"}
+    
+    for modelo in modelos_glm:
+        try:
+            payload = {
+                "model": modelo,
+                "messages": [
+                    {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena. Responde en español, profesional y cercano."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            r = requests.post(url, json=payload, headers=headers, timeout=25)
+            if r.status_code == 200:
+                texto = r.json()["choices"][0]["message"]["content"]
+                if texto and texto.strip():
+                    logger.info(f"✅ Respuesta GLM ({modelo})")
+                    return texto.strip()
+            elif r.status_code == 400:
+                # Modelo deprecado o no disponible — probar siguiente
+                logger.debug(f"GLM modelo '{modelo}' devolvió 400, probando siguiente")
+                continue
+            elif r.status_code == 429:
+                # Cuota agotada, no insistir con más modelos
+                logger.warning(f"GLM cuota agotada ({modelo})")
+                return None
+            elif r.status_code in (401, 403):
+                # Auth fallida, no insistir
+                logger.warning(f"GLM auth fallida (status {r.status_code})")
+                return None
+            else:
+                logger.warning(f"GLM error {r.status_code} con {modelo}")
+        except Exception as e:
+            logger.debug(f"Error GLM {modelo}: {e}")
+            continue
+    
+    logger.warning("GLM: todos los modelos fallaron")
     return None
+
+
+def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """DeepSeek API — CUARTO fallback LLM (FASE 19).
+    
+    DeepSeek ofrece API OpenAI-compatible con tier gratuito generoso:
+    - 5M tokens al registro
+    - 500M tokens/mes después en tier free
+    
+    Endpoint: https://api.deepseek.com/chat/completions
+    Modelos verificados (Mayo 2026):
+      - deepseek-chat: alias estable, ruteado a deepseek-v4-flash (no-thinking)
+      - deepseek-reasoner: alias estable, ruteado a deepseek-v4-flash (thinking)
+      - deepseek-v4-flash: rapido y economico (recomendado para chat)
+      - deepseek-v4-pro: mas potente, para tareas complejas
+    
+    Para registrarse: https://platform.deepseek.com → API Keys → crear clave
+    Variable de entorno requerida: DEEPSEEK_API_KEY
+    """
+    if not DEEPSEEK_API_KEY:
+        return None
+    
+    # Lista de modelos según indicación del usuario (deepseek-v4-flash + alias estable como respaldo)
+    modelos_deepseek = [
+        "deepseek-v4-flash",   # Modelo directo solicitado por el usuario
+        "deepseek-chat",       # Alias estable, ruteado a v4-flash (respaldo si el directo falla)
+    ]
+    
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+    }
+    
+    for modelo in modelos_deepseek:
+        try:
+            payload = {
+                "model": modelo,
+                "messages": [
+                    {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena de oficiales de la Armada. Responde en español, profesional, cercano y directo. Sin asteriscos."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": min(max_tokens, 8000),  # DeepSeek max output
+                "temperature": temperature,
+                "stream": False,
+            }
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                texto = data["choices"][0]["message"]["content"]
+                if texto and texto.strip():
+                    logger.info(f"✅ Respuesta DeepSeek ({modelo})")
+                    return texto.strip()
+            elif r.status_code == 400:
+                logger.debug(f"DeepSeek modelo '{modelo}' devolvió 400, probando siguiente")
+                continue
+            elif r.status_code == 429:
+                logger.warning(f"DeepSeek cuota/rate limit agotada ({modelo})")
+                return None
+            elif r.status_code in (401, 403):
+                logger.warning(f"DeepSeek auth fallida (status {r.status_code}) - verificar DEEPSEEK_API_KEY")
+                return None
+            elif r.status_code == 402:
+                logger.warning(f"DeepSeek saldo insuficiente (status 402)")
+                return None
+            else:
+                logger.warning(f"DeepSeek error {r.status_code} con {modelo}")
+        except requests.Timeout:
+            logger.warning(f"DeepSeek timeout con {modelo}")
+            continue
+        except Exception as e:
+            logger.debug(f"Error DeepSeek {modelo}: {e}")
+            continue
+    
+    logger.warning("DeepSeek: todos los modelos fallaron")
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 20: SISTEMA DE MONITOREO DE SALDO DEEPSEEK
+# ════════════════════════════════════════════════════════════════════════
+
+def consultar_saldo_deepseek():
+    """
+    Consulta el saldo actual de la cuenta DeepSeek.
+    Endpoint oficial: GET https://api.deepseek.com/user/balance
+    
+    Retorna dict con:
+        - is_available: bool (True si la cuenta puede usar la API)
+        - balance_infos: lista con saldos por moneda
+        - total_balance_usd: float (saldo total convertido a USD)
+        - granted_balance_usd: float (saldo gratuito otorgado)
+        - topped_up_balance_usd: float (saldo recargado)
+    
+    Retorna None si la consulta falla.
+    """
+    if not DEEPSEEK_API_KEY:
+        return None
+    try:
+        url = "https://api.deepseek.com/user/balance"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            logger.warning(f"DeepSeek balance check status {r.status_code}")
+            return None
+        
+        data = r.json()
+        # Formato típico de la respuesta:
+        # {
+        #   "is_available": true,
+        #   "balance_infos": [
+        #     {"currency": "USD", "total_balance": "5.00",
+        #      "granted_balance": "0.00", "topped_up_balance": "5.00"}
+        #   ]
+        # }
+        resultado = {
+            'is_available': data.get('is_available', False),
+            'balance_infos': data.get('balance_infos', []),
+            'total_balance_usd': 0.0,
+            'granted_balance_usd': 0.0,
+            'topped_up_balance_usd': 0.0,
+        }
+        for info in resultado['balance_infos']:
+            if info.get('currency') == 'USD':
+                try:
+                    resultado['total_balance_usd'] = float(info.get('total_balance', '0') or 0)
+                    resultado['granted_balance_usd'] = float(info.get('granted_balance', '0') or 0)
+                    resultado['topped_up_balance_usd'] = float(info.get('topped_up_balance', '0') or 0)
+                except (ValueError, TypeError):
+                    pass
+                break
+        return resultado
+    except requests.Timeout:
+        logger.warning("DeepSeek balance check timeout")
+        return None
+    except Exception as e:
+        logger.debug(f"Error consultando saldo DeepSeek: {e}")
+        return None
+
+
+async def alertar_saldo_deepseek(context=None):
+    """
+    Job programado que verifica el saldo de DeepSeek cada 6 horas.
+    Si está bajo el umbral, envía mensaje al OWNER (Germán).
+    
+    Umbrales (configurables por env):
+      - DEEPSEEK_ALERTA_SALDO_BAJO (default $1.00): alerta saldo escaso
+      - DEEPSEEK_ALERTA_SALDO_AGOTADO (default $0.10): alerta saldo agotado
+    
+    Anti-spam: solo envía la misma alerta una vez por día.
+    """
+    if not DEEPSEEK_API_KEY or not OWNER_ID:
+        return
+    
+    saldo = consultar_saldo_deepseek()
+    if saldo is None:
+        logger.debug("No se pudo consultar saldo DeepSeek (puede ser normal)")
+        return
+    
+    total = saldo.get('total_balance_usd', 0)
+    granted = saldo.get('granted_balance_usd', 0)
+    topped = saldo.get('topped_up_balance_usd', 0)
+    is_avail = saldo.get('is_available', False)
+    
+    _DEEPSEEK_ALERT_CACHE['ultimo_saldo'] = {
+        'fecha': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'total_usd': total,
+        'granted_usd': granted,
+        'topped_up_usd': topped,
+        'is_available': is_avail,
+    }
+    
+    logger.info(f"💰 DeepSeek saldo: total=${total:.2f} (granted=${granted:.2f} + topped=${topped:.2f})")
+    
+    hoy_iso = datetime.now().strftime('%Y-%m-%d')
+    
+    # ═══ Caso 1: SALDO AGOTADO (crítico) ═══
+    if total <= DEEPSEEK_ALERTA_SALDO_AGOTADO:
+        ultima = _DEEPSEEK_ALERT_CACHE.get('ultima_alerta_agotado')
+        if ultima != hoy_iso:  # solo 1 alerta por día
+            try:
+                if context and hasattr(context, 'bot'):
+                    bot_instance = context.bot
+                else:
+                    from telegram import Bot
+                    bot_instance = Bot(token=TOKEN_BOT)
+                
+                mensaje = (
+                    f"🚨 *DEEPSEEK SALDO AGOTADO*\n\n"
+                    f"💸 Saldo actual: *${total:.4f} USD*\n"
+                    f"📊 Granted: ${granted:.4f}\n"
+                    f"📊 Topped-up: ${topped:.4f}\n\n"
+                    f"⚠️ El bot ahora dependerá solo de Groq, Gemini y GLM.\n"
+                    f"Si esos también fallan, los usuarios verán errores.\n\n"
+                    f"🔗 *Recargar ahora:* https://platform.deepseek.com/top\\_up\n\n"
+                    f"💡 Recomendación: top-up de $5-10 USD."
+                )
+                await bot_instance.send_message(
+                    chat_id=OWNER_ID,
+                    text=mensaje,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
+                _DEEPSEEK_ALERT_CACHE['ultima_alerta_agotado'] = hoy_iso
+                logger.warning(f"🚨 Alerta DeepSeek SALDO AGOTADO enviada al admin (saldo=${total:.4f})")
+            except Exception as e:
+                logger.warning(f"Error enviando alerta saldo agotado: {e}")
+    
+    # ═══ Caso 2: SALDO BAJO (advertencia) ═══
+    elif total <= DEEPSEEK_ALERTA_SALDO_BAJO:
+        ultima = _DEEPSEEK_ALERT_CACHE.get('ultima_alerta_bajo')
+        if ultima != hoy_iso:  # solo 1 alerta por día
+            try:
+                if context and hasattr(context, 'bot'):
+                    bot_instance = context.bot
+                else:
+                    from telegram import Bot
+                    bot_instance = Bot(token=TOKEN_BOT)
+                
+                # Estimar consultas restantes (deepseek-v4-flash: ~$0.0003 por consulta media)
+                consultas_aprox = int(total / 0.0003) if total > 0 else 0
+                
+                mensaje = (
+                    f"⚠️ *DEEPSEEK SALDO BAJO*\n\n"
+                    f"💵 Saldo actual: *${total:.2f} USD*\n"
+                    f"📊 Granted: ${granted:.2f}\n"
+                    f"📊 Topped-up: ${topped:.2f}\n\n"
+                    f"📈 Estimación: ~{consultas_aprox:,} consultas restantes\n\n"
+                    f"🔗 *Recargar:* https://platform.deepseek.com/top\\_up\n\n"
+                    f"💡 Te recomiendo recargar pronto para evitar interrupciones."
+                )
+                await bot_instance.send_message(
+                    chat_id=OWNER_ID,
+                    text=mensaje,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
+                _DEEPSEEK_ALERT_CACHE['ultima_alerta_bajo'] = hoy_iso
+                logger.warning(f"⚠️ Alerta DeepSeek SALDO BAJO enviada al admin (saldo=${total:.2f})")
+            except Exception as e:
+                logger.warning(f"Error enviando alerta saldo bajo: {e}")
+
+
+def alertar_saldo_deepseek_sync_wrapper():
+    """Wrapper síncrono para APScheduler (que no soporta async directamente)."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(alertar_saldo_deepseek())
+        loop.close()
+    except Exception as e:
+        logger.debug(f"Error wrapper alerta DeepSeek: {e}")
 
 
 # ==================== FUNCIONES DE VOZ (STT + TTS) ====================
@@ -4022,6 +4326,61 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': str(e)}, status=500)
             return
         
+        # FASE 20: API usuarios — listado completo de usuarios activos
+        if path == '/api/usuarios':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                usuarios = listar_usuarios_activos()
+                self._send_json({'usuarios': usuarios, 'total': len(usuarios)})
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 20: API saldos — estado de saldo DeepSeek + LLMs configurados
+        if path == '/api/saldos':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                resultado = {
+                    'deepseek': consultar_saldo_deepseek(),
+                    'llms_config': [
+                        {
+                            'nombre': 'Groq (Llama 3.3 70B)',
+                            'configurado': bool(GROQ_API_KEY),
+                            'tipo': 'Free / Pay-as-you-go',
+                            'notas': 'Primer fallback (más rápido)',
+                        },
+                        {
+                            'nombre': 'Gemini 2.0 Flash',
+                            'configurado': bool(GEMINI_API_KEY),
+                            'tipo': 'Free tier (cuota diaria)',
+                            'notas': 'Segundo fallback',
+                        },
+                        {
+                            'nombre': 'GLM (Z.AI) — glm-4.7-flash, glm-4.7',
+                            'configurado': bool(GLM_API_KEY),
+                            'tipo': 'Free tier',
+                            'notas': 'Tercer fallback',
+                        },
+                        {
+                            'nombre': 'DeepSeek (deepseek-v4-flash)',
+                            'configurado': bool(DEEPSEEK_API_KEY),
+                            'tipo': 'Pay-as-you-go ($)',
+                            'notas': 'CUARTO y último fallback (paga)',
+                        },
+                    ],
+                    'cache': _DEEPSEEK_ALERT_CACHE.get('ultimo_saldo'),
+                }
+                self._send_json(resultado)
+            except Exception as e:
+                logger.warning(f"Error /api/saldos: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
         # FASE 15: API analytics
         if path == '/api/analytics' or path.startswith('/api/analytics/'):
             if not self._check_admin_auth():
@@ -4186,7 +4545,9 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 
 <div class="tabs">
 <button class="tab active" onclick="switchTab('empresas')">🏢 Empresas</button>
+<button class="tab" onclick="switchTab('usuarios')">👥 Usuarios</button>
 <button class="tab" onclick="switchTab('analytics')">📊 Analytics</button>
+<button class="tab" onclick="switchTab('saldos')">💰 Saldos LLM</button>
 <button class="tab" onclick="switchTab('api-info')">🔌 API REST</button>
 </div>
 
@@ -4194,6 +4555,30 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 <button class="refresh-btn" onclick="cargarEmpresas()">↻ Refrescar</button>
 <h3 style="color:#c3a55a;margin-top:0">Empresas con IntelliBot</h3>
 <div id="empresas-list"><div class="loading">Cargando empresas...</div></div>
+</div>
+
+<div id="usuarios" class="tab-content">
+<button class="refresh-btn" onclick="cargarUsuarios()">↻ Refrescar</button>
+<h3 style="color:#c3a55a;margin-top:0">👥 Usuarios Registrados (Activos)</h3>
+<div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<input id="filtro-usuarios" type="text" placeholder="🔍 Filtrar por nombre, username o ID..." 
+  oninput="filtrarUsuarios()" style="flex:1;min-width:240px;padding:9px 13px;background:#0a1628;
+  border:1px solid rgba(195,165,90,.3);border-radius:8px;color:#e0e6ed;font-size:.9em">
+<select id="ordenar-usuarios" onchange="filtrarUsuarios()" style="padding:9px 13px;background:#0a1628;
+  border:1px solid rgba(195,165,90,.3);border-radius:8px;color:#e0e6ed;font-size:.9em">
+<option value="mensajes_desc">Más mensajes primero</option>
+<option value="recientes">Más recientes primero</option>
+<option value="antiguos">Más antiguos primero</option>
+<option value="alfabetico">Alfabético (A-Z)</option>
+</select>
+</div>
+<div id="usuarios-content"><div class="loading">Cargando usuarios...</div></div>
+</div>
+
+<div id="saldos" class="tab-content">
+<button class="refresh-btn" onclick="cargarSaldos()">↻ Refrescar</button>
+<h3 style="color:#c3a55a;margin-top:0">💰 Estado de Saldos LLM</h3>
+<div id="saldos-content"><div class="loading">Cargando saldos...</div></div>
 </div>
 
 <div id="analytics" class="tab-content">
@@ -4210,6 +4595,8 @@ cursor:pointer;font-weight:600;font-size:.9em;float:right}
 <tr><th>Método</th><th>Endpoint</th><th>Descripción</th></tr>
 <tr><td><code>GET</code></td><td><code>/health</code></td><td>Status del bot (público, sin auth)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/empresas</code></td><td>Lista empresas registradas</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/usuarios</code></td><td>Lista usuarios activos (FASE 20)</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/saldos</code></td><td>Saldo DeepSeek y estado LLMs (FASE 20)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/analytics</code></td><td>Analytics del tenant default</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/analytics/{tenant_id}</code></td><td>Analytics de tenant específico</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/analytics?dias=7</code></td><td>Analytics de últimos N días</td></tr>
@@ -4238,7 +4625,9 @@ function switchTab(name){
   event.target.classList.add('active');
   document.getElementById(name).classList.add('active');
   if(name === 'empresas') cargarEmpresas();
+  if(name === 'usuarios') cargarUsuarios();
   if(name === 'analytics') cargarAnalytics();
+  if(name === 'saldos') cargarSaldos();
 }
 
 async function api(path, method='GET', body=null){
@@ -4381,6 +4770,163 @@ function renderAnalytics(d){
 function escapeHtml(s){
   if(s==null) return '';
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ════════════════════════════════════════════════════════════════
+// FASE 20: Funciones para tab USUARIOS
+// ════════════════════════════════════════════════════════════════
+let _usuariosCache = [];
+
+async function cargarUsuarios(){
+  const cont = document.getElementById('usuarios-content');
+  cont.innerHTML = '<div class="loading">Cargando usuarios...</div>';
+  try{
+    const data = await api('/api/usuarios');
+    if(!data.usuarios || data.usuarios.length === 0){
+      cont.innerHTML = '<div class="card">No hay usuarios registrados todavía.</div>';
+      return;
+    }
+    _usuariosCache = data.usuarios;
+    filtrarUsuarios();
+  }catch(err){
+    cont.innerHTML = `<div class="error">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function filtrarUsuarios(){
+  const cont = document.getElementById('usuarios-content');
+  const filtro = (document.getElementById('filtro-usuarios').value || '').toLowerCase().trim();
+  const orden = document.getElementById('ordenar-usuarios').value;
+  
+  let lista = _usuariosCache.slice();
+  
+  // Aplicar filtro
+  if(filtro){
+    lista = lista.filter(u => 
+      (u.nombre||'').toLowerCase().includes(filtro) ||
+      (u.username||'').toLowerCase().includes(filtro) ||
+      String(u.user_id||'').includes(filtro) ||
+      (u.profesion||'').toLowerCase().includes(filtro)
+    );
+  }
+  
+  // Aplicar orden
+  if(orden === 'mensajes_desc'){
+    lista.sort((a,b) => (b.mensajes||0) - (a.mensajes||0));
+  } else if(orden === 'recientes'){
+    lista.sort((a,b) => (b.fecha_alta_ts||0) - (a.fecha_alta_ts||0));
+  } else if(orden === 'antiguos'){
+    lista.sort((a,b) => (a.fecha_alta_ts||0) - (b.fecha_alta_ts||0));
+  } else if(orden === 'alfabetico'){
+    lista.sort((a,b) => (a.nombre||'').localeCompare(b.nombre||''));
+  }
+  
+  if(lista.length === 0){
+    cont.innerHTML = '<div class="card">No hay usuarios que coincidan con el filtro.</div>';
+    return;
+  }
+  
+  // KPIs resumen
+  const total = _usuariosCache.length;
+  const filtrados = lista.length;
+  const totalMensajes = lista.reduce((s,u) => s + (u.mensajes||0), 0);
+  const conTarjeta = lista.filter(u => u.tiene_tarjeta).length;
+  const owners = lista.filter(u => u.es_admin).length;
+  
+  let html = `<div class="kpi-grid">
+    <div class="kpi"><div class="num">${total}</div><div class="lbl">Total registrados</div></div>
+    <div class="kpi"><div class="num">${filtrados}</div><div class="lbl">Mostrados</div></div>
+    <div class="kpi"><div class="num">${totalMensajes.toLocaleString()}</div><div class="lbl">Mensajes (visibles)</div></div>
+    <div class="kpi"><div class="num">${conTarjeta}</div><div class="lbl">Con tarjeta profesional</div></div>
+  </div>`;
+  
+  // Tabla
+  html += '<div class="card"><table><thead><tr>';
+  html += '<th>Nombre</th><th>Username</th><th>ID</th><th>Profesión</th>';
+  html += '<th>Fecha alta</th><th>Mensajes</th><th>Tarjeta</th><th>Estado</th>';
+  html += '</tr></thead><tbody>';
+  
+  lista.forEach(u => {
+    const tieneTarj = u.tiene_tarjeta ? '✓' : '—';
+    const username = u.username ? `@${escapeHtml(u.username)}` : '—';
+    const profesion = u.profesion ? escapeHtml(u.profesion) : '—';
+    const fecha = u.fecha_alta || '—';
+    const estadoIcon = u.es_admin ? '👑 Admin' : (u.es_activo ? '🟢 Activo' : '⚪ Inactivo');
+    
+    html += `<tr>
+      <td><strong>${escapeHtml(u.nombre||'(sin nombre)')}</strong></td>
+      <td>${username}</td>
+      <td><code style="font-size:.8em;color:#8899aa">${u.user_id||'—'}</code></td>
+      <td>${profesion}</td>
+      <td>${escapeHtml(fecha)}</td>
+      <td style="text-align:right">${(u.mensajes||0).toLocaleString()}</td>
+      <td style="text-align:center">${tieneTarj}</td>
+      <td>${estadoIcon}</td>
+    </tr>`;
+  });
+  
+  html += '</tbody></table></div>';
+  cont.innerHTML = html;
+}
+
+// ════════════════════════════════════════════════════════════════
+// FASE 20: Funciones para tab SALDOS LLM
+// ════════════════════════════════════════════════════════════════
+async function cargarSaldos(){
+  const cont = document.getElementById('saldos-content');
+  cont.innerHTML = '<div class="loading">Consultando saldos en tiempo real...</div>';
+  try{
+    const data = await api('/api/saldos');
+    
+    let html = '<div class="kpi-grid">';
+    
+    // DeepSeek
+    if(data.deepseek){
+      const ds = data.deepseek;
+      const colorTotal = ds.total_balance_usd >= 1.0 ? '#2ecc71' : (ds.total_balance_usd > 0.1 ? '#f39c12' : '#e74c3c');
+      html += `<div class="kpi" style="border-left-color:${colorTotal}">
+        <div class="num" style="color:${colorTotal}">$${ds.total_balance_usd.toFixed(2)}</div>
+        <div class="lbl">DeepSeek total</div>
+      </div>`;
+      html += `<div class="kpi"><div class="num">$${ds.granted_balance_usd.toFixed(2)}</div><div class="lbl">Granted</div></div>`;
+      html += `<div class="kpi"><div class="num">$${ds.topped_up_balance_usd.toFixed(2)}</div><div class="lbl">Topped-up</div></div>`;
+      const estaActivo = ds.is_available ? '🟢 Disponible' : '🔴 No disponible';
+      html += `<div class="kpi"><div class="num" style="font-size:1em;line-height:2.4">${estaActivo}</div><div class="lbl">Estado API</div></div>`;
+    } else {
+      html += '<div class="kpi"><div class="num">—</div><div class="lbl">DeepSeek (no consultable)</div></div>';
+    }
+    html += '</div>';
+    
+    // Estado de los LLMs configurados
+    html += '<div class="card"><h3>🔌 LLMs Configurados (orden de la cascada)</h3>';
+    html += '<table><thead><tr><th>#</th><th>LLM</th><th>API Key</th><th>Tipo</th><th>Status</th></tr></thead><tbody>';
+    
+    const llms = data.llms_config || [];
+    llms.forEach((llm, idx) => {
+      const tieneKey = llm.configurado ? '✓ Configurada' : '✗ Falta';
+      const colorKey = llm.configurado ? '#2ecc71' : '#e74c3c';
+      html += `<tr>
+        <td>${idx+1}</td>
+        <td><strong>${escapeHtml(llm.nombre)}</strong></td>
+        <td style="color:${colorKey}">${tieneKey}</td>
+        <td>${escapeHtml(llm.tipo)}</td>
+        <td>${escapeHtml(llm.notas||'—')}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+    
+    // Recomendación
+    if(data.deepseek && data.deepseek.total_balance_usd < 1.0){
+      html += `<div class="error" style="background:rgba(243,156,18,.1);border-color:rgba(243,156,18,.4);color:#f39c12">
+        ⚠️ <strong>Saldo DeepSeek bajo.</strong> Recargar en 
+        <a href="https://platform.deepseek.com/top_up" target="_blank" style="color:#f39c12;text-decoration:underline">platform.deepseek.com</a>
+      </div>`;
+    }
+    
+    cont.innerHTML = html;
+  }catch(err){
+    cont.innerHTML = `<div class="error">Error consultando saldos: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 // Cargar al inicio
@@ -7568,11 +8114,56 @@ PREGUNTA DE {user_name}: "{pregunta}"
 CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
+        # FASE 19: cascada de 4 LLMs con logs detallados para diagnóstico
+        # Orden: Groq (rápido) → Gemini (gratis) → GLM/Z.AI (gratis) → DeepSeek (5M tokens free)
         respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
+            logger.warning(f"⚠️ Groq falló para '{user_name}' — fallback Gemini")
             respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
+            logger.warning(f"⚠️ Gemini falló — fallback GLM (Z.AI)")
             respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ GLM falló — fallback DeepSeek")
+            respuesta = llamar_deepseek(prompt, max_tokens=1000, temperature=0.5)
+        
+        # FASE 19 FIX CRÍTICO: si los 4 LLMs fallan, intentar prompt SIMPLIFICADO
+        # (suele superar rate-limits porque pesa menos)
+        if not respuesta:
+            logger.warning(f"⚠️ Los 4 LLMs fallaron — intento simplificado")
+            try:
+                prompt_minimo = (
+                    f"Pregunta de {user_name}: {pregunta}\n\n"
+                    f"Responde brevemente en español (máximo 2 párrafos), profesional y cordial. "
+                    f"Si conoces el tema, explícalo con tu conocimiento general. Sin asteriscos."
+                )
+                respuesta = llamar_groq(prompt_minimo, max_tokens=500, temperature=0.6)
+                if not respuesta:
+                    respuesta = llamar_deepseek(prompt_minimo, max_tokens=500, temperature=0.6)
+            except Exception as _e_simple:
+                logger.warning(f"Intento simplificado falló: {_e_simple}")
+        
+        # FASE 19: ÚLTIMO RECURSO — respuesta directa desde RAG sin LLM
+        # Si tenemos contexto del RAG pero ningún LLM responde, formatear los
+        # fragmentos relevantes manualmente. Mejor que "No pude generar respuesta"
+        if not respuesta and contexto_completo and len(contexto_completo) > 100:
+            logger.warning(f"⚠️ Construyendo respuesta directa desde RAG para '{user_name}'")
+            try:
+                rag_text = contexto_completo[:1500]
+                rag_text = re.sub(r'\[Fuente:[^\]]+\]\s*', '', rag_text)
+                rag_text = re.sub(r'━+', '', rag_text)
+                rag_text = re.sub(r'\s+', ' ', rag_text).strip()
+                
+                if len(rag_text) > 100:
+                    respuesta = (
+                        f"Hola {user_name}, encontré información en la biblioteca relacionada con tu consulta. "
+                        f"Te comparto los fragmentos más relevantes:\n\n"
+                        f"{rag_text[:1200]}...\n\n"
+                        f"Para más detalle puedes ejecutar: /rag_consulta {pregunta[:60]}"
+                    )
+                    logger.info(f"✅ Respuesta RAG-directa generada ({len(respuesta)} chars)")
+            except Exception as _e_rag_direct:
+                logger.warning(f"Respuesta RAG directa falló: {_e_rag_direct}")
         
         await msg.delete()
         
@@ -7615,13 +8206,17 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
+            # FASE 19: caso muy raro — los 4 LLMs Y el RAG fallaron
+            # Esto solo pasa cuando: Groq saturado + Gemini cuota agotada +
+            # GLM error + DeepSeek caido + RAG sin info relevante
             await update.message.reply_text(
-                "❌ No pude generar respuesta.\n\n"
-                "Comandos útiles:\n"
-                "/buscar_profesional [profesión]\n"
-                "/empleo [cargo]\n"
-                "/buscar_ia [tema]\n"
-                "/rag_consulta [tema]"
+                f"⏱️ {user_name}, los servicios de IA están momentáneamente saturados.\n\n"
+                f"Esto suele resolverse en pocos minutos. Mientras tanto puedes:\n\n"
+                f"📚 /rag_consulta {pregunta[:50]}\n"
+                f"🌐 /buscar_web {pregunta[:50]}\n"
+                f"💼 /expertise {pregunta[:40]}\n"
+                f"👥 /buscar_profesional [tema]\n\n"
+                f"Si el problema persiste, escríbele a Germán."
             )
             
     except Exception as e:
@@ -11155,6 +11750,105 @@ def _features_default():
         'mentor_ia': True,
         'busqueda_web': True,
     }
+
+
+def listar_usuarios_activos():
+    """FASE 20: Devuelve lista completa de usuarios registrados con datos enriquecidos.
+    
+    Combina información de:
+      - suscripciones (tabla principal de usuarios)
+      - tarjetas_profesional (si tienen tarjeta creada)
+      - mensajes (cuenta total enviados)
+    
+    Retorna lista de dicts con: nombre, username, user_id, profesion,
+    fecha_alta, fecha_alta_ts (timestamp), mensajes (count), tiene_tarjeta,
+    es_admin, es_activo, ultimo_mensaje.
+    """
+    usuarios = []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return usuarios
+        c = conn.cursor()
+        
+        # Query principal: combina suscripciones + tarjetas + count mensajes
+        # Usamos LEFT JOIN para no perder usuarios sin tarjeta
+        # COUNT(m.id) para contar mensajes por usuario
+        sql = """
+            SELECT 
+                s.user_id,
+                s.first_name,
+                s.username,
+                s.fecha_registro,
+                s.estado,
+                s.es_admin,
+                COALESCE(t.profesion, '') as profesion,
+                COALESCE(t.nombre_completo, s.first_name) as nombre_completo,
+                CASE WHEN t.user_id IS NOT NULL THEN 1 ELSE 0 END as tiene_tarjeta,
+                (SELECT COUNT(*) FROM mensajes m WHERE m.user_id = s.user_id) as mensajes_count,
+                (SELECT MAX(m.fecha) FROM mensajes m WHERE m.user_id = s.user_id) as ultimo_msg
+            FROM suscripciones s
+            LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+            ORDER BY mensajes_count DESC, s.fecha_registro DESC
+        """
+        c.execute(sql)
+        rows = c.fetchall()
+        
+        for r in rows:
+            try:
+                if isinstance(r, tuple):
+                    (uid, fname, uname, freg, estado, admin_flag, prof,
+                     nombre_full, tiene_tarj, msg_count, ultimo_msg) = r
+                else:
+                    uid = r['user_id']
+                    fname = r['first_name']
+                    uname = r['username']
+                    freg = r['fecha_registro']
+                    estado = r['estado']
+                    admin_flag = r['es_admin']
+                    prof = r['profesion']
+                    nombre_full = r['nombre_completo']
+                    tiene_tarj = r['tiene_tarjeta']
+                    msg_count = r['mensajes_count']
+                    ultimo_msg = r['ultimo_msg']
+                
+                # Convertir timestamp a iso + epoch
+                fecha_alta_str = str(freg)[:19] if freg else '—'
+                try:
+                    if hasattr(freg, 'timestamp'):
+                        fecha_alta_ts = int(freg.timestamp())
+                    else:
+                        fecha_alta_ts = 0
+                except Exception:
+                    fecha_alta_ts = 0
+                
+                ultimo_msg_str = str(ultimo_msg)[:19] if ultimo_msg else None
+                
+                # Nombre a mostrar (preferir nombre_completo de tarjeta si existe)
+                nombre_show = (nombre_full or fname or '').strip() or '(sin nombre)'
+                
+                usuarios.append({
+                    'user_id': uid,
+                    'nombre': nombre_show,
+                    'username': uname or '',
+                    'profesion': prof or '',
+                    'fecha_alta': fecha_alta_str,
+                    'fecha_alta_ts': fecha_alta_ts,
+                    'mensajes': int(msg_count or 0),
+                    'tiene_tarjeta': bool(tiene_tarj),
+                    'es_admin': bool(admin_flag),
+                    'es_activo': (estado == 'activo'),
+                    'ultimo_mensaje': ultimo_msg_str,
+                })
+            except Exception as _e_row:
+                logger.debug(f"Error procesando usuario: {_e_row}")
+                continue
+        
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error listando usuarios: {e}")
+    
+    return usuarios
 
 
 def listar_empresas():
@@ -22035,13 +22729,8 @@ def scraping_bcentral_noticias():
     """
     Web scraping de noticias y comunicados recientes del Banco Central de Chile.
     Retorna lista de titulares relevantes (máx. 5).
-    
-    FASE 18: si BCCh no devuelve nada (sitio cambió HTML o timeout), intenta
-    fallback con búsqueda DuckDuckGo de noticias económicas chilenas recientes.
     """
     noticias = []
-    
-    # INTENTO 1: Banco Central oficial
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/1.0)'}
         resp = requests.get(
@@ -22061,43 +22750,6 @@ def scraping_bcentral_noticias():
                         break
     except Exception as e:
         logger.warning(f'Scraping BCCH: {e}')
-    
-    # FASE 18 FALLBACK: si BCCh devolvió 0-2 noticias, complementar con DuckDuckGo
-    if len(noticias) < 3:
-        logger.info(f"⚠️ BCCh devolvió solo {len(noticias)} noticias — complementando con búsqueda web")
-        try:
-            from datetime import datetime as _dt_news
-            mes_actual = _dt_news.now().strftime('%B %Y')
-            queries_noticias = [
-                f'noticias economia Chile {mes_actual}',
-                f'IPC inflacion Chile reciente',
-                f'tipo de cambio dolar Chile',
-            ]
-            for q in queries_noticias:
-                try:
-                    resultados_ddg = _scrape_ddg_sync(q, n=3)
-                    for r in resultados_ddg:
-                        titulo = r.get('title', '') if isinstance(r, dict) else str(r)
-                        if titulo and len(titulo) > 25 and len(noticias) < 5:
-                            # Evitar duplicados
-                            if not any(titulo[:50].lower() in n.lower() for n in noticias):
-                                noticias.append(titulo[:160])
-                except Exception:
-                    continue
-                if len(noticias) >= 5:
-                    break
-        except Exception as e:
-            logger.warning(f'Fallback DDG noticias: {e}')
-    
-    # FASE 18: si TODO falla, devolver al menos contexto genérico útil
-    if not noticias:
-        logger.warning("⚠️ Sin noticias de BCCh ni DDG — usando contexto genérico")
-        noticias = [
-            "Banco Central de Chile evalua politica monetaria en proximas reuniones del Consejo.",
-            "Mercados internacionales atentos a decisiones de Fed sobre tasas de interes.",
-            "Cobre fluctua segun demanda China e inventarios globales.",
-        ]
-    
     return noticias
 
 
@@ -23131,150 +23783,30 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             resp_batch = llamar_groq(prompt_batch, max_tokens=5000, temperature=0.45)
             if resp_batch:
-                # FASE 18: parser MEJORADO. Antes: muy frágil, fallaba si Groq devolvía
-                # 'UF: análisis...' y el código real era 'uf' (no matcheaba bien).
-                # Ahora: normalización agresiva + matching multinivel + detección de
-                # alias comunes que el LLM usa (DOLAR_USD vs dolar, etc.)
-                _alias_codigos = {
-                    'dolar_usd': 'dolar', 'dolar': 'dolar',
-                    'euro_eur': 'euro', 'euro': 'euro',
-                    'libra_de_cobre': 'libra_cobre', 'cobre': 'libra_cobre', 'libra_cobre': 'libra_cobre',
-                    'tasa_de_desempleo': 'tasa_desempleo', 'desempleo': 'tasa_desempleo',
-                    'tasa_desempleo': 'tasa_desempleo',
-                    'tasa_de_politica_monetaria': 'tpm', 'tpm': 'tpm',
-                    'btc': 'bitcoin', 'bitcoin': 'bitcoin',
-                    'eth': 'ethereum', 'ethereum': 'ethereum',
-                    'sol': 'solana', 'solana': 'solana',
-                    'uf': 'uf', 'utm': 'utm', 'ipc': 'ipc', 'imacec': 'imacec', 'ipsa': 'ipsa', 'ivp': 'ivp',
-                }
-                
                 for linea in resp_batch.strip().split('\n'):
                     linea = linea.strip()
-                    if ':' not in linea or len(linea) < 30:  # mínimo 30 chars de respuesta
-                        continue
-                    parts = linea.split(':', 1)
-                    if len(parts) != 2:
-                        continue
-                    
-                    cod_raw = parts[0].strip().lower()
-                    contenido = parts[1].strip()
-                    if len(contenido) < 20:  # respuesta muy corta = no útil
-                        continue
-                    
-                    # Normalizar agresivamente: quitar acentos, no-alfanum → _
-                    import unicodedata as _uni_ind
-                    cod_norm = _uni_ind.normalize('NFKD', cod_raw)
-                    cod_norm = ''.join(c for c in cod_norm if not _uni_ind.combining(c))
-                    cod_norm = re.sub(r'[^a-z0-9]+', '_', cod_norm).strip('_')
-                    
-                    # Estrategia 1: alias directo
-                    cod_match = _alias_codigos.get(cod_norm)
-                    
-                    # Estrategia 2: match con códigos reales (substring bidireccional)
-                    if not cod_match:
+                    if ':' in linea:
+                        parts = linea.split(':', 1)
+                        cod_limpio = parts[0].strip().lower().replace(' ', '_').replace('-', '_')
+                        # Buscar match con codigos reales
                         for cod_real in datos:
-                            if (cod_norm == cod_real or 
-                                cod_norm in cod_real or 
-                                cod_real in cod_norm or
-                                cod_norm.replace('_', '') == cod_real.replace('_', '')):
-                                cod_match = cod_real
+                            if cod_limpio == cod_real or cod_limpio in cod_real or cod_real in cod_limpio:
+                                explicaciones[cod_real] = parts[1].strip()
                                 break
-                    
-                    if cod_match and cod_match in datos:
-                        explicaciones[cod_match] = contenido
-                
-                logger.info(f"📊 Análisis IA: {len(explicaciones)}/{len(datos)} indicadores parseados")
             
-            # FASE 18: si Groq parseó MENOS DEL 50% de indicadores, intentar
-            # SEGUNDA pasada con prompt más simple (más confiable que un solo intento grande)
-            if len(explicaciones) < len(datos) * 0.5:
-                logger.warning(f"⚠️ Análisis IA insuficiente ({len(explicaciones)}/{len(datos)}) — segundo intento simplificado")
-                try:
-                    faltantes_codigos = [c for c in datos if c not in explicaciones]
-                    nombres_faltantes = [datos[c].get('nombre', c) for c in faltantes_codigos]
-                    
-                    prompt_simple = (
-                        f"Eres economista chileno senior. Hoy {_ahora_chile().strftime('%d de %B %Y')}.\n"
-                        f"Para cada indicador escribe UN parrafo profesional de 3-4 oraciones explicando "
-                        f"POR QUE varia y como afecta a un chileno comun. Menciona al menos un actor o evento real.\n\n"
-                        f"FORMATO ESTRICTO: 'CODIGO: parrafo'. UN indicador por linea.\n\n"
-                        f"INDICADORES (con datos):\n"
-                    )
-                    for c in faltantes_codigos:
-                        d = datos[c]
-                        val_act = d.get('valor', 0)
-                        try:
-                            serie = d.get('serie30', []) or []
-                            val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
-                            var_pct = ((float(val_act) - float(val_ant)) / float(val_ant) * 100) if val_ant else 0
-                        except Exception:
-                            var_pct = 0
-                        prompt_simple += f"- {c} ({d.get('nombre', c)}): {val_act} ({var_pct:+.2f}%)\n"
-                    prompt_simple += "\nResponde SOLO con el formato 'CODIGO: parrafo'. Sin emojis ni asteriscos."
-                    
-                    resp_simple = llamar_groq(prompt_simple, max_tokens=3000, temperature=0.4)
-                    if resp_simple:
-                        for linea in resp_simple.strip().split('\n'):
-                            linea = linea.strip()
-                            if ':' not in linea or len(linea) < 30:
-                                continue
-                            parts = linea.split(':', 1)
-                            cod_raw = parts[0].strip().lower()
-                            contenido = parts[1].strip()
-                            if len(contenido) < 20:
-                                continue
-                            
-                            cod_norm = re.sub(r'[^a-z0-9]+', '_', cod_raw).strip('_')
-                            cod_match = _alias_codigos.get(cod_norm)
-                            if not cod_match:
-                                for cod_real in faltantes_codigos:
-                                    if cod_norm == cod_real or cod_norm in cod_real or cod_real in cod_norm:
-                                        cod_match = cod_real
-                                        break
-                            if cod_match and cod_match in datos and cod_match not in explicaciones:
-                                explicaciones[cod_match] = contenido
-                    logger.info(f"📊 Tras 2do intento: {len(explicaciones)}/{len(datos)} indicadores explicados")
-                except Exception as _e_2do:
-                    logger.warning(f"2do intento análisis IA falló: {_e_2do}")
-            
-            # Fallback CONTEXTUAL para indicadores aún sin explicacion
-            # FASE 18: en vez de "X aumento Y%" genérico, dar contexto útil específico
-            _CONTEXTO_INDICADOR = {
-                'uf': "La UF se reajusta segun la variacion del IPC del mes anterior. Sube de forma natural cuando hay inflacion. Afecta arriendos, dividendos hipotecarios y pagos a plazo.",
-                'utm': "La UTM se actualiza mensualmente segun la variacion del IPC. Su evolucion refleja la inflacion oficial. Se usa para multas, impuestos y reajustes legales en Chile.",
-                'dolar': "El dolar fluctua por diferencial de tasas Fed-BCCh, precio del cobre, flujos financieros internacionales y eventos politicos. Afecta importaciones, viajes y precios internos de productos transables.",
-                'euro': "El euro depende de politica del BCE, datos de la Eurozona y diferenciales con dolar. Para Chile, su movimiento afecta importaciones europeas (autos, vinos, equipos industriales).",
-                'ipc': "El IPC mide variacion mensual de canasta basica del INE. Refleja cambios en alimentos, energia, transporte y servicios. Es base para ajustes de UF, salarios y politica monetaria.",
-                'tpm': "La TPM la fija el Consejo del BCCh en sus reuniones mensuales. Se ajusta segun proyeccion de inflacion vs meta 3%. Influye en creditos hipotecarios, depositos a plazo y consumo.",
-                'libra_cobre': "El cobre depende de demanda China (50% mundial), inventarios LME/Shanghai y oferta Codelco. Es clave para Chile: 50% exportaciones, recauda fiscal y peso chileno.",
-                'tasa_desempleo': "El desempleo lo mide INE en encuestas trimestrales moviles. Refleja creacion de empleo formal vs informal, sectorialmente y por region. Afecta consumo y politica social.",
-                'imacec': "El IMACEC es proxy mensual del PIB publicado por BCCh. Se descompone en minero y no-minero. Su tendencia anticipa la actividad economica de Chile.",
-                'ipsa': "El IPSA refleja las 40 mayores empresas chilenas. Se mueve por flujos AFP, utilidades trimestrales, riesgo Chile (EMBI) y precio cobre. Impacta directamente fondos AFP A-B.",
-                'bitcoin': "Bitcoin se mueve por flujos ETF spot, decisiones Fed sobre tasas, regulacion EEUU y eventos halving. Para chilenos es alternativa de inversion volátil pero alto retorno potencial.",
-                'ethereum': "Ethereum responde a evolucion DeFi, NFTs, layer-2, y correlacion con Bitcoin. Es la segunda crypto por capitalizacion y plataforma para muchos proyectos blockchain.",
-                'solana': "Solana compite como blockchain de alta velocidad. Su precio depende de adopcion DeFi, memes coins en su red y comparacion con Ethereum por costos.",
-                'ivp': "El IVP es Indice de Valor Promedio del Banco Central, similar a la UF pero diferente metodologia. Se usa en algunos contratos hipotecarios y arriendos.",
-            }
-            
+            # Fallback para indicadores sin explicacion
             for cod, d in datos.items():
                 if cod not in explicaciones:
-                    val_act = d.get('valor', 0)
-                    try:
-                        serie = d.get('serie30', []) or []
-                        val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
-                        var_pct = ((float(val_act) - float(val_ant)) / float(val_ant) * 100) if val_ant and val_ant != 0 else 0
-                    except Exception:
-                        var_pct = 0
-                    
-                    # Construir explicación: variación + contexto específico del indicador
-                    if abs(var_pct) > 0.01:
-                        direccion = "subio" if var_pct > 0 else "bajo"
-                        encabezado = f"{d.get('nombre', cod)} {direccion} {abs(var_pct):.2f}% respecto al periodo anterior. "
+                    val_act = d['valor']
+                    serie = d.get('serie30', [])
+                    val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                    var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
+                    if var_pct > 0:
+                        explicaciones[cod] = f"{d['nombre']} aumento {abs(var_pct):.3f}% respecto al periodo anterior."
+                    elif var_pct < 0:
+                        explicaciones[cod] = f"{d['nombre']} disminuyo {abs(var_pct):.3f}% respecto al periodo anterior."
                     else:
-                        encabezado = f"{d.get('nombre', cod)} se mantuvo estable respecto al periodo anterior. "
-                    
-                    contexto_especifico = _CONTEXTO_INDICADOR.get(cod, "")
-                    explicaciones[cod] = encabezado + contexto_especifico
+                        explicaciones[cod] = f"{d['nombre']} se mantuvo estable respecto al periodo anterior."
 
 
             # PASO 5: Noticias HTML con análisis IA completo
@@ -26514,6 +27046,11 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             if not respuesta:
                 respuesta = llamar_glm5(prompt, max_tokens=1800, temperature=0.7)
             
+            # FASE 19: agregar DeepSeek como 4to fallback (5M tokens free)
+            if not respuesta:
+                logger.warning("⚠️ Chat privado: GLM falló — fallback DeepSeek")
+                respuesta = llamar_deepseek(prompt, max_tokens=1800, temperature=0.7)
+            
             if respuesta:
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
@@ -26691,6 +27228,20 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             name='recordatorio_agenda'
         )
         logger.info("🔔 Job de recordatorios de agenda programado (cada 10 min)")
+        
+        # FASE 20: Job alerta de saldo DeepSeek (cada 6 horas)
+        # Avisa al OWNER (Germán) cuando el saldo está bajo o agotado.
+        # Anti-spam: solo 1 alerta por día por categoría.
+        try:
+            job_queue.run_repeating(
+                alertar_saldo_deepseek,
+                interval=21600,  # 6 horas en segundos
+                first=180,       # Primera ejecución 3 minutos después del inicio
+                name='alerta_saldo_deepseek'
+            )
+            logger.info("💰 Job de alerta saldo DeepSeek programado (cada 6 horas)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar alerta DeepSeek: {e}")
         
         # Newsletter semanal: lunes a las 9:00 AM Chile
         try:
