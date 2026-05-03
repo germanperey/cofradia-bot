@@ -3920,22 +3920,145 @@ async def buscar_empleos_web(cargo=None, ubicacion=None, renta=None):
 # ==================== KEEP-ALIVE PARA RENDER ====================
 
 class KeepAliveHandler(BaseHTTPRequestHandler):
+    """FASE 15: extendido con API REST mínima + Panel de Control admin.
+    
+    Endpoints públicos:
+      GET /                  → status simple
+      GET /calculadora       → HTML calculadora
+      GET /health            → JSON status (para integraciones)
+    
+    Endpoints API (requieren header X-Admin-Token = ADMIN_API_TOKEN):
+      GET /api/empresas      → lista empresas registradas
+      GET /api/analytics     → analytics resumen del tenant default
+      GET /api/analytics/{tenant_id} → analytics de un tenant específico
+      POST /api/feature      → habilita/deshabilita feature {tenant_id, feature, enabled}
+    
+    Endpoints admin UI:
+      GET /admin             → Panel HTML de control (auth: ?token=ADMIN_API_TOKEN)
+    """
+    
+    def _send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False, default=str).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'X-Admin-Token, Content-Type')
+        self.end_headers()
+        self.wfile.write(body)
+    
+    def _send_html(self, html, status=200):
+        body = html.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store, no-cache')
+        self.send_header('X-Robots-Tag', 'noindex, nofollow')
+        self.end_headers()
+        self.wfile.write(body)
+    
+    def _check_admin_auth(self):
+        """Valida token admin via header X-Admin-Token o query param ?token=...
+        Retorna True si está autorizado, False si no."""
+        admin_token = os.environ.get('ADMIN_API_TOKEN', '').strip()
+        if not admin_token:
+            return False  # sin token configurado, denegar siempre
+        # Header
+        provided = self.headers.get('X-Admin-Token', '').strip()
+        if provided == admin_token:
+            return True
+        # Query param ?token=
+        try:
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            if qs.get('token', [''])[0] == admin_token:
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def do_OPTIONS(self):
+        # CORS preflight
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'X-Admin-Token, Content-Type')
+        self.end_headers()
+    
     def do_GET(self):
-        if self.path == '/calculadora':
+        # Quitar query string para routing
+        from urllib.parse import urlparse
+        path = urlparse(self.path).path
+        
+        if path == '/calculadora':
             try:
                 html = _get_calculadora_html()
-                self.send_response(200)
-                self.send_header('Content-type', 'text/html; charset=utf-8')
-                self.send_header('Cache-Control', 'no-store, no-cache')
-                self.send_header('X-Robots-Tag', 'noindex, nofollow')
-                self.end_headers()
-                self.wfile.write(html.encode('utf-8'))
+                self._send_html(html)
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'text/plain')
                 self.end_headers()
                 self.wfile.write(f"Error: {e}".encode())
             return
+        
+        # FASE 15: HEALTH endpoint (para integraciones simples)
+        if path == '/health':
+            self._send_json({
+                'status': 'ok',
+                'ia_disponible': bool(ia_disponible),
+                'db': 'supabase' if DATABASE_URL else 'sqlite',
+                'tenant_default': os.getenv('TENANT_ID', 'cofradia'),
+                'version': 'fase15'
+            })
+            return
+        
+        # FASE 15: API empresas
+        if path == '/api/empresas':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                empresas = listar_empresas()
+                self._send_json({'empresas': empresas, 'total': len(empresas)})
+            except Exception as e:
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 15: API analytics
+        if path == '/api/analytics' or path.startswith('/api/analytics/'):
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                # Parsear tenant_id si viene en URL
+                tenant_id = None
+                if path.startswith('/api/analytics/'):
+                    tenant_id = path[len('/api/analytics/'):].strip()
+                
+                # Parsear ?dias=N
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                dias = int(qs.get('dias', ['30'])[0])
+                dias = max(1, min(dias, 365))
+                
+                resumen = obtener_analytics_resumen(dias=dias, tenant_id=tenant_id)
+                resumen['tenant_id'] = tenant_id or os.getenv('TENANT_ID', 'cofradia')
+                resumen['dias_analizados'] = dias
+                self._send_json(resumen)
+            except Exception as e:
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 15: PANEL ADMIN HTML
+        if path == '/admin':
+            if not self._check_admin_auth():
+                self._send_html(_html_login_admin(), status=401)
+                return
+            try:
+                self._send_html(_html_panel_admin())
+            except Exception as e:
+                self._send_html(f"<pre>Error: {e}</pre>", status=500)
+            return
+        
+        # Default: status simple
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
@@ -3943,8 +4066,328 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         db_status = "✅ Supabase" if DATABASE_URL else "⚠️ SQLite"
         self.wfile.write(f"Bot Cofradía Premium - {status} - DB: {db_status}".encode())
     
+    def do_POST(self):
+        from urllib.parse import urlparse
+        path = urlparse(self.path).path
+        
+        # FASE 15: API toggle feature
+        if path == '/api/feature':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                tenant_id = body.get('tenant_id', '').strip()
+                feature = body.get('feature', '').strip()
+                enabled = bool(body.get('enabled', False))
+                if not tenant_id or not feature:
+                    self._send_json({'error': 'missing tenant_id or feature'}, status=400)
+                    return
+                ok = actualizar_feature_empresa(tenant_id, feature, enabled)
+                self._send_json({'ok': ok, 'tenant_id': tenant_id, 'feature': feature, 'enabled': enabled})
+            except Exception as e:
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # Default
+        self.send_response(404)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"404 Not Found")
+    
     def log_message(self, format, *args):
         pass
+
+
+def _html_login_admin():
+    """HTML de login para el panel admin (cuando token no es válido)."""
+    return """<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><title>Panel Admin · IntelliBot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;background:#0a1628;color:#e0e6ed;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
+<div style="text-align:center;padding:40px;background:#0f2f59;border-radius:16px;
+border:1px solid rgba(195,165,90,.4);max-width:420px;">
+<h1 style="color:#c3a55a;margin:0 0 16px;">🔒 Acceso Restringido</h1>
+<p style="opacity:.85;line-height:1.6;margin-bottom:20px;">
+Este panel requiere autenticación.<br>
+Accede con: <code style="background:#0a1628;padding:4px 8px;border-radius:4px;color:#c3a55a;">/admin?token=TU_TOKEN</code>
+</p>
+<p style="opacity:.6;font-size:.85em;">Si eres el administrador, configura
+<code>ADMIN_API_TOKEN</code> en las variables de entorno de Render.</p>
+</div></body></html>"""
+
+
+def _html_panel_admin():
+    """HTML del panel de control admin maestro.
+    Muestra empresas, analytics y permite habilitar/deshabilitar features.
+    """
+    admin_token_js = json.dumps(os.environ.get('ADMIN_API_TOKEN', ''))
+    return """<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🎛️ Panel Admin Maestro · IntelliBot</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#0a1628;color:#e0e6ed;margin:0;padding:20px;line-height:1.5}
+.container{max-width:1280px;margin:0 auto}
+h1{color:#c3a55a;margin:0 0 4px;font-size:1.8em;letter-spacing:-.01em}
+.subtitle{opacity:.7;margin-bottom:28px;font-size:.95em}
+.tabs{display:flex;gap:6px;margin-bottom:24px;border-bottom:1px solid rgba(195,165,90,.2)}
+.tab{padding:10px 18px;background:transparent;color:#8899aa;border:none;border-bottom:3px solid transparent;
+cursor:pointer;font-weight:600;font-size:.95em;transition:.18s}
+.tab:hover{color:#e0e6ed}
+.tab.active{color:#c3a55a;border-bottom-color:#c3a55a}
+.tab-content{display:none}
+.tab-content.active{display:block;animation:fadeIn .3s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.card{background:#0f2f59;border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+.card h3{color:#c3a55a;margin:0 0 12px;font-size:1.1em}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:24px}
+.kpi{background:#0f2f59;border-left:4px solid #c3a55a;border-radius:10px;padding:14px 18px}
+.kpi .num{font-size:2em;color:#c3a55a;font-weight:700}
+.kpi .lbl{opacity:.8;font-size:.82em;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+table{width:100%;border-collapse:collapse;margin-top:8px;font-size:.92em}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid rgba(255,255,255,.06)}
+th{color:#c3a55a;font-weight:600;font-size:.82em;text-transform:uppercase;letter-spacing:.4px;background:rgba(195,165,90,.06)}
+tr:hover td{background:rgba(195,165,90,.04)}
+.empresa-card{background:#0f2f59;border:1px solid rgba(195,165,90,.25);border-radius:12px;padding:18px;margin-bottom:14px}
+.empresa-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:12px}
+.empresa-name{font-size:1.15em;color:#c3a55a;font-weight:600;margin:0}
+.empresa-meta{opacity:.7;font-size:.85em;margin-top:3px}
+.badge{display:inline-block;padding:3px 9px;border-radius:11px;font-size:.78em;font-weight:600;letter-spacing:.3px}
+.badge-active{background:rgba(46,204,113,.18);color:#2ecc71;border:1px solid rgba(46,204,113,.4)}
+.badge-inactive{background:rgba(231,76,60,.18);color:#e74c3c;border:1px solid rgba(231,76,60,.4)}
+.feature-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:10px}
+.feature{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#0a1628;
+border-radius:8px;border:1px solid rgba(255,255,255,.05);font-size:.88em}
+.toggle{position:relative;display:inline-block;width:38px;height:20px}
+.toggle input{display:none}
+.slider{position:absolute;cursor:pointer;inset:0;background:#3a4a5a;border-radius:20px;transition:.18s}
+.slider::before{content:"";position:absolute;height:14px;width:14px;left:3px;bottom:3px;background:#fff;
+border-radius:50%;transition:.18s}
+input:checked+.slider{background:#c3a55a}
+input:checked+.slider::before{transform:translateX(18px)}
+.refresh-btn{background:#c3a55a;color:#0a1628;border:none;padding:8px 16px;border-radius:8px;
+cursor:pointer;font-weight:600;font-size:.9em;float:right}
+.refresh-btn:hover{background:#d4b86a}
+.loading{text-align:center;padding:30px;opacity:.6}
+.error{background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.4);color:#e74c3c;padding:12px;border-radius:8px;margin:12px 0}
+@media(max-width:680px){body{padding:12px}.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}.tab{flex-shrink:0}}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🎛️ Panel Admin Maestro · IntelliBot</h1>
+<div class="subtitle">Control central de todas las empresas, analytics y configuración de features</div>
+
+<div class="tabs">
+<button class="tab active" onclick="switchTab('empresas')">🏢 Empresas</button>
+<button class="tab" onclick="switchTab('analytics')">📊 Analytics</button>
+<button class="tab" onclick="switchTab('api-info')">🔌 API REST</button>
+</div>
+
+<div id="empresas" class="tab-content active">
+<button class="refresh-btn" onclick="cargarEmpresas()">↻ Refrescar</button>
+<h3 style="color:#c3a55a;margin-top:0">Empresas con IntelliBot</h3>
+<div id="empresas-list"><div class="loading">Cargando empresas...</div></div>
+</div>
+
+<div id="analytics" class="tab-content">
+<button class="refresh-btn" onclick="cargarAnalytics()">↻ Refrescar</button>
+<h3 style="color:#c3a55a;margin-top:0">Analytics — últimos 30 días</h3>
+<div id="analytics-content"><div class="loading">Cargando analytics...</div></div>
+</div>
+
+<div id="api-info" class="tab-content">
+<div class="card">
+<h3>🔌 Endpoints API REST disponibles</h3>
+<p style="opacity:.85">Todos requieren header <code style="color:#c3a55a">X-Admin-Token: TU_TOKEN</code> o query param <code style="color:#c3a55a">?token=TU_TOKEN</code></p>
+<table>
+<tr><th>Método</th><th>Endpoint</th><th>Descripción</th></tr>
+<tr><td><code>GET</code></td><td><code>/health</code></td><td>Status del bot (público, sin auth)</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/empresas</code></td><td>Lista empresas registradas</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/analytics</code></td><td>Analytics del tenant default</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/analytics/{tenant_id}</code></td><td>Analytics de tenant específico</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/analytics?dias=7</code></td><td>Analytics de últimos N días</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/feature</code></td><td>Toggle feature (body: {tenant_id, feature, enabled})</td></tr>
+</table>
+</div>
+<div class="card">
+<h3>📋 Ejemplo de uso desde curl</h3>
+<pre style="background:#0a1628;padding:14px;border-radius:8px;overflow:auto;font-size:.85em;line-height:1.5;color:#e8e0d3">curl -H "X-Admin-Token: TU_TOKEN" \\
+  https://cofradia-bot.onrender.com/api/analytics?dias=7
+
+curl -X POST -H "X-Admin-Token: TU_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"tenant_id":"cofradia","feature":"economia","enabled":false}' \\
+  https://cofradia-bot.onrender.com/api/feature</pre>
+</div>
+</div>
+
+</div>
+<script>
+const TOKEN = """ + admin_token_js + """;
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById(name).classList.add('active');
+  if(name === 'empresas') cargarEmpresas();
+  if(name === 'analytics') cargarAnalytics();
+}
+
+async function api(path, method='GET', body=null){
+  const opts = {method, headers: {'X-Admin-Token': TOKEN}};
+  if(body){ opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  return await r.json();
+}
+
+async function cargarEmpresas(){
+  const cont = document.getElementById('empresas-list');
+  cont.innerHTML = '<div class="loading">Cargando...</div>';
+  try{
+    const data = await api('/api/empresas');
+    if(!data.empresas || data.empresas.length === 0){
+      cont.innerHTML = '<div class="card">No hay empresas registradas todavía.</div>';
+      return;
+    }
+    cont.innerHTML = data.empresas.map(e => renderEmpresa(e)).join('');
+  }catch(err){
+    cont.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+  }
+}
+
+function renderEmpresa(e){
+  const features = Object.entries(e.features || {});
+  const featuresHtml = features.map(([key, val]) => `
+    <div class="feature">
+      <span>${formatFeatureName(key)}</span>
+      <label class="toggle">
+        <input type="checkbox" ${val ? 'checked' : ''} 
+          onchange="toggleFeature('${e.tenant_id}', '${key}', this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+  `).join('');
+  
+  return `
+    <div class="empresa-card">
+      <div class="empresa-header">
+        <div>
+          <p class="empresa-name">${escapeHtml(e.nombre)}</p>
+          <div class="empresa-meta">
+            <code>${e.tenant_id}</code> · Plan: <strong>${e.plan}</strong> · Alta: ${e.fecha_alta}
+            ${e.contacto_email ? '· ' + escapeHtml(e.contacto_email) : ''}
+          </div>
+        </div>
+        <span class="badge ${e.activa ? 'badge-active' : 'badge-inactive'}">
+          ${e.activa ? '● Activa' : '○ Inactiva'}
+        </span>
+      </div>
+      <div style="font-size:.85em;opacity:.75;margin-top:10px;margin-bottom:6px">Features habilitadas (toggle en vivo):</div>
+      <div class="feature-grid">${featuresHtml}</div>
+    </div>`;
+}
+
+function formatFeatureName(key){
+  const names = {
+    'rag_consulta': '🧠 RAG Consulta',
+    'capturar_conocimiento': '📚 Captura conocimiento',
+    'expertise': '🎯 Búsqueda expertos',
+    'top10': '🏆 Top 10 mensual',
+    'graficos': '📊 Gráficos',
+    'economia': '💰 Indicadores economía',
+    'calculadora': '🧮 Calculadora',
+    'tts_audio': '🎙️ Audio TTS',
+    'alertas_managers': '🚨 Alertas managers',
+    'cumpleanos': '🎂 Cumpleaños',
+    'gamificacion': '⭐ Gamificación',
+    'mentor_ia': '👥 Mentor IA',
+    'busqueda_web': '🌐 Búsqueda web'
+  };
+  return names[key] || key;
+}
+
+async function toggleFeature(tenant_id, feature, enabled){
+  try{
+    const r = await api('/api/feature', 'POST', {tenant_id, feature, enabled});
+    if(r.ok){
+      console.log('Feature actualizada:', feature, '=', enabled);
+    }else{
+      alert('Error: ' + (r.error || 'desconocido'));
+    }
+  }catch(err){
+    alert('Error: ' + err.message);
+  }
+}
+
+async function cargarAnalytics(){
+  const cont = document.getElementById('analytics-content');
+  cont.innerHTML = '<div class="loading">Cargando analytics...</div>';
+  try{
+    const data = await api('/api/analytics?dias=30');
+    cont.innerHTML = renderAnalytics(data);
+  }catch(err){
+    cont.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+  }
+}
+
+function renderAnalytics(d){
+  const kpis = `
+    <div class="kpi-grid">
+      <div class="kpi"><div class="num">${d.total_eventos || 0}</div><div class="lbl">Total eventos</div></div>
+      <div class="kpi"><div class="num">${d.usuarios_unicos || 0}</div><div class="lbl">Usuarios únicos</div></div>
+      <div class="kpi"><div class="num">${d.errores_recientes || 0}</div><div class="lbl">Errores</div></div>
+      <div class="kpi"><div class="num">${d.dias_analizados || 30}</div><div class="lbl">Días</div></div>
+    </div>
+  `;
+  
+  const topComandos = (d.top_comandos || []).map(c => 
+    `<tr><td>${escapeHtml(c.comando || 'N/A')}</td><td><strong>${c.usos}</strong></td></tr>`
+  ).join('') || '<tr><td colspan="2" style="opacity:.5">Sin datos</td></tr>';
+  
+  const topTemas = (d.top_temas_rag || []).map(t => 
+    `<tr><td>${escapeHtml(t.tema || 'N/A')}</td><td><strong>${t.busquedas}</strong></td></tr>`
+  ).join('') || '<tr><td colspan="2" style="opacity:.5">Sin datos</td></tr>';
+  
+  const topExpertos = (d.top_expertos_consultados || []).map(e => 
+    `<tr><td>${escapeHtml(e.experto || 'N/A')}</td><td><strong>${e.consultas}</strong></td></tr>`
+  ).join('') || '<tr><td colspan="2" style="opacity:.5">Sin datos</td></tr>';
+  
+  const topCapturadores = (d.top_capturadores || []).map(c => 
+    `<tr><td>${escapeHtml(c.usuario || 'N/A')}</td><td><strong>${c.aportes}</strong></td></tr>`
+  ).join('') || '<tr><td colspan="2" style="opacity:.5">Sin datos</td></tr>';
+  
+  return kpis + `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px">
+      <div class="card"><h3>🎯 Top Comandos</h3>
+        <table><tr><th>Comando</th><th>Usos</th></tr>${topComandos}</table></div>
+      <div class="card"><h3>🧠 Top Temas RAG</h3>
+        <table><tr><th>Tema</th><th>Búsquedas</th></tr>${topTemas}</table></div>
+      <div class="card"><h3>👤 Expertos más consultados</h3>
+        <table><tr><th>Experto</th><th>Consultas</th></tr>${topExpertos}</table></div>
+      <div class="card"><h3>📚 Top capturadores conocimiento</h3>
+        <table><tr><th>Usuario</th><th>Aportes</th></tr>${topCapturadores}</table></div>
+    </div>
+  `;
+}
+
+function escapeHtml(s){
+  if(s==null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Cargar al inicio
+cargarEmpresas();
+</script>
+</body></html>"""
+
 
 def run_keepalive_server():
     port = int(os.environ.get('PORT', 10000))
@@ -4097,10 +4540,220 @@ def registrar_servicio_usado(user_id, servicio):
                           (json.dumps(servicios), user_id))
             conn.commit()
         conn.close()
+        
+        # FASE 15: También registrar en tabla analytics avanzada
+        try:
+            registrar_analytics(user_id, 'comando', servicio)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Error registrando servicio: {e}")
         if conn:
             conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 15: SISTEMA DE ANALYTICS AVANZADO
+# Registra TODO lo que pasa en el bot para análisis posterior:
+# - Comandos ejecutados (qué, quién, cuándo)
+# - Búsquedas RAG (qué temas se buscan más)
+# - Expertos consultados (a quién se busca como referente)
+# - Conocimiento capturado (qué áreas se documentan)
+# - Tiempos de respuesta y errores
+# ════════════════════════════════════════════════════════════════════════
+
+def _init_tabla_analytics():
+    """Crea la tabla analytics_eventos si no existe (idempotente)."""
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_eventos (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    tenant_id TEXT DEFAULT 'cofradia',
+                    user_id BIGINT,
+                    user_name TEXT,
+                    tipo_evento TEXT NOT NULL,
+                    detalle TEXT,
+                    metadata TEXT,
+                    duracion_ms INTEGER,
+                    exito BOOLEAN DEFAULT TRUE
+                )
+            """)
+            # Índices para queries rápidas en el panel
+            c.execute("CREATE INDEX IF NOT EXISTS idx_analytics_tipo ON analytics_eventos(tipo_evento)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_analytics_fecha ON analytics_eventos(timestamp)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_analytics_tenant ON analytics_eventos(tenant_id)")
+        else:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_eventos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                    tenant_id TEXT DEFAULT 'cofradia',
+                    user_id INTEGER,
+                    user_name TEXT,
+                    tipo_evento TEXT NOT NULL,
+                    detalle TEXT,
+                    metadata TEXT,
+                    duracion_ms INTEGER,
+                    exito INTEGER DEFAULT 1
+                )
+            """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error inicializando tabla analytics: {e}")
+        if conn:
+            try: conn.close()
+            except: pass
+
+
+def registrar_analytics(user_id=None, tipo_evento='evento', detalle='',
+                        metadata='', user_name='', duracion_ms=None, exito=True,
+                        tenant_id=None):
+    """FASE 15: Registra UN evento de analytics. Es no-bloqueante: si falla, no afecta al bot.
+    
+    tipos_evento estándar:
+      - 'comando' (alguien usó /xxx)
+      - 'rag_busqueda' (alguien buscó en el RAG)
+      - 'expertise_busqueda' (alguien buscó expertos)
+      - 'conocimiento_capturado' (alguien aportó al RAG)
+      - 'consulta_chat' (alguien hizo pregunta natural)
+      - 'experto_consultado' (un nombre apareció en resultados de /expertise)
+      - 'error' (algo falló)
+    """
+    if not tenant_id:
+        tenant_id = os.getenv('TENANT_ID', 'cofradia')
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""
+                INSERT INTO analytics_eventos
+                (tenant_id, user_id, user_name, tipo_evento, detalle, metadata, duracion_ms, exito)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (tenant_id, user_id, user_name, tipo_evento,
+                  (detalle or '')[:500], (metadata or '')[:1000], duracion_ms, exito))
+        else:
+            c.execute("""
+                INSERT INTO analytics_eventos
+                (tenant_id, user_id, user_name, tipo_evento, detalle, metadata, duracion_ms, exito)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (tenant_id, user_id, user_name, tipo_evento,
+                  (detalle or '')[:500], (metadata or '')[:1000], duracion_ms, 1 if exito else 0))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Analytics no crítico falló: {e}")
+
+
+def obtener_analytics_resumen(dias=30, tenant_id=None):
+    """FASE 15: Devuelve métricas agregadas para el panel admin.
+    Retorna dict con: top_comandos, top_temas_rag, top_expertos_consultados,
+    top_capturadores, total_eventos, usuarios_unicos, errores.
+    """
+    if not tenant_id:
+        tenant_id = os.getenv('TENANT_ID', 'cofradia')
+    
+    resumen = {
+        'top_comandos': [], 'top_temas_rag': [], 'top_expertos_consultados': [],
+        'top_capturadores': [], 'total_eventos': 0, 'usuarios_unicos': 0,
+        'errores_recientes': 0, 'eventos_por_dia': []
+    }
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return resumen
+        c = conn.cursor()
+        
+        if DATABASE_URL:
+            sql_filtro = "WHERE tenant_id = %s AND timestamp >= NOW() - INTERVAL '%s days'"
+            params_base = [tenant_id, dias]
+            ph = '%s'
+        else:
+            sql_filtro = "WHERE tenant_id = ? AND timestamp >= datetime('now', '-' || ? || ' days')"
+            params_base = [tenant_id, dias]
+            ph = '?'
+        
+        # Top comandos
+        c.execute(f"""SELECT detalle, COUNT(*) as cnt FROM analytics_eventos
+                      {sql_filtro} AND tipo_evento = 'comando'
+                      GROUP BY detalle ORDER BY cnt DESC LIMIT 10""", params_base)
+        for r in c.fetchall():
+            d = r[0] if isinstance(r, tuple) else r['detalle']
+            n = r[1] if isinstance(r, tuple) else r['cnt']
+            resumen['top_comandos'].append({'comando': d, 'usos': int(n)})
+        
+        # Top temas RAG
+        c.execute(f"""SELECT detalle, COUNT(*) as cnt FROM analytics_eventos
+                      {sql_filtro} AND tipo_evento = 'rag_busqueda'
+                      GROUP BY detalle ORDER BY cnt DESC LIMIT 15""", params_base)
+        for r in c.fetchall():
+            d = r[0] if isinstance(r, tuple) else r['detalle']
+            n = r[1] if isinstance(r, tuple) else r['cnt']
+            resumen['top_temas_rag'].append({'tema': (d or '')[:80], 'busquedas': int(n)})
+        
+        # Top expertos consultados
+        c.execute(f"""SELECT detalle, COUNT(*) as cnt FROM analytics_eventos
+                      {sql_filtro} AND tipo_evento = 'experto_consultado'
+                      GROUP BY detalle ORDER BY cnt DESC LIMIT 10""", params_base)
+        for r in c.fetchall():
+            d = r[0] if isinstance(r, tuple) else r['detalle']
+            n = r[1] if isinstance(r, tuple) else r['cnt']
+            resumen['top_expertos_consultados'].append({'experto': d or 'N/A', 'consultas': int(n)})
+        
+        # Top capturadores de conocimiento
+        c.execute(f"""SELECT user_name, COUNT(*) as cnt FROM analytics_eventos
+                      {sql_filtro} AND tipo_evento = 'conocimiento_capturado'
+                      GROUP BY user_name ORDER BY cnt DESC LIMIT 10""", params_base)
+        for r in c.fetchall():
+            d = r[0] if isinstance(r, tuple) else r['user_name']
+            n = r[1] if isinstance(r, tuple) else r['cnt']
+            resumen['top_capturadores'].append({'usuario': d or 'Anónimo', 'aportes': int(n)})
+        
+        # Total eventos y usuarios únicos
+        c.execute(f"""SELECT COUNT(*) as total, COUNT(DISTINCT user_id) as uniq
+                      FROM analytics_eventos {sql_filtro}""", params_base)
+        row = c.fetchone()
+        if row:
+            if isinstance(row, tuple):
+                resumen['total_eventos'] = int(row[0] or 0)
+                resumen['usuarios_unicos'] = int(row[1] or 0)
+            else:
+                resumen['total_eventos'] = int(row['total'] or 0)
+                resumen['usuarios_unicos'] = int(row['uniq'] or 0)
+        
+        # Errores recientes
+        c.execute(f"""SELECT COUNT(*) FROM analytics_eventos
+                      {sql_filtro} AND (tipo_evento = 'error' OR exito = {('false' if DATABASE_URL else '0')})""",
+                  params_base)
+        row = c.fetchone()
+        if row:
+            v = row[0] if isinstance(row, tuple) else list(row.values())[0]
+            resumen['errores_recientes'] = int(v or 0)
+        
+        # Eventos por día (últimos 30 días)
+        if DATABASE_URL:
+            c.execute(f"""SELECT DATE(timestamp) as d, COUNT(*) as cnt FROM analytics_eventos
+                          {sql_filtro} GROUP BY DATE(timestamp) ORDER BY d DESC LIMIT 30""", params_base)
+        else:
+            c.execute(f"""SELECT DATE(timestamp) as d, COUNT(*) as cnt FROM analytics_eventos
+                          {sql_filtro} GROUP BY DATE(timestamp) ORDER BY d DESC LIMIT 30""", params_base)
+        for r in c.fetchall():
+            d = r[0] if isinstance(r, tuple) else r['d']
+            n = r[1] if isinstance(r, tuple) else r['cnt']
+            resumen['eventos_por_dia'].append({'fecha': str(d)[:10], 'eventos': int(n)})
+        
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error obteniendo analytics: {e}")
+    return resumen
 
 
 # ==================== COMANDOS BÁSICOS ====================
@@ -10410,13 +11063,339 @@ async def test_tts_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# FASE 14: CAPTURA DE CONOCIMIENTO INSTITUCIONAL
-# Atributo clave de IntelliBot: que el conocimiento de los expertos NO se pierda
-# cuando se van. Permite a cualquier miembro registrar conocimiento experto que
-# se indexa automáticamente al RAG con metadata (autor, fecha, tema).
-# Caso de uso para empresas: "antes que se jubile el ingeniero senior, captura
-# su know-how". Caso de uso para Cofradía: experiencias profesionales únicas.
+# FASE 15: MULTI-TENANCY BÁSICO
+# Tabla `empresas` lleva el registro de cada cliente que tenga IntelliBot.
+# El `tenant_id` se inyecta en analytics_eventos para que cada empresa solo
+# vea sus propios datos en el panel.
+#
+# IMPORTANTE: este es multi-tenancy LÓGICO (un solo deployment Render
+# atiende a un solo tenant identificado por env var TENANT_ID).
+# Para servir varias empresas REALMENTE distintas, replicar el deployment
+# Render con TENANT_ID y TOKEN_BOT diferentes — la BD Supabase puede ser
+# compartida o separada según necesidad.
+# 
+# El panel admin permite VER cada empresa registrada y sus métricas, y
+# habilitar/deshabilitar features por empresa via la tabla.
 # ════════════════════════════════════════════════════════════════════════
+
+def _init_tabla_empresas():
+    """Crea tabla empresas si no existe. Auto-registra Cofradía como tenant default."""
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS empresas (
+                    tenant_id TEXT PRIMARY KEY,
+                    nombre TEXT NOT NULL,
+                    contacto_nombre TEXT,
+                    contacto_email TEXT,
+                    contacto_telefono TEXT,
+                    fecha_alta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    activa BOOLEAN DEFAULT TRUE,
+                    plan TEXT DEFAULT 'demo',
+                    notas TEXT,
+                    features_habilitadas TEXT DEFAULT '{}'
+                )
+            """)
+        else:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS empresas (
+                    tenant_id TEXT PRIMARY KEY,
+                    nombre TEXT NOT NULL,
+                    contacto_nombre TEXT,
+                    contacto_email TEXT,
+                    contacto_telefono TEXT,
+                    fecha_alta TEXT DEFAULT CURRENT_TIMESTAMP,
+                    activa INTEGER DEFAULT 1,
+                    plan TEXT DEFAULT 'demo',
+                    notas TEXT,
+                    features_habilitadas TEXT DEFAULT '{}'
+                )
+            """)
+        # Auto-registrar Cofradía como tenant default si no existe
+        tenant_default = os.getenv('TENANT_ID', 'cofradia')
+        nombre_default = os.getenv('TENANT_NAME', 'Cofradía de Networking')
+        if DATABASE_URL:
+            c.execute("""
+                INSERT INTO empresas (tenant_id, nombre, plan, features_habilitadas)
+                VALUES (%s, %s, 'produccion', %s)
+                ON CONFLICT (tenant_id) DO NOTHING
+            """, (tenant_default, nombre_default, json.dumps(_features_default())))
+        else:
+            c.execute("""
+                INSERT OR IGNORE INTO empresas (tenant_id, nombre, plan, features_habilitadas)
+                VALUES (?, ?, 'produccion', ?)
+            """, (tenant_default, nombre_default, json.dumps(_features_default())))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error inicializando empresas: {e}")
+        if conn:
+            try: conn.close()
+            except: pass
+
+
+def _features_default():
+    """Lista de features que cada empresa puede habilitar/deshabilitar."""
+    return {
+        'rag_consulta': True,
+        'capturar_conocimiento': True,
+        'expertise': True,
+        'top10': True,
+        'graficos': True,
+        'economia': True,
+        'calculadora': True,
+        'tts_audio': True,
+        'alertas_managers': True,
+        'cumpleanos': True,
+        'gamificacion': True,
+        'mentor_ia': True,
+        'busqueda_web': True,
+    }
+
+
+def listar_empresas():
+    """Devuelve lista de todas las empresas registradas."""
+    empresas = []
+    try:
+        conn = get_db_connection()
+        if not conn: return empresas
+        c = conn.cursor()
+        c.execute("""SELECT tenant_id, nombre, contacto_nombre, contacto_email,
+                            fecha_alta, activa, plan, features_habilitadas
+                     FROM empresas ORDER BY fecha_alta DESC""")
+        for r in c.fetchall():
+            if isinstance(r, tuple):
+                tid, nom, cn, ce, fa, ac, pl, fh = r
+            else:
+                tid = r['tenant_id']; nom = r['nombre']
+                cn = r['contacto_nombre']; ce = r['contacto_email']
+                fa = r['fecha_alta']; ac = r['activa']; pl = r['plan']
+                fh = r['features_habilitadas']
+            try:
+                features = json.loads(fh or '{}')
+            except Exception:
+                features = {}
+            empresas.append({
+                'tenant_id': tid, 'nombre': nom,
+                'contacto_nombre': cn, 'contacto_email': ce,
+                'fecha_alta': str(fa)[:19], 'activa': bool(ac),
+                'plan': pl, 'features': features
+            })
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error listando empresas: {e}")
+    return empresas
+
+
+def actualizar_feature_empresa(tenant_id, feature_name, habilitada):
+    """Cambia el estado de una feature para una empresa específica."""
+    try:
+        conn = get_db_connection()
+        if not conn: return False
+        c = conn.cursor()
+        # Cargar features actuales
+        if DATABASE_URL:
+            c.execute("SELECT features_habilitadas FROM empresas WHERE tenant_id = %s", (tenant_id,))
+        else:
+            c.execute("SELECT features_habilitadas FROM empresas WHERE tenant_id = ?", (tenant_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return False
+        fh_str = row[0] if isinstance(row, tuple) else row['features_habilitadas']
+        try:
+            features = json.loads(fh_str or '{}')
+        except Exception:
+            features = _features_default()
+        features[feature_name] = bool(habilitada)
+        # Guardar
+        if DATABASE_URL:
+            c.execute("UPDATE empresas SET features_habilitadas = %s WHERE tenant_id = %s",
+                      (json.dumps(features), tenant_id))
+        else:
+            c.execute("UPDATE empresas SET features_habilitadas = ? WHERE tenant_id = ?",
+                      (json.dumps(features), tenant_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"🔧 Feature '{feature_name}' = {habilitada} para tenant '{tenant_id}'")
+        return True
+    except Exception as e:
+        logger.warning(f"Error actualizando feature: {e}")
+        return False
+
+
+def feature_habilitada(feature_name, tenant_id=None):
+    """Verifica si una feature está habilitada para el tenant actual.
+    Si no encuentra info, asume habilitada (fail-open para no romper bot)."""
+    if not tenant_id:
+        tenant_id = os.getenv('TENANT_ID', 'cofradia')
+    try:
+        conn = get_db_connection()
+        if not conn: return True
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT features_habilitadas FROM empresas WHERE tenant_id = %s", (tenant_id,))
+        else:
+            c.execute("SELECT features_habilitadas FROM empresas WHERE tenant_id = ?", (tenant_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return True  # Si no hay registro, no bloquear
+        fh_str = row[0] if isinstance(row, tuple) else row['features_habilitadas']
+        try:
+            features = json.loads(fh_str or '{}')
+        except Exception:
+            return True
+        return features.get(feature_name, True)
+    except Exception:
+        return True  # fail-open
+
+
+
+# Cuando alguien captura conocimiento que contiene palabras clave de
+# alto valor (protocolos críticos, lecciones costosas, contactos clave),
+# se envía notificación automática a los managers configurados.
+# 
+# CONFIGURACIÓN (en Render env vars):
+#   - MANAGER_TELEGRAM_IDS: IDs separados por coma. Ej: "1612694642,123456"
+#     (si está vacío, usa OWNER_TELEGRAM_ID por default)
+#   - ALERT_KEYWORDS_CRITICAS: palabras clave en JSON o coma-separadas
+#     (si está vacío, usa lista default chilena)
+# 
+# Cómo se activa: automáticamente cada vez que alguien usa
+# /capturar_conocimiento. Si el contenido contiene >= 1 palabra clave crítica,
+# se envía DM a cada manager con un resumen del aporte.
+# ════════════════════════════════════════════════════════════════════════
+
+# Lista default de palabras clave que indican conocimiento crítico
+_FASE15_KEYWORDS_CRITICAS_DEFAULT = [
+    # Procedimientos críticos
+    'crítico', 'critico', 'urgente', 'emergencia', 'protocolo', 'procedimiento',
+    'seguridad', 'riesgo', 'accidente', 'falla', 'error grave',
+    # Lecciones aprendidas costosas
+    'pérdida', 'perdida', 'costo', 'multa', 'sanción', 'sancion', 'demanda',
+    'reclamación', 'reclamacion', 'cliente perdido', 'clientes perdidos',
+    # Contactos clave
+    'contacto clave', 'proveedor único', 'proveedor unico', 'cliente importante',
+    'cliente vip', 'autoridad', 'regulador', 'fiscalizador',
+    # Compliance / Legal
+    'normativa', 'compliance', 'auditoría', 'auditoria', 'ley',
+    'reglamento', 'fiscalización', 'fiscalizacion',
+    # Conocimiento experto único
+    'know-how', 'experiencia única', 'experiencia unica', 'lecciones aprendidas',
+    'método propio', 'metodo propio', 'fórmula', 'formula',
+]
+
+
+def _es_conocimiento_critico(tema, contenido):
+    """Determina si un aporte de conocimiento es 'crítico' según keywords."""
+    try:
+        # Permitir override via env var
+        kw_env = os.getenv('ALERT_KEYWORDS_CRITICAS', '').strip()
+        if kw_env:
+            try:
+                # Intentar parsear como JSON, si no como CSV
+                if kw_env.startswith('['):
+                    keywords = json.loads(kw_env)
+                else:
+                    keywords = [k.strip().lower() for k in kw_env.split(',') if k.strip()]
+            except Exception:
+                keywords = _FASE15_KEYWORDS_CRITICAS_DEFAULT
+        else:
+            keywords = _FASE15_KEYWORDS_CRITICAS_DEFAULT
+        
+        texto_a_analizar = (tema + ' ' + contenido).lower()
+        # Normalizar tildes
+        import unicodedata as _uni_cri
+        texto_norm = _uni_cri.normalize('NFKD', texto_a_analizar)
+        texto_norm = ''.join(c for c in texto_norm if not _uni_cri.combining(c))
+        
+        matches = []
+        for kw in keywords:
+            kw_norm = _uni_cri.normalize('NFKD', kw.lower())
+            kw_norm = ''.join(c for c in kw_norm if not _uni_cri.combining(c))
+            if kw_norm in texto_norm:
+                matches.append(kw)
+        
+        return matches  # lista de keywords matched (vacía si no es crítico)
+    except Exception as e:
+        logger.debug(f"Error evaluando criticidad: {e}")
+        return []
+
+
+async def _enviar_alerta_conocimiento_critico(context, tema, contenido,
+                                              autor, autor_user_id, registro_id):
+    """Envía alerta a managers si el aporte es crítico.
+    Lo hace de forma no-bloqueante: si falla, no afecta la captura del conocimiento.
+    """
+    matches = _es_conocimiento_critico(tema, contenido)
+    if not matches:
+        return  # No es crítico, no alertar
+    
+    # Obtener IDs de managers
+    manager_ids_env = os.getenv('MANAGER_TELEGRAM_IDS', '').strip()
+    if manager_ids_env:
+        try:
+            manager_ids = [int(x.strip()) for x in manager_ids_env.split(',') if x.strip().isdigit()]
+        except Exception:
+            manager_ids = []
+    else:
+        manager_ids = []
+    
+    # Si no hay managers configurados, usar OWNER por default
+    if not manager_ids:
+        try:
+            manager_ids = [OWNER_ID]
+        except Exception:
+            return
+    
+    # Construir mensaje de alerta
+    keywords_str = ', '.join(matches[:5])
+    contenido_preview = contenido[:300] + ('...' if len(contenido) > 300 else '')
+    
+    mensaje_alerta = (
+        f"🚨 ALERTA: Conocimiento Crítico Capturado\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📚 Tema: {tema}\n"
+        f"👤 Autor: {autor}\n"
+        f"🆔 Registro #{registro_id}\n"
+        f"🔑 Palabras clave detectadas: {keywords_str}\n\n"
+        f"📝 Vista previa:\n"
+        f"{contenido_preview}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Acción sugerida:\n"
+        f"  • Revisa este aporte para validar exactitud\n"
+        f"  • Considera incluirlo en documentación oficial\n"
+        f"  • Agradece al autor si corresponde\n\n"
+        f"🔍 Para verlo completo:\n"
+        f"  /rag_consulta {tema[:40]}"
+    )
+    
+    enviados = 0
+    for mid in manager_ids:
+        try:
+            if context and hasattr(context, 'bot'):
+                await context.bot.send_message(chat_id=mid, text=mensaje_alerta)
+                enviados += 1
+        except Exception as e:
+            logger.warning(f"No se pudo enviar alerta a manager {mid}: {e}")
+    
+    if enviados > 0:
+        logger.info(f"🚨 ALERTA conocimiento crítico enviada a {enviados} manager(s) — keywords: {keywords_str}")
+        try:
+            registrar_analytics(
+                user_id=autor_user_id, user_name=autor,
+                tipo_evento='alerta_critica_enviada',
+                detalle=tema[:200],
+                metadata=f"keywords={keywords_str};managers={enviados}"
+            )
+        except Exception:
+            pass
+
 
 async def capturar_conocimiento_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /capturar_conocimiento - Registra conocimiento experto al RAG.
@@ -10584,6 +11563,28 @@ async def capturar_conocimiento_comando(update: Update, context: ContextTypes.DE
         await msg.edit_text(confirmacion)
         registrar_servicio_usado(user_id, 'capturar_conocimiento')
         
+        # FASE 15: analytics
+        try:
+            registrar_analytics(
+                user_id=user_id,
+                user_name=user_full,
+                tipo_evento='conocimiento_capturado',
+                detalle=tema[:200],
+                metadata=f"chars={len(contenido)} registro_id={registro_id}"
+            )
+        except Exception:
+            pass
+        
+        # FASE 15: ALERTAS A MANAGERS si el conocimiento es CRÍTICO
+        # Heurística: detecta palabras clave que indican conocimiento de alto valor
+        # (procedimientos críticos, contactos clave, lecciones aprendidas costosas)
+        try:
+            await _enviar_alerta_conocimiento_critico(
+                context, tema, contenido, user_full, user_id, registro_id
+            )
+        except Exception as _e_alert:
+            logger.debug(f"Alerta managers no crítico: {_e_alert}")
+        
     except Exception as e:
         logger.error(f"Error en capturar_conocimiento: {e}", exc_info=True)
         try:
@@ -10709,6 +11710,86 @@ async def expertise_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as _e_con:
             logger.debug(f"Búsqueda conocimiento (no crítico, tabla puede no existir): {_e_con}")
         
+        # FASE 15: 4. EXCEL DE GOOGLE DRIVE (datos de miembros y especialidades)
+        # Cruza con BD Excel del Drive para enriquecer expertise con info actualizada
+        # de profesión, ciudad, generación, especialidades.
+        try:
+            df_drive = obtener_datos_excel_drive()
+            if df_drive is not None and len(df_drive) > 0:
+                # Identificar columnas relevantes (búsqueda flexible — nombres pueden variar)
+                cols_drive = [c.lower() for c in df_drive.columns]
+                col_nombre = next((df_drive.columns[i] for i, c in enumerate(cols_drive) if 'nombre' in c), None)
+                col_apellido = next((df_drive.columns[i] for i, c in enumerate(cols_drive) if 'apellido' in c), None)
+                col_telegram = next((df_drive.columns[i] for i, c in enumerate(cols_drive) 
+                                     if 'telegram' in c or 'user_id' in c or 'userid' in c), None)
+                # Cualquier columna que contenga texto buscable
+                cols_texto = [df_drive.columns[i] for i, c in enumerate(cols_drive) 
+                              if any(kw in c for kw in ['profes', 'especialid', 'rubro', 'area', 
+                                                       'experien', 'cargo', 'industr', 'sector',
+                                                       'descripci', 'observa', 'comentario'])]
+                
+                if col_nombre and cols_texto:
+                    # Construir texto buscable concatenando todas las columnas relevantes
+                    matches_drive = 0
+                    for _idx, row in df_drive.iterrows():
+                        try:
+                            texto_fila = ' '.join(str(row[c] or '') for c in cols_texto).lower()
+                            texto_fila_norm = _uni_e.normalize('NFKD', texto_fila)
+                            texto_fila_norm = ''.join(c2 for c2 in texto_fila_norm if not _uni_e.combining(c2))
+                            
+                            # Match si AL MENOS UNA palabra del tema aparece
+                            hay_match = False
+                            for p_tema in palabras_tema:
+                                if p_tema in texto_fila_norm:
+                                    hay_match = True
+                                    break
+                            
+                            if hay_match:
+                                nombre_drive = str(row[col_nombre] or '').strip()
+                                if col_apellido:
+                                    nombre_drive += ' ' + str(row[col_apellido] or '').strip()
+                                nombre_drive = nombre_drive.strip()
+                                if not nombre_drive:
+                                    continue
+                                
+                                # Detalle de especialidades encontradas
+                                especialidades = []
+                                for c_t in cols_texto[:3]:
+                                    val = str(row[c_t] or '').strip()
+                                    if val and val.lower() not in ['nan', 'none', '']:
+                                        especialidades.append(f"{c_t}: {val[:60]}")
+                                
+                                # Usar telegram_id si existe, si no usar hash del nombre
+                                try:
+                                    if col_telegram and str(row[col_telegram] or '').strip().isdigit():
+                                        uid_drive = int(row[col_telegram])
+                                    else:
+                                        uid_drive = -abs(hash(nombre_drive)) % (10**9)  # ID negativo para distinguir
+                                except Exception:
+                                    uid_drive = -abs(hash(nombre_drive)) % (10**9)
+                                
+                                if uid_drive not in expertos:
+                                    expertos[uid_drive] = {'nombre': nombre_drive, 'score': 0, 'fuentes': []}
+                                # Score moderado-alto: el Excel del Drive es fuente oficial
+                                expertos[uid_drive]['score'] += 12
+                                if especialidades:
+                                    expertos[uid_drive]['fuentes'].append(
+                                        f"BD Drive: {' | '.join(especialidades[:2])}"
+                                    )
+                                else:
+                                    expertos[uid_drive]['fuentes'].append("BD Drive: registro encontrado")
+                                matches_drive += 1
+                                if matches_drive >= 30:  # límite para no saturar
+                                    break
+                        except Exception as _e_row:
+                            continue
+                    if matches_drive > 0:
+                        logger.info(f"📊 Expertise: {matches_drive} matches desde Excel Drive para '{tema[:40]}'")
+            else:
+                logger.debug("Excel Drive vacío/no disponible para expertise")
+        except Exception as _e_drv:
+            logger.debug(f"Búsqueda Drive Excel (no crítico): {_e_drv}")
+        
         # 3. HISTORIAL DE MENSAJES (quién habla más del tema)
         try:
             placeholders_hist = ' OR '.join([
@@ -10791,6 +11872,26 @@ async def expertise_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await msg.edit_text("\n".join(lineas))
         registrar_servicio_usado(update.effective_user.id, 'expertise')
+        
+        # FASE 15: registrar evento detallado de búsqueda + cada experto consultado
+        try:
+            user_full_an = (update.effective_user.first_name or '')
+            registrar_analytics(
+                user_id=update.effective_user.id,
+                user_name=user_full_an,
+                tipo_evento='expertise_busqueda',
+                detalle=tema[:200]
+            )
+            for uid_e, data_e in ranking[:3]:  # top 3 expertos consultados
+                registrar_analytics(
+                    user_id=update.effective_user.id,
+                    user_name=user_full_an,
+                    tipo_evento='experto_consultado',
+                    detalle=(data_e.get('nombre') or 'N/A')[:100],
+                    metadata=f"tema={tema[:80]} score={data_e.get('score')}"
+                )
+        except Exception as _e_an:
+            logger.debug(f"Analytics expertise no crítico: {_e_an}")
         
     except Exception as e:
         logger.error(f"Error en expertise_comando: {e}", exc_info=True)
@@ -11098,6 +12199,17 @@ fluida, como si estuvieras conversando."""
                     tag_tts='rag_consulta'
                 )
                 registrar_servicio_usado(update.effective_user.id, 'rag_consulta')
+                # FASE 15: registrar tema buscado para analytics
+                try:
+                    registrar_analytics(
+                        user_id=update.effective_user.id,
+                        user_name=(update.effective_user.first_name or ''),
+                        tipo_evento='rag_busqueda',
+                        detalle=query[:200],
+                        metadata=f"resultados={total_rag} confianza={rag_conf}"
+                    )
+                except Exception:
+                    pass
                 return
         
         # Sin IA: mostrar resultados directos
@@ -24474,6 +25586,20 @@ def main():
     
     # Crear tablas para mejoras (audit, feedback, mentorias)
     _crear_tablas_mejoras()
+    
+    # FASE 15: Inicializar tabla de analytics avanzada
+    try:
+        _init_tabla_analytics()
+        logger.info("📊 Tabla analytics_eventos inicializada (Fase 15)")
+    except Exception as e:
+        logger.warning(f"Analytics init: {e}")
+    
+    # FASE 15: Inicializar tabla de empresas para multi-tenancy
+    try:
+        _init_tabla_empresas()
+        logger.info("🏢 Tabla empresas inicializada (Fase 15 multi-tenancy)")
+    except Exception as e:
+        logger.warning(f"Empresas init: {e}")
     
     # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
     keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
