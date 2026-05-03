@@ -66,7 +66,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v16-pronunciacion-expandida-2026-05-03"
+TTS_VERSION_TAG = "v18-pronunciacion-natural-2026-05-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -141,75 +141,133 @@ def _texto_a_ssml(texto: str) -> str:
     # palabras sin acento.
     # ════════════════════════════════════════════════════════════════════
     PRONUNCIACIONES_FORZADAS = {
-        # Nombres propios con tilde — fuerza acentuación correcta
-        'Germán': 'Jermán',         # evita "Gérman"
+        # ═══════════════════════════════════════════════════════════════════
+        # FASE 18: DICCIONARIO REVISADO con pronunciación NATURAL chilena
+        # 
+        # Principio guía: NO alargar artificialmente con triples consonantes
+        # ('Andréesss') porque suena raro. En lugar de eso:
+        #   - Separación silábica clara con guion (Mi-lei → Mi-lei suena bien)
+        #   - Uso de letras fonéticas correctas (h muda → j en latinoamericano)
+        #   - Solo doblar UNA letra cuando ayuda al énfasis (Cofradíia)
+        # 
+        # Basado en el "Diccionario de dudas de la lengua española" (Manuel Seco)
+        # y en las reglas de pronunciación rioplatense / chilena.
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # ── NOMBRES PROPIOS DEL USUARIO Y SU CÍRCULO ──
+        'Germán': 'Jermán',          # H muda → J (pronunciación latinoamericana)
         'germán': 'jermán',
-        'Pérey': 'Péreey',           # apellido del usuario (alargar para enfatizar tilde)
-        'pérey': 'péreey',
-        'Perey': 'Péreey',           # también si lo escribe sin tilde
-        'perey': 'péreey',
-        # Personajes / autores frecuentemente mencionados
-        'Milei': 'Mi-lei',           # evita "Meli" — separación silábica
-        'Friedman': 'Fríidman',      # apellido americano, fuerza pronunciación
+        'Pérey': 'Pérei',             # Y final → I (más natural en español)
+        'pérey': 'pérei',
+        'Perey': 'Pérei',
+        'perey': 'pérei',
+        
+        # ── PERSONAJES PÚBLICOS / AUTORES MENCIONADOS EN RAG ──
+        'Milei': 'Mi-léi',            # Separación silábica para evitar "Meli"
+        'Friedman': 'Frídman',        # Pronunciación germano-americana
         'Hayek': 'Háyek',
-        'Keynes': 'Káines',
+        'Keynes': 'Kéins',            # Pronunciación inglesa estándar
         'Boric': 'Bóric',
         'Kast': 'Kast',
-        'Piñera': 'Piñera',
+        'Piñera': 'Piñéra',
         'Bachelet': 'Báchelet',
-        'Goleman': 'Góulman',        # autor "Inteligencia Emocional"
-        'Oppenheimer': 'Oppenjáimer',
-        'Drucker': 'Drácker',
+        'Goleman': 'Gólman',          # Daniel Goleman (autor "Inteligencia Emocional")
+        'Oppenheimer': 'Ópenjáimer',  # Oppenheimer alemán → ópenjáimer
+        'Drucker': 'Drácker',         # Peter Drucker
         'Buffett': 'Báfet',
         'Munger': 'Mánguer',
         'Soros': 'Sóros',
-        # Términos navales chilenos
-        'Cofradía': 'Cofradíia',     # alargar tilde
-        'cofradía': 'cofradíia',
-        'náutico': 'nááutico',
-        'náutica': 'nááutica',
-        'capitán': 'capitáan',
+        'Powell': 'Pául',             # Jerome Powell (Fed)
+        'Costa': 'Cósta',             # Rosanna Costa (BCCh)
+        'Trump': 'Tramp',             # Pronunciación inglesa
+        'Lagarde': 'Lagárd',          # Christine Lagarde (BCE)
+        
+        # ── TÉRMINOS NAVALES Y DE LA COFRADÍA ──
+        'Cofradía': 'Cofradía',       # Sin alargamiento, ya tiene tilde
+        'cofradía': 'cofradía',
+        'Cofrades': 'Cofrádes',       # Énfasis en sílaba tónica
+        'cofrades': 'cofrádes',
+        'náutico': 'náutico',
+        'náutica': 'náutica',
+        'capitán': 'capitán',
         'almirante': 'almirante',
-        # Términos financieros chilenos
-        'inflación': 'inflasión',    # variante chilena natural
-        'política': 'políitica',
-        'económico': 'ekonóomico',
-        'económica': 'ekonóomica',
-        'América': 'Améerica',
-        'Argentina': 'Argentíina',
-        'Chile': 'Chíile',
-        # FASE 16: palabras chilenas con acentos comúnmente mal pronunciadas
-        'Andrés': 'Andréesss',
-        'Sebastián': 'Sebastiáan',
-        'Cristóbal': 'Cristóobal',
-        'José': 'Joséee',
-        'Tomás': 'Tomáasss',
-        'Nicolás': 'Nicoláasss',
-        'Martín': 'Martíiin',
-        'Joaquín': 'Joakíiin',
-        'Iván': 'Iváaan',
-        'Inés': 'Inéesss',
-        'María': 'Maríia',
-        'Ramón': 'Ramóoon',
-        'Simón': 'Simóoon',
-        'Adrián': 'Adriáaan',
-        'Hernán': 'Jernáaan',
-        'Julián': 'Juliáaan',
-        'Fabián': 'Fabiáaan',
-        'estás': 'estáasss',
-        'estáis': 'estáais',
-        'háblame': 'jáblame',
-        'cuéntame': 'kuéntame',
+        'oficial': 'oficiál',
+        'Armada': 'Armáda',
+        'armada': 'armáda',
+        
+        # ── TÉRMINOS ECONÓMICOS Y FINANCIEROS ──
+        'inflación': 'inflasión',     # Pronunciación chilena (s en vez de θ)
+        'política': 'política',
+        'económico': 'económico',
+        'económica': 'económica',
+        'macroeconómico': 'macroeconómico',
+        'monetaria': 'monetária',
+        'monetario': 'monetário',
+        'financiera': 'financiéra',
+        'financiero': 'financiéro',
+        
+        # ── PAÍSES Y LUGARES ──
+        'América': 'América',
+        'Argentina': 'Arjentína',     # G suena como J en español
+        'Chile': 'Chíle',
+        'España': 'España',
+        'México': 'Méjico',           # X de México suena J (regla histórica)
+        'Brasil': 'Brasíl',
+        'Colombia': 'Colómbia',
+        'Perú': 'Perú',
+        'Venezuela': 'Venesuéla',
+        'Ecuador': 'Ekuadór',
+        'Estados Unidos': 'Estádos Unídos',
+        'Dubai': 'Dubái',             # Acento agudo
+        'Dubái': 'Dubái',
+        'Emiratos': 'Emirátos',
+        
+        # ── NOMBRES PROPIOS CHILENOS COMUNES ──
+        'Andrés': 'Andrés',
+        'Sebastián': 'Sebastián',
+        'Cristóbal': 'Cristóbal',
+        'José': 'José',
+        'Tomás': 'Tomás',
+        'Nicolás': 'Nicolás',
+        'Martín': 'Martín',
+        'Joaquín': 'Joakín',          # Q+u → k
+        'Iván': 'Iván',
+        'Inés': 'Inés',
+        'María': 'María',
+        'Ramón': 'Ramón',
+        'Simón': 'Simón',
+        'Adrián': 'Adrián',
+        'Hernán': 'Jernán',           # H muda → J (latinoamericano)
+        'Julián': 'Julián',
+        'Fabián': 'Fabián',
+        'Felipe': 'Felípe',
+        'Rodrigo': 'Rodrígo',
+        'Patricio': 'Patrício',
+        'Gonzalo': 'Gonsálo',         # Z chilena → S
+        'Alejandro': 'Alejándro',
+        'Francisco': 'Fransísco',     # Z chilena → S
+        'Eduardo': 'Eduárdo',
+        
+        # ── VERBOS Y EXPRESIONES COMUNES ──
+        'háblame': 'jáblame',         # H → J latinoamericano
+        'cuéntame': 'cuéntame',
         'háganos': 'jáganos',
-        'búsqueda': 'bússkeda',
-        'préstamo': 'préestamo',
-        'táctica': 'tákktica',
-        'práctica': 'práaktica',
-        'logística': 'lojíistika',
-        'estratégica': 'estratéejika',
-        # Cargos/títulos
+        'búsqueda': 'búsqueda',
+        'préstamo': 'préstamo',
+        'táctica': 'táctica',
+        'práctica': 'práctica',
+        'logística': 'lojística',     # G suave → J
+        'estratégica': 'estratéjica',
+        
+        # ── CARGOS Y TÍTULOS ──
         'doctor': 'doctór',
-        'ingeniero': 'injeniero',
+        'doctora': 'doctóra',
+        'ingeniero': 'injenié-ro',
+        'ingeniera': 'injenié-ra',
+        'profesor': 'profesór',
+        'profesora': 'profesóra',
+        'gerente': 'jerénte',
+        'comandante': 'comandánte',
     }
     
     # 1. ESCAPE XML estricto (CRÍTICO — un solo & sin escapar rompe todo el SSML)

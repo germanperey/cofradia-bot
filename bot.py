@@ -7570,29 +7570,9 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 
         respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
-            logger.warning(f"⚠️ Groq falló en mención de '{user_name}' — fallback Gemini")
             respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
-            logger.warning(f"⚠️ Gemini falló — fallback GLM5")
             respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
-        
-        # FASE 18: Si los 3 LLMs fallaron, intentar con prompt SIMPLIFICADO
-        # (causa común: prompt demasiado largo + rate limit de Groq combinados)
-        if not respuesta:
-            logger.warning(f"⚠️ Los 3 LLMs fallaron — intentando prompt simplificado")
-            try:
-                prompt_simple = (
-                    f"Responde de forma clara y útil a {user_name} (estás en la Cofradía "
-                    f"de Networking, comunidad chilena profesional). Su pregunta:\n\n"
-                    f"\"{pregunta}\"\n\n"
-                    f"Si conoces el tema, responde con tu conocimiento general. "
-                    f"Sé cordial, máximo 3 párrafos, sin asteriscos."
-                )
-                respuesta = llamar_groq(prompt_simple, max_tokens=800, temperature=0.6)
-                if not respuesta:
-                    respuesta = llamar_gemini_texto(prompt_simple, max_tokens=800, temperature=0.6)
-            except Exception as _e_retry:
-                logger.warning(f"Retry simplificado también falló: {_e_retry}")
         
         await msg.delete()
         
@@ -7635,14 +7615,13 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
-            # FASE 18: mensaje más útil cuando TODO falla (caso muy raro: 3 LLMs caídos)
             await update.message.reply_text(
-                f"⏱️ {user_name}, los servicios de IA están momentáneamente saturados.\n"
-                f"Por favor reintenta en unos segundos, o usa estos comandos directos:\n\n"
-                f"/rag_consulta {pregunta[:50]}\n"
-                f"/buscar_ia {pregunta[:50]}\n"
-                f"/buscar_web {pregunta[:50]}\n\n"
-                f"Si el problema persiste, escríbele a Germán."
+                "❌ No pude generar respuesta.\n\n"
+                "Comandos útiles:\n"
+                "/buscar_profesional [profesión]\n"
+                "/empleo [cargo]\n"
+                "/buscar_ia [tema]\n"
+                "/rag_consulta [tema]"
             )
             
     except Exception as e:
@@ -7656,94 +7635,74 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 
 async def _agente_participar_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                      temas: list, texto_trigger: str, nombre_usuario: str):
-    """Agente conversacional que participa naturalmente en el grupo cuando es invocado.
-    
-    FASE 18: prompt mejorado para NO inventar libros/autores sin relación al tema real.
-    Usa RAG SOLO si la confianza es alta y el tema relevante.
-    """
+    """Agente conversacional que participa naturalmente en el grupo cuando detecta temas relevantes.
+    Usa RAG + Groq + memoria conversacional para generar respuestas útiles y contextuales."""
     try:
         # Obtener contexto conversacional
-        conversacion_reciente = grupo_memory.get_recent_context(8)
+        conversacion_reciente = grupo_memory.get_recent_context(12)
+        hot_topics = grupo_memory.get_hot_topics(3)
         
-        # FASE 18: Buscar RAG solo si es una pregunta real (no un comentario casual)
-        # y filtrar por confianza alta + relevancia
-        rag_context = ""
-        es_pregunta_real = '?' in texto_trigger or any(
-            p in texto_trigger.lower() for p in 
-            ['cómo', 'como', 'qué', 'que', 'cuál', 'cual', 'dónde', 'donde',
-             'por qué', 'porque', 'cuándo', 'cuando', 'recomienda', 'sugiere',
-             'explica', 'cuenta', 'dime', 'busca', 'encuentra']
-        )
-        
-        if es_pregunta_real:
-            try:
-                from concurrent.futures import ThreadPoolExecutor as _TPE_agente
-                with _TPE_agente(max_workers=1) as pool:
-                    fut = pool.submit(busqueda_unificada, texto_trigger, 3, 6)
-                    rag_results = fut.result(timeout=5)  # FASE 18: timeout 5s
-                
-                # CRÍTICO: solo usar RAG si la confianza es alta Y el tema es relevante
-                rag_conf = rag_results.get('rag_confianza', 'ninguna')
-                rag_tema = rag_results.get('rag_tematica', 'desconocida')
-                
-                if (rag_results.get('rag') and 
-                    rag_conf == 'alta' and rag_tema == 'relevante'):
-                    rag_context = formatear_contexto_unificado(rag_results, texto_trigger)[:1500]
-                    logger.info(f"🤖 Agente: RAG relevante encontrado para '{texto_trigger[:40]}'")
-                else:
-                    logger.info(f"🤖 Agente: SIN RAG relevante (conf={rag_conf}, tema={rag_tema}) — "
-                                f"responde desde conocimiento general")
-            except Exception:
-                pass
-        
-        # Comandos sugeridos según tema
-        comandos_utiles = []
+        # Construir información de herramientas relevantes
+        herramientas_info = []
         for tema in temas:
             info = _TEMAS_ACCIONABLES.get(tema, {})
             if info:
-                comandos_utiles.extend(info.get('comandos', [])[:2])
-        comandos_str = ', '.join(comandos_utiles[:3]) if comandos_utiles else ''
+                cmds = ' | '.join(info.get('comandos', []))
+                herramientas_info.append(f"Tema '{tema}': {info.get('prompt_extra', '')} Comandos: {cmds}")
         
-        # FASE 18: prompt RECONSTRUIDO — cordial, contextual, sin libros inventados
-        prompt = f"""Eres el asistente de la Cofradía de Networking, una comunidad profesional chilena.
-
-⚠️ {nombre_usuario} TE INVOCÓ EXPLÍCITAMENTE en el grupo. Responde así:
-1. Sé CORDIAL y dirígete a {nombre_usuario} por su nombre
-2. Responde al CONTEXTO REAL del mensaje (no inventes temas)
-3. Si NO tienes información clara para aportar, simplemente saluda amablemente
-   y pregunta cómo puedes ayudar
-4. NUNCA cites libros o autores que NO tengan relación directa con lo hablado
-5. Máximo 3-4 líneas, tono natural y profesional
+        herramientas_str = '\n'.join(herramientas_info)
+        topics_str = ', '.join([f"{t[0]}({t[1]})" for t in hot_topics]) if hot_topics else 'variados'
+        
+        # MCP tools context
+        mcp_prompt = mcp_registry.get_tools_prompt()
+        
+        # Buscar contexto RAG si el tema es accionable
+        rag_context = ""
+        try:
+            from concurrent.futures import ThreadPoolExecutor as _TPE_agente
+            with _TPE_agente(max_workers=1) as pool:
+                fut = pool.submit(busqueda_unificada, texto_trigger, 5, 10)
+                rag_results = fut.result()
+            if rag_results.get('rag'):
+                rag_context = formatear_contexto_unificado(rag_results, texto_trigger)[:2000]
+        except Exception:
+            pass
+        
+        prompt = f"""Eres el asistente IA de la Cofradía de Networking (comunidad de oficiales navales chilenos).
+Estás observando la conversación del grupo y detectaste que se habla de: {', '.join(temas)}.
 
 CONVERSACIÓN RECIENTE DEL GRUPO:
 {conversacion_reciente}
 
-MENSAJE QUE TE INVOCÓ (de {nombre_usuario}):
-"{texto_trigger}"
+TEMAS TRENDING: {topics_str}
 
-{('INFORMACIÓN ÚTIL ENCONTRADA EN BIBLIOTECA (úsala SOLO si es claramente relevante):' + chr(10) + rag_context) if rag_context else 'No tienes documentos relevantes para esta consulta — responde desde tu conocimiento general como asistente.'}
+{herramientas_str}
 
-{f'COMANDOS QUE PODRÍAS SUGERIR si vienen al caso: {comandos_str}' if comandos_str else ''}
+{mcp_prompt}
 
-REGLAS FINALES:
-- Si fue solo un saludo o mención casual: responde con cortesía breve.
-- Si fue una pregunta real: respóndela directa y útil.
-- NO inventes ni cites información que no esté en el contexto explícito.
-- NO uses asteriscos ni markdown.
-- Responde en máximo 80 palabras.
+{f'CONTEXTO DE BIBLIOTECA (RAG):' + chr(10) + rag_context if rag_context else ''}
 
-Tu respuesta breve a {nombre_usuario}:"""
+INSTRUCCIONES PARA PARTICIPAR:
+1. Responde de forma BREVE (máximo 3-4 líneas), natural y amigable
+2. Dirígete al grupo en general o a {nombre_usuario} si es relevante
+3. Aporta un dato útil, tip, o sugerencia de comando del bot
+4. NO uses asteriscos ni formato Markdown
+5. NO seas invasivo ni repitas info obvia
+6. Sé como un cofrade más que aporta al grupo, no como un bot genérico
+7. Si puedes aportar un dato concreto del RAG, hazlo
+8. Siempre sugiere 1-2 comandos específicos que sean útiles para el tema
 
-        respuesta = llamar_groq(prompt, max_tokens=250, temperature=0.6)
+MENSAJE QUE DISPARÓ TU PARTICIPACIÓN:
+"{texto_trigger}" — de {nombre_usuario}
+
+Genera UNA respuesta corta y útil:"""
+
+        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.7)
         if not respuesta:
             return
         
         # Limpiar respuesta
         respuesta_limpia = respuesta.replace('*', '').replace('_', ' ').strip()
-        
-        # Si la respuesta es excesivamente larga, truncar (señal de que el LLM divagó)
-        if len(respuesta_limpia) > 600:
-            respuesta_limpia = respuesta_limpia[:580].rsplit('.', 1)[0] + '.'
         
         # Agregar emoji de bot para identificar
         respuesta_final = f"🤖 {respuesta_limpia}"
@@ -7756,7 +7715,7 @@ Tu respuesta breve a {nombre_usuario}:"""
         
         # Marcar participación para cooldown
         grupo_memory.mark_bot_participated()
-        logger.info(f"🤖 Agente respondió a {nombre_usuario} — temas: {temas}")
+        logger.info(f"🤖 Agente participó en grupo — temas: {temas}")
         
     except Exception as e:
         logger.debug(f"Error agente grupo: {e}")
@@ -7863,24 +7822,12 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
     # ══════════════════════════════════════════════════════════════════
     # ═══  AGENTE CONVERSACIONAL: Detectar temas y participar  ═══════
     # ══════════════════════════════════════════════════════════════════
-    # FASE 18 (FIX CRÍTICO): bot NO debe auto-invitarse en conversaciones
-    # entre usuarios. Antes detectaba "tarjeta" → buscaba RAG → opinaba con
-    # libros sin relación. Esto rompía la confianza para propuesta empresarial.
-    # 
-    # Ahora SOLO participa si es EXPLÍCITAMENTE invocado:
-    #   - @mención al bot (@CofradiaPremiumBot, @bot)
-    #   - Reply a un mensaje del bot
-    #   - Palabra "bot", "claude", "asistente" como gatillo en mensaje corto
-    # 
-    # La función responder_mencion() ya maneja @menciones — esta lógica es
-    # solo para evitar el auto-invitarse cuando NO hay mención explícita.
-    # ══════════════════════════════════════════════════════════════════
     try:
         texto_msg = update.message.text
-        # 1. Detectar temas del mensaje (sigue siendo útil para memoria/analytics)
+        # 1. Detectar temas del mensaje
         temas = detectar_temas(texto_msg)
         
-        # 2. Agregar a memoria conversacional (siempre, no afecta participación)
+        # 2. Agregar a memoria conversacional
         grupo_memory.add_message(
             user_name=f"{first_name} {last_name}".strip(),
             user_id=user_id,
@@ -7888,49 +7835,13 @@ async def guardar_mensaje_grupo(update: Update, context: ContextTypes.DEFAULT_TY
             topics=temas
         )
         
-        # 3. FASE 18: VERIFICAR INVOCACIÓN EXPLÍCITA antes de cualquier participación
-        bot_fue_invocado = False
-        try:
-            import unicodedata as _uni_inv18
-            texto_norm_inv = _uni_inv18.normalize('NFKD', (texto_msg or '').lower())
-            texto_norm_inv = ''.join(c for c in texto_norm_inv if not _uni_inv18.combining(c))
-            
-            # 3a. ¿@mención al bot? (formal o atajo @bot)
-            if context and context.bot:
-                bot_username = (context.bot.username or '').lower()
-                if bot_username and f'@{bot_username}' in texto_norm_inv:
-                    bot_fue_invocado = True
-            if not bot_fue_invocado and re.search(r'(?:^|\s)@bot\b', texto_norm_inv):
-                bot_fue_invocado = True
-            
-            # 3b. ¿Reply directo a un mensaje del bot?
-            if (not bot_fue_invocado and update.message.reply_to_message and
-                update.message.reply_to_message.from_user and
-                update.message.reply_to_message.from_user.is_bot):
-                bot_fue_invocado = True
-            
-            # 3c. ¿Palabra gatillo? (mensaje corto con "bot"/"claude"/"asistente")
-            if not bot_fue_invocado:
-                num_palabras = len(texto_msg.split())
-                gatillos_inicio = ['bot ', 'bot,', 'bot:', 'claude ', 'claude,',
-                                   'claude:', 'asistente ', 'asistente,', 'asistente:']
-                if any(texto_norm_inv.strip()[:30].startswith(g) for g in gatillos_inicio):
-                    bot_fue_invocado = True
-                elif num_palabras <= 25 and re.search(r'\bbot\b', texto_norm_inv):
-                    bot_fue_invocado = True
-        except Exception:
-            pass
-        
-        # 4. SOLO participar si fue invocado Y respeta cooldown
-        # IMPORTANTE: si fue invocado por @mención, responder_mencion() ya respondió
-        # arriba — este agente sería un duplicado. Solo participa si fue invocado
-        # por palabra gatillo (sin @mención formal).
-        if (bot_fue_invocado and temas and 
-            grupo_memory.should_bot_participate() and ia_disponible):
+        # 3. Evaluar si el bot debería participar
+        if temas and grupo_memory.should_bot_participate() and ia_disponible:
+            # Solo participar si hay temas accionables
             temas_accionables = [t for t in temas if t in _TEMAS_ACCIONABLES]
             if temas_accionables:
-                if len(texto_msg.split()) >= 4:  # mensaje mínimo de 4 palabras
-                    logger.info(f"🤖 Agente invocado explícitamente — temas: {temas_accionables}")
+                # Verificar que no sea un mensaje muy corto o saludo
+                if len(texto_msg.split()) >= 6:
                     asyncio.create_task(
                         _agente_participar_grupo(update, context, temas_accionables, texto_msg, f"{first_name}")
                     )
@@ -12180,25 +12091,8 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = await update.message.reply_text(f"🧠 Buscando en todas las fuentes: {query}...")
     
     try:
-        # FASE 18: búsqueda con TIMEOUT ESTRICTO de 12s para evitar cuelgues largos.
-        # limit_rag=20 (antes 30): suficiente para síntesis completa, ~30% más rápido.
-        # 20 chunks × 700 chars = 14,000 chars = contexto rico SIN ser excesivo.
-        import time as _t_rag18
-        _t0_rag = _t_rag18.time()
-        from concurrent.futures import ThreadPoolExecutor as _TPE_rag18, TimeoutError as _TE_rag18
-        try:
-            with _TPE_rag18(max_workers=1) as _pool_rag:
-                _fut_rag = _pool_rag.submit(busqueda_unificada, query, 8, 20)
-                resultados = _fut_rag.result(timeout=12)
-        except _TE_rag18:
-            logger.warning(f"⚠️ Búsqueda RAG timeout (>12s) para: {query[:40]}")
-            await msg.edit_text(
-                "⏱️ La búsqueda está tardando más de lo esperado.\n"
-                "Por favor intenta con palabras más específicas o usa /rag_status para ver documentos."
-            )
-            return
-        _t_busq = _t_rag18.time() - _t0_rag
-        logger.info(f"⏱️ RAG búsqueda: {_t_busq:.1f}s para '{query[:40]}'")
+        # Búsqueda unificada (máximo contexto posible)
+        resultados = busqueda_unificada(query, limit_historial=10, limit_rag=30)
         
         tiene_historial = bool(resultados.get('historial'))
         tiene_rag = bool(resultados.get('rag'))
@@ -12285,9 +12179,7 @@ RECORDATORIO FINAL: el usuario llama Germán (con tilde en la "a"). Si te dirige
 respeta esa grafía. Sintetiza los fragmentos en una respuesta valiosa, completa y
 fluida, como si estuvieras conversando."""
             
-            # FASE 18: max_tokens reducido de 2000 → 1500 para 2-3s más rápido
-            # 1500 tokens = ~600 palabras = ideal para chat (suficiente y completo)
-            respuesta = llamar_groq(prompt, max_tokens=1500, temperature=0.3)
+            respuesta = llamar_groq(prompt, max_tokens=2000, temperature=0.3)
             
             if respuesta:
                 respuesta_limpia = respuesta.replace('*', '').replace('_', ' ')
@@ -22143,8 +22035,13 @@ def scraping_bcentral_noticias():
     """
     Web scraping de noticias y comunicados recientes del Banco Central de Chile.
     Retorna lista de titulares relevantes (máx. 5).
+    
+    FASE 18: si BCCh no devuelve nada (sitio cambió HTML o timeout), intenta
+    fallback con búsqueda DuckDuckGo de noticias económicas chilenas recientes.
     """
     noticias = []
+    
+    # INTENTO 1: Banco Central oficial
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; CofrBot/1.0)'}
         resp = requests.get(
@@ -22164,6 +22061,43 @@ def scraping_bcentral_noticias():
                         break
     except Exception as e:
         logger.warning(f'Scraping BCCH: {e}')
+    
+    # FASE 18 FALLBACK: si BCCh devolvió 0-2 noticias, complementar con DuckDuckGo
+    if len(noticias) < 3:
+        logger.info(f"⚠️ BCCh devolvió solo {len(noticias)} noticias — complementando con búsqueda web")
+        try:
+            from datetime import datetime as _dt_news
+            mes_actual = _dt_news.now().strftime('%B %Y')
+            queries_noticias = [
+                f'noticias economia Chile {mes_actual}',
+                f'IPC inflacion Chile reciente',
+                f'tipo de cambio dolar Chile',
+            ]
+            for q in queries_noticias:
+                try:
+                    resultados_ddg = _scrape_ddg_sync(q, n=3)
+                    for r in resultados_ddg:
+                        titulo = r.get('title', '') if isinstance(r, dict) else str(r)
+                        if titulo and len(titulo) > 25 and len(noticias) < 5:
+                            # Evitar duplicados
+                            if not any(titulo[:50].lower() in n.lower() for n in noticias):
+                                noticias.append(titulo[:160])
+                except Exception:
+                    continue
+                if len(noticias) >= 5:
+                    break
+        except Exception as e:
+            logger.warning(f'Fallback DDG noticias: {e}')
+    
+    # FASE 18: si TODO falla, devolver al menos contexto genérico útil
+    if not noticias:
+        logger.warning("⚠️ Sin noticias de BCCh ni DDG — usando contexto genérico")
+        noticias = [
+            "Banco Central de Chile evalua politica monetaria en proximas reuniones del Consejo.",
+            "Mercados internacionales atentos a decisiones de Fed sobre tasas de interes.",
+            "Cobre fluctua segun demanda China e inventarios globales.",
+        ]
+    
     return noticias
 
 
@@ -23197,30 +23131,150 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             resp_batch = llamar_groq(prompt_batch, max_tokens=5000, temperature=0.45)
             if resp_batch:
+                # FASE 18: parser MEJORADO. Antes: muy frágil, fallaba si Groq devolvía
+                # 'UF: análisis...' y el código real era 'uf' (no matcheaba bien).
+                # Ahora: normalización agresiva + matching multinivel + detección de
+                # alias comunes que el LLM usa (DOLAR_USD vs dolar, etc.)
+                _alias_codigos = {
+                    'dolar_usd': 'dolar', 'dolar': 'dolar',
+                    'euro_eur': 'euro', 'euro': 'euro',
+                    'libra_de_cobre': 'libra_cobre', 'cobre': 'libra_cobre', 'libra_cobre': 'libra_cobre',
+                    'tasa_de_desempleo': 'tasa_desempleo', 'desempleo': 'tasa_desempleo',
+                    'tasa_desempleo': 'tasa_desempleo',
+                    'tasa_de_politica_monetaria': 'tpm', 'tpm': 'tpm',
+                    'btc': 'bitcoin', 'bitcoin': 'bitcoin',
+                    'eth': 'ethereum', 'ethereum': 'ethereum',
+                    'sol': 'solana', 'solana': 'solana',
+                    'uf': 'uf', 'utm': 'utm', 'ipc': 'ipc', 'imacec': 'imacec', 'ipsa': 'ipsa', 'ivp': 'ivp',
+                }
+                
                 for linea in resp_batch.strip().split('\n'):
                     linea = linea.strip()
-                    if ':' in linea:
-                        parts = linea.split(':', 1)
-                        cod_limpio = parts[0].strip().lower().replace(' ', '_').replace('-', '_')
-                        # Buscar match con codigos reales
+                    if ':' not in linea or len(linea) < 30:  # mínimo 30 chars de respuesta
+                        continue
+                    parts = linea.split(':', 1)
+                    if len(parts) != 2:
+                        continue
+                    
+                    cod_raw = parts[0].strip().lower()
+                    contenido = parts[1].strip()
+                    if len(contenido) < 20:  # respuesta muy corta = no útil
+                        continue
+                    
+                    # Normalizar agresivamente: quitar acentos, no-alfanum → _
+                    import unicodedata as _uni_ind
+                    cod_norm = _uni_ind.normalize('NFKD', cod_raw)
+                    cod_norm = ''.join(c for c in cod_norm if not _uni_ind.combining(c))
+                    cod_norm = re.sub(r'[^a-z0-9]+', '_', cod_norm).strip('_')
+                    
+                    # Estrategia 1: alias directo
+                    cod_match = _alias_codigos.get(cod_norm)
+                    
+                    # Estrategia 2: match con códigos reales (substring bidireccional)
+                    if not cod_match:
                         for cod_real in datos:
-                            if cod_limpio == cod_real or cod_limpio in cod_real or cod_real in cod_limpio:
-                                explicaciones[cod_real] = parts[1].strip()
+                            if (cod_norm == cod_real or 
+                                cod_norm in cod_real or 
+                                cod_real in cod_norm or
+                                cod_norm.replace('_', '') == cod_real.replace('_', '')):
+                                cod_match = cod_real
                                 break
+                    
+                    if cod_match and cod_match in datos:
+                        explicaciones[cod_match] = contenido
+                
+                logger.info(f"📊 Análisis IA: {len(explicaciones)}/{len(datos)} indicadores parseados")
             
-            # Fallback para indicadores sin explicacion
+            # FASE 18: si Groq parseó MENOS DEL 50% de indicadores, intentar
+            # SEGUNDA pasada con prompt más simple (más confiable que un solo intento grande)
+            if len(explicaciones) < len(datos) * 0.5:
+                logger.warning(f"⚠️ Análisis IA insuficiente ({len(explicaciones)}/{len(datos)}) — segundo intento simplificado")
+                try:
+                    faltantes_codigos = [c for c in datos if c not in explicaciones]
+                    nombres_faltantes = [datos[c].get('nombre', c) for c in faltantes_codigos]
+                    
+                    prompt_simple = (
+                        f"Eres economista chileno senior. Hoy {_ahora_chile().strftime('%d de %B %Y')}.\n"
+                        f"Para cada indicador escribe UN parrafo profesional de 3-4 oraciones explicando "
+                        f"POR QUE varia y como afecta a un chileno comun. Menciona al menos un actor o evento real.\n\n"
+                        f"FORMATO ESTRICTO: 'CODIGO: parrafo'. UN indicador por linea.\n\n"
+                        f"INDICADORES (con datos):\n"
+                    )
+                    for c in faltantes_codigos:
+                        d = datos[c]
+                        val_act = d.get('valor', 0)
+                        try:
+                            serie = d.get('serie30', []) or []
+                            val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                            var_pct = ((float(val_act) - float(val_ant)) / float(val_ant) * 100) if val_ant else 0
+                        except Exception:
+                            var_pct = 0
+                        prompt_simple += f"- {c} ({d.get('nombre', c)}): {val_act} ({var_pct:+.2f}%)\n"
+                    prompt_simple += "\nResponde SOLO con el formato 'CODIGO: parrafo'. Sin emojis ni asteriscos."
+                    
+                    resp_simple = llamar_groq(prompt_simple, max_tokens=3000, temperature=0.4)
+                    if resp_simple:
+                        for linea in resp_simple.strip().split('\n'):
+                            linea = linea.strip()
+                            if ':' not in linea or len(linea) < 30:
+                                continue
+                            parts = linea.split(':', 1)
+                            cod_raw = parts[0].strip().lower()
+                            contenido = parts[1].strip()
+                            if len(contenido) < 20:
+                                continue
+                            
+                            cod_norm = re.sub(r'[^a-z0-9]+', '_', cod_raw).strip('_')
+                            cod_match = _alias_codigos.get(cod_norm)
+                            if not cod_match:
+                                for cod_real in faltantes_codigos:
+                                    if cod_norm == cod_real or cod_norm in cod_real or cod_real in cod_norm:
+                                        cod_match = cod_real
+                                        break
+                            if cod_match and cod_match in datos and cod_match not in explicaciones:
+                                explicaciones[cod_match] = contenido
+                    logger.info(f"📊 Tras 2do intento: {len(explicaciones)}/{len(datos)} indicadores explicados")
+                except Exception as _e_2do:
+                    logger.warning(f"2do intento análisis IA falló: {_e_2do}")
+            
+            # Fallback CONTEXTUAL para indicadores aún sin explicacion
+            # FASE 18: en vez de "X aumento Y%" genérico, dar contexto útil específico
+            _CONTEXTO_INDICADOR = {
+                'uf': "La UF se reajusta segun la variacion del IPC del mes anterior. Sube de forma natural cuando hay inflacion. Afecta arriendos, dividendos hipotecarios y pagos a plazo.",
+                'utm': "La UTM se actualiza mensualmente segun la variacion del IPC. Su evolucion refleja la inflacion oficial. Se usa para multas, impuestos y reajustes legales en Chile.",
+                'dolar': "El dolar fluctua por diferencial de tasas Fed-BCCh, precio del cobre, flujos financieros internacionales y eventos politicos. Afecta importaciones, viajes y precios internos de productos transables.",
+                'euro': "El euro depende de politica del BCE, datos de la Eurozona y diferenciales con dolar. Para Chile, su movimiento afecta importaciones europeas (autos, vinos, equipos industriales).",
+                'ipc': "El IPC mide variacion mensual de canasta basica del INE. Refleja cambios en alimentos, energia, transporte y servicios. Es base para ajustes de UF, salarios y politica monetaria.",
+                'tpm': "La TPM la fija el Consejo del BCCh en sus reuniones mensuales. Se ajusta segun proyeccion de inflacion vs meta 3%. Influye en creditos hipotecarios, depositos a plazo y consumo.",
+                'libra_cobre': "El cobre depende de demanda China (50% mundial), inventarios LME/Shanghai y oferta Codelco. Es clave para Chile: 50% exportaciones, recauda fiscal y peso chileno.",
+                'tasa_desempleo': "El desempleo lo mide INE en encuestas trimestrales moviles. Refleja creacion de empleo formal vs informal, sectorialmente y por region. Afecta consumo y politica social.",
+                'imacec': "El IMACEC es proxy mensual del PIB publicado por BCCh. Se descompone en minero y no-minero. Su tendencia anticipa la actividad economica de Chile.",
+                'ipsa': "El IPSA refleja las 40 mayores empresas chilenas. Se mueve por flujos AFP, utilidades trimestrales, riesgo Chile (EMBI) y precio cobre. Impacta directamente fondos AFP A-B.",
+                'bitcoin': "Bitcoin se mueve por flujos ETF spot, decisiones Fed sobre tasas, regulacion EEUU y eventos halving. Para chilenos es alternativa de inversion volátil pero alto retorno potencial.",
+                'ethereum': "Ethereum responde a evolucion DeFi, NFTs, layer-2, y correlacion con Bitcoin. Es la segunda crypto por capitalizacion y plataforma para muchos proyectos blockchain.",
+                'solana': "Solana compite como blockchain de alta velocidad. Su precio depende de adopcion DeFi, memes coins en su red y comparacion con Ethereum por costos.",
+                'ivp': "El IVP es Indice de Valor Promedio del Banco Central, similar a la UF pero diferente metodologia. Se usa en algunos contratos hipotecarios y arriendos.",
+            }
+            
             for cod, d in datos.items():
                 if cod not in explicaciones:
-                    val_act = d['valor']
-                    serie = d.get('serie30', [])
-                    val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
-                    var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
-                    if var_pct > 0:
-                        explicaciones[cod] = f"{d['nombre']} aumento {abs(var_pct):.3f}% respecto al periodo anterior."
-                    elif var_pct < 0:
-                        explicaciones[cod] = f"{d['nombre']} disminuyo {abs(var_pct):.3f}% respecto al periodo anterior."
+                    val_act = d.get('valor', 0)
+                    try:
+                        serie = d.get('serie30', []) or []
+                        val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
+                        var_pct = ((float(val_act) - float(val_ant)) / float(val_ant) * 100) if val_ant and val_ant != 0 else 0
+                    except Exception:
+                        var_pct = 0
+                    
+                    # Construir explicación: variación + contexto específico del indicador
+                    if abs(var_pct) > 0.01:
+                        direccion = "subio" if var_pct > 0 else "bajo"
+                        encabezado = f"{d.get('nombre', cod)} {direccion} {abs(var_pct):.2f}% respecto al periodo anterior. "
                     else:
-                        explicaciones[cod] = f"{d['nombre']} se mantuvo estable respecto al periodo anterior."
+                        encabezado = f"{d.get('nombre', cod)} se mantuvo estable respecto al periodo anterior. "
+                    
+                    contexto_especifico = _CONTEXTO_INDICADOR.get(cod, "")
+                    explicaciones[cod] = encabezado + contexto_especifico
 
 
             # PASO 5: Noticias HTML con análisis IA completo
