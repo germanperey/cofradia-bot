@@ -1308,6 +1308,15 @@ def init_db():
                 c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS fecha_incorporacion TIMESTAMP")
             except Exception:
                 pass
+            # FASE 23: campo de verificación de identidad por admin
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS verificado_admin BOOLEAN DEFAULT FALSE")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN IF NOT EXISTS fecha_verificacion TIMESTAMP")
+            except Exception:
+                pass
             
             # Tabla RAG chunks para memoria semántica
             c.execute('''CREATE TABLE IF NOT EXISTS rag_chunks (
@@ -1618,6 +1627,15 @@ def init_db():
                 pass
             try:
                 c.execute("ALTER TABLE suscripciones ADD COLUMN fecha_incorporacion DATETIME")
+            except Exception:
+                pass
+            # FASE 23: campos verificación SQLite
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN verificado_admin INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE suscripciones ADD COLUMN fecha_verificacion DATETIME")
             except Exception:
                 pass
             
@@ -2417,9 +2435,15 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     """
     import re
 
-    # Limitar largo del texto
-    if len(texto) > 2000:
-        texto = texto[:1997] + "..."
+    # FASE 23: aumentar límite a 5000 chars (Google TTS soporta hasta ~5000 sin problema)
+    # Antes era 2000 y truncaba respuestas largas, dejándolas incompletas en audio.
+    if len(texto) > 5000:
+        # Truncar en el último punto antes del límite para no cortar oraciones
+        cortar_en = texto.rfind('.', 0, 4990)
+        if cortar_en > 4000:
+            texto = texto[:cortar_en + 1]
+        else:
+            texto = texto[:4997] + "..."
 
     # Limpiar emojis y símbolos
     texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═⚓]', '', texto)
@@ -4691,6 +4715,165 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': str(e)}, status=500)
             return
         
+        # FASE 23: API para marcar/desmarcar usuario como verificado
+        if path == '/api/usuarios/verificar':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                user_id = body.get('user_id')
+                verificar = bool(body.get('verificar', True))  # si False, des-verifica
+                
+                if not user_id:
+                    self._send_json({'error': 'missing user_id'}, status=400)
+                    return
+                
+                conn = get_db_connection()
+                if not conn:
+                    self._send_json({'error': 'db unavailable'}, status=500)
+                    return
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("UPDATE suscripciones SET verificado_admin = %s, fecha_verificacion = CURRENT_TIMESTAMP WHERE user_id = %s",
+                             (verificar, int(user_id)))
+                else:
+                    c.execute("UPDATE suscripciones SET verificado_admin = ?, fecha_verificacion = CURRENT_TIMESTAMP WHERE user_id = ?",
+                             (1 if verificar else 0, int(user_id)))
+                conn.commit()
+                conn.close()
+                self._send_json({'ok': True, 'verificado': verificar, 'user_id': user_id})
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/verificar: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 23: API para renovar suscripción silenciosamente
+        if path == '/api/usuarios/renovar':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                from datetime import datetime, timedelta
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                
+                user_id = body.get('user_id')
+                dias = int(body.get('dias', 90))
+                modo = body.get('modo', 'individual')  # individual | todos | vence_pronto
+                
+                if dias < 1 or dias > 3650:
+                    self._send_json({'error': 'días debe ser entre 1 y 3650'}, status=400)
+                    return
+                
+                conn = get_db_connection()
+                if not conn:
+                    self._send_json({'error': 'db unavailable'}, status=500)
+                    return
+                c = conn.cursor()
+                
+                target_ids = []
+                if modo == 'todos':
+                    c.execute("SELECT user_id FROM suscripciones WHERE estado = 'activo' OR estado IS NULL")
+                    for row in c.fetchall():
+                        target_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
+                elif modo == 'vence_pronto':
+                    dias_buffer = int(body.get('dias_buffer', 30))
+                    try:
+                        if DATABASE_URL:
+                            c.execute(f"""SELECT user_id FROM suscripciones 
+                                          WHERE fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '{dias_buffer} days'
+                                          AND fecha_expiracion > CURRENT_TIMESTAMP
+                                          AND fecha_expiracion < '2099-01-01'""")
+                        else:
+                            fecha_lim = (datetime.now() + timedelta(days=dias_buffer)).isoformat()
+                            c.execute("""SELECT user_id FROM suscripciones 
+                                         WHERE fecha_expiracion < ? AND fecha_expiracion > datetime('now')
+                                         AND fecha_expiracion < '2099-01-01'""", (fecha_lim,))
+                        for row in c.fetchall():
+                            target_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
+                    except Exception as _eq:
+                        logger.warning(f"Query vence_pronto API: {_eq}")
+                else:  # individual
+                    if not user_id:
+                        self._send_json({'error': 'missing user_id'}, status=400)
+                        return
+                    target_ids = [int(user_id)]
+                
+                # Aplicar renovación
+                nueva_fecha = datetime.now() + timedelta(days=dias)
+                renovados = 0
+                for uid in target_ids:
+                    try:
+                        if DATABASE_URL:
+                            c.execute("""UPDATE suscripciones SET fecha_expiracion = %s, estado = 'activo'
+                                         WHERE user_id = %s""", (nueva_fecha, uid))
+                        else:
+                            c.execute("""UPDATE suscripciones SET fecha_expiracion = ?, estado = 'activo'
+                                         WHERE user_id = ?""", (nueva_fecha.isoformat(), uid))
+                        if c.rowcount > 0:
+                            renovados += 1
+                    except Exception as _er:
+                        logger.debug(f"Error renovando uid {uid}: {_er}")
+                
+                conn.commit()
+                conn.close()
+                
+                self._send_json({
+                    'ok': True,
+                    'renovados': renovados,
+                    'total': len(target_ids),
+                    'nueva_fecha': nueva_fecha.strftime('%Y-%m-%d'),
+                    'dias_extension': dias,
+                    'modo': modo,
+                })
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/renovar: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
+        # FASE 23: API para anunciar identidad de un usuario en el grupo Cofradía
+        # Útil después de normalizar/editar para que el grupo sepa quién es cada uno
+        if path == '/api/usuarios/anunciar':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+                body = json.loads(body_raw)
+                user_id = body.get('user_id')
+                modo = body.get('modo', 'individual')  # individual | todos_normalizados
+                
+                if not user_id and modo == 'individual':
+                    self._send_json({'error': 'missing user_id'}, status=400)
+                    return
+                
+                # Lanzar tarea async que envía mensaje al grupo
+                import threading
+                
+                def _enviar_anuncio_async(uid_o_lista, modo_envio):
+                    """Wrapper sync para enviar desde thread."""
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(_anunciar_identidad_grupo(uid_o_lista, modo_envio))
+                        loop.close()
+                    except Exception as _ee:
+                        logger.warning(f"Error wrapper anuncio: {_ee}")
+                
+                threading.Thread(target=_enviar_anuncio_async, args=(user_id, modo), daemon=True).start()
+                
+                self._send_json({'ok': True, 'mensaje': 'Anuncio enviado al grupo Cofradía'})
+            except Exception as e:
+                logger.warning(f"Error /api/usuarios/anunciar: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
         # Default
         self.send_response(404)
         self.send_header('Content-type', 'text/plain')
@@ -4785,6 +4968,26 @@ padding:5px 10px;border-radius:6px;cursor:pointer;font-size:.82em;font-weight:60
 .btn-editar:hover{background:rgba(195,165,90,.25)}
 .btn-invitar{background:rgba(56,189,248,.12);color:#38bdf8;border-color:rgba(56,189,248,.4)}
 .btn-invitar:hover{background:rgba(56,189,248,.22)}
+/* FASE 23: botones de verificación */
+.btn-verificar,.btn-desverif{padding:5px 11px;border-radius:6px;font-size:.82em;cursor:pointer;
+font-weight:600;letter-spacing:.02em;transition:.15s;margin-left:6px}
+.btn-verificar{background:rgba(46,204,113,.12);color:#2ecc71;border:1px solid rgba(46,204,113,.4)}
+.btn-verificar:hover{background:rgba(46,204,113,.22)}
+.btn-desverif{background:rgba(231,76,60,.10);color:#e74c3c;border:1px solid rgba(231,76,60,.35)}
+.btn-desverif:hover{background:rgba(231,76,60,.20)}
+/* FASE 23: botón renovar */
+.btn-renovar{padding:5px 11px;border-radius:6px;font-size:.82em;cursor:pointer;
+font-weight:600;letter-spacing:.02em;transition:.15s;margin-left:6px;
+background:rgba(155,89,182,.12);color:#9b59b6;border:1px solid rgba(155,89,182,.4)}
+.btn-renovar:hover{background:rgba(155,89,182,.22)}
+.btn-renovar-masivo{padding:8px 16px;border-radius:8px;font-size:.9em;cursor:pointer;
+font-weight:600;background:linear-gradient(135deg,#9b59b6,#8e44ad);color:#fff;border:none;
+margin-left:10px;transition:.15s}
+.btn-renovar-masivo:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(155,89,182,.3)}
+.btn-anunciar{padding:5px 11px;border-radius:6px;font-size:.82em;cursor:pointer;
+font-weight:600;letter-spacing:.02em;transition:.15s;margin-left:6px;
+background:rgba(56,189,248,.10);color:#38bdf8;border:1px solid rgba(56,189,248,.35)}
+.btn-anunciar:hover{background:rgba(56,189,248,.22)}
 .btn-invitar:disabled{opacity:.6;cursor:not-allowed}
 .btn-normalizar{background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.4);
 padding:8px 14px;border-radius:8px;cursor:pointer;font-size:.88em;font-weight:600;margin-left:8px}
@@ -4865,6 +5068,8 @@ border-radius:8px;color:#e0e6ed;font-size:.95em;margin-top:6px;font-family:inher
 <button class="refresh-btn" onclick="cargarUsuarios()">↻ Refrescar</button>
 <button id="btn-normalizar-todos" class="btn-normalizar" onclick="normalizarTodos()" 
   style="float:right" title="Normalizar todos los nombres y usernames vacíos o incompletos">🔄 Normalizar todos</button>
+<button class="btn-renovar-masivo" onclick="renovarVencenPronto()" 
+  style="float:right" title="Renovar gratis a todos los que vencen en próximos 30 días">🔄 Renovar Vencen Pronto</button>
 <h3 style="color:#c3a55a;margin-top:0">👥 Usuarios Registrados (Activos)</h3>
 <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <input id="filtro-usuarios" type="text" placeholder="🔍 Filtrar por nombre, username o ID..." 
@@ -5152,8 +5357,8 @@ function filtrarUsuarios(){
   
   // Tabla
   html += '<div class="card"><table><thead><tr>';
-  html += '<th>Nombre</th><th>Username</th><th>ID</th><th>Profesión</th>';
-  html += '<th>Fecha alta</th><th>Mensajes</th><th>Tarjeta</th><th>Estado</th><th>Acciones</th>';
+  html += '<th>Nombre</th><th>Username</th><th>User Telegram</th><th>ID</th><th>Profesión</th>';
+  html += '<th>Fecha alta</th><th>Vence</th><th>Mensajes</th><th>Tarjeta</th><th>Estado</th><th>Acciones</th>';
   html += '</tr></thead><tbody>';
   
   lista.forEach(u => {
@@ -5161,6 +5366,38 @@ function filtrarUsuarios(){
     const profesion = u.profesion ? escapeHtml(u.profesion) : '—';
     const fecha = u.fecha_alta || '—';
     const estadoIcon = u.es_admin ? '👑 Admin' : (u.es_activo ? '🟢 Activo' : '⚪ Inactivo');
+    
+    // FASE 23: badge de verificación junto al nombre
+    const verifBadge = u.verificado ? '<span style="color:#2ecc71;margin-left:6px" title="Identidad verificada por admin">✅</span>' : '';
+    
+    // FASE 23: User Telegram = nombre + apellido reales que vienen de Telegram
+    // (lo que el usuario tiene configurado en su perfil personal de Telegram)
+    let userTelegram = '—';
+    if (u.last_name_real || u.first_name_telegram) {
+      const parts = [];
+      // El "first_name_telegram" sería el nombre que el bot recibe directamente de Telegram
+      // En este caso usamos lo que está como first_name actual (que puede haber sido normalizado)
+      // pero si el last_name_real está, eso ES de Telegram
+      if (u.last_name_real) {
+        userTelegram = '<span style="color:#8899aa;font-size:.88em" title="Apellido configurado en perfil de Telegram">' + escapeHtml(u.last_name_real) + '</span>';
+      }
+    }
+    
+    // FASE 23: columna vencimiento
+    let venceCell;
+    if (u.dias_para_vencer === null || u.dias_para_vencer === undefined) {
+      venceCell = '<span style="color:#8899aa">—</span>';
+    } else if (u.dias_para_vencer >= 9000) {
+      venceCell = '<span style="color:#c3a55a" title="Suscripción vitalicia">♾️ Vitalicio</span>';
+    } else if (u.dias_para_vencer < 0) {
+      venceCell = '<span style="color:#e74c3c">❌ Vencido (' + Math.abs(u.dias_para_vencer) + 'd)</span>';
+    } else if (u.dias_para_vencer <= 7) {
+      venceCell = '<span style="color:#e74c3c">⚠️ ' + u.dias_para_vencer + 'd</span>';
+    } else if (u.dias_para_vencer <= 30) {
+      venceCell = '<span style="color:#f39c12">⏰ ' + u.dias_para_vencer + 'd</span>';
+    } else {
+      venceCell = '<span style="color:#2ecc71">✓ ' + u.dias_para_vencer + 'd</span>';
+    }
     
     // Columna Tarjeta: si NO tiene → botón invitar; si tiene → check
     let tarjetaCell;
@@ -5172,17 +5409,29 @@ function filtrarUsuarios(){
         title="Enviar mensaje invitando a crear tarjeta">📩 Invitar</button>`;
     }
     
-    // Acciones: botón Editar
+    // Acciones: botón Editar + Verificar + Renovar (FASE 23)
+    const verifBtn = u.verificado ?
+      `<button class="btn-desverif" onclick="toggleVerificado(${u.user_id}, false)" title="Quitar verificación">↺ Quitar verif.</button>` :
+      `<button class="btn-verificar" onclick="toggleVerificado(${u.user_id}, true)" title="Marcar como identidad verificada">✓ Verificar</button>`;
+    
+    const renovarBtn = `<button class="btn-renovar" onclick="renovarUsuario(${u.user_id}, '${escapeHtml(u.nombre||'').replace(/'/g,"\\'")}')"
+      title="Renovar suscripción gratis (silencioso)">🔄 Renovar</button>`;
+    
+    const anunciarBtn = `<button class="btn-anunciar" onclick="anunciarIdentidad(${u.user_id}, '${escapeHtml(u.nombre||'').replace(/'/g,"\\'")}')"
+      title="Anunciar identidad de este cofrade en el grupo">📢 Anunciar</button>`;
+    
     const acciones = `<button class="btn-editar" 
       onclick='abrirEditor(${JSON.stringify(u).replace(/'/g,"&#39;")})'
-      title="Editar nombre, username o profesión">✏️ Editar</button>`;
+      title="Editar nombre, username o profesión">✏️ Editar</button> ${verifBtn} ${renovarBtn} ${anunciarBtn}`;
     
     html += `<tr data-uid="${u.user_id}">
-      <td><strong>${escapeHtml(u.nombre||'(sin nombre)')}</strong></td>
+      <td><strong>${escapeHtml(u.nombre||'(sin nombre)')}</strong>${verifBadge}</td>
       <td>${username}</td>
+      <td>${userTelegram}</td>
       <td><code class="user-id-cell">${u.user_id||'—'}</code></td>
       <td>${profesion}</td>
       <td>${escapeHtml(fecha)}</td>
+      <td style="text-align:center">${venceCell}</td>
       <td style="text-align:right">${(u.mensajes||0).toLocaleString()}</td>
       <td style="text-align:center">${tarjetaCell}</td>
       <td>${estadoIcon}</td>
@@ -5192,6 +5441,108 @@ function filtrarUsuarios(){
   
   html += '</tbody></table></div>';
   cont.innerHTML = html;
+}
+
+// FASE 23: toggle verificación de identidad
+async function toggleVerificado(userId, verificar){
+  const accion = verificar ? "VERIFICAR" : "QUITAR la verificación de";
+  if(!confirm("¿Confirmar " + accion + " la identidad de este usuario?\\n\\nEsto se reflejará en el directorio público y en el comando /quien.")){
+    return;
+  }
+  try {
+    const r = await fetch('/api/usuarios/verificar', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({user_id: userId, verificar: verificar})
+    });
+    const data = await r.json();
+    if(data.ok){
+      cargarUsuarios();
+    } else {
+      alert("❌ Error: " + (data.error || 'desconocido'));
+    }
+  } catch(e) {
+    alert("❌ Error de red: " + e.message);
+  }
+}
+
+// FASE 23: renovar suscripción silenciosa
+async function renovarUsuario(userId, nombre){
+  const dias = prompt("¿Por cuántos días renovar la suscripción de " + nombre + "?\\n\\n(El usuario NO será notificado - renovación silenciosa)\\n\\nEjemplos: 30, 90, 180, 365", "90");
+  if(!dias || isNaN(parseInt(dias))) return;
+  
+  const diasNum = parseInt(dias);
+  if(diasNum < 1 || diasNum > 3650){
+    alert("❌ Días inválidos (1-3650)");
+    return;
+  }
+  
+  try {
+    const r = await fetch('/api/usuarios/renovar', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({user_id: userId, dias: diasNum, modo: 'individual'})
+    });
+    const data = await r.json();
+    if(data.ok){
+      alert("✅ Suscripción renovada\\n\\n" + nombre + " ahora vence el " + data.nueva_fecha + "\\n(" + diasNum + " días extendidos)");
+      cargarUsuarios();
+    } else {
+      alert("❌ Error: " + (data.error || 'desconocido'));
+    }
+  } catch(e) {
+    alert("❌ Error de red: " + e.message);
+  }
+}
+
+// FASE 23: anunciar identidad de un cofrade en el grupo Cofradía
+async function anunciarIdentidad(userId, nombre){
+  if(!confirm("¿Anunciar la identidad de " + nombre + " en el grupo Cofradía?\\n\\nSe enviará una tarjeta de identidad clickeable al grupo principal con su nombre oficial registrado.")){
+    return;
+  }
+  try {
+    const r = await fetch('/api/usuarios/anunciar', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({user_id: userId, modo: 'individual'})
+    });
+    const data = await r.json();
+    if(data.ok){
+      alert("📢 Tarjeta de identidad enviada al grupo Cofradía");
+    } else {
+      alert("❌ Error: " + (data.error || 'desconocido'));
+    }
+  } catch(e) {
+    alert("❌ Error de red: " + e.message);
+  }
+}
+
+// FASE 23: renovar a TODOS los que vencen pronto (botón global)
+async function renovarVencenPronto(){
+  const dias = prompt("Renovar a TODOS los usuarios cuya suscripción vence en próximos 30 días.\\n\\n¿Por cuántos días extenderlas? (recomendado: 90)", "90");
+  if(!dias || isNaN(parseInt(dias))) return;
+  
+  const diasNum = parseInt(dias);
+  if(!confirm("¿Confirmar renovación masiva por " + diasNum + " días?\\n\\nLos usuarios NO serán notificados.")){
+    return;
+  }
+  
+  try {
+    const r = await fetch('/api/usuarios/renovar', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+      body: JSON.stringify({modo: 'vence_pronto', dias: diasNum, dias_buffer: 30})
+    });
+    const data = await r.json();
+    if(data.ok){
+      alert("✅ Renovación masiva completada\\n\\nUsuarios renovados: " + data.renovados + "/" + data.total + "\\nNueva fecha vencimiento: " + data.nueva_fecha);
+      cargarUsuarios();
+    } else {
+      alert("❌ Error: " + (data.error || 'desconocido'));
+    }
+  } catch(e) {
+    alert("❌ Error de red: " + e.message);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -5398,7 +5749,22 @@ async function normalizarTodos(){
     if(data.error){
       alert('❌ Error: ' + data.error);
     } else {
-      alert("✅ Normalización completada\\n\\nRevisados: " + data.total_revisados + "\\nNombres actualizados: " + data.nombres_actualizados + "\\nUsernames actualizados: " + data.usernames_actualizados + "\\nErrores: " + (data.errores || 0));
+      const msg = "✅ Normalización completada\\n\\nRevisados: " + data.total_revisados + "\\nNombres actualizados: " + data.nombres_actualizados + "\\nUsernames actualizados: " + data.usernames_actualizados + "\\nErrores: " + (data.errores || 0);
+      
+      // FASE 23: ofrecer anunciar la actualización en el grupo Cofradía
+      if(data.nombres_actualizados > 0 || data.usernames_actualizados > 0){
+        if(confirm(msg + "\\n\\n¿Quieres ANUNCIAR en el grupo Cofradía que el directorio fue actualizado?\\n\\nEsto enviará un mensaje al grupo recordando los comandos /quien y /directorio.")){
+          fetch('/api/usuarios/anunciar', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
+            body: JSON.stringify({modo: 'todos_normalizados'})
+          }).then(r => r.json()).then(d => {
+            if(d.ok){ alert('📢 Anuncio enviado al grupo Cofradía'); }
+          }).catch(e => alert('Error anunciando: ' + e.message));
+        }
+      } else {
+        alert(msg);
+      }
       cargarUsuarios();
     }
   } catch(e) {
@@ -5447,6 +5813,22 @@ async function cargarDashboard(){
       kpiCard('Nuevos Mes', k.nuevos_30d||0, 'Últimos 30 días', '#f39c12') +
     '</div>';
     
+    // FASE 23: Sección adicional de KPIs de seguridad/identidad y vencimientos
+    const v = data.vencimientos || {};
+    const ret = data.retencion || {};
+    const verif = data.verificacion || {};
+    
+    kpiBox.innerHTML += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:14px">' +
+      kpiCard('✅ Verificados', verif.verificados||0, (verif.tasa_verificacion||0) + '% del total', '#2ecc71') +
+      kpiCard('⚪ Sin verificar', verif.no_verificados||0, 'Identidad pendiente', '#95a5a6') +
+      kpiCard('⚠️ Vencen 7d', v.vence_7d||0, 'Renovar urgente', '#e74c3c') +
+      kpiCard('⏰ Vencen 30d', v.vence_30d||0, 'Próximos a vencer', '#f39c12') +
+      kpiCard('✓ Vigentes', v.vigentes||0, 'Suscripción activa', '#3498db') +
+      kpiCard('♾️ Vitalicios', v.vitalicios||0, 'Sin vencimiento', '#c3a55a') +
+      kpiCard('🗣️ Han escrito', ret.usuarios_que_escribieron||0, ret.tasa_retencion + '% retención', '#9b59b6') +
+      kpiCard('🔇 Silenciosos', ret.silenciosos||0, 'Nunca escribieron', '#95a5a6') +
+    '</div>';
+    
     // ═══ GRÁFICOS ECHARTS ═══
     const chartCard = (titulo, idChart) =>
       '<div style="background:#0f1f3a;border:1px solid rgba(195,165,90,.2);border-radius:12px;padding:18px">' +
@@ -5460,7 +5842,9 @@ async function cargarDashboard(){
       chartCard('🎓 Distribución por profesión', 'chart-profesiones') +
       chartCard('📈 Crecimiento usuarios (12 meses)', 'chart-crecimiento') +
       chartCard('🕐 Mensajes por hora del día', 'chart-horas') +
-      chartCard('🏷️ Top categorías de mensajes', 'chart-categorias');
+      chartCard('🏷️ Top categorías de mensajes', 'chart-categorias') +
+      chartCard('📅 Distribución de Vencimientos', 'chart-vencimientos') +
+      chartCard('🏙️ Top Ciudades', 'chart-ciudades');
     
     // Esperar a que el DOM se actualice antes de inicializar charts
     setTimeout(() => {
@@ -5553,9 +5937,43 @@ async function cargarDashboard(){
         });
       }
       
+      // FASE 23: 7) Distribución de vencimientos (dona)
+      const v = data.vencimientos || {};
+      if(v.vence_7d !== undefined || v.vigentes !== undefined){
+        const c7 = echarts.init(document.getElementById('chart-vencimientos'));
+        c7.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'item'},
+          legend: {bottom: 0, textStyle: {color: '#8899aa', fontSize: 10}},
+          series: [{type: 'pie', radius: ['40%','65%'], center: ['50%','45%'],
+            data: [
+              {value: v.vencidos||0, name: 'Vencidos', itemStyle: {color: '#e74c3c'}},
+              {value: v.vence_7d||0, name: 'Vence 7d', itemStyle: {color: '#f39c12'}},
+              {value: v.vence_30d||0, name: 'Vence 30d', itemStyle: {color: '#3498db'}},
+              {value: v.vigentes||0, name: 'Vigentes', itemStyle: {color: '#2ecc71'}},
+              {value: v.vitalicios||0, name: 'Vitalicios', itemStyle: {color: '#c3a55a'}},
+            ].filter(d => d.value > 0),
+            label: {color: '#e0e6ed', fontSize: 10},
+            itemStyle: {borderColor: '#0f1f3a', borderWidth: 2}}]
+        });
+      }
+      
+      // FASE 23: 8) Top ciudades (barras horizontales)
+      if(data.top_ciudades && data.top_ciudades.length > 0){
+        const c8 = echarts.init(document.getElementById('chart-ciudades'));
+        c8.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          yAxis: {type: 'category', data: data.top_ciudades.map(c => c.ciudad.slice(0,25)).reverse(), axisLabel: {color: '#8899aa', fontSize: 11}},
+          grid: {left: 130, right: 20, top: 10, bottom: 30},
+          series: [{data: data.top_ciudades.map(c => c.cnt).reverse(), type: 'bar', itemStyle: {color: '#1abc9c', borderRadius: [0,4,4,0]}}]
+        });
+      }
+      
       // Resize automático
       window.addEventListener('resize', () => {
-        ['chart-mensajes-dia','chart-top-users','chart-profesiones','chart-crecimiento','chart-horas','chart-categorias'].forEach(id => {
+        ['chart-mensajes-dia','chart-top-users','chart-profesiones','chart-crecimiento','chart-horas','chart-categorias','chart-vencimientos','chart-ciudades'].forEach(id => {
           const el = document.getElementById(id);
           if(el){
             const inst = echarts.getInstanceByDom(el);
@@ -6654,6 +7072,571 @@ async def activar_codigo_comando(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ==================== COMANDOS DE BÚSQUEDA ====================
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 23: SISTEMA DE IDENTIDAD VISIBLE
+# Permite identificar a cualquier usuario del grupo aunque su username
+# en Telegram esté vacío o no represente su nombre real.
+# ════════════════════════════════════════════════════════════════════════
+
+# Cache simple para no hacer query a BD en cada mencion (TTL 60s)
+_identidad_cache = {}
+_identidad_cache_ttl = {}
+
+def mencion_oficial(user_id: int, fallback_nombre: str = '') -> str:
+    """FASE 23: Genera una mención HTML con el nombre OFICIAL del usuario.
+    
+    Usa el nombre completo registrado en BD (después de normalización) en lugar
+    del first_name que cada usuario configura en su perfil de Telegram.
+    
+    Esto permite que cuando el bot menciona a alguien, todos vean siempre la
+    identidad real registrada (no el alias que el usuario haya elegido en TG).
+    
+    Retorna: '<a href="tg://user?id=123456">Juan Pérez González</a>'
+    
+    Args:
+        user_id: ID Telegram del usuario
+        fallback_nombre: nombre a usar si BD no tiene datos
+    """
+    if not user_id:
+        return fallback_nombre or '(sin id)'
+    
+    # Cache simple
+    import time
+    ahora = time.time()
+    if user_id in _identidad_cache:
+        if ahora - _identidad_cache_ttl.get(user_id, 0) < 60:
+            cached = _identidad_cache[user_id]
+            return f'<a href="tg://user?id={user_id}">{_escape_html(cached)}</a>'
+    
+    # Buscar en BD
+    try:
+        data = _obtener_identidad_usuario(user_id)
+        if data and data.get('nombre_oficial'):
+            nombre = data['nombre_oficial']
+            _identidad_cache[user_id] = nombre
+            _identidad_cache_ttl[user_id] = ahora
+            return f'<a href="tg://user?id={user_id}">{_escape_html(nombre)}</a>'
+    except Exception:
+        pass
+    
+    # Fallback
+    nombre = fallback_nombre or f'Usuario {user_id}'
+    return f'<a href="tg://user?id={user_id}">{_escape_html(nombre)}</a>'
+
+
+def _obtener_identidad_usuario(user_id: int) -> dict:
+    """Obtiene la identidad completa de un usuario desde la BD.
+    
+    Combina datos de suscripciones + tarjetas_profesional para devolver
+    la "tarjeta de identidad" oficial registrada en el sistema.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+        c = conn.cursor()
+        
+        # Query combinada: suscripciones + tarjeta + onboarding (nombre + apellido)
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    SELECT s.user_id, s.first_name, s.last_name, s.username, s.es_admin,
+                           COALESCE(s.verificado_admin, FALSE) as verificado,
+                           COALESCE(t.nombre_completo, '') as nombre_tarj,
+                           COALESCE(t.profesion, '') as profesion,
+                           COALESCE(t.empresa, '') as empresa,
+                           COALESCE(t.nro_kdt, '') as nro_kdt,
+                           COALESCE(nm.nombre, '') as nombre_onb,
+                           COALESCE(nm.apellido, '') as apellido_onb
+                    FROM suscripciones s
+                    LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                    LEFT JOIN (
+                        SELECT user_id, MAX(nombre) as nombre, MAX(apellido) as apellido
+                        FROM nuevos_miembros
+                        WHERE nombre IS NOT NULL AND nombre != ''
+                        GROUP BY user_id
+                    ) nm ON s.user_id = nm.user_id
+                    WHERE s.user_id = %s LIMIT 1
+                """, (user_id,))
+            else:
+                c.execute("""
+                    SELECT s.user_id, s.first_name, s.last_name, s.username, s.es_admin,
+                           COALESCE(s.verificado_admin, 0) as verificado,
+                           COALESCE(t.nombre_completo, '') as nombre_tarj,
+                           COALESCE(t.profesion, '') as profesion,
+                           COALESCE(t.empresa, '') as empresa,
+                           COALESCE(t.nro_kdt, '') as nro_kdt,
+                           '' as nombre_onb, '' as apellido_onb
+                    FROM suscripciones s
+                    LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                    WHERE s.user_id = ? LIMIT 1
+                """, (user_id,))
+            row = c.fetchone()
+        except Exception as _e_q:
+            logger.debug(f"Query identidad fallback: {_e_q}")
+            try: conn.rollback()
+            except: pass
+            if DATABASE_URL:
+                c.execute("SELECT user_id, first_name, last_name, username, es_admin FROM suscripciones WHERE user_id = %s", (user_id,))
+            else:
+                c.execute("SELECT user_id, first_name, last_name, username, es_admin FROM suscripciones WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+        
+        if not row:
+            conn.close()
+            return {}
+        
+        if isinstance(row, tuple):
+            data = {
+                'user_id': row[0],
+                'first_name': row[1] or '',
+                'last_name': row[2] or '',
+                'username': row[3] or '',
+                'es_admin': bool(row[4]) if len(row) > 4 else False,
+                'verificado': bool(row[5]) if len(row) > 5 else False,
+                'nombre_tarj': row[6] if len(row) > 6 else '',
+                'profesion': row[7] if len(row) > 7 else '',
+                'empresa': row[8] if len(row) > 8 else '',
+                'nro_kdt': row[9] if len(row) > 9 else '',
+                'nombre_onb': row[10] if len(row) > 10 else '',
+                'apellido_onb': row[11] if len(row) > 11 else '',
+            }
+        else:
+            data = {
+                'user_id': row['user_id'],
+                'first_name': row['first_name'] or '',
+                'last_name': row.get('last_name', '') or '' if hasattr(row, 'get') else (row['last_name'] or ''),
+                'username': row['username'] or '',
+                'es_admin': bool(row['es_admin']),
+                'verificado': bool(row.get('verificado', 0)) if hasattr(row, 'get') else bool(row['verificado']),
+                'nombre_tarj': row['nombre_tarj'] or '' if 'nombre_tarj' in row.keys() else '',
+                'profesion': row['profesion'] or '' if 'profesion' in row.keys() else '',
+                'empresa': row['empresa'] or '' if 'empresa' in row.keys() else '',
+                'nro_kdt': row['nro_kdt'] or '' if 'nro_kdt' in row.keys() else '',
+                'nombre_onb': row['nombre_onb'] or '' if 'nombre_onb' in row.keys() else '',
+                'apellido_onb': row['apellido_onb'] or '' if 'apellido_onb' in row.keys() else '',
+            }
+        
+        # Determinar el "mejor nombre" (formato priorizado)
+        candidatos = []
+        if data['nombre_onb'] and data['apellido_onb']:
+            candidatos.append(f"{data['nombre_onb']} {data['apellido_onb']}".strip())
+        if data['nombre_tarj'] and len(data['nombre_tarj'].split()) >= 2:
+            candidatos.append(data['nombre_tarj'])
+        if data['first_name'] and data['last_name']:
+            candidatos.append(f"{data['first_name']} {data['last_name']}".strip())
+        if data['first_name']:
+            candidatos.append(data['first_name'])
+        
+        data['nombre_oficial'] = next((c for c in candidatos if len(c.split()) >= 2), 
+                                       candidatos[0] if candidatos else '(sin identificar)')
+        
+        conn.close()
+        return data
+    except Exception as e:
+        logger.warning(f"Error obteniendo identidad de {user_id}: {e}")
+        return {}
+
+
+def _formatear_tarjeta_identidad(data: dict) -> str:
+    """Formatea la tarjeta de identidad para mostrar en el grupo."""
+    if not data:
+        return "❓ <b>Usuario no registrado</b> en la BD del bot."
+    
+    # Mención inline con nombre oficial (link clickeable)
+    nombre_link = f'<a href="tg://user?id={data["user_id"]}">{data["nombre_oficial"]}</a>'
+    
+    # Badges
+    badges = []
+    if data.get('verificado'):
+        badges.append("✅ Verificado")
+    if data.get('es_admin'):
+        badges.append("👑 Admin")
+    if data.get('nro_kdt'):
+        badges.append(f"🎖️ KDT {data['nro_kdt']}")
+    
+    badges_str = " · ".join(badges) if badges else ""
+    
+    # Construcción del mensaje
+    lineas = [f"📇 <b>Identidad oficial:</b>"]
+    lineas.append(f"   👤 {nombre_link}")
+    
+    if data.get('username'):
+        lineas.append(f"   🔗 @{data['username']}")
+    else:
+        lineas.append(f"   🔗 <i>(sin username de Telegram)</i>")
+    
+    lineas.append(f"   🆔 ID: <code>{data['user_id']}</code>")
+    
+    if data.get('profesion'):
+        lineas.append(f"   💼 {data['profesion']}")
+    
+    if data.get('empresa'):
+        lineas.append(f"   🏢 {data['empresa']}")
+    
+    if badges_str:
+        lineas.append(f"\n   {badges_str}")
+    
+    if not data.get('verificado') and not data.get('es_admin'):
+        lineas.append(f"\n   ⚠️ <i>Identidad NO verificada por admin</i>")
+    
+    return "\n".join(lineas)
+
+
+@requiere_suscripcion
+async def quien_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /quien — identifica a un usuario.
+    
+    Modos de uso:
+      - /quien (sin args, sin reply) → identifica al que ejecuta
+      - /quien (haciendo reply a un mensaje) → identifica al autor de ese mensaje
+      - /quien @username → busca por username
+      - /quien <user_id> → busca por ID de Telegram
+    """
+    target_user_id = None
+    target_username = None
+    
+    # Modo 1: reply a un mensaje
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_user_id = update.message.reply_to_message.from_user.id
+    
+    # Modo 2: argumento (username o ID)
+    elif context.args:
+        arg = context.args[0].strip().lstrip('@')
+        if arg.isdigit():
+            target_user_id = int(arg)
+        else:
+            target_username = arg
+            # Buscar el user_id por username
+            try:
+                conn = get_db_connection()
+                if conn:
+                    c = conn.cursor()
+                    if DATABASE_URL:
+                        c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(%s) LIMIT 1", (target_username,))
+                    else:
+                        c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(?) LIMIT 1", (target_username,))
+                    row = c.fetchone()
+                    conn.close()
+                    if row:
+                        target_user_id = row[0] if isinstance(row, tuple) else row['user_id']
+            except Exception as e:
+                logger.debug(f"Error buscando username: {e}")
+    
+    # Modo 3: sin args, identificar al que ejecuta
+    else:
+        target_user_id = update.effective_user.id
+    
+    if not target_user_id:
+        await update.message.reply_text(
+            "❌ No pude identificar al usuario.\n\n"
+            "Modos de uso:\n"
+            "• <code>/quien</code> (responde a un mensaje)\n"
+            "• <code>/quien @username</code>\n"
+            "• <code>/quien 123456789</code> (ID)\n"
+            "• <code>/quien</code> (sin args = te identifica a ti)",
+            parse_mode='HTML'
+        )
+        return
+    
+    data = _obtener_identidad_usuario(target_user_id)
+    if not data:
+        await update.message.reply_text(
+            f"❓ Usuario <code>{target_user_id}</code> no está registrado en el sistema.\n\n"
+            "Si crees que debería estar, contacta al admin para verificar.",
+            parse_mode='HTML'
+        )
+        return
+    
+    tarjeta = _formatear_tarjeta_identidad(data)
+    await update.message.reply_text(tarjeta, parse_mode='HTML', disable_web_page_preview=True)
+
+
+@requiere_suscripcion
+async def directorio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /directorio — muestra lista de TODOS los miembros del grupo
+    con sus identidades oficiales (nombre real + KDT + verificación).
+    
+    Útil para que cualquier miembro pueda saber quién es quién en el grupo.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ No hay conexión a BD.")
+            return
+        c = conn.cursor()
+        
+        # Query: todos los usuarios + datos clave para identidad
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    SELECT s.user_id, s.first_name, s.username,
+                           COALESCE(s.verificado_admin, FALSE) as verificado,
+                           s.es_admin,
+                           COALESCE(t.nombre_completo, '') as nombre_tarj,
+                           COALESCE(t.profesion, '') as profesion,
+                           COALESCE(t.nro_kdt, '') as nro_kdt
+                    FROM suscripciones s
+                    LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                    WHERE s.estado = 'activo' OR s.estado IS NULL OR s.estado = ''
+                    ORDER BY 
+                        s.es_admin DESC,
+                        COALESCE(s.verificado_admin, FALSE) DESC,
+                        s.first_name ASC
+                """)
+            else:
+                c.execute("""
+                    SELECT s.user_id, s.first_name, s.username,
+                           COALESCE(s.verificado_admin, 0) as verificado,
+                           s.es_admin,
+                           COALESCE(t.nombre_completo, '') as nombre_tarj,
+                           COALESCE(t.profesion, '') as profesion,
+                           COALESCE(t.nro_kdt, '') as nro_kdt
+                    FROM suscripciones s
+                    LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
+                    WHERE s.estado = 'activo' OR s.estado IS NULL OR s.estado = ''
+                    ORDER BY s.es_admin DESC, s.first_name ASC
+                """)
+            rows = c.fetchall()
+        except Exception as e_q:
+            logger.warning(f"Query directorio falló: {e_q}")
+            try: conn.rollback()
+            except: pass
+            if DATABASE_URL:
+                c.execute("SELECT user_id, first_name, username, FALSE, es_admin, '', '', '' FROM suscripciones LIMIT 300")
+            else:
+                c.execute("SELECT user_id, first_name, username, 0, es_admin, '', '', '' FROM suscripciones LIMIT 300")
+            rows = c.fetchall()
+        conn.close()
+        
+        if not rows:
+            await update.message.reply_text("📋 No hay miembros registrados todavía.")
+            return
+        
+        # Construir mensajes paginados (Telegram límite ~4096 chars por mensaje)
+        # Cada miembro toma aprox 80-120 chars
+        lineas = []
+        lineas.append("📇 <b>DIRECTORIO DE COFRADÍA</b>")
+        lineas.append(f"<i>Total: {len(rows)} miembros · Actualizado: {_ahora_chile().strftime('%d/%m/%Y %H:%M')}</i>")
+        lineas.append("")
+        lineas.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lineas.append("")
+        
+        contador_admin = 0
+        contador_verif = 0
+        contador_otros = 0
+        
+        for r in rows:
+            try:
+                if isinstance(r, tuple):
+                    uid, fname, uname, verif, admin_flag, nombre_tarj, profesion, nro_kdt = r
+                else:
+                    uid = r['user_id']
+                    fname = r['first_name'] or ''
+                    uname = r['username'] or ''
+                    verif = bool(r['verificado'])
+                    admin_flag = bool(r['es_admin'])
+                    nombre_tarj = r['nombre_tarj'] or ''
+                    profesion = r['profesion'] or ''
+                    nro_kdt = r['nro_kdt'] or ''
+                
+                # Determinar mejor nombre
+                nombre_show = nombre_tarj if nombre_tarj and len(nombre_tarj.split()) >= 2 else (fname or '(sin nombre)')
+                
+                # Badge de identificación
+                if admin_flag:
+                    badge = "👑"
+                    contador_admin += 1
+                elif verif:
+                    badge = "✅"
+                    contador_verif += 1
+                else:
+                    badge = "⚪"
+                    contador_otros += 1
+                
+                # KDT si tiene
+                kdt_str = f" · KDT {nro_kdt}" if nro_kdt else ""
+                
+                # Username
+                uname_str = f" (@{uname})" if uname else ""
+                
+                # Mención clickeable + datos
+                linea = f'{badge} <a href="tg://user?id={uid}"><b>{_escape_html(nombre_show)}</b></a>{uname_str}{kdt_str}'
+                if profesion:
+                    linea += f"\n   <i>{_escape_html(profesion[:60])}</i>"
+                
+                lineas.append(linea)
+            except Exception as e_row:
+                logger.debug(f"Error procesando fila directorio: {e_row}")
+                continue
+        
+        # Footer con leyenda
+        lineas.append("")
+        lineas.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lineas.append(f"👑 Admin: {contador_admin} · ✅ Verificados: {contador_verif} · ⚪ Pendientes: {contador_otros}")
+        lineas.append("")
+        lineas.append("💡 Usa <code>/quien</code> respondiendo a cualquier mensaje para identificar al autor.")
+        
+        # Enviar paginado si excede límite Telegram (4096 chars)
+        mensaje_completo = "\n".join(lineas)
+        if len(mensaje_completo) <= 4000:
+            await update.message.reply_text(mensaje_completo, parse_mode='HTML', disable_web_page_preview=True)
+        else:
+            # Dividir en chunks de máx 3500 chars cada uno
+            chunks = []
+            chunk_actual = []
+            chunk_size = 0
+            for ln in lineas:
+                ln_size = len(ln) + 1
+                if chunk_size + ln_size > 3500 and chunk_actual:
+                    chunks.append("\n".join(chunk_actual))
+                    chunk_actual = [ln]
+                    chunk_size = ln_size
+                else:
+                    chunk_actual.append(ln)
+                    chunk_size += ln_size
+            if chunk_actual:
+                chunks.append("\n".join(chunk_actual))
+            
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    await update.message.reply_text(chunk, parse_mode='HTML', disable_web_page_preview=True)
+                else:
+                    await update.message.reply_text(f"<i>(continuación {i+1}/{len(chunks)})</i>\n\n{chunk}", parse_mode='HTML', disable_web_page_preview=True)
+                await asyncio.sleep(0.3)  # evitar rate limit
+    
+    except Exception as e:
+        logger.warning(f"Error /directorio: {e}")
+        await update.message.reply_text(f"❌ Error generando directorio: {str(e)[:200]}")
+
+
+def _escape_html(texto: str) -> str:
+    """Escape básico para HTML en Telegram."""
+    if not texto:
+        return ''
+    return str(texto).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+@requiere_suscripcion
+async def verificar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /verificar — Solo admins. Marca a un usuario como 'identidad verificada'.
+    
+    Uso:
+      /verificar (responde a mensaje del usuario)
+      /verificar @username
+      /verificar <user_id>
+    """
+    user = update.effective_user
+    
+    # Chequeo de admin: owner principal o managers configurados
+    es_admin_real = False
+    try:
+        owner_id = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
+        if user.id == owner_id:
+            es_admin_real = True
+    except Exception:
+        pass
+    
+    if not es_admin_real:
+        # Verificar también via MANAGER_TELEGRAM_IDS env
+        try:
+            manager_ids_env = os.getenv('MANAGER_TELEGRAM_IDS', '').strip()
+            if manager_ids_env:
+                manager_ids = [int(x.strip()) for x in manager_ids_env.split(',') if x.strip().isdigit()]
+                if user.id in manager_ids:
+                    es_admin_real = True
+        except Exception:
+            pass
+    
+    if not es_admin_real:
+        # Verificar si es admin en BD
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("SELECT es_admin FROM suscripciones WHERE user_id = %s", (user.id,))
+                else:
+                    c.execute("SELECT es_admin FROM suscripciones WHERE user_id = ?", (user.id,))
+                row = c.fetchone()
+                conn.close()
+                if row and (row[0] if isinstance(row, tuple) else row['es_admin']):
+                    es_admin_real = True
+        except Exception:
+            pass
+    
+    if not es_admin_real:
+        await update.message.reply_text("❌ Solo administradores pueden verificar identidades.")
+        return
+    
+    target_user_id = None
+    
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_user_id = update.message.reply_to_message.from_user.id
+    elif context.args:
+        arg = context.args[0].strip().lstrip('@')
+        if arg.isdigit():
+            target_user_id = int(arg)
+        else:
+            try:
+                conn = get_db_connection()
+                if conn:
+                    c = conn.cursor()
+                    if DATABASE_URL:
+                        c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(%s) LIMIT 1", (arg,))
+                    else:
+                        c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(?) LIMIT 1", (arg,))
+                    row = c.fetchone()
+                    conn.close()
+                    if row:
+                        target_user_id = row[0] if isinstance(row, tuple) else row['user_id']
+            except Exception:
+                pass
+    
+    if not target_user_id:
+        await update.message.reply_text(
+            "❌ No pude identificar al usuario.\n"
+            "Uso: /verificar (responder a mensaje), /verificar @user, o /verificar 123456",
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Sin conexión a BD.")
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("UPDATE suscripciones SET verificado_admin = TRUE, fecha_verificacion = CURRENT_TIMESTAMP WHERE user_id = %s", (target_user_id,))
+        else:
+            c.execute("UPDATE suscripciones SET verificado_admin = 1, fecha_verificacion = CURRENT_TIMESTAMP WHERE user_id = ?", (target_user_id,))
+        conn.commit()
+        conn.close()
+        
+        data = _obtener_identidad_usuario(target_user_id)
+        nombre = data.get('nombre_oficial', f'ID {target_user_id}')
+        await update.message.reply_text(
+            f"✅ <b>Identidad verificada</b>\n\n"
+            f"<a href=\"tg://user?id={target_user_id}\">{_escape_html(nombre)}</a> ahora aparece marcado como verificado en el directorio.",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.warning(f"Error /verificar: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
+def _es_owner(user_id):
+    """Helper para chequear si es el owner principal."""
+    try:
+        owner = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
+        return user_id == owner
+    except Exception:
+        return False
+
 
 @requiere_suscripcion
 async def buscar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9474,6 +10457,177 @@ async def vencimientos_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(mensaje)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /renovar — Renueva suscripción a uno o varios usuarios SIN COSTO.
+    
+    Solo el OWNER puede usar este comando. El usuario renovado NO recibe notificación
+    (silencioso) — Germán pidió explícitamente que sea sin que se enteren.
+    
+    Modos de uso:
+      /renovar 30                    → renueva a TODOS los que vencen en próximos 30 días
+      /renovar 1612694642            → renueva a un usuario específico (90 días por defecto)
+      /renovar 1612694642 180        → renueva a usuario específico por 180 días
+      /renovar @username             → renueva por username
+      /renovar todos 365             → renueva a TODOS los activos por 365 días
+      /renovar vence_pronto 90       → renueva a los que vencen en próximos 30d, por 90d
+    """
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador principal puede renovar suscripciones.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📋 <b>Comando /renovar</b>\n\n"
+            "<b>Modos disponibles:</b>\n"
+            "• <code>/renovar 1612694642</code> — Renueva 1 usuario por 90 días\n"
+            "• <code>/renovar 1612694642 180</code> — Renueva 1 usuario por 180 días\n"
+            "• <code>/renovar @username 90</code> — Renueva por username\n"
+            "• <code>/renovar vence_pronto 90</code> — Renueva a los que vencen en 30 días\n"
+            "• <code>/renovar todos 365</code> — Renueva a TODOS los activos\n\n"
+            "💡 La renovación es <b>silenciosa</b>: el usuario NO recibe notificación.",
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        from datetime import datetime, timedelta
+        
+        # Parsear argumentos
+        primer_arg = context.args[0].strip().lstrip('@')
+        dias_renovar = 90  # default
+        target_user_ids = []
+        modo_descripcion = ""
+        
+        if primer_arg.lower() == 'todos':
+            # Renovar a todos los activos
+            if len(context.args) >= 2:
+                try:
+                    dias_renovar = int(context.args[1])
+                except ValueError:
+                    pass
+            
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT user_id FROM suscripciones WHERE estado = 'activo' OR estado IS NULL")
+            for row in c.fetchall():
+                target_user_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
+            conn.close()
+            modo_descripcion = f"todos los activos ({len(target_user_ids)} usuarios)"
+        
+        elif primer_arg.lower() == 'vence_pronto':
+            # Renovar a los que vencen en próximos 30 días
+            dias_buffer = 30
+            if len(context.args) >= 2:
+                try:
+                    dias_renovar = int(context.args[1])
+                except ValueError:
+                    pass
+            
+            conn = get_db_connection()
+            c = conn.cursor()
+            try:
+                if DATABASE_URL:
+                    c.execute("""
+                        SELECT user_id FROM suscripciones 
+                        WHERE fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '%s days'
+                        AND fecha_expiracion > CURRENT_TIMESTAMP
+                        AND fecha_expiracion < '2099-01-01'
+                    """ % dias_buffer)
+                else:
+                    fecha_limite = (datetime.now() + timedelta(days=dias_buffer)).isoformat()
+                    c.execute("""
+                        SELECT user_id FROM suscripciones 
+                        WHERE fecha_expiracion < ? AND fecha_expiracion > datetime('now')
+                        AND fecha_expiracion < '2099-01-01'
+                    """, (fecha_limite,))
+            except Exception as _e_q:
+                logger.warning(f"Query vence_pronto falló: {_e_q}")
+                c.execute("SELECT user_id FROM suscripciones WHERE estado = 'activo' OR estado IS NULL")
+            
+            for row in c.fetchall():
+                target_user_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
+            conn.close()
+            modo_descripcion = f"{len(target_user_ids)} usuarios que vencían pronto"
+        
+        elif primer_arg.isdigit():
+            # User ID específico
+            target_user_ids = [int(primer_arg)]
+            if len(context.args) >= 2:
+                try:
+                    dias_renovar = int(context.args[1])
+                except ValueError:
+                    pass
+            modo_descripcion = "1 usuario por ID"
+        
+        else:
+            # Username
+            conn = get_db_connection()
+            c = conn.cursor()
+            try:
+                if DATABASE_URL:
+                    c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(%s) LIMIT 1", (primer_arg,))
+                else:
+                    c.execute("SELECT user_id FROM suscripciones WHERE LOWER(username) = LOWER(?) LIMIT 1", (primer_arg,))
+                row = c.fetchone()
+                if row:
+                    target_user_ids = [row[0] if isinstance(row, tuple) else row['user_id']]
+            except Exception:
+                pass
+            conn.close()
+            
+            if len(context.args) >= 2:
+                try:
+                    dias_renovar = int(context.args[1])
+                except ValueError:
+                    pass
+            modo_descripcion = f"usuario @{primer_arg}"
+        
+        if not target_user_ids:
+            await update.message.reply_text("❌ No se encontraron usuarios para renovar.")
+            return
+        
+        if dias_renovar < 1 or dias_renovar > 3650:
+            await update.message.reply_text("❌ Días de renovación inválido. Usa entre 1 y 3650.")
+            return
+        
+        # Aplicar renovación silenciosa
+        conn = get_db_connection()
+        c = conn.cursor()
+        renovados = 0
+        nueva_fecha = datetime.now() + timedelta(days=dias_renovar)
+        
+        for uid in target_user_ids:
+            try:
+                if DATABASE_URL:
+                    c.execute("""UPDATE suscripciones 
+                                 SET fecha_expiracion = %s, estado = 'activo'
+                                 WHERE user_id = %s""", (nueva_fecha, uid))
+                else:
+                    c.execute("""UPDATE suscripciones 
+                                 SET fecha_expiracion = ?, estado = 'activo'
+                                 WHERE user_id = ?""", (nueva_fecha.isoformat(), uid))
+                if c.rowcount > 0:
+                    renovados += 1
+            except Exception as _e_r:
+                logger.debug(f"Error renovando {uid}: {_e_r}")
+        
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ <b>Renovación silenciosa completada</b>\n\n"
+            f"🎯 Modo: {modo_descripcion}\n"
+            f"✅ Renovados: <b>{renovados}/{len(target_user_ids)}</b>\n"
+            f"📅 Nueva fecha de vencimiento: <b>{nueva_fecha.strftime('%d/%m/%Y')}</b>\n"
+            f"⏱️ Extensión: {dias_renovar} días\n\n"
+            f"🔇 Los usuarios <b>NO fueron notificados</b>.",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.warning(f"Error /renovar: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:300]}")
 
 
 async def vencimientos_mes_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12452,6 +13606,22 @@ def _features_default():
     }
 
 
+def _calcular_dias_vencer(fecha_expiracion):
+    """Devuelve días hasta vencimiento. None si vence después de 2099 (vitalicio)."""
+    if not fecha_expiracion:
+        return None
+    try:
+        from datetime import datetime
+        if isinstance(fecha_expiracion, str):
+            fecha_expiracion = datetime.fromisoformat(fecha_expiracion[:19])
+        if fecha_expiracion.year >= 2099:
+            return 9999  # vitalicio
+        delta = fecha_expiracion - datetime.now()
+        return delta.days
+    except Exception:
+        return None
+
+
 def listar_usuarios_activos():
     """FASE 20: Devuelve lista completa de usuarios registrados con datos enriquecidos.
     
@@ -12492,7 +13662,10 @@ def listar_usuarios_activos():
                 COALESCE(t.email, '') as email,
                 COALESCE(t.ciudad, '') as ciudad,
                 COALESCE(t.linkedin, '') as linkedin,
-                COALESCE(t.nro_kdt, '') as nro_kdt
+                COALESCE(t.nro_kdt, '') as nro_kdt,
+                COALESCE(s.verificado_admin, FALSE) as verificado_admin,
+                COALESCE(s.last_name, '') as last_name_real,
+                s.fecha_expiracion
             FROM suscripciones s
             LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
             ORDER BY mensajes_count DESC, s.fecha_registro DESC
@@ -12503,9 +13676,26 @@ def listar_usuarios_activos():
         for r in rows:
             try:
                 if isinstance(r, tuple):
-                    (uid, fname, uname, freg, estado, admin_flag, prof,
-                     nombre_full, tiene_tarj, msg_count, ultimo_msg,
-                     empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt) = r
+                    # FASE 23: incluir verificado_admin + last_name + fecha_expiracion
+                    if len(r) >= 21:
+                        (uid, fname, uname, freg, estado, admin_flag, prof,
+                         nombre_full, tiene_tarj, msg_count, ultimo_msg,
+                         empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt,
+                         verificado_admin, last_name_real, fecha_expiracion) = r
+                    elif len(r) >= 19:
+                        (uid, fname, uname, freg, estado, admin_flag, prof,
+                         nombre_full, tiene_tarj, msg_count, ultimo_msg,
+                         empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt,
+                         verificado_admin) = r
+                        last_name_real = ''
+                        fecha_expiracion = None
+                    else:
+                        (uid, fname, uname, freg, estado, admin_flag, prof,
+                         nombre_full, tiene_tarj, msg_count, ultimo_msg,
+                         empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt) = r
+                        verificado_admin = False
+                        last_name_real = ''
+                        fecha_expiracion = None
                 else:
                     uid = r['user_id']
                     fname = r['first_name']
@@ -12525,6 +13715,18 @@ def listar_usuarios_activos():
                     ciudad = r['ciudad']
                     linkedin = r['linkedin']
                     nro_kdt = r['nro_kdt']
+                    try:
+                        verificado_admin = bool(r['verificado_admin'])
+                    except (KeyError, TypeError):
+                        verificado_admin = False
+                    try:
+                        last_name_real = r['last_name_real'] or ''
+                    except (KeyError, TypeError):
+                        last_name_real = ''
+                    try:
+                        fecha_expiracion = r['fecha_expiracion']
+                    except (KeyError, TypeError):
+                        fecha_expiracion = None
                 
                 # Convertir timestamp a iso + epoch
                 fecha_alta_str = str(freg)[:19] if freg else '—'
@@ -12561,6 +13763,10 @@ def listar_usuarios_activos():
                     'ciudad': ciudad or '',
                     'linkedin': linkedin or '',
                     'nro_kdt': nro_kdt or '',
+                    'verificado': bool(verificado_admin),
+                    'last_name_real': last_name_real or '',
+                    'fecha_vencimiento': str(fecha_expiracion)[:10] if fecha_expiracion else '',
+                    'dias_para_vencer': _calcular_dias_vencer(fecha_expiracion),
                 })
             except Exception as _e_row:
                 logger.debug(f"Error procesando usuario: {_e_row}")
@@ -12692,7 +13898,11 @@ def editar_usuario_admin(user_id, campos):
         campos_tarjeta = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt']
         cambios_tarjeta = {k: v for k, v in campos.items() if k in campos_tarjeta}
         
-        if cambios_tarjeta:
+        # FASE 23 FIX: solo procesar si hay AL MENOS UN campo con valor real
+        # (evita crear tarjetas vacías que cuentan pero no tienen datos)
+        cambios_tarjeta_con_valor = {k: v for k, v in cambios_tarjeta.items() if v and str(v).strip()}
+        
+        if cambios_tarjeta:  # hay campos en el body
             # Verificar si tiene tarjeta primero
             c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
             tiene_tarjeta = c.fetchone() is not None
@@ -12708,7 +13918,7 @@ def editar_usuario_admin(user_id, campos):
                         return False, "nro_kdt inválido. Debe ser un número entre 1 y 999."
             
             if tiene_tarjeta:
-                # Update con campos dinámicos
+                # Update con campos dinámicos (incluso vacíos para limpiar)
                 sets_tarj = []
                 params_tarj = []
                 for key, val in cambios_tarjeta.items():
@@ -12719,14 +13929,15 @@ def editar_usuario_admin(user_id, campos):
                 params_tarj.append(user_id)
                 sql_tarj = f"UPDATE tarjetas_profesional SET {', '.join(sets_tarj)} WHERE user_id = %s"
                 c.execute(sql_tarj, params_tarj)
-            else:
-                # Crear registro nuevo con los campos provistos
+            elif cambios_tarjeta_con_valor:
+                # FASE 23 FIX: solo crear tarjeta nueva si AL MENOS UN campo tiene valor real
+                # Esto evita tarjetas fantasma (con todos los campos vacíos)
                 cols = ['user_id', 'nombre_completo']
                 vals = [user_id, campos.get('nombre', '')]
-                for key, val in cambios_tarjeta.items():
+                for key, val in cambios_tarjeta_con_valor.items():
                     cols.append(key)
                     vals.append(val)
-                    cambios_aplicados.append(f"{key.capitalize()}: {val if val else '(vacío)'}")
+                    cambios_aplicados.append(f"{key.capitalize()}: {val}")
                 placeholders = ', '.join(['%s'] * len(cols))
                 cols_str = ', '.join(cols)
                 sql_insert = f"INSERT INTO tarjetas_profesional ({cols_str}) VALUES ({placeholders})"
@@ -12943,6 +14154,96 @@ def normalizar_nombres_usernames_bd():
         return {**stats, 'error': str(e)}
 
 
+async def _anunciar_identidad_grupo(user_id_o_lista, modo='individual'):
+    """FASE 23: Anuncia la identidad de un usuario (o lista) en el grupo Cofradía.
+    
+    Esto crea un mensaje "tarjeta de identidad" en el grupo principal usando
+    mencion HTML clickeable con el nombre OFICIAL registrado en BD.
+    
+    Args:
+        user_id_o_lista: ID Telegram individual o lista de IDs
+        modo: 'individual' o 'todos_normalizados'
+    """
+    try:
+        from telegram import Bot
+        bot_instance = Bot(token=TOKEN_BOT)
+        
+        if not COFRADIA_GROUP_ID:
+            logger.warning("COFRADIA_GROUP_ID no configurado - no se puede anunciar")
+            return
+        
+        if modo == 'individual':
+            # Anuncio de UNA persona
+            data = _obtener_identidad_usuario(int(user_id_o_lista))
+            if not data:
+                logger.warning(f"Usuario {user_id_o_lista} no encontrado para anunciar")
+                return
+            
+            nombre_link = f'<a href="tg://user?id={data["user_id"]}">{_escape_html(data["nombre_oficial"])}</a>'
+            
+            badges = []
+            if data.get('verificado'):
+                badges.append("✅ Verificado")
+            if data.get('es_admin'):
+                badges.append("👑 Admin")
+            if data.get('nro_kdt'):
+                badges.append(f"🎖️ KDT {data['nro_kdt']}")
+            
+            mensaje = (
+                f"📇 <b>IDENTIFICACIÓN DE COFRADE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 {nombre_link}\n"
+            )
+            
+            if data.get('username'):
+                mensaje += f"🔗 @{data['username']}\n"
+            
+            if data.get('profesion'):
+                mensaje += f"💼 {_escape_html(data['profesion'])}\n"
+            
+            if data.get('empresa'):
+                mensaje += f"🏢 {_escape_html(data['empresa'])}\n"
+            
+            if badges:
+                mensaje += f"\n{' · '.join(badges)}\n"
+            
+            mensaje += (
+                f"\n💡 <i>Usa</i> <code>/quien</code> <i>respondiendo a un mensaje "
+                f"para identificar a cualquier cofrade.</i>"
+            )
+            
+            await bot_instance.send_message(
+                chat_id=COFRADIA_GROUP_ID,
+                text=mensaje,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+            logger.info(f"📇 Identidad anunciada en grupo: {data['nombre_oficial']}")
+        
+        elif modo == 'todos_normalizados':
+            # Anuncio de actualización masiva (no listar todos, solo decir que se actualizó)
+            mensaje = (
+                f"📇 <b>DIRECTORIO ACTUALIZADO</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⚓ Cofrades, el directorio de identidades ha sido actualizado.\n\n"
+                f"💡 Usa los siguientes comandos para identificar a cualquier miembro:\n\n"
+                f"• <code>/quien</code> (respondiendo a un mensaje) → identifica al autor\n"
+                f"• <code>/quien @username</code> → busca por username\n"
+                f"• <code>/directorio</code> → muestra TODOS los cofrades con sus identidades\n\n"
+                f"Esto te ayudará a saber quién es quién en el grupo, especialmente cuando "
+                f"alguien escribe sin un nombre claro o sin username."
+            )
+            await bot_instance.send_message(
+                chat_id=COFRADIA_GROUP_ID,
+                text=mensaje,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+            logger.info("📇 Anuncio masivo de directorio actualizado enviado al grupo")
+    except Exception as e:
+        logger.warning(f"Error anunciando identidad: {e}")
+
+
 async def enviar_invitacion_tarjeta_async(user_id):
     """FASE 21: Envía mensaje motivador + tutorial HTML para crear tarjeta profesional.
     
@@ -13121,6 +14422,11 @@ def obtener_dashboard_avanzado():
         'crecimiento_mensual': [],
         'mensajes_por_hora': [],
         'top_categorias': [],
+        'top_dominios': [],
+        'top_ciudades': [],
+        'vencimientos': {},
+        'retencion': {},
+        'verificacion': {},
     }
     
     try:
@@ -13336,6 +14642,142 @@ def obtener_dashboard_avanzado():
                     })
         except Exception as _e:
             logger.debug(f"top_categorias: {_e}")
+        
+        # ═══ FASE 23: VENCIMIENTOS PRÓXIMOS ═══
+        try:
+            if DATABASE_URL:
+                c.execute("""
+                    SELECT 
+                        SUM(CASE WHEN fecha_expiracion < CURRENT_TIMESTAMP THEN 1 ELSE 0 END) as vencidos,
+                        SUM(CASE WHEN fecha_expiracion >= CURRENT_TIMESTAMP 
+                            AND fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '7 days' THEN 1 ELSE 0 END) as vence_7d,
+                        SUM(CASE WHEN fecha_expiracion >= CURRENT_TIMESTAMP + INTERVAL '7 days'
+                            AND fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '30 days' THEN 1 ELSE 0 END) as vence_30d,
+                        SUM(CASE WHEN fecha_expiracion >= CURRENT_TIMESTAMP + INTERVAL '30 days'
+                            AND fecha_expiracion < '2099-01-01' THEN 1 ELSE 0 END) as vigentes,
+                        SUM(CASE WHEN fecha_expiracion >= '2099-01-01' THEN 1 ELSE 0 END) as vitalicios
+                    FROM suscripciones
+                    WHERE estado = 'activo' OR estado IS NULL
+                """)
+                row = c.fetchone()
+                if row:
+                    if isinstance(row, dict):
+                        resultado['vencimientos'] = {
+                            'vencidos': row.get('vencidos', 0) or 0,
+                            'vence_7d': row.get('vence_7d', 0) or 0,
+                            'vence_30d': row.get('vence_30d', 0) or 0,
+                            'vigentes': row.get('vigentes', 0) or 0,
+                            'vitalicios': row.get('vitalicios', 0) or 0,
+                        }
+                    else:
+                        resultado['vencimientos'] = {
+                            'vencidos': row[0] or 0,
+                            'vence_7d': row[1] or 0,
+                            'vence_30d': row[2] or 0,
+                            'vigentes': row[3] or 0,
+                            'vitalicios': row[4] or 0,
+                        }
+        except Exception as _e:
+            logger.debug(f"vencimientos: {_e}")
+        
+        # ═══ FASE 23: RETENCIÓN — % usuarios que han enviado al menos 1 mensaje ═══
+        try:
+            c.execute("""
+                SELECT 
+                    COUNT(DISTINCT s.user_id) as total_registrados,
+                    COUNT(DISTINCT m.user_id) as usuarios_que_escribieron
+                FROM suscripciones s
+                LEFT JOIN mensajes m ON s.user_id = m.user_id
+            """)
+            row = c.fetchone()
+            if row:
+                if isinstance(row, dict):
+                    total_reg = row.get('total_registrados', 0) or 0
+                    activos = row.get('usuarios_que_escribieron', 0) or 0
+                else:
+                    total_reg = row[0] or 0
+                    activos = row[1] or 0
+                tasa_retencion = round((activos / total_reg * 100), 1) if total_reg > 0 else 0
+                resultado['retencion'] = {
+                    'total_registrados': total_reg,
+                    'usuarios_que_escribieron': activos,
+                    'silenciosos': total_reg - activos,
+                    'tasa_retencion': tasa_retencion,
+                }
+        except Exception as _e:
+            logger.debug(f"retencion: {_e}")
+        
+        # ═══ FASE 23: TOP DOMINIOS DE EMAIL (insights de usuarios) ═══
+        try:
+            c.execute("""
+                SELECT 
+                    SUBSTRING(email FROM POSITION('@' IN email) + 1) as dominio,
+                    COUNT(*) as cnt
+                FROM tarjetas_profesional
+                WHERE email IS NOT NULL AND email != '' AND POSITION('@' IN email) > 0
+                GROUP BY SUBSTRING(email FROM POSITION('@' IN email) + 1)
+                ORDER BY cnt DESC LIMIT 6
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado.setdefault('top_dominios', []).append({
+                        'dominio': row['dominio'],
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado.setdefault('top_dominios', []).append({
+                        'dominio': row[0],
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"top_dominios: {_e}")
+        
+        # ═══ FASE 23: TOP CIUDADES de los miembros ═══
+        try:
+            c.execute("""
+                SELECT ciudad, COUNT(*) as cnt
+                FROM tarjetas_profesional
+                WHERE ciudad IS NOT NULL AND ciudad != ''
+                GROUP BY ciudad
+                ORDER BY cnt DESC LIMIT 8
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado.setdefault('top_ciudades', []).append({
+                        'ciudad': row['ciudad'],
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado.setdefault('top_ciudades', []).append({
+                        'ciudad': row[0],
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"top_ciudades: {_e}")
+        
+        # ═══ FASE 23: % verificados ═══
+        try:
+            c.execute("""
+                SELECT 
+                    SUM(CASE WHEN verificado_admin = TRUE THEN 1 ELSE 0 END) as verificados,
+                    COUNT(*) as total
+                FROM suscripciones
+            """)
+            row = c.fetchone()
+            if row:
+                if isinstance(row, dict):
+                    verif = row.get('verificados', 0) or 0
+                    total = row.get('total', 0) or 0
+                else:
+                    verif = row[0] or 0
+                    total = row[1] or 0
+                resultado['verificacion'] = {
+                    'verificados': verif,
+                    'no_verificados': total - verif,
+                    'tasa_verificacion': round((verif / total * 100), 1) if total > 0 else 0,
+                }
+        except Exception as _e:
+            logger.debug(f"verificacion: {_e}")
         
         conn.close()
     except Exception as e:
@@ -21597,25 +23039,34 @@ async def aprobar_solicitud_comando(update: Update, context: ContextTypes.DEFAUL
         # ═══════════════════════════════════════════════════════════════
         nombre_completo = f"{nombre} {apellido}".strip()
         
-        # 1) MENSAJE PUBLICO EN EL GRUPO PRINCIPAL
+        # 1) MENSAJE PUBLICO EN EL GRUPO PRINCIPAL (FASE 23: con mención oficial clickeable)
         if COFRADIA_GROUP_ID:
             try:
+                # Mención clickeable con nombre OFICIAL (registrado en BD del bot)
+                # Esto crea la "etiqueta identitaria" visible en el grupo
+                mencion = f'<a href="tg://user?id={target_user_id}">{_escape_html(nombre_completo)}</a>'
+                
                 bienvenida_grupo = (
-                    f"🎉 ¡BIENVENIDO/A A COFRADÍA DE NETWORKING! 🎉\n"
+                    f"🎉 <b>¡BIENVENIDO/A A COFRADÍA DE NETWORKING!</b> 🎉\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"⚓ Cofrades, demos la más cordial bienvenida a:\n\n"
-                    f"👤 {nombre_completo}\n"
-                    f"🎓 Generación: {generacion}\n\n"
+                    f"📇 <b>Identidad oficial:</b>\n"
+                    f"👤 {mencion}\n"
+                    f"🎓 Generación: <b>{_escape_html(generacion)}</b>\n\n"
                     f"💎 Esperamos que disfrutes este espacio de camaradería, "
                     f"intercambio profesional y conexiones de valor.\n\n"
                     f"🤝 ¡Te invitamos a presentarte al grupo y participar activamente!\n\n"
+                    f"💡 <i>Para identificar a cualquier cofrade en el grupo usa</i> "
+                    f"<code>/quien</code> <i>(respondiendo a su mensaje) o</i> <code>/directorio</code>\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🤖 Saludos cordiales,\n"
                     f"Cofradía Premium Bot"
                 )
                 await context.bot.send_message(
                     chat_id=COFRADIA_GROUP_ID,
-                    text=bienvenida_grupo
+                    text=bienvenida_grupo,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True,
                 )
                 logger.info(f"✅ Bienvenida publica enviada al grupo para {nombre_completo}")
             except Exception as e_grupo:
@@ -25260,59 +26711,58 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"- Presidente BCCh: Rosanna Costa (consejo monetario)\n"
                 f"- Contexto externo: Fed con Powell/Trump tension tasas, China desaceleracion demanda cobre, "
                 f"guerra comercial aranceles EEUU, petroleo volatil por Medio Oriente.\n\n"
-                f"TAREA: Para CADA indicador escribe UN parrafo profesional de 4-6 oraciones.\n"
+                f"TAREA: Para CADA indicador escribe UN parrafo MUY DETALLADO de 6-8 oraciones (mínimo 100 palabras por indicador).\n"
                 f"Formato EXACTO de respuesta (una linea por indicador):\n"
-                f"CODIGO: [parrafo analitico]\n\n"
-                f"CADA parrafo DEBE incluir obligatoriamente:\n"
-                f"1. CAUSA CONCRETA: Por que vario en las ultimas semanas. Menciona al menos UN actor, "
-                f"institucion o evento REAL especifico (ej: 'el Consejo del BCCh en su reunion de...', "
-                f"'el dato IPC del INE de marzo', 'el anuncio de la Fed sobre tasas', 'la caida del cobre en Shanghai'). "
+                f"CODIGO: [parrafo analitico extenso]\n\n"
+                f"CADA parrafo DEBE incluir TODOS estos elementos:\n"
+                f"1. CAUSA PRINCIPAL CONCRETA (2 oraciones): Por que vario. Menciona al menos DOS actores, instituciones "
+                f"o eventos REALES especificos (ej: 'el Consejo del BCCh en su reunion de marzo subio la TPM 25pb', "
+                f"'la Fed mantuvo tasas tras dato CPI EEUU de 3.2%', 'inventarios cobre LME bajaron 15k toneladas'). "
                 f"NO digas 'factores varios' ni generalidades vacias.\n"
-                f"2. TENDENCIA 7d vs 30d: Compara la variacion de los ultimos 7 dias con la de 30 dias. "
-                f"Si es distinta (ej: subio semana pero bajo el mes), explica el quiebre.\n"
-                f"3. IMPACTO EN EL COFRADE: Como afecta concretamente a un oficial de Armada chileno jubilado "
-                f"o en servicio (ej: UF afecta arriendo y dividendo, Dolar afecta compras internacionales y viajes, "
-                f"TPM afecta depositos a plazo y creditos hipotecarios, IPSA afecta AFP-A/B, "
-                f"Cobre afecta la economia nacional y peso).\n"
-                f"4. PROYECCION 15-30 DIAS: Hacia donde va segun consenso de mercado, con rango numerico "
-                f"(ej: 'consenso Bloomberg proyecta rango 920-945 para abril').\n\n"
-                f"CONTEXTO POR INDICADOR (usa solo lo relevante a cada uno):\n"
-                f"- UF/UTM: Banco Central publica el 9 de cada mes; IPC INE; reajustes arriendos y creditos hipotecarios.\n"
-                f"- DOLAR: Intervencion BCCh si hay volatilidad; diferencial tasa Fed vs TPM; cuenta corriente; flujos no residentes.\n"
-                f"- EURO: Politica BCE (Lagarde); crisis industrial Alemania; guerra Ucrania.\n"
-                f"- TPM: Decisiones reunion mensual BCCh; inflacion subyacente; expectativas IPoM.\n"
-                f"- IPC: INE publica primeros 8 dias del mes; canasta basica; administrados (electricidad, combustibles).\n"
-                f"- LIBRA_COBRE: Bolsa Shanghai (SHFE); inventarios LME; demanda China construccion; Codelco.\n"
+                f"2. CONTEXTO HISTORICO (1 oracion): Compara con periodos anteriores (mes pasado, mismo mes año pasado, máximo/mínimo histórico).\n"
+                f"3. TENDENCIA 7d vs 30d (1 oracion): Compara la variacion de los ultimos 7 dias con la de 30 dias. "
+                f"Si es distinta, explica el quiebre.\n"
+                f"4. IMPACTO EN EL COFRADE (2 oraciones): Como afecta concretamente a un oficial de Armada chileno jubilado "
+                f"o en servicio. Sé MUY específico: monto pesos extra/mes, % impacto AFP, etc. Da ejemplos numéricos concretos.\n"
+                f"5. PROYECCION 15-30 DIAS (1-2 oraciones): Hacia donde va segun consenso de mercado, con rango numerico "
+                f"(ej: 'consenso Bloomberg proyecta rango 920-945 para abril', 'analistas LarrainVial estiman cobre US$4.20-4.50/lb')."
+                f" Menciona riesgos (al alza y a la baja).\n\n"
+                f"CONTEXTO POR INDICADOR (usa para enriquecer):\n"
+                f"- UF/UTM: Banco Central publica el 9 de cada mes; IPC INE; reajustes arriendos y creditos hipotecarios. UF impacta directo dividendos.\n"
+                f"- DOLAR: Intervencion BCCh si hay volatilidad; diferencial tasa Fed vs TPM; cuenta corriente; flujos no residentes; precio cobre. Cada $10 mueve viajes.\n"
+                f"- EURO: Politica BCE (Lagarde); crisis industrial Alemania; guerra Ucrania; flujos USD/EUR.\n"
+                f"- TPM: Decisiones reunion mensual BCCh; inflacion subyacente; expectativas IPoM. Afecta depositos a plazo y créditos.\n"
+                f"- IPC: INE publica primeros 8 dias del mes; canasta basica; administrados (electricidad, combustibles); IPC subyacente.\n"
+                f"- LIBRA_COBRE: Bolsa Shanghai (SHFE); inventarios LME; demanda China construccion; Codelco; tensiones geopolíticas.\n"
                 f"- BITCOIN/ETH/SOL: Flujos ETF spot; decisiones Fed; regulacion EEUU; halving; nivel MicroStrategy/Saylor.\n"
-                f"- IPSA: Flujos AFP; utilidades Q1; cobre como driver; sector bancario; riesgo Chile (EMBI).\n"
+                f"- IPSA: Flujos AFP; utilidades Q1; cobre como driver; sector bancario; riesgo Chile (EMBI). Afecta multifondos.\n"
                 f"- TASA_DESEMPLEO: Encuesta INE trimestral movil; creacion empleo formal; desempleo juvenil; mujeres.\n"
-                f"- IMACEC: Indicador mensual BCCh; proxy PIB; minero vs no minero.\n\n"
+                f"- IMACEC: Indicador mensual BCCh; proxy PIB; minero vs no minero; expectativas crecimiento anual.\n\n"
                 f"DATOS DE INDICADORES (actual | ayer | hace 7d | hace 30d):\n{indicadores_txt}\n{contexto_extra}\n\n"
                 f"REGLAS ESTRICTAS:\n"
-                f"- Cada parrafo en 4-6 oraciones completas, profesional pero accesible.\n"
-                f"- Menciona al menos UN actor, institucion o evento especifico por parrafo.\n"
-                f"- Usa datos numericos del cuadro (variaciones, rangos).\n"
+                f"- Cada parrafo MINIMO 100 palabras, 6-8 oraciones completas, profesional pero accesible.\n"
+                f"- Menciona al menos DOS actores, instituciones o eventos especificos por parrafo.\n"
+                f"- Usa datos numericos del cuadro (variaciones, rangos, porcentajes).\n"
+                f"- INCLUYE rangos de proyección numéricos (ej: 'consenso 920-945').\n"
+                f"- DA ejemplos cuantificados de impacto al cofrade (ej: 'cada UP de TPM = $30k extra anual en hipoteca de 3000UF').\n"
                 f"- NO uses emojis, asteriscos, markdown ni listas. Solo texto corrido.\n"
                 f"- NO digas 'varios factores' ni 'multiples causas' sin nombrarlos."
             )
             
-            # FASE 22: cascada de LLMs y mayor max_tokens para análisis más completo
-            resp_batch = llamar_groq(prompt_batch, max_tokens=8000, temperature=0.45)
-            
-            # FASE 22: si Groq falla o respuesta es corta, intentar GLM y DeepSeek
-            if not resp_batch or len(resp_batch.strip()) < 500:
-                logger.info("Groq devolvió respuesta corta/vacía, intentando GLM...")
-                try:
-                    resp_batch = llamar_glm5(prompt_batch, max_tokens=8000, temperature=0.45)
-                except Exception as _e_glm:
-                    logger.debug(f"GLM falló: {_e_glm}")
-            
-            if not resp_batch or len(resp_batch.strip()) < 500:
-                logger.info("GLM también falló, intentando DeepSeek...")
-                try:
-                    resp_batch = llamar_deepseek(prompt_batch, max_tokens=8000, temperature=0.45)
-                except Exception as _e_dsk:
-                    logger.debug(f"DeepSeek falló: {_e_dsk}")
+            # FASE 23: optimización de tiempo — usar SOLO Groq con max_tokens grande pero único
+            # (la cascada de 3 LLMs causaba 4+ minutos de espera)
+            # Si Groq falla, vamos directo al fallback enriquecido sin esperar a otros LLMs.
+            resp_batch = None
+            try:
+                # Llamar Groq en thread con timeout estricto
+                resp_batch = await asyncio.wait_for(
+                    loop.run_in_executor(None, llamar_groq, prompt_batch, 8000, 0.5),
+                    timeout=90.0  # máximo 90s para análisis completo
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Groq timeout en /indicadores tras 90s — usando fallback enriquecido")
+            except Exception as _e_groq:
+                logger.warning(f"Groq error en /indicadores: {_e_groq}")
             
             if resp_batch:
                 for linea in resp_batch.strip().split('\n'):
@@ -28052,6 +29502,12 @@ def main():
     # Handlers de búsqueda
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
+    # FASE 23: SISTEMA DE IDENTIDAD VISIBLE
+    application.add_handler(CommandHandler("quien", quien_comando))
+    application.add_handler(CommandHandler("identidad", quien_comando))  # alias
+    application.add_handler(CommandHandler("directorio", directorio_comando))
+    application.add_handler(CommandHandler("miembros", directorio_comando))  # alias
+    application.add_handler(CommandHandler("verificar", verificar_comando))
     # Fase 9: Busqueda por autor (quien public\u00f3 qu\u00e9 en el grupo)
     application.add_handler(CommandHandler("publicaciones", publicaciones_comando))
     application.add_handler(CommandHandler("temas", temas_usuario_comando))
@@ -28093,6 +29549,7 @@ def main():
     application.add_handler(CommandHandler("set_precios", set_precios_comando))
     application.add_handler(CommandHandler("pagos_pendientes", pagos_pendientes_comando))
     application.add_handler(CommandHandler("vencimientos", vencimientos_comando))
+    application.add_handler(CommandHandler("renovar", renovar_comando))
     application.add_handler(CommandHandler("vencimientos_mes", vencimientos_mes_comando))
     application.add_handler(CommandHandler("ingresos", ingresos_comando))
     application.add_handler(CommandHandler("ingreso", ingresos_comando))  # alias
