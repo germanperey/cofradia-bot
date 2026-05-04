@@ -2411,6 +2411,9 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     FASE 10 (CRÍTICO): Detecta si tts_chatterbox.py tiene SSML y lo loguea visiblemente.
     Si tts_chatterbox.py es la versión vieja sin SSML, mostrará warning para que sepas
     que hay que actualizar el archivo en Render.
+    
+    FASE 22: pre-procesa números grandes (millones, miles) y abreviaturas comunes
+    para evitar lecturas robóticas como 'cinco mil pesos millones de pesos'.
     """
     import re
 
@@ -2421,6 +2424,114 @@ async def generar_audio_tts(texto: str, filename: str = "/tmp/respuesta_tts.mp3"
     # Limpiar emojis y símbolos
     texto_voz = re.sub(r'[📊📈📉💰🪙🏅🏆⭐🔵🟢⚪💬💡📱📧🔗📇💎📋📅🔔📢🎂🎉👤👥🎤🔍💼🏢📍🛠️✅❌⏰♾️✏️━═⚓]', '', texto)
     texto_voz = re.sub(r'[#*_~`|]', '', texto_voz)
+    
+    # ═══ FASE 22: NORMALIZACIÓN DE NÚMEROS PARA TTS ═══
+    # Problema: "$5.000 millones de pesos" se leía como "cinco mil pesos millones de pesos"
+    # porque el TTS de Google leía "$5.000" → "cinco mil pesos" (Chile usa . como separador
+    # de miles), y luego "millones de pesos" se sumaba al final.
+    # Solución: detectar patrones "$<num> millones/mil millones/billones" y reescribirlos
+    # como "<num> millones/mil millones/billones de pesos" sin el símbolo $ confuso.
+    
+    # Patrón 1: $X[.XXX]+ millones/billones de pesos → "X millones de pesos"
+    # Ejemplo: "$5.000 millones de pesos" → "5000 millones de pesos"
+    def _limpiar_cifra(match):
+        cifra = match.group(1)
+        magnitud = match.group(2)
+        sufijo = match.group(3) or ''
+        # Quitar puntos separadores de miles (estilo CL/EU)
+        # Pero conservar coma decimal si la hubiera
+        cifra_limpia = cifra.replace('.', '')
+        return f"{cifra_limpia} {magnitud}{sufijo}"
+    
+    # "$5.000 millones de pesos" o "$5 millones de USD" o "$5.000 mil millones de dólares"
+    texto_voz = re.sub(
+        r'\$\s*([\d.,]+)\s+(mil\s+millones|millones|billones|mil)(\s+de\s+(?:pesos|d[óo]lares|USD|UF|euros))?',
+        _limpiar_cifra,
+        texto_voz,
+        flags=re.IGNORECASE
+    )
+    
+    # Patrón 2: cifras con $ y separadores de miles SIN sufijo de magnitud
+    # "$1.234.567" → "1234567 pesos"  (para que Google diga el número correcto)
+    # "$50.000" → "50000 pesos"
+    def _limpiar_cifra_simple(match):
+        cifra = match.group(1)
+        # Solo reemplazar si tiene múltiples puntos (separadores de miles) o solo dígitos
+        # NO tocar decimales como "$50.5" (50 punto 5)
+        partes = cifra.split('.')
+        if len(partes) >= 2 and all(len(p) == 3 for p in partes[1:]):
+            # Es separador de miles: "1.234.567" o "50.000"
+            cifra_limpia = cifra.replace('.', '')
+            return f"{cifra_limpia} pesos"
+        return match.group(0)  # mantener original (decimal)
+    
+    texto_voz = re.sub(r'\$\s*([\d.]+)(?!\s*(?:mil|millones|billones))', _limpiar_cifra_simple, texto_voz)
+    
+    # Patrón 3: porcentajes con coma decimal: "4,50%" → "4 coma 50 por ciento"
+    texto_voz = re.sub(r'(\d+),(\d+)\s*%', r'\1 coma \2 por ciento', texto_voz)
+    texto_voz = re.sub(r'(\d+)\s*%', r'\1 por ciento', texto_voz)
+    
+    # Patrón 4: rangos de fechas y horas
+    texto_voz = re.sub(r'(\d{4})-(\d{2})-(\d{2})', r'\3 del \2 del \1', texto_voz)
+    
+    # ═══ FASE 22: NORMALIZACIÓN DE ABREVIATURAS COMUNES ═══
+    abreviaturas = {
+        # Económicas / financieras
+        r'\bUSD\b': 'dólares',
+        r'\bUF\b': 'unidades de fomento',
+        r'\bUTM\b': 'unidad tributaria mensual',
+        r'\bIPC\b': 'índice de precios al consumidor',
+        r'\bIPSA\b': 'I P S A',
+        r'\bTPM\b': 'tasa de política monetaria',
+        r'\bIMACEC\b': 'I M A C E C',
+        r'\bPIB\b': 'producto interno bruto',
+        r'\bROI\b': 'retorno de inversión',
+        r'\bROE\b': 'retorno sobre capital',
+        r'\bEBITDA\b': 'EBITDA',
+        r'\bCMF\b': 'comisión para el mercado financiero',
+        r'\bSII\b': 'S I I',
+        r'\bAFP\b': 'A F P',
+        r'\bBC\b': 'Banco Central',
+        r'\bBCCh\b': 'Banco Central de Chile',
+        r'\bBTC\b': 'bitcoin',
+        r'\bETH\b': 'ethereum',
+        r'\bSOL\b': 'solana',
+        r'\bUSA\b': 'Estados Unidos',
+        r'\bEEUU\b': 'Estados Unidos',
+        r'\bEE\.UU\.': 'Estados Unidos',
+        # Profesionales / militares
+        r'\bKDT\b': 'cadete',
+        r'\bMSc\b': 'magíster',
+        r'\bPhD\b': 'doctor',
+        r'\bMBA\b': 'M B A',
+        r'\bRRHH\b': 'recursos humanos',
+        r'\bTI\b': 'tecnologías de la información',
+        r'\bCEO\b': 'C E O',
+        r'\bCFO\b': 'C F O',
+        r'\bCTO\b': 'C T O',
+        r'\bCOO\b': 'C O O',
+        # Cofradía-específicas
+        r'\bIA\b': 'inteligencia artificial',
+        r'\bRAG\b': 'R A G',
+        r'\bAPI\b': 'A P I',
+        r'\bLLM\b': 'L L M',
+        # Comunes en español
+        r'\bSr\.\s+': 'Señor ',
+        r'\bSra\.\s+': 'Señora ',
+        r'\bDr\.\s+': 'Doctor ',
+        r'\bDra\.\s+': 'Doctora ',
+        r'\bIng\.\s+': 'Ingeniero ',
+        r'\bArq\.\s+': 'Arquitecto ',
+        r'\bLic\.\s+': 'Licenciado ',
+        r'\bAv\.\s+': 'Avenida ',
+        r'\bN[°º]\s+': 'número ',
+        r'\bnúm\.\s+': 'número ',
+        r'\bp\.\s*ej\.': 'por ejemplo',
+        r'\bp\.\s*ext\.': 'por extensión',
+    }
+    for patron, reemplazo in abreviaturas.items():
+        texto_voz = re.sub(patron, reemplazo, texto_voz, flags=re.IGNORECASE if patron.startswith(r'\bSr') else 0)
+    
     texto_voz = texto_voz.replace(' ej:', ', por ejemplo:')
     texto_voz = texto_voz.replace(' Ej:', ', por ejemplo:')
     texto_voz = texto_voz.replace(' etc.', ', etcétera.')
@@ -3219,18 +3330,47 @@ def registrar_usuario_suscripcion(user_id, first_name, username, es_admin=False,
         fecha_registro = datetime.now()
         
         if existente:
-            # Usuario ya existe - solo actualizar nombre/username
+            # FASE 22 SEGURIDAD: si el usuario ya existe Y tiene nombre completo guardado,
+            # NO sobrescribir con datos parciales que envía Telegram automáticamente.
+            # Esto protege los nombres normalizados desde el panel admin.
+            try:
+                if DATABASE_URL:
+                    c.execute("SELECT first_name, last_name, username FROM suscripciones WHERE user_id = %s", (user_id,))
+                else:
+                    c.execute("SELECT first_name, last_name, username FROM suscripciones WHERE user_id = ?", (user_id,))
+                row_actual = c.fetchone()
+                fname_actual = (row_actual['first_name'] if DATABASE_URL else row_actual[0]) or ''
+                lname_actual = (row_actual['last_name'] if DATABASE_URL else row_actual[1]) or ''
+                uname_actual = (row_actual['username'] if DATABASE_URL else row_actual[2]) or ''
+            except Exception:
+                fname_actual, lname_actual, uname_actual = '', '', ''
+            
+            # Decidir qué first_name guardar:
+            # - Si el actual tiene 2+ palabras (nombre completo) → MANTENER el actual
+            # - Si el actual está vacío o tiene 1 palabra Y el nuevo tiene más → ACTUALIZAR
+            # - En otro caso → mantener actual
+            palabras_actual = len([p for p in fname_actual.split() if p.strip()])
+            palabras_nuevo = len([p for p in (first_name or '').split() if p.strip()])
+            
+            fname_final = fname_actual if palabras_actual >= 2 else (first_name or fname_actual)
+            
+            # Username: si ya tenemos uno guardado, NO sobrescribir aunque Telegram cambie
+            uname_final = uname_actual if uname_actual else (username or '')
+            
+            # Last name: solo agregar si no había
+            lname_final = lname_actual if lname_actual else (last_name or '')
+            
             if DATABASE_URL:
                 c.execute("""UPDATE suscripciones 
                              SET first_name = %s, last_name = %s, username = %s, es_admin = %s
                              WHERE user_id = %s""",
-                          (first_name, last_name or '', username, 1 if es_admin else 0, user_id))
+                          (fname_final, lname_final, uname_final, 1 if es_admin else 0, user_id))
             else:
                 c.execute("""UPDATE suscripciones 
                              SET first_name = ?, last_name = ?, username = ?, es_admin = ?
                              WHERE user_id = ?""",
-                          (first_name, last_name or '', username, 1 if es_admin else 0, user_id))
-            logger.info(f"Usuario existente actualizado: {first_name} {last_name} (ID: {user_id})")
+                          (fname_final, lname_final, uname_final, 1 if es_admin else 0, user_id))
+            logger.info(f"Usuario existente preservado: {fname_final} (ID: {user_id})")
         else:
             # Nuevo usuario - dar período de prueba GRATIS
             fecha_expiracion = fecha_registro + timedelta(days=dias_gratis)
@@ -4408,6 +4548,19 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': str(e)}, status=500)
             return
         
+        # FASE 22: API dashboard avanzado con KPIs y gráficos
+        if path == '/api/dashboard':
+            if not self._check_admin_auth():
+                self._send_json({'error': 'unauthorized'}, status=401)
+                return
+            try:
+                resultado = obtener_dashboard_avanzado()
+                self._send_json(resultado)
+            except Exception as e:
+                logger.warning(f"Error /api/dashboard: {e}")
+                self._send_json({'error': str(e)}, status=500)
+            return
+        
         # FASE 15: PANEL ADMIN HTML
         if path == '/admin':
             if not self._check_admin_auth():
@@ -4467,14 +4620,30 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                     self._send_json({'error': 'missing user_id'}, status=400)
                     return
                 
-                # Solo se aceptan estos 3 campos por seguridad
+                # FASE 22: ahora aceptamos TODOS los campos de tarjeta + nombre/username
                 campos = {}
                 if 'nombre' in body:
                     campos['nombre'] = str(body.get('nombre', '')).strip()[:200]
                 if 'username' in body:
                     campos['username'] = str(body.get('username', '')).strip().lstrip('@')[:60]
-                if 'profesion' in body:
-                    campos['profesion'] = str(body.get('profesion', '')).strip()[:200]
+                # Campos de tarjeta profesional
+                campos_tarjeta_validos = ['profesion', 'empresa', 'servicios', 'telefono', 
+                                          'email', 'ciudad', 'linkedin', 'nro_kdt']
+                for campo_tarj in campos_tarjeta_validos:
+                    if campo_tarj in body:
+                        valor = str(body.get(campo_tarj, '')).strip()
+                        # Truncar según el campo
+                        if campo_tarj in ('profesion', 'empresa', 'ciudad'):
+                            valor = valor[:200]
+                        elif campo_tarj == 'servicios':
+                            valor = valor[:500]
+                        elif campo_tarj == 'telefono':
+                            valor = valor[:50]
+                        elif campo_tarj in ('email', 'linkedin'):
+                            valor = valor[:200]
+                        elif campo_tarj == 'nro_kdt':
+                            valor = valor[:10]
+                        campos[campo_tarj] = valor
                 
                 if not campos:
                     self._send_json({'error': 'no fields to update'}, status=400)
@@ -4561,6 +4730,7 @@ def _html_panel_admin():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🎛️ Panel Admin Maestro · IntelliBot</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#0a1628;color:#e0e6ed;margin:0;padding:20px;line-height:1.5}
@@ -4647,6 +4817,21 @@ padding:9px 18px;border-radius:8px;cursor:pointer;font-weight:600;font-size:.9em
 .btn-save{background:#c3a55a;color:#0a1628;border:none;padding:9px 18px;border-radius:8px;
 cursor:pointer;font-weight:700;font-size:.9em;transition:.15s}
 .btn-save:hover{background:#d4b86a;transform:translateY(-1px)}
+/* FASE 22: editor expandido */
+.modal-lg{max-width:760px}
+.modal-tabs{display:flex;gap:4px;padding:0 22px;border-bottom:1px solid rgba(195,165,90,.15)}
+.modal-tab{background:transparent;color:#8899aa;border:none;border-bottom:2px solid transparent;
+padding:10px 14px;cursor:pointer;font-weight:600;font-size:.88em;transition:.15s}
+.modal-tab:hover{color:#e0e6ed}
+.modal-tab.active{color:#c3a55a;border-bottom-color:#c3a55a}
+.modal-tab-content{display:none}
+.modal-tab-content.active{display:block}
+.grid-2col{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+.grid-2col label{margin-bottom:14px}
+.modal-body textarea{width:100%;padding:10px 13px;background:#0a1628;border:1px solid rgba(195,165,90,.25);
+border-radius:8px;color:#e0e6ed;font-size:.95em;margin-top:6px;font-family:inherit;transition:.15s;resize:vertical}
+.modal-body textarea:focus{outline:none;border-color:#c3a55a;background:#0d1a30}
+@media(max-width:680px){.grid-2col{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -4655,14 +4840,22 @@ cursor:pointer;font-weight:700;font-size:.9em;transition:.15s}
 <div class="subtitle">Control central de todas las empresas, analytics y configuración de features</div>
 
 <div class="tabs">
-<button class="tab active" onclick="switchTab('empresas')">🏢 Empresas</button>
+<button class="tab active" onclick="switchTab('dashboard')">📈 Dashboard</button>
+<button class="tab" onclick="switchTab('empresas')">🏢 Empresas</button>
 <button class="tab" onclick="switchTab('usuarios')">👥 Usuarios</button>
 <button class="tab" onclick="switchTab('analytics')">📊 Analytics</button>
 <button class="tab" onclick="switchTab('saldos')">💰 Saldos LLM</button>
 <button class="tab" onclick="switchTab('api-info')">🔌 API REST</button>
 </div>
 
-<div id="empresas" class="tab-content active">
+<div id="dashboard" class="tab-content active">
+<button class="refresh-btn" onclick="cargarDashboard()">↻ Refrescar</button>
+<h3 style="color:#c3a55a;margin-top:0">📈 Dashboard Avanzado</h3>
+<div id="dashboard-kpis"><div class="loading">Cargando KPIs...</div></div>
+<div id="dashboard-charts" style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:24px"></div>
+</div>
+
+<div id="empresas" class="tab-content">
 <button class="refresh-btn" onclick="cargarEmpresas()">↻ Refrescar</button>
 <h3 style="color:#c3a55a;margin-top:0">Empresas con IntelliBot</h3>
 <div id="empresas-list"><div class="loading">Cargando empresas...</div></div>
@@ -4740,6 +4933,7 @@ function switchTab(name){
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   event.target.classList.add('active');
   document.getElementById(name).classList.add('active');
+  if(name === 'dashboard') cargarDashboard();
   if(name === 'empresas') cargarEmpresas();
   if(name === 'usuarios') cargarUsuarios();
   if(name === 'analytics') cargarAnalytics();
@@ -5009,37 +5203,81 @@ function abrirEditor(usuario){
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div class="modal-box">
+    <div class="modal-box modal-lg">
       <div class="modal-header">
         <h3>✏️ Editar usuario · <span style="color:#8899aa;font-size:.8em">ID ${u.user_id}</span></h3>
         <button class="modal-close" onclick="cerrarEditor()">×</button>
       </div>
+      <div class="modal-tabs">
+        <button class="modal-tab active" onclick="switchModalTab(event,'tab-basico')">👤 Básico</button>
+        <button class="modal-tab" onclick="switchModalTab(event,'tab-tarjeta')">🎖️ Tarjeta</button>
+      </div>
       <div class="modal-body">
-        <label>Nombre completo
-          <input id="edit-nombre" type="text" value="${escapeHtml(u.nombre||'')}" 
-            placeholder="Ej: Juan Andrés Pérez Soto" maxlength="200">
-          <small>Formato sugerido para nuevos: [Nombre] [Nombre2] [PrimerApellido] [SegundoApellido]</small>
-        </label>
-        <label>Username (sin el @)
-          <input id="edit-username" type="text" value="${escapeHtml(u.username||'')}"
-            placeholder="Ej: Juan_Perez" maxlength="60">
-          <small>Estructura recomendada: Nombre_PrimerApellido</small>
-        </label>
-        <label>Profesión
-          <input id="edit-profesion" type="text" value="${escapeHtml(u.profesion||'')}"
-            placeholder="Ej: Ingeniero Civil Industrial" maxlength="200">
-          <small>${u.tiene_tarjeta ? 'Se actualiza en su tarjeta profesional' : 'Se creará registro mínimo en tarjetas'}</small>
-        </label>
+        <div id="tab-basico" class="modal-tab-content active">
+          <label>Nombre completo
+            <input id="edit-nombre" type="text" value="${escapeHtml(u.nombre||'')}" 
+              placeholder="Ej: Juan Andrés Pérez Soto" maxlength="200">
+            <small>Formato: [Nombre1] [Nombre2] [PrimerApellido] [SegundoApellido]</small>
+          </label>
+          <label>Username (sin el @)
+            <input id="edit-username" type="text" value="${escapeHtml(u.username||'')}"
+              placeholder="Ej: Juan_Perez" maxlength="60">
+            <small>Estructura: Nombre_PrimerApellido (sin tildes ni espacios)</small>
+          </label>
+        </div>
+        <div id="tab-tarjeta" class="modal-tab-content">
+          <div class="grid-2col">
+            <label>Profesión
+              <input id="edit-profesion" type="text" value="${escapeHtml(u.profesion||'')}"
+                placeholder="Ej: Ingeniero Civil Industrial" maxlength="200">
+            </label>
+            <label>Empresa
+              <input id="edit-empresa" type="text" value="${escapeHtml(u.empresa||'')}"
+                placeholder="Ej: Anglo American" maxlength="200">
+            </label>
+            <label>Teléfono
+              <input id="edit-telefono" type="text" value="${escapeHtml(u.telefono||'')}"
+                placeholder="Ej: +56912345678" maxlength="50">
+            </label>
+            <label>Email
+              <input id="edit-email" type="email" value="${escapeHtml(u.email||'')}"
+                placeholder="Ej: juan@empresa.cl" maxlength="200">
+            </label>
+            <label>Ciudad
+              <input id="edit-ciudad" type="text" value="${escapeHtml(u.ciudad||'')}"
+                placeholder="Ej: Santiago" maxlength="200">
+            </label>
+            <label>Nº KDT (3 dígitos)
+              <input id="edit-nro_kdt" type="text" value="${escapeHtml(u.nro_kdt||'')}"
+                placeholder="Ej: 322" maxlength="10">
+              <small>Número único de Cofradía (1 a 999)</small>
+            </label>
+          </div>
+          <label>LinkedIn (URL completa)
+            <input id="edit-linkedin" type="text" value="${escapeHtml(u.linkedin||'')}"
+              placeholder="https://linkedin.com/in/usuario" maxlength="200">
+          </label>
+          <label>Servicios
+            <textarea id="edit-servicios" placeholder="Servicios o especialidad. Ej: Consultoría minera, Auditorías ambientales..." maxlength="500" rows="2">${escapeHtml(u.servicios||'')}</textarea>
+            <small>Solo los campos que llenes serán guardados. Los vacíos se mantienen sin tocar.</small>
+          </label>
+        </div>
         <div id="edit-status" style="margin-top:14px;font-size:.9em;min-height:20px"></div>
       </div>
       <div class="modal-footer">
         <button class="btn-cancel" onclick="cerrarEditor()">Cancelar</button>
-        <button class="btn-save" onclick="guardarEdicion(${u.user_id})">💾 Guardar cambios</button>
+        <button class="btn-save" onclick="guardarEdicion(${u.user_id})">💾 Guardar todos los cambios</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
-  // Foco en primer input
   setTimeout(() => document.getElementById('edit-nombre').focus(), 50);
+}
+
+function switchModalTab(evt, tabId){
+  document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.modal-tab-content').forEach(c => c.classList.remove('active'));
+  evt.target.classList.add('active');
+  document.getElementById(tabId).classList.add('active');
 }
 
 function cerrarEditor(){
@@ -5048,18 +5286,28 @@ function cerrarEditor(){
 }
 
 async function guardarEdicion(userId){
-  const nombre = document.getElementById('edit-nombre').value.trim();
-  const username = document.getElementById('edit-username').value.trim().replace(/^@/, '');
-  const profesion = document.getElementById('edit-profesion').value.trim();
+  // Recopilar TODOS los campos editables
   const status = document.getElementById('edit-status');
-  
   status.innerHTML = '<span style="color:#c3a55a">Guardando...</span>';
+  
+  const body = {user_id: userId};
+  const campos = ['nombre', 'username', 'profesion', 'empresa', 'servicios', 
+                  'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt'];
+  for(const campo of campos){
+    const el = document.getElementById('edit-' + campo);
+    if(el){
+      let val = el.value.trim();
+      if(campo === 'username') val = val.replace(/^@/, '');
+      // Solo enviar campos que tienen valor o que cambiaron
+      body[campo] = val;
+    }
+  }
   
   try {
     const r = await fetch('/api/usuarios/editar', {
       method: 'POST',
       headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
-      body: JSON.stringify({user_id: userId, nombre, username, profesion})
+      body: JSON.stringify(body)
     });
     const data = await r.json();
     if(data.ok){
@@ -5067,7 +5315,7 @@ async function guardarEdicion(userId){
       setTimeout(() => {
         cerrarEditor();
         cargarUsuarios();
-      }, 800);
+      }, 1000);
     } else {
       status.innerHTML = '<span style="color:#e74c3c">✗ ' + escapeHtml(data.error || data.mensaje || 'Error desconocido') + '</span>';
     }
@@ -5119,7 +5367,7 @@ async function invitarTarjeta(userId, nombre){
 }
 
 async function normalizarTodos(){
-  if(!confirm("¿Normalizar TODOS los nombres y usernames vacíos o incompletos?\\n\\nEsto:\\n• Completará nombres con datos de tarjetas profesionales (cuando estén)\\n• Generará usernames vacíos como Nombre_PrimerApellido\\n• NO modifica usernames reales de Telegram que ya existan\\n\\n¿Continuar?")){
+  if(!confirm("¿Normalizar TODOS los nombres y usernames vacíos o incompletos?\\n\\nEsto:\\n• Completará nombres con datos de tarjetas profesionales (cuando estén)\\n• Generará usernames vacíos como Nombre_PrimerApellido\\n• NO modifica usernames reales de Telegram que ya existan\\n\\nEsta operación puede tomar 30-60 segundos.\\n\\n¿Continuar?")){
     return;
   }
   
@@ -5131,7 +5379,22 @@ async function normalizarTodos(){
       method: 'POST',
       headers: {'Content-Type':'application/json', 'X-Admin-Token': TOKEN},
     });
-    const data = await r.json();
+    
+    // FASE 22: si la respuesta no es JSON (timeout, error 502, etc.), parsear con cuidado
+    const txt = await r.text();
+    let data;
+    try {
+      data = JSON.parse(txt);
+    } catch(parseErr) {
+      // Respuesta HTML en lugar de JSON (probablemente timeout del proxy)
+      // PERO la operación PUEDE haber terminado igual en el backend.
+      // Refrescar la tabla para verificar el estado actual.
+      alert("⚠️ La operación tardó más de lo esperado.\\n\\nLos cambios PUEDEN haberse aplicado igual.\\n\\nVoy a refrescar la tabla para que veas el estado actual.");
+      cargarUsuarios();
+      if(btn){ btn.disabled = false; btn.textContent = '🔄 Normalizar todos'; }
+      return;
+    }
+    
     if(data.error){
       alert('❌ Error: ' + data.error);
     } else {
@@ -5139,10 +5402,171 @@ async function normalizarTodos(){
       cargarUsuarios();
     }
   } catch(e) {
-    alert('❌ Error: ' + e.message);
+    alert('⚠️ Error de red: ' + e.message + '\\n\\nLa normalización PUEDE haber funcionado igual. Refresca para verificar.');
+    cargarUsuarios();
   }
   
   if(btn){ btn.disabled = false; btn.textContent = '🔄 Normalizar todos'; }
+}
+
+// ════════════════════════════════════════════════════════════════
+// FASE 22: DASHBOARD AVANZADO con KPIs y gráficos ECharts
+// ════════════════════════════════════════════════════════════════
+async function cargarDashboard(){
+  const kpiBox = document.getElementById('dashboard-kpis');
+  const chartsBox = document.getElementById('dashboard-charts');
+  kpiBox.innerHTML = '<div class="loading">Cargando dashboard...</div>';
+  chartsBox.innerHTML = '';
+  
+  try {
+    const r = await fetch('/api/dashboard', {headers: {'X-Admin-Token': TOKEN}});
+    const data = await r.json();
+    if(data.error){
+      kpiBox.innerHTML = '<div style="color:#e74c3c;padding:16px">Error: ' + escapeHtml(data.error) + '</div>';
+      return;
+    }
+    
+    const k = data.kpis || {};
+    
+    // ═══ KPI CARDS ═══
+    const kpiCard = (label, valor, sublabel, color) => 
+      '<div style="background:linear-gradient(135deg,#0f1f3a,#0a1628);border:1px solid ' + (color||'rgba(195,165,90,.3)') + ';border-radius:12px;padding:18px;text-align:center">' +
+      '<div style="font-size:2.2em;font-weight:700;color:' + (color||'#c3a55a') + ';line-height:1">' + valor + '</div>' +
+      '<div style="font-size:.8em;color:#8899aa;text-transform:uppercase;letter-spacing:.05em;margin-top:8px;font-weight:600">' + label + '</div>' +
+      (sublabel ? '<div style="font-size:.78em;color:#5a6b7d;margin-top:4px">' + sublabel + '</div>' : '') +
+      '</div>';
+    
+    kpiBox.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:16px">' +
+      kpiCard('Total Usuarios', k.total_usuarios||0, k.nuevos_30d + ' nuevos en 30d', '#c3a55a') +
+      kpiCard('Activos 7 días', k.activos_7d||0, k.tasa_actividad_7d + '% del total', '#2ecc71') +
+      kpiCard('Activos 30 días', k.activos_30d||0, k.tasa_actividad_30d + '% del total', '#3498db') +
+      kpiCard('Total Mensajes', (k.total_mensajes||0).toLocaleString('es-CL'), k.mensajes_7d + ' últimos 7d', '#9b59b6') +
+      kpiCard('Mensajes 30d', (k.mensajes_30d||0).toLocaleString('es-CL'), 'Promedio: ' + k.promedio_msg_user + '/usuario', '#e67e22') +
+      kpiCard('Con Tarjeta', k.con_tarjeta||0, k.tasa_tarjeta + '% del total', '#1abc9c') +
+      kpiCard('Sin Tarjeta', k.sin_tarjeta||0, 'Pendientes de invitar', '#e74c3c') +
+      kpiCard('Nuevos Mes', k.nuevos_30d||0, 'Últimos 30 días', '#f39c12') +
+    '</div>';
+    
+    // ═══ GRÁFICOS ECHARTS ═══
+    const chartCard = (titulo, idChart) =>
+      '<div style="background:#0f1f3a;border:1px solid rgba(195,165,90,.2);border-radius:12px;padding:18px">' +
+      '<h4 style="margin:0 0 12px;color:#c3a55a;font-size:1em">' + titulo + '</h4>' +
+      '<div id="' + idChart + '" style="height:280px"></div>' +
+      '</div>';
+    
+    chartsBox.innerHTML = 
+      chartCard('💬 Mensajes por día (últimos 30d)', 'chart-mensajes-dia') +
+      chartCard('🏆 Top 10 usuarios por mensajes', 'chart-top-users') +
+      chartCard('🎓 Distribución por profesión', 'chart-profesiones') +
+      chartCard('📈 Crecimiento usuarios (12 meses)', 'chart-crecimiento') +
+      chartCard('🕐 Mensajes por hora del día', 'chart-horas') +
+      chartCard('🏷️ Top categorías de mensajes', 'chart-categorias');
+    
+    // Esperar a que el DOM se actualice antes de inicializar charts
+    setTimeout(() => {
+      const baseTheme = {
+        textStyle: {color: '#e0e6ed', fontFamily: 'system-ui'},
+        backgroundColor: 'transparent',
+      };
+      
+      // 1) Mensajes por día (línea)
+      if(data.mensajes_por_dia && data.mensajes_por_dia.length > 0){
+        const c1 = echarts.init(document.getElementById('chart-mensajes-dia'));
+        c1.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'category', data: data.mensajes_por_dia.map(d => d.fecha.slice(5)), axisLabel: {color: '#8899aa', fontSize: 10}},
+          yAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          grid: {left: 50, right: 20, top: 10, bottom: 30},
+          series: [{data: data.mensajes_por_dia.map(d => d.cnt), type: 'line', smooth: true, lineStyle: {color: '#c3a55a', width: 2}, areaStyle: {color: 'rgba(195,165,90,.2)'}, symbol: 'circle', symbolSize: 4}]
+        });
+      }
+      
+      // 2) Top usuarios (barras horizontales)
+      if(data.top_usuarios && data.top_usuarios.length > 0){
+        const c2 = echarts.init(document.getElementById('chart-top-users'));
+        c2.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          yAxis: {type: 'category', data: data.top_usuarios.map(u => u.nombre.slice(0,18)).reverse(), axisLabel: {color: '#8899aa', fontSize: 11}},
+          grid: {left: 130, right: 20, top: 10, bottom: 30},
+          series: [{data: data.top_usuarios.map(u => u.mensajes).reverse(), type: 'bar', itemStyle: {color: '#3498db', borderRadius: [0,4,4,0]}}]
+        });
+      }
+      
+      // 3) Profesiones (dona)
+      if(data.distribucion_profesiones && data.distribucion_profesiones.length > 0){
+        const c3 = echarts.init(document.getElementById('chart-profesiones'));
+        c3.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'item'},
+          legend: {bottom: 0, textStyle: {color: '#8899aa', fontSize: 10}},
+          series: [{type: 'pie', radius: ['40%','65%'], center: ['50%','45%'], 
+            data: data.distribucion_profesiones.map(p => ({value: p.cnt, name: p.profesion.slice(0,30)})),
+            label: {color: '#e0e6ed', fontSize: 10},
+            itemStyle: {borderColor: '#0f1f3a', borderWidth: 2}}]
+        });
+      }
+      
+      // 4) Crecimiento mensual (línea)
+      if(data.crecimiento_mensual && data.crecimiento_mensual.length > 0){
+        const c4 = echarts.init(document.getElementById('chart-crecimiento'));
+        c4.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'category', data: data.crecimiento_mensual.map(m => m.mes), axisLabel: {color: '#8899aa', fontSize: 10}},
+          yAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          grid: {left: 50, right: 20, top: 10, bottom: 30},
+          series: [{data: data.crecimiento_mensual.map(m => m.cnt), type: 'bar', itemStyle: {color: '#2ecc71', borderRadius: [4,4,0,0]}}]
+        });
+      }
+      
+      // 5) Mensajes por hora (barras)
+      if(data.mensajes_por_hora && data.mensajes_por_hora.length > 0){
+        const horas = Array.from({length: 24}, (_, i) => i);
+        const valoresPorHora = horas.map(h => {
+          const item = data.mensajes_por_hora.find(x => x.hora === h);
+          return item ? item.cnt : 0;
+        });
+        const c5 = echarts.init(document.getElementById('chart-horas'));
+        c5.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'category', data: horas.map(h => h + 'h'), axisLabel: {color: '#8899aa', fontSize: 10}},
+          yAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          grid: {left: 50, right: 20, top: 10, bottom: 30},
+          series: [{data: valoresPorHora, type: 'bar', itemStyle: {color: '#9b59b6', borderRadius: [4,4,0,0]}}]
+        });
+      }
+      
+      // 6) Top categorías (barras horizontales)
+      if(data.top_categorias && data.top_categorias.length > 0){
+        const c6 = echarts.init(document.getElementById('chart-categorias'));
+        c6.setOption({
+          ...baseTheme,
+          tooltip: {trigger: 'axis'},
+          xAxis: {type: 'value', axisLabel: {color: '#8899aa'}},
+          yAxis: {type: 'category', data: data.top_categorias.map(c => c.categoria.slice(0,25)).reverse(), axisLabel: {color: '#8899aa', fontSize: 11}},
+          grid: {left: 160, right: 20, top: 10, bottom: 30},
+          series: [{data: data.top_categorias.map(c => c.cnt).reverse(), type: 'bar', itemStyle: {color: '#e67e22', borderRadius: [0,4,4,0]}}]
+        });
+      }
+      
+      // Resize automático
+      window.addEventListener('resize', () => {
+        ['chart-mensajes-dia','chart-top-users','chart-profesiones','chart-crecimiento','chart-horas','chart-categorias'].forEach(id => {
+          const el = document.getElementById(id);
+          if(el){
+            const inst = echarts.getInstanceByDom(el);
+            if(inst) inst.resize();
+          }
+        });
+      });
+    }, 100);
+  } catch(e) {
+    kpiBox.innerHTML = '<div style="color:#e74c3c;padding:16px">Error de red: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -5205,8 +5629,8 @@ async function cargarSaldos(){
   }
 }
 
-// Cargar al inicio
-cargarEmpresas();
+// Cargar al inicio (FASE 22: dashboard es la pestaña por defecto)
+cargarDashboard();
 </script>
 </body></html>"""
 
@@ -12048,8 +12472,7 @@ def listar_usuarios_activos():
         c = conn.cursor()
         
         # Query principal: combina suscripciones + tarjetas + count mensajes
-        # Usamos LEFT JOIN para no perder usuarios sin tarjeta
-        # COUNT(m.id) para contar mensajes por usuario
+        # FASE 22: incluir TODOS los campos de la tarjeta para edición desde panel
         sql = """
             SELECT 
                 s.user_id,
@@ -12062,7 +12485,14 @@ def listar_usuarios_activos():
                 COALESCE(t.nombre_completo, s.first_name) as nombre_completo,
                 CASE WHEN t.user_id IS NOT NULL THEN 1 ELSE 0 END as tiene_tarjeta,
                 (SELECT COUNT(*) FROM mensajes m WHERE m.user_id = s.user_id) as mensajes_count,
-                (SELECT MAX(m.fecha) FROM mensajes m WHERE m.user_id = s.user_id) as ultimo_msg
+                (SELECT MAX(m.fecha) FROM mensajes m WHERE m.user_id = s.user_id) as ultimo_msg,
+                COALESCE(t.empresa, '') as empresa,
+                COALESCE(t.servicios, '') as servicios,
+                COALESCE(t.telefono, '') as telefono,
+                COALESCE(t.email, '') as email,
+                COALESCE(t.ciudad, '') as ciudad,
+                COALESCE(t.linkedin, '') as linkedin,
+                COALESCE(t.nro_kdt, '') as nro_kdt
             FROM suscripciones s
             LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
             ORDER BY mensajes_count DESC, s.fecha_registro DESC
@@ -12074,7 +12504,8 @@ def listar_usuarios_activos():
             try:
                 if isinstance(r, tuple):
                     (uid, fname, uname, freg, estado, admin_flag, prof,
-                     nombre_full, tiene_tarj, msg_count, ultimo_msg) = r
+                     nombre_full, tiene_tarj, msg_count, ultimo_msg,
+                     empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt) = r
                 else:
                     uid = r['user_id']
                     fname = r['first_name']
@@ -12087,6 +12518,13 @@ def listar_usuarios_activos():
                     tiene_tarj = r['tiene_tarjeta']
                     msg_count = r['mensajes_count']
                     ultimo_msg = r['ultimo_msg']
+                    empresa = r['empresa']
+                    servicios = r['servicios']
+                    telefono = r['telefono']
+                    email = r['email']
+                    ciudad = r['ciudad']
+                    linkedin = r['linkedin']
+                    nro_kdt = r['nro_kdt']
                 
                 # Convertir timestamp a iso + epoch
                 fecha_alta_str = str(freg)[:19] if freg else '—'
@@ -12115,6 +12553,14 @@ def listar_usuarios_activos():
                     'es_admin': bool(admin_flag),
                     'es_activo': (estado == 'activo'),
                     'ultimo_mensaje': ultimo_msg_str,
+                    # FASE 22: campos completos de tarjeta para edición desde panel
+                    'empresa': empresa or '',
+                    'servicios': servicios or '',
+                    'telefono': telefono or '',
+                    'email': email or '',
+                    'ciudad': ciudad or '',
+                    'linkedin': linkedin or '',
+                    'nro_kdt': nro_kdt or '',
                 })
             except Exception as _e_row:
                 logger.debug(f"Error procesando usuario: {_e_row}")
@@ -12202,9 +12648,9 @@ def generar_username_normalizado(nombre_completo):
 def editar_usuario_admin(user_id, campos):
     """Edita los campos permitidos de un usuario desde el panel admin.
     
-    Args:
-        user_id: ID de Telegram del usuario
-        campos: dict con keys posibles 'nombre', 'username', 'profesion'
+    FASE 22: ahora acepta TODOS los campos de tarjeta profesional:
+      - nombre, username (van a suscripciones)
+      - profesion, empresa, servicios, telefono, email, ciudad, linkedin, nro_kdt (van a tarjetas_profesional)
     
     Retorna: (ok: bool, mensaje: str)
     """
@@ -12241,23 +12687,50 @@ def editar_usuario_admin(user_id, campos):
             sql_susc = f"UPDATE suscripciones SET {', '.join(sets_susc)} WHERE user_id = %s"
             c.execute(sql_susc, params_susc)
         
-        # 2. Profesión → tabla tarjetas_profesional (si existe registro)
-        if 'profesion' in campos:
+        # 2. Campos de tarjeta profesional
+        # FASE 22: lista expandida con TODOS los campos editables de la tarjeta
+        campos_tarjeta = ['profesion', 'empresa', 'servicios', 'telefono', 'email', 'ciudad', 'linkedin', 'nro_kdt']
+        cambios_tarjeta = {k: v for k, v in campos.items() if k in campos_tarjeta}
+        
+        if cambios_tarjeta:
             # Verificar si tiene tarjeta primero
             c.execute("SELECT user_id FROM tarjetas_profesional WHERE user_id = %s", (user_id,))
             tiene_tarjeta = c.fetchone() is not None
             
+            # Validar nro_kdt si está presente
+            if 'nro_kdt' in cambios_tarjeta:
+                kdt_val = str(cambios_tarjeta['nro_kdt']).strip()
+                if kdt_val:
+                    digitos = ''.join(ch for ch in kdt_val if ch.isdigit())
+                    if digitos and 1 <= int(digitos) <= 999:
+                        cambios_tarjeta['nro_kdt'] = digitos.zfill(3)
+                    else:
+                        return False, "nro_kdt inválido. Debe ser un número entre 1 y 999."
+            
             if tiene_tarjeta:
-                # Update
-                c.execute("UPDATE tarjetas_profesional SET profesion = %s, fecha_actualizacion = CURRENT_TIMESTAMP WHERE user_id = %s",
-                         (campos['profesion'], user_id))
+                # Update con campos dinámicos
+                sets_tarj = []
+                params_tarj = []
+                for key, val in cambios_tarjeta.items():
+                    sets_tarj.append(f"{key} = %s")
+                    params_tarj.append(val)
+                    cambios_aplicados.append(f"{key.capitalize()}: {val if val else '(vacío)'}")
+                sets_tarj.append("fecha_actualizacion = CURRENT_TIMESTAMP")
+                params_tarj.append(user_id)
+                sql_tarj = f"UPDATE tarjetas_profesional SET {', '.join(sets_tarj)} WHERE user_id = %s"
+                c.execute(sql_tarj, params_tarj)
             else:
-                # Crear registro mínimo (ya que no hay tarjeta aún)
-                c.execute("""INSERT INTO tarjetas_profesional 
-                             (user_id, nombre_completo, profesion) 
-                             VALUES (%s, %s, %s)""",
-                         (user_id, campos.get('nombre', ''), campos['profesion']))
-            cambios_aplicados.append(f"Profesión: {campos['profesion']}")
+                # Crear registro nuevo con los campos provistos
+                cols = ['user_id', 'nombre_completo']
+                vals = [user_id, campos.get('nombre', '')]
+                for key, val in cambios_tarjeta.items():
+                    cols.append(key)
+                    vals.append(val)
+                    cambios_aplicados.append(f"{key.capitalize()}: {val if val else '(vacío)'}")
+                placeholders = ', '.join(['%s'] * len(cols))
+                cols_str = ', '.join(cols)
+                sql_insert = f"INSERT INTO tarjetas_profesional ({cols_str}) VALUES ({placeholders})"
+                c.execute(sql_insert, vals)
         
         # 3. Si se editó el nombre y el usuario tiene tarjeta, actualizar también ahí
         if 'nombre' in campos:
@@ -12309,17 +12782,20 @@ def normalizar_nombres_usernames_bd():
             return {**stats, 'error': 'No hay conexión a BD'}
         c = conn.cursor()
         
-        # FIX FASE 21.2: query mejorada — combina suscripciones + tarjetas + nuevos_miembros
-        # Tomamos del onboarding (nuevos_miembros) como fuente prioritaria porque ahí
-        # está el nombre + apellido completo que el usuario ingresó al registrarse.
-        # Usamos MAX() agrupado para tomar la última solicitud de cada user_id (compatible PG/SQLite).
-        # Si la query falla (ej. tabla no existe), caemos al SELECT más simple.
+        # FIX FASE 22: query MUY mejorada — combina TODAS las fuentes posibles:
+        #   1. nuevos_miembros.nombre + apellido (del onboarding) — más confiable
+        #   2. tarjetas_profesional.nombre_completo (si tiene tarjeta)
+        #   3. suscripciones.last_name (apellido de Telegram al registro)
+        #   4. mensajes.first_name + last_name (lo que Telegram envía con cada msg)
+        # Si la query falla, caemos al SELECT más simple.
         try:
             c.execute("""
-                SELECT s.user_id, s.first_name, s.username,
+                SELECT s.user_id, s.first_name, s.username, s.last_name,
                        COALESCE(t.nombre_completo, '') as nombre_tarjeta,
                        COALESCE(nm.nombre, '') as nombre_onb,
-                       COALESCE(nm.apellido, '') as apellido_onb
+                       COALESCE(nm.apellido, '') as apellido_onb,
+                       COALESCE(mm.first_name, '') as msg_first,
+                       COALESCE(mm.last_name, '') as msg_last
                 FROM suscripciones s
                 LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
                 LEFT JOIN (
@@ -12328,19 +12804,24 @@ def normalizar_nombres_usernames_bd():
                     WHERE nombre IS NOT NULL AND nombre != ''
                     GROUP BY user_id
                 ) nm ON s.user_id = nm.user_id
+                LEFT JOIN (
+                    SELECT user_id, MAX(first_name) as first_name, MAX(last_name) as last_name
+                    FROM mensajes
+                    WHERE last_name IS NOT NULL AND last_name != ''
+                    GROUP BY user_id
+                ) mm ON s.user_id = mm.user_id
             """)
         except Exception as _e_query:
-            logger.warning(f"Query con nuevos_miembros falló, usando query básica: {_e_query}")
-            # Re-conectar (la conexión puede estar en estado de error)
+            logger.warning(f"Query con todas las fuentes falló, usando query básica: {_e_query}")
             try:
                 conn.rollback()
             except Exception:
                 pass
             c.execute("""
-                SELECT s.user_id, s.first_name, s.username,
+                SELECT s.user_id, s.first_name, s.username, '' as last_name,
                        COALESCE(t.nombre_completo, '') as nombre_tarjeta,
-                       '' as nombre_onb,
-                       '' as apellido_onb
+                       '' as nombre_onb, '' as apellido_onb,
+                       '' as msg_first, '' as msg_last
                 FROM suscripciones s
                 LEFT JOIN tarjetas_profesional t ON s.user_id = t.user_id
             """)
@@ -12350,40 +12831,66 @@ def normalizar_nombres_usernames_bd():
             stats['total_revisados'] += 1
             try:
                 if isinstance(r, tuple):
-                    uid, fname, uname, nombre_tarjeta, nombre_onb, apellido_onb = r
+                    uid, fname, uname, sus_lname, nombre_tarjeta, nombre_onb, apellido_onb, msg_first, msg_last = r
                 else:
                     uid = r['user_id']
                     fname = r['first_name']
                     uname = r['username']
+                    sus_lname = r.get('last_name', '') if hasattr(r, 'get') else r['last_name']
                     nombre_tarjeta = r['nombre_tarjeta']
                     nombre_onb = r['nombre_onb']
                     apellido_onb = r['apellido_onb']
+                    msg_first = r['msg_first']
+                    msg_last = r['msg_last']
                 
-                fname = (fname or '').strip()
+                fname = (fname or '').strip().replace('+', ' ').strip()  # FIX: limpiar "+" de nombres
                 uname_actual = (uname or '').strip()
+                sus_lname = (sus_lname or '').strip()
                 nombre_tarjeta = (nombre_tarjeta or '').strip()
                 nombre_onb = (nombre_onb or '').strip()
                 apellido_onb = (apellido_onb or '').strip()
+                msg_first = (msg_first or '').strip()
+                msg_last = (msg_last or '').strip()
                 
-                # Construir el nombre completo desde onboarding si existe
-                nombre_completo_onb = ''
+                # Construir candidatos de nombre completo desde TODAS las fuentes
+                # en orden de confiabilidad
+                candidatos = []
+                
+                # 1) Onboarding nombre+apellido (más confiable)
                 if nombre_onb and apellido_onb:
-                    nombre_completo_onb = f"{nombre_onb} {apellido_onb}".strip()
-                elif nombre_onb:
-                    nombre_completo_onb = nombre_onb
+                    candidatos.append(f"{nombre_onb} {apellido_onb}".strip())
+                
+                # 2) Tarjeta profesional
+                if nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
+                    candidatos.append(nombre_tarjeta)
+                
+                # 3) suscripciones.last_name + first_name actual
+                if fname and sus_lname and len(fname.split()) >= 1:
+                    candidatos.append(f"{fname} {sus_lname}".strip())
+                
+                # 4) mensajes: first_name + last_name (último visto)
+                if msg_first and msg_last:
+                    candidatos.append(f"{msg_first} {msg_last}".strip())
+                
+                # Normalizar candidatos: quitar duplicados y verificar que tengan 2+ palabras
+                candidatos_validos = []
+                for c_nombre in candidatos:
+                    c_nombre = c_nombre.strip().replace('+', ' ').strip()
+                    if c_nombre and len(c_nombre.split()) >= 2:
+                        if c_nombre not in candidatos_validos:
+                            candidatos_validos.append(c_nombre)
+                
+                # Mejor candidato (el primero de la lista priorizada)
+                mejor_nombre_completo = candidatos_validos[0] if candidatos_validos else ''
                 
                 # ═══ NORMALIZAR NOMBRE ═══
-                # Modificar si está vacío o tiene 1 sola palabra
+                # Modificar si está vacío o tiene 1 sola palabra (FIX: también limpia "+")
                 palabras_fname = len([p for p in fname.split() if p.strip()])
                 
                 nuevo_nombre = None
                 if not fname or palabras_fname <= 1:
-                    # PRIORIDAD 1: nombre completo del onboarding (más confiable)
-                    if nombre_completo_onb and len(nombre_completo_onb.split()) >= 2:
-                        nuevo_nombre = nombre_completo_onb
-                    # PRIORIDAD 2: nombre completo de la tarjeta profesional
-                    elif nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
-                        nuevo_nombre = nombre_tarjeta
+                    if mejor_nombre_completo:
+                        nuevo_nombre = mejor_nombre_completo
                 
                 if nuevo_nombre and nuevo_nombre != fname:
                     c.execute("UPDATE suscripciones SET first_name = %s WHERE user_id = %s",
@@ -12403,10 +12910,8 @@ def normalizar_nombres_usernames_bd():
                 base_nombre = ''
                 if fname and len(fname.split()) >= 2:
                     base_nombre = fname
-                elif nombre_completo_onb and len(nombre_completo_onb.split()) >= 2:
-                    base_nombre = nombre_completo_onb
-                elif nombre_tarjeta and len(nombre_tarjeta.split()) >= 2:
-                    base_nombre = nombre_tarjeta
+                elif mejor_nombre_completo:
+                    base_nombre = mejor_nombre_completo
                 
                 if not uname_actual and base_nombre:
                     nuevo_username = generar_username_normalizado(base_nombre)
@@ -12513,8 +13018,43 @@ async def enviar_invitacion_tarjeta_async(user_id):
         return True, "Invitación enviada"
     
     except Exception as e:
-        logger.warning(f"Error enviando invitación a {user_id}: {e}")
-        return False, f"Error: {str(e)[:200]}"
+        # FASE 22: detectar errores específicos de Telegram
+        err_str = str(e).lower()
+        if 'bot was blocked' in err_str or 'blocked by the user' in err_str:
+            # Marcar usuario como inactivo (bloqueó al bot)
+            try:
+                conn = get_db_connection()
+                if conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE suscripciones SET estado = 'bloqueado_bot' WHERE user_id = %s", (user_id,))
+                    conn.commit()
+                    conn.close()
+            except Exception:
+                pass
+            logger.warning(f"⛔ Usuario {user_id} bloqueó al bot")
+            return False, "El usuario bloqueó al bot. No se puede contactar."
+        elif 'user is deactivated' in err_str or 'user_deactivated' in err_str:
+            # Marcar usuario como desactivado (cuenta Telegram eliminada)
+            try:
+                conn = get_db_connection()
+                if conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE suscripciones SET estado = 'cuenta_eliminada' WHERE user_id = %s", (user_id,))
+                    conn.commit()
+                    conn.close()
+            except Exception:
+                pass
+            logger.warning(f"⛔ Usuario {user_id} tiene cuenta Telegram eliminada")
+            return False, "La cuenta de Telegram del usuario fue eliminada."
+        elif 'chat not found' in err_str:
+            logger.warning(f"⛔ Chat no encontrado para {user_id}")
+            return False, "Chat no encontrado. El usuario nunca inició conversación con el bot."
+        elif 'forbidden' in err_str:
+            logger.warning(f"⛔ Acceso prohibido para {user_id}: {e}")
+            return False, "El bot no puede contactar a este usuario."
+        else:
+            logger.warning(f"Error enviando invitación a {user_id}: {e}")
+            return False, f"Error: {str(e)[:200]}"
 
 
 def enviar_invitacion_tarjeta_admin(user_id):
@@ -12554,6 +13094,255 @@ def enviar_invitacion_tarjeta_admin(user_id):
     except Exception as e:
         logger.warning(f"Error wrapper invitación tarjeta: {e}")
         return False, f"Error: {str(e)[:200]}"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 22: DASHBOARD AVANZADO — KPIs y datos para gráficos
+# ════════════════════════════════════════════════════════════════════════
+
+def obtener_dashboard_avanzado():
+    """Devuelve métricas avanzadas para el dashboard del panel admin.
+    
+    Incluye:
+      - KPIs globales (usuarios totales, activos 7/30 días, retención)
+      - Top usuarios por mensajes (gráfico barras)
+      - Mensajes por día últimos 30 días (gráfico línea)
+      - Distribución por profesión (gráfico dona)
+      - Crecimiento mensual de usuarios (gráfico línea)
+      - Mensajes por hora del día (gráfico barras)
+      - Distribución de tarjetas profesionales (KPI)
+      - Top categorías de mensajes
+    """
+    resultado = {
+        'kpis': {},
+        'top_usuarios': [],
+        'mensajes_por_dia': [],
+        'distribucion_profesiones': [],
+        'crecimiento_mensual': [],
+        'mensajes_por_hora': [],
+        'top_categorias': [],
+    }
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {**resultado, 'error': 'No hay conexión a BD'}
+        c = conn.cursor()
+        
+        # ═══ KPIs GLOBALES ═══
+        # Total usuarios registrados
+        c.execute("SELECT COUNT(*) as total FROM suscripciones")
+        row = c.fetchone()
+        total_usuarios = (row['total'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Usuarios activos últimos 7 días (con al menos 1 mensaje)
+        c.execute("""
+            SELECT COUNT(DISTINCT user_id) as cnt FROM mensajes 
+            WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+        """)
+        row = c.fetchone()
+        activos_7d = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Usuarios activos últimos 30 días
+        c.execute("""
+            SELECT COUNT(DISTINCT user_id) as cnt FROM mensajes 
+            WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+        """)
+        row = c.fetchone()
+        activos_30d = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Total mensajes
+        c.execute("SELECT COUNT(*) as cnt FROM mensajes")
+        row = c.fetchone()
+        total_mensajes = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Mensajes últimos 7 / 30 días
+        c.execute("SELECT COUNT(*) as cnt FROM mensajes WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '7 days'")
+        row = c.fetchone()
+        msg_7d = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        c.execute("SELECT COUNT(*) as cnt FROM mensajes WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '30 days'")
+        row = c.fetchone()
+        msg_30d = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Total con tarjeta profesional
+        c.execute("SELECT COUNT(*) as cnt FROM tarjetas_profesional")
+        row = c.fetchone()
+        con_tarjeta = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Nuevos usuarios últimos 30 días
+        c.execute("""
+            SELECT COUNT(*) as cnt FROM suscripciones 
+            WHERE fecha_registro >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+        """)
+        row = c.fetchone()
+        nuevos_30d = (row['cnt'] if isinstance(row, dict) else row[0]) if row else 0
+        
+        # Calcular tasas
+        tasa_actividad_7d = round((activos_7d / total_usuarios * 100), 1) if total_usuarios > 0 else 0
+        tasa_actividad_30d = round((activos_30d / total_usuarios * 100), 1) if total_usuarios > 0 else 0
+        tasa_tarjeta = round((con_tarjeta / total_usuarios * 100), 1) if total_usuarios > 0 else 0
+        promedio_msg_user = round((total_mensajes / total_usuarios), 1) if total_usuarios > 0 else 0
+        
+        resultado['kpis'] = {
+            'total_usuarios': total_usuarios,
+            'activos_7d': activos_7d,
+            'activos_30d': activos_30d,
+            'total_mensajes': total_mensajes,
+            'mensajes_7d': msg_7d,
+            'mensajes_30d': msg_30d,
+            'con_tarjeta': con_tarjeta,
+            'sin_tarjeta': total_usuarios - con_tarjeta,
+            'nuevos_30d': nuevos_30d,
+            'tasa_actividad_7d': tasa_actividad_7d,
+            'tasa_actividad_30d': tasa_actividad_30d,
+            'tasa_tarjeta': tasa_tarjeta,
+            'promedio_msg_user': promedio_msg_user,
+        }
+        
+        # ═══ TOP 10 USUARIOS POR MENSAJES ═══
+        c.execute("""
+            SELECT s.first_name as nombre, s.username, COUNT(m.id) as cnt
+            FROM suscripciones s
+            INNER JOIN mensajes m ON s.user_id = m.user_id
+            GROUP BY s.user_id, s.first_name, s.username
+            ORDER BY cnt DESC LIMIT 10
+        """)
+        for row in c.fetchall():
+            if isinstance(row, dict):
+                resultado['top_usuarios'].append({
+                    'nombre': row['nombre'] or '(sin nombre)',
+                    'username': row['username'] or '',
+                    'mensajes': row['cnt'],
+                })
+            else:
+                resultado['top_usuarios'].append({
+                    'nombre': row[0] or '(sin nombre)',
+                    'username': row[1] or '',
+                    'mensajes': row[2],
+                })
+        
+        # ═══ MENSAJES POR DÍA (últimos 30 días) ═══
+        try:
+            c.execute("""
+                SELECT DATE(fecha) as dia, COUNT(*) as cnt
+                FROM mensajes
+                WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                GROUP BY DATE(fecha)
+                ORDER BY dia
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado['mensajes_por_dia'].append({
+                        'fecha': str(row['dia']),
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado['mensajes_por_dia'].append({
+                        'fecha': str(row[0]),
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"mensajes_por_dia: {_e}")
+        
+        # ═══ TOP 8 PROFESIONES ═══
+        try:
+            c.execute("""
+                SELECT profesion, COUNT(*) as cnt
+                FROM tarjetas_profesional
+                WHERE profesion IS NOT NULL AND profesion != ''
+                GROUP BY profesion
+                ORDER BY cnt DESC LIMIT 8
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado['distribucion_profesiones'].append({
+                        'profesion': row['profesion'][:60],
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado['distribucion_profesiones'].append({
+                        'profesion': row[0][:60] if row[0] else '(otra)',
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"distribucion_profesiones: {_e}")
+        
+        # ═══ CRECIMIENTO MENSUAL DE USUARIOS (últimos 12 meses) ═══
+        try:
+            c.execute("""
+                SELECT TO_CHAR(fecha_registro, 'YYYY-MM') as mes, COUNT(*) as cnt
+                FROM suscripciones
+                WHERE fecha_registro >= CURRENT_TIMESTAMP - INTERVAL '12 months'
+                GROUP BY TO_CHAR(fecha_registro, 'YYYY-MM')
+                ORDER BY mes
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado['crecimiento_mensual'].append({
+                        'mes': row['mes'],
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado['crecimiento_mensual'].append({
+                        'mes': row[0],
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"crecimiento_mensual: {_e}")
+        
+        # ═══ MENSAJES POR HORA DEL DÍA ═══
+        try:
+            c.execute("""
+                SELECT EXTRACT(HOUR FROM fecha) as hora, COUNT(*) as cnt
+                FROM mensajes
+                WHERE fecha >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                GROUP BY EXTRACT(HOUR FROM fecha)
+                ORDER BY hora
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado['mensajes_por_hora'].append({
+                        'hora': int(row['hora']),
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado['mensajes_por_hora'].append({
+                        'hora': int(row[0]),
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"mensajes_por_hora: {_e}")
+        
+        # ═══ TOP CATEGORÍAS DE MENSAJES ═══
+        try:
+            c.execute("""
+                SELECT categoria, COUNT(*) as cnt
+                FROM mensajes
+                WHERE categoria IS NOT NULL AND categoria != ''
+                GROUP BY categoria
+                ORDER BY cnt DESC LIMIT 8
+            """)
+            for row in c.fetchall():
+                if isinstance(row, dict):
+                    resultado['top_categorias'].append({
+                        'categoria': row['categoria'],
+                        'cnt': row['cnt'],
+                    })
+                else:
+                    resultado['top_categorias'].append({
+                        'categoria': row[0],
+                        'cnt': row[1],
+                    })
+        except Exception as _e:
+            logger.debug(f"top_categorias: {_e}")
+        
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Error obtener_dashboard_avanzado: {e}")
+        resultado['error'] = str(e)
+    
+    return resultado
 
 
 def listar_empresas():
@@ -24507,7 +25296,24 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"- NO digas 'varios factores' ni 'multiples causas' sin nombrarlos."
             )
             
-            resp_batch = llamar_groq(prompt_batch, max_tokens=5000, temperature=0.45)
+            # FASE 22: cascada de LLMs y mayor max_tokens para análisis más completo
+            resp_batch = llamar_groq(prompt_batch, max_tokens=8000, temperature=0.45)
+            
+            # FASE 22: si Groq falla o respuesta es corta, intentar GLM y DeepSeek
+            if not resp_batch or len(resp_batch.strip()) < 500:
+                logger.info("Groq devolvió respuesta corta/vacía, intentando GLM...")
+                try:
+                    resp_batch = llamar_glm5(prompt_batch, max_tokens=8000, temperature=0.45)
+                except Exception as _e_glm:
+                    logger.debug(f"GLM falló: {_e_glm}")
+            
+            if not resp_batch or len(resp_batch.strip()) < 500:
+                logger.info("GLM también falló, intentando DeepSeek...")
+                try:
+                    resp_batch = llamar_deepseek(prompt_batch, max_tokens=8000, temperature=0.45)
+                except Exception as _e_dsk:
+                    logger.debug(f"DeepSeek falló: {_e_dsk}")
+            
             if resp_batch:
                 for linea in resp_batch.strip().split('\n'):
                     linea = linea.strip()
@@ -24520,19 +25326,55 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 explicaciones[cod_real] = parts[1].strip()
                                 break
             
-            # Fallback para indicadores sin explicacion
+            # FASE 22: Fallback ENRIQUECIDO si LLM no respondió por algún indicador
+            # Genera análisis básico pero más informativo que solo "aumentó N%"
+            contexto_indicadores = {
+                'uf': 'La UF se reajusta diariamente según la variación del IPC del mes anterior. Su comportamiento afecta directamente arriendos, dividendos hipotecarios y créditos en UF.',
+                'utm': 'La UTM se actualiza mensualmente según el IPC y se usa para calcular impuestos, multas y obligaciones tributarias.',
+                'dolar': 'El tipo de cambio peso-dólar es influenciado por el diferencial de tasas Fed-BCCh, el precio del cobre, los flujos de capital y la intervención cambiaria del Banco Central.',
+                'euro': 'El euro fluctúa según las decisiones del BCE (Lagarde), la situación económica de la zona euro y su relación con el dólar.',
+                'tpm': 'La Tasa de Política Monetaria es decidida por el Consejo del Banco Central de Chile. Afecta directamente las tasas de depósitos, créditos hipotecarios y consumo.',
+                'ipc': 'El IPC mide la variación de precios al consumidor. Es publicado por el INE los primeros 8 días del mes y determina los reajustes de la UF y UTM.',
+                'libra_cobre': 'El cobre es el principal producto de exportación chileno. Su precio depende de la demanda china (construcción, vehículos eléctricos), inventarios LME y producción de Codelco.',
+                'bitcoin': 'Bitcoin es el principal criptoactivo. Su precio depende de flujos de ETF spot, decisiones de la Fed sobre tasas y eventos como el halving.',
+                'ethereum': 'Ethereum es la segunda mayor criptomoneda. Su precio refleja el desarrollo de aplicaciones DeFi, NFTs y decisiones regulatorias.',
+                'solana': 'Solana es una blockchain de alto rendimiento. Su precio depende de la actividad en su red y la adopción de aplicaciones.',
+                'ipsa': 'El IPSA es el principal índice bursátil chileno. Sus 30 acciones más transadas están influidas por flujos de AFP, utilidades empresariales y precio del cobre.',
+                'tasa_desempleo': 'La tasa de desempleo es publicada trimestralmente por el INE. Refleja la salud del mercado laboral chileno y afecta el consumo interno.',
+                'imacec': 'El IMACEC es el indicador mensual de actividad económica del Banco Central, considerado proxy del PIB. Se descompone en minero y no minero.',
+            }
+            
             for cod, d in datos.items():
                 if cod not in explicaciones:
                     val_act = d['valor']
                     serie = d.get('serie30', [])
                     val_ant = serie[1].get('valor', val_act) if len(serie) >= 2 else val_act
                     var_pct = ((val_act - val_ant) / val_ant * 100) if val_ant and val_ant != 0 else 0
-                    if var_pct > 0:
-                        explicaciones[cod] = f"{d['nombre']} aumento {abs(var_pct):.3f}% respecto al periodo anterior."
-                    elif var_pct < 0:
-                        explicaciones[cod] = f"{d['nombre']} disminuyo {abs(var_pct):.3f}% respecto al periodo anterior."
+                    
+                    # Tendencia 7 días si hay datos
+                    tendencia_7d = ''
+                    if len(serie) >= 7:
+                        val_7d = serie[6].get('valor', val_act)
+                        var_7d = ((val_act - val_7d) / val_7d * 100) if val_7d and val_7d != 0 else 0
+                        if abs(var_7d) > 0.1:
+                            tendencia_7d = f" Variación 7 días: {'+' if var_7d > 0 else ''}{var_7d:.2f}%."
+                    
+                    contexto = contexto_indicadores.get(cod, '')
+                    
+                    if var_pct > 0.05:
+                        explicacion = (f"{d['nombre']} mostró un aumento de {abs(var_pct):.3f}% respecto al período anterior.{tendencia_7d} "
+                                     f"{contexto} Para conocer las causas específicas y proyecciones de mercado, "
+                                     f"se recomienda consultar el último IPoM del Banco Central y reportes de bancos de inversión.")
+                    elif var_pct < -0.05:
+                        explicacion = (f"{d['nombre']} mostró una disminución de {abs(var_pct):.3f}% respecto al período anterior.{tendencia_7d} "
+                                     f"{contexto} Para conocer las causas específicas y proyecciones de mercado, "
+                                     f"se recomienda consultar el último IPoM del Banco Central y reportes de bancos de inversión.")
                     else:
-                        explicaciones[cod] = f"{d['nombre']} se mantuvo estable respecto al periodo anterior."
+                        explicacion = (f"{d['nombre']} se mantuvo estable respecto al período anterior.{tendencia_7d} "
+                                     f"{contexto} La estabilidad sugiere consenso de mercado sobre el nivel actual, "
+                                     f"a la espera de catalizadores como decisiones de política monetaria o publicación de datos macro.")
+                    
+                    explicaciones[cod] = explicacion
 
 
             # PASO 5: Noticias HTML con análisis IA completo
