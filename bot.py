@@ -2122,8 +2122,12 @@ def init_db():
 
 # ==================== FUNCIONES DE GROQ AI ====================
 
-def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7, reintentos: int = 3) -> str:
-    """Llama a la API de Groq con reintentos automaticos y control de presupuesto"""
+def llamar_groq(prompt: str, max_tokens: int = 1024, temperature: float = 0.7, reintentos: int = 2) -> str:
+    """Llama a la API de Groq con reintentos automaticos y control de presupuesto.
+    
+    FASE 25: reducidos reintentos de 3 a 2, timeout de 30s a 20s para responder
+    más rápido (antes podía esperar hasta 90s solo en Groq).
+    """
     if not GROQ_API_KEY:
         logger.warning("Intento de llamar Groq sin API Key")
         return None
@@ -2165,7 +2169,8 @@ Tu personalidad:
     
     for intento in range(reintentos):
         try:
-            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            # FASE 25: timeout reducido de 30s a 25s (con 2 reintentos = max 50s vs 90s antes)
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=25)
             
             if response.status_code == 200:
                 data = response.json()
@@ -2969,9 +2974,16 @@ async def _enviar_respuesta_con_audio(update, texto_respuesta_completa, texto_pa
     if not texto_para_audio:
         texto_para_audio = texto_respuesta_completa
     
-    # Truncar a 1500 chars para TTS (Chatterbox y edge-TTS son mas lentos con textos largos)
-    if len(texto_para_audio) > 1500:
-        texto_para_audio = texto_para_audio[:1497] + "..."
+    # FASE 25: aumentar límite TTS a 5000 chars para audios COMPLETOS
+    # (antes truncaba a 1500 dejando audios cortos vs respuesta texto)
+    # Google Cloud TTS soporta hasta 5000 chars sin problema.
+    if len(texto_para_audio) > 5000:
+        # Cortar en último punto antes del límite
+        corte = texto_para_audio.rfind('.', 0, 4990)
+        if corte > 4000:
+            texto_para_audio = texto_para_audio[:corte + 1]
+        else:
+            texto_para_audio = texto_para_audio[:4997] + "..."
     
     # No generar audio para respuestas muy cortas (<40 chars, no vale la pena)
     if len(texto_para_audio.strip()) < 40:
@@ -5075,7 +5087,7 @@ Este panel requiere autenticación.<br>
 Accede con: <code style="background:#0a1628;padding:4px 8px;border-radius:4px;color:#c3a55a;">/admin?token=TU_TOKEN</code>
 </p>
 <p style="opacity:.6;font-size:.85em;">Si eres el administrador, configura
-<code>ADMIN_API_TOKEN</code> en las variables de entorno de Render.</p>
+<code>ADMIN_API_TOKEN</code> en las variables de entorno del servidor.</p>
 </div></body></html>"""
 
 
@@ -5089,7 +5101,7 @@ def _html_panel_admin():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🎛️ Panel Admin Maestro · IntelliBot</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- Cofradía Premium · Visualization Engine v5 --><script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#0a1628;color:#e0e6ed;margin:0;padding:20px;line-height:1.5}
@@ -5342,7 +5354,7 @@ border-radius:8px;color:#e0e6ed;font-size:.95em;margin-top:6px;font-family:inher
 curl -X POST -H "X-Admin-Token: TU_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"tenant_id":"cofradia","feature":"economia","enabled":false}' \\
-  https://cofradia-bot.onrender.com/api/feature</pre>
+  https://api.cofradia-bot.com/api/feature</pre>
 </div>
 </div>
 
@@ -6995,6 +7007,411 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
     return ONBOARD_NOMBRE
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 26: GENERADORES HTML PARA /ayuda
+# Crea archivos HTML descargables con estilo profesional Cofradía Premium.
+# DISCRECIÓN TECNOLÓGICA: NO menciona ECharts/Render/Supabase/Groq/etc.
+# Usa SVG inline + CSS puro (sin librerías externas) para gráficos.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _ayuda_html_generar(es_admin: bool = False) -> str:
+    """Genera el HTML descargable de /ayuda.
+    
+    Args:
+        es_admin: Si True, incluye comandos administrativos exclusivos del owner.
+                  Si False, solo comandos visibles para todos los usuarios.
+    
+    Returns:
+        String con el HTML completo (sin librerías externas para discreción).
+    """
+    
+    # ─── CSS común (paleta dorado/azul Cofradía) ───
+    css_common = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: linear-gradient(135deg,#0a1628 0%,#0f2f59 50%,#1a3a6a 100%); color: #e0e6ed; min-height: 100vh; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; padding: 2rem 1rem; line-height: 1.55; }
+.container { max-width: 1280px; margin: 0 auto; }
+header { text-align: center; padding: 28px 0 22px; border-bottom: 2px solid #c3a55a; margin-bottom: 28px; position: relative; }
+header h1 { color: #c3a55a; font-size: 2.4em; margin-bottom: 8px; letter-spacing: -.02em; text-shadow: 0 2px 10px rgba(195,165,90,.3); }
+header h1::before { content: "\\2693 "; }
+header .subtitle { color: #aebfd0; font-size: 1.05em; font-weight: 400; }
+header .badge { display: inline-block; background: linear-gradient(135deg,#c3a55a,#d4b878); color: #0a1628; padding: 4px 12px; border-radius: 16px; font-weight: 700; font-size: .85em; margin-top: 12px; box-shadow: 0 4px 12px rgba(195,165,90,.25); }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 22px 0 36px; }
+.kpi { background: linear-gradient(135deg,rgba(15,47,89,.7),rgba(26,58,106,.4)); border: 1px solid rgba(195,165,90,.25); border-radius: 12px; padding: 16px; text-align: center; transition: all .3s; }
+.kpi:hover { border-color: #c3a55a; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(195,165,90,.15); }
+.kpi-num { font-size: 2.3em; font-weight: 800; color: #c3a55a; text-shadow: 0 0 18px rgba(195,165,90,.3); line-height: 1; }
+.kpi-lbl { color: #aebfd0; font-size: .82em; margin-top: 6px; text-transform: uppercase; letter-spacing: .8px; }
+
+section.cat { background: linear-gradient(135deg,rgba(15,47,89,.55),rgba(26,58,106,.3)); border: 1px solid rgba(195,165,90,.18); border-radius: 14px; padding: 22px 26px; margin-bottom: 22px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+section.cat h2 { color: #c3a55a; font-size: 1.5em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid rgba(195,165,90,.25); }
+section.cat h2 .cat-icon { display: inline-block; width: 38px; height: 38px; background: linear-gradient(135deg,#c3a55a,#d4b878); border-radius: 8px; text-align: center; line-height: 38px; margin-right: 12px; font-size: .9em; color: #0a1628; vertical-align: middle; }
+
+.cmd-list { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.cmd { background: rgba(10,22,40,.55); border-left: 3px solid #c3a55a; border-radius: 8px; padding: 14px 18px; transition: all .25s; }
+.cmd:hover { background: rgba(10,22,40,.85); border-left-color: #d4b878; }
+.cmd-name { color: #c3a55a; font-family: 'Consolas','Courier New',monospace; font-size: 1.05em; font-weight: 700; }
+.cmd-desc { color: #d4dde8; margin-top: 6px; font-size: .96em; }
+.cmd-example { color: #88a8c8; margin-top: 8px; font-size: .88em; padding: 8px 12px; background: rgba(195,165,90,.06); border-radius: 6px; border-left: 2px solid rgba(195,165,90,.4); font-family: 'Consolas','Courier New',monospace; }
+.cmd-example::before { content: "Ejemplo: "; color: #c3a55a; font-weight: 700; font-family: 'Segoe UI'; }
+
+footer { text-align: center; padding: 28px 0 12px; margin-top: 36px; border-top: 1px solid rgba(195,165,90,.2); color: #88a8c8; font-size: .88em; }
+footer .gold { color: #c3a55a; font-weight: 600; }
+
+@media (max-width: 700px) {
+  header h1 { font-size: 1.8em; }
+  section.cat { padding: 18px 16px; }
+  .cmd-name { font-size: .95em; }
+}
+"""
+    
+    # ─── Diagrama SVG decorativo "uso del bot" (sin librerías) ───
+    svg_uso = """<svg viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;height:auto;display:block;margin:18px auto;">
+  <defs>
+    <linearGradient id="gradGold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#c3a55a"/>
+      <stop offset="100%" stop-color="#d4b878"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  
+  <text x="400" y="28" text-anchor="middle" fill="#c3a55a" font-size="18" font-weight="700" font-family="Segoe UI">FLUJO DE USO DEL BOT</text>
+  
+  <!-- Nodo 1 -->
+  <circle cx="80" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="80" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">1</text>
+  <text x="80" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">REGISTRO</text>
+  <text x="80" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/start</text>
+  
+  <line x1="125" y1="120" x2="195" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
+  
+  <!-- Nodo 2 -->
+  <circle cx="240" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="240" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">2</text>
+  <text x="240" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">PERFIL</text>
+  <text x="240" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/mi_tarjeta</text>
+  
+  <line x1="285" y1="120" x2="355" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
+  
+  <!-- Nodo 3 -->
+  <circle cx="400" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="400" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">3</text>
+  <text x="400" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">CONECTAR</text>
+  <text x="400" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/conectar /directorio</text>
+  
+  <line x1="445" y1="120" x2="515" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
+  
+  <!-- Nodo 4 -->
+  <circle cx="560" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="560" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">4</text>
+  <text x="560" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">PRODUCIR</text>
+  <text x="560" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/oportunidad /tarea_crear</text>
+  
+  <line x1="605" y1="120" x2="675" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
+  
+  <!-- Nodo 5 -->
+  <circle cx="720" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="720" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">5</text>
+  <text x="720" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">ANALIZAR</text>
+  <text x="720" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/economia /pipeline</text>
+</svg>"""
+
+    # ─── Comandos de USUARIO (todos pueden usar) ───
+    categorias_usuario = [
+        {
+            "icon": "🚀",
+            "titulo": "Inicio y Cuenta",
+            "comandos": [
+                ("/start", "Iniciar el bot y registrarte en la Cofradía", None),
+                ("/mi_cuenta", "Ver el estado de tu suscripción", None),
+                ("/mi_perfil", "Ver tu perfil de actividad", None),
+                ("/renovar", "Renovar tu suscripción", None),
+                ("/activar [código]", "Activar un código de acceso", "/activar COFR-2026-XYZ"),
+                ("/ayuda", "Ver este menú de ayuda con HTML descargable", None),
+            ],
+        },
+        {
+            "icon": "🆔",
+            "titulo": "Identidad y Comunidad",
+            "comandos": [
+                ("/quien", "Identificar a un usuario (responde a un mensaje suyo, o usa @user)", "/quien @Pedro_RRHH"),
+                ("/cofrades", "Ver listado completo de miembros con identidad oficial", None),
+                ("/dotacion", "Total de integrantes activos de la Cofradía", None),
+                ("/mi_tarjeta", "Crear o ver tu tarjeta profesional", None),
+                ("/web_tarjeta", "Descargar tu tarjeta como HTML profesional", None),
+                ("/directorio [filtro]", "Buscar en el directorio profesional", "/directorio gerente comercial"),
+                ("/recomendar @user [texto]", "Recomendar a un cofrade", "/recomendar @Juan Excelente abogado tributario"),
+                ("/mis_recomendaciones", "Ver las recomendaciones que has recibido", None),
+            ],
+        },
+        {
+            "icon": "🤝",
+            "titulo": "Conexiones Inteligentes",
+            "comandos": [
+                ("/conectar [necesidad]", "Matching inteligente con miembros relevantes", "/conectar busco asesor previsional"),
+                ("/expertise [tema]", "Buscar expertos en un tema específico", "/expertise ciberseguridad"),
+                ("/buscar_profesional [área]", "Buscar profesionales por área", "/buscar_profesional finanzas"),
+                ("/buscar_apoyo [área]", "Buscar cofrades en búsqueda laboral", "/buscar_apoyo logística"),
+                ("/empleo [cargo]", "Buscar ofertas de empleo publicadas", "/empleo gerente operaciones"),
+            ],
+        },
+        {
+            "icon": "💼",
+            "titulo": "CRM Conversacional (NUEVO)",
+            "comandos": [
+                ("/oportunidad título | cliente | monto | fecha", "Crear oportunidad comercial", "/oportunidad Consultoría TI Q3 | Aramark | 45000000 | 2026-08-30"),
+                ("/oportunidades", "Ver tus oportunidades activas", None),
+                ("/op_actualizar [id] [etapa]", "Mover oportunidad de etapa (prospecto → contactado → propuesta → negociación → cerrado_ganado)", "/op_actualizar 5 propuesta"),
+                ("/op_nota [id] [texto]", "Agregar nota a una oportunidad", "/op_nota 5 Llamada con cliente, pidió 10% descuento"),
+                ("/pipeline", "Ver tu pipeline visual con forecast ponderado", None),
+            ],
+        },
+        {
+            "icon": "📋",
+            "titulo": "Tareas y Proyectos (NUEVO)",
+            "comandos": [
+                ("/tarea_crear título | @usuario | prioridad | fecha", "Crear tarea (asignable a otros cofrades)", "/tarea_crear Preparar informe Q3 | @Juan | alta | 2026-08-15"),
+                ("/mis_tareas", "Ver tus tareas pendientes ordenadas por prioridad", None),
+                ("/tareas_asignadas", "Ver tareas que has asignado a otros", None),
+                ("/tarea_completar [id]", "Marcar una tarea como completada", "/tarea_completar 12"),
+                ("/tarea_progreso [id]", "Marcar una tarea como en progreso", "/tarea_progreso 12"),
+            ],
+        },
+        {
+            "icon": "📅",
+            "titulo": "Calendario Compartido (NUEVO)",
+            "comandos": [
+                ("/disponibilidad @usuario [fecha]", "Ver semáforo 🟢🔴 de disponibilidad por hora", "/disponibilidad @Pedro 2026-05-15"),
+                ("/agendar @usuario fecha hora duración título", "Agendar reunión con un cofrade", "/agendar @Pedro 2026-05-15 14:00 60 Revisión propuesta Aramark"),
+                ("/mi_calendario", "Ver tus eventos próximos en 14 días", None),
+                ("/confirmar_evento [id]", "Confirmar asistencia a un evento", "/confirmar_evento 8"),
+                ("/rechazar_evento [id]", "Rechazar invitación a un evento", "/rechazar_evento 8"),
+            ],
+        },
+        {
+            "icon": "🔍",
+            "titulo": "Búsqueda Avanzada",
+            "comandos": [
+                ("/buscar [texto]", "Buscar en el historial del grupo", "/buscar reforma previsional"),
+                ("/buscar_ia [consulta]", "Búsqueda inteligente con análisis", "/buscar_ia ¿Qué se dijo del salario mínimo en marzo?"),
+                ("/buscar_web [consulta]", "Búsqueda en Internet", "/buscar_web últimas noticias mercado bursátil"),
+                ("/rag_consulta [pregunta]", "Consultar la biblioteca de documentos y libros", "/rag_consulta principios de negociación Harvard"),
+                ("/publicaciones @usuario", "Ver publicaciones de un usuario específico", "/publicaciones @Pedro_RRHH"),
+                ("/temas @usuario", "Temas que toca un usuario (análisis IA)", "/temas @Pedro_RRHH"),
+            ],
+        },
+        {
+            "icon": "📢",
+            "titulo": "Comunidad y Eventos",
+            "comandos": [
+                ("/anuncios", "Ver tablón de anuncios actuales", None),
+                ("/publicar", "Publicar un anuncio en el grupo", None),
+                ("/eventos", "Ver próximos eventos de la Cofradía", None),
+                ("/cumpleanos_mes", "Ver cumpleaños del mes en curso", None),
+                ("/consultas", "Ver consultas profesionales abiertas", None),
+                ("/consultar [tema]", "Hacer una consulta profesional al grupo", "/consultar Recomendación de notario en Las Condes"),
+                ("/responder [id_consulta] [texto]", "Responder a una consulta abierta", None),
+            ],
+        },
+        {
+            "icon": "📊",
+            "titulo": "Estadísticas y Gamificación",
+            "comandos": [
+                ("/estadisticas", "Ver estadísticas generales del grupo", None),
+                ("/graficos", "Ver gráficos de actividad mensual", None),
+                ("/top_usuarios", "Ranking de participación", None),
+                ("/top10", "Top 10 cofrades del mes", None),
+                ("/ranking", "Ranking del mes e histórico completo", None),
+                ("/mis_puntos", "Ver tus puntos y posición en el ranking", None),
+                ("/mis_insignias", "Ver tus 10 insignias posibles y desbloqueadas", None),
+                ("/resumen", "Resumen de actividad del día", None),
+                ("/resumen_semanal", "Resumen de los últimos 7 días", None),
+            ],
+        },
+        {
+            "icon": "💰",
+            "titulo": "Economía y Finanzas",
+            "comandos": [
+                ("/economia", "Dashboard económico Chile + simuladores + análisis", None),
+                ("/indicadores", "Indicadores económicos con análisis individualizado", None),
+                ("/calculadora", "Suite Económica Pro: créditos, IPC, UF, IVA, APV", None),
+            ],
+        },
+        {
+            "icon": "🪙",
+            "titulo": "Cofradía Coins",
+            "comandos": [
+                ("/mis_coins", "Balance, historial y servicios canjeables", None),
+            ],
+        },
+        {
+            "icon": "🤖",
+            "titulo": "Agente Inteligente",
+            "comandos": [
+                ("/agente", "Plan de networking personalizado con IA", None),
+                ("/match", "Match inteligente con cofrades compatibles", None),
+                ("/briefing", "Briefing diario de networking", None),
+                ("/capturar_conocimiento [tema]", "Aportar conocimiento experto a la base", "/capturar_conocimiento estrategia tributaria PYME"),
+            ],
+        },
+        {
+            "icon": "🎤",
+            "titulo": "Voz y Audio",
+            "comandos": [
+                ("Mensaje de voz", "Envía un audio mencionando «Bot» y te respondo con voz natural y texto", None),
+                ("«Bot, comando [nombre]»", "Ejecuta un comando hablándole al bot por audio", None),
+            ],
+        },
+    ]
+
+    # ─── Comandos de ADMIN (solo OWNER ve) ───
+    categorias_admin = [
+        {
+            "icon": "👑",
+            "titulo": "Gestión de Usuarios",
+            "comandos": [
+                ("/aprobar_solicitud [ID]", "Aprobar el ingreso de un nuevo usuario", "/aprobar_solicitud 1234567890"),
+                ("/eliminar_solicitud [ID]", "Eliminar a un usuario", "/eliminar_solicitud 1234567890"),
+                ("/editar_usuario [ID] [campo] [valor]", "Editar datos de un usuario", "/editar_usuario 1234567890 telefono +56912345678"),
+                ("/buscar_usuario [nombre]", "Buscar el ID de un usuario por nombre", "/buscar_usuario Pedro Ramírez"),
+                ("/ver_solicitudes", "Ver solicitudes pendientes de aprobación", None),
+                ("/generar_codigo", "Generar un código de activación de invitación", None),
+                ("/verificar [ID]", "Marcar un usuario como verificado oficialmente", None),
+            ],
+        },
+        {
+            "icon": "💼",
+            "titulo": "Gestión Comercial",
+            "comandos": [
+                ("/cobros_admin", "Panel de cobros y suscripciones", None),
+                ("/pipeline todos", "Ver el pipeline CRM consolidado de todos los cofrades", None),
+                ("/oportunidades todas", "Ver todas las oportunidades del grupo", None),
+                ("/reporte_ejecutivo", "Generar reporte ejecutivo completo en HTML", None),
+                ("/dashboard_admin", "Acceder al panel admin web", None),
+            ],
+        },
+        {
+            "icon": "📅",
+            "titulo": "Eventos y Anuncios",
+            "comandos": [
+                ("/nuevo_evento fecha | título | lugar | desc", "Crear un evento de la Cofradía", "/nuevo_evento 2026-08-15 19:00 | Cena de gala | Club Naval | Tenida formal"),
+                ("/notificar [mensaje]", "Enviar notificación masiva a todos los miembros", None),
+                ("/dotacion", "Ver dotación completa con detalle administrativo", None),
+            ],
+        },
+        {
+            "icon": "🕵️",
+            "titulo": "Headhunters / Reclutamiento",
+            "comandos": [
+                ("/publicar_empleo título | empresa | descripción", "Publicar oferta de empleo", "/publicar_empleo Gerente TI | Banco XYZ | Buscamos líder técnico..."),
+                ("/empleos_admin", "Gestionar empleos publicados", None),
+                ("/postulantes [id_empleo]", "Ver postulantes a un empleo", None),
+            ],
+        },
+        {
+            "icon": "📚",
+            "titulo": "Biblioteca y Conocimiento",
+            "comandos": [
+                ("/agregar_libro", "Agregar libro a la biblioteca RAG", None),
+                ("/listar_libros", "Listar todos los libros indexados", None),
+                ("/eliminar_libro [id]", "Eliminar un libro de la biblioteca", None),
+                ("/conocimientos", "Ver conocimientos capturados de cofrades", None),
+            ],
+        },
+        {
+            "icon": "💾",
+            "titulo": "Mantenimiento y Backup",
+            "comandos": [
+                ("/backup_manual", "Iniciar backup manual de la base de datos", None),
+                ("/listar_backups", "Listar backups disponibles", None),
+                ("/restore_backup [id]", "Restaurar un backup específico", None),
+                ("/integridad_rag", "Verificar integridad de los datos RAG", None),
+                ("/limpiar_cache", "Limpiar cachés temporales del sistema", None),
+            ],
+        },
+        {
+            "icon": "📈",
+            "titulo": "Analítica y Auditoría",
+            "comandos": [
+                ("/estadisticas_avanzadas", "Estadísticas avanzadas para el administrador", None),
+                ("/auditoria", "Ver registro de auditoría de acciones", None),
+                ("/diagnostico", "Diagnóstico técnico de la plataforma", None),
+                ("/saldos", "Ver estado de servicios y saldos", None),
+            ],
+        },
+    ]
+    
+    categorias = categorias_admin if es_admin else categorias_usuario
+    titulo = "Comandos Administrativos" if es_admin else "Comandos Disponibles"
+    sub = "Acceso exclusivo del fundador y administrador" if es_admin else "Manual completo de uso de la plataforma Cofradía Premium"
+    badge_text = "PANEL ADMIN · v7.0" if es_admin else "PLATAFORMA · v7.0"
+    
+    # Calcular KPIs
+    total_cmds = sum(len(c["comandos"]) for c in categorias)
+    total_cats = len(categorias)
+    
+    # ─── Construir HTML ───
+    html_parts = [f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cofradía Premium · {titulo}</title>
+<style>{css_common}</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>{titulo}</h1>
+<p class="subtitle">{sub}</p>
+<span class="badge">{badge_text}</span>
+</header>
+
+<div class="kpi-grid">
+<div class="kpi"><div class="kpi-num">{total_cmds}</div><div class="kpi-lbl">Comandos</div></div>
+<div class="kpi"><div class="kpi-num">{total_cats}</div><div class="kpi-lbl">Categorías</div></div>
+<div class="kpi"><div class="kpi-num">24/7</div><div class="kpi-lbl">Disponibilidad</div></div>
+<div class="kpi"><div class="kpi-num">∞</div><div class="kpi-lbl">Conocimiento</div></div>
+</div>
+
+{svg_uso if not es_admin else ''}
+
+"""]
+
+    # Generar cada categoría
+    for cat in categorias:
+        html_parts.append(f"""<section class="cat">
+<h2><span class="cat-icon">{cat['icon']}</span>{cat['titulo']}</h2>
+<div class="cmd-list">
+""")
+        for cmd_name, cmd_desc, cmd_example in cat["comandos"]:
+            esc_name = cmd_name.replace('<','&lt;').replace('>','&gt;')
+            esc_desc = cmd_desc.replace('<','&lt;').replace('>','&gt;')
+            html_parts.append(f"""<div class="cmd">
+<div class="cmd-name">{esc_name}</div>
+<div class="cmd-desc">{esc_desc}</div>
+""")
+            if cmd_example:
+                esc_ex = cmd_example.replace('<','&lt;').replace('>','&gt;')
+                html_parts.append(f'<div class="cmd-example">{esc_ex}</div>\n')
+            html_parts.append('</div>\n')
+        html_parts.append('</div></section>\n')
+    
+    # Footer (sin mencionar tecnologías)
+    html_parts.append(f"""
+<footer>
+<p><span class="gold">⚓ Cofradía Premium</span> · Plataforma de Networking Profesional</p>
+<p style="margin-top: 6px;">Generado automáticamente · {('Visualización exclusiva del administrador' if es_admin else 'Manual del usuario')}</p>
+</footer>
+</div>
+</body>
+</html>""")
+    
+    return ''.join(html_parts)
+
+
 @solo_chat_privado
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ayuda - Lista de comandos con ejemplos expandibles"""
@@ -7150,7 +7567,64 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🪙 Ejemplos Coins ＋", callback_data="ayuda_ej_coins")],
     ]
     
-    await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(keyboard))
+    # FASE 25: dividir si excede 4096 chars (límite Telegram)
+    # El texto creció con FASE 23 (Identidad Visible) y excede el límite,
+    # haciendo que Telegram rechace el mensaje y /ayuda no responda.
+    LIMITE_TG = 4000  # margen sobre 4096
+    if len(texto) <= LIMITE_TG:
+        await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        # Cortar en un \n cerca del límite para no dividir en medio de un comando
+        corte = texto.rfind('\n\n', 0, LIMITE_TG)
+        if corte < 2000:
+            corte = LIMITE_TG
+        parte1 = texto[:corte]
+        parte2 = texto[corte:].lstrip()
+        # Parte 1 sin botones, parte 2 con botones
+        await update.message.reply_text(parte1)
+        await update.message.reply_text(parte2, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # FASE 26: ENVIAR HTML DESCARGABLE CON TODOS LOS COMANDOS Y EJEMPLOS
+    # Discreción tecnológica: HTML usa solo SVG inline + CSS puro,
+    # sin librerías externas que delaten el stack tecnológico.
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        # HTML para todos los usuarios
+        html_user = _ayuda_html_generar(es_admin=False)
+        path_user = f"/tmp/cofradia_manual_{user_id}.html"
+        with open(path_user, 'w', encoding='utf-8') as fh:
+            fh.write(html_user)
+        with open(path_user, 'rb') as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename="Cofradia_Premium_Manual_Usuario.html",
+                caption="📖 <b>Manual completo en HTML</b>\nÁbrelo en tu navegador para ver todos los comandos con ejemplos ilustrados.",
+                parse_mode='HTML'
+            )
+        try: os.remove(path_user)
+        except: pass
+    except Exception as _e_html_user:
+        logger.warning(f"FASE 26: error enviando HTML usuario: {_e_html_user}")
+    
+    # Admin commands en HTML separado (solo OWNER lo recibe)
+    if user_id == OWNER_ID:
+        try:
+            html_adm = _ayuda_html_generar(es_admin=True)
+            path_adm = f"/tmp/cofradia_admin_{user_id}.html"
+            with open(path_adm, 'w', encoding='utf-8') as fh:
+                fh.write(html_adm)
+            with open(path_adm, 'rb') as fh:
+                await update.message.reply_document(
+                    document=fh,
+                    filename="Cofradia_Premium_Manual_Admin.html",
+                    caption="👑 <b>Manual administrativo</b>\nComandos exclusivos del fundador. Acceso restringido.",
+                    parse_mode='HTML'
+                )
+            try: os.remove(path_adm)
+            except: pass
+        except Exception as _e_html_adm:
+            logger.warning(f"FASE 26: error enviando HTML admin: {_e_html_adm}")
     
     # Admin commands in separate message (no buttons needed)
     if user_id == OWNER_ID:
@@ -8305,7 +8779,7 @@ async def graficos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dashboard Cofradía de Networking</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- Cofradía Premium · Visualization Engine v5 --><script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ 
@@ -10248,6 +10722,9 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     f"Si conoces el tema, explícalo con tu conocimiento general. Sin asteriscos."
                 )
                 respuesta = llamar_groq(prompt_minimo, max_tokens=500, temperature=0.6)
+                # FASE 25: respetar orden — DeepSeek (pago) SIEMPRE al final
+                if not respuesta:
+                    respuesta = llamar_glm5(prompt_minimo, max_tokens=500, temperature=0.6)
                 if not respuesta:
                     respuesta = llamar_deepseek(prompt_minimo, max_tokens=500, temperature=0.6)
             except Exception as _e_simple:
@@ -11532,7 +12009,7 @@ async def estadisticas_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         html = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Estadísticas Cofradía</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- Cofradía Premium · Visualization Engine v5 --><script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0a1628,#0f2f59);color:#e0e6ed;padding:20px;min-height:100vh}}
@@ -16306,7 +16783,7 @@ async def rag_backup_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Comando solo disponible para el administrador.")
         return
     
-    msg = await update.message.reply_text("🔍 Verificando integridad de datos RAG en Supabase...")
+    msg = await update.message.reply_text("🔍 Verificando integridad de datos RAG en la base...")
     
     try:
         conn = get_db_connection()
@@ -16940,7 +17417,7 @@ async def backup_ahora_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Comando exclusivo del administrador.")
         return
     
-    msg = await update.message.reply_text("💾 Iniciando backup manual de BD...\n⏳ Extrayendo tablas de Supabase...")
+    msg = await update.message.reply_text("💾 Iniciando backup manual de BD...\n⏳ Extrayendo tablas...")
     try:
         loop = asyncio.get_running_loop()
         await msg.edit_text("💾 Generando Excel multi-hoja...\n⏳ Esto puede tardar 10-30 segundos.")
@@ -17002,7 +17479,7 @@ async def listar_backups_comando(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Comando exclusivo del administrador.")
         return
     
-    msg = await update.message.reply_text("📋 Consultando backups en Supabase Storage...")
+    msg = await update.message.reply_text("📋 Consultando backups en almacenamiento...")
     try:
         loop = asyncio.get_running_loop()
         archivos = await loop.run_in_executor(None, _listar_backups_drive, 20)
@@ -17103,7 +17580,7 @@ async def descargar_backup_comando(update: Update, context: ContextTypes.DEFAULT
         )
         return
     
-    msg = await update.message.reply_text(f"📋 Buscando backup #{indice_usuario} en Supabase Storage...")
+    msg = await update.message.reply_text(f"📋 Buscando backup #{indice_usuario} en almacenamiento de respaldo...")
     try:
         loop = asyncio.get_running_loop()
         # Pedir hasta 20 backups (limite practico)
@@ -26851,7 +27328,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         '<meta charset="UTF-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>Indicadores Economicos Chile \u2014 Cofradia de Networking</title>'
-        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
+        '<!-- Cofradía Premium · Visualization Engine v5 --><script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>'
         '<style>' + css + '</style></head><body>'
 
         '<header>'
@@ -26933,7 +27410,7 @@ def generar_html_indicadores(all_data, explicaciones, noticias_html=''):
         'Banco Central de Chile &nbsp;&middot;&nbsp; CMF'
         ' &nbsp;&middot;&nbsp; Bolsa de Santiago (IPSA)'
         ' &nbsp;&middot;&nbsp; Analisis IA + RAG &nbsp;&middot;&nbsp;'
-        ' Cofradia de Networking Bot v6.0'
+        ' Cofradía Premium · Plataforma v7.0'
         '</footer>'
 
         '<script>'
@@ -27763,7 +28240,7 @@ def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analis
 
     html = '''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Dashboard Economico Chile - Cofradia</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- Cofradía Premium · Visualization Engine v5 --><script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
@@ -29517,11 +29994,11 @@ async def calculadora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             "👇 Presiona el botón para abrir:"
         )
     else:
-        # Grupo: WebAppInfo NO funciona en grupos, usar URL + opción privado
+        # FASE 26: en grupos, redirigir a chat privado para usar WebApp embebido
+        # (oculta URL del servidor, mantiene discreción tecnológica)
         bot_username = (context.bot.username or BOT_USERNAME).lstrip('@')
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧮 Abrir en navegador", url=calc_url)],
-            [InlineKeyboardButton("💬 Mejor experiencia (chat privado)", url=f"https://t.me/{bot_username}?start=calculadora")],
+            [InlineKeyboardButton("🧮 Abrir Suite Económica Pro", url=f"https://t.me/{bot_username}?start=calculadora")],
         ])
         texto = (
             "🧮 SUITE ECONÓMICA PRO\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -29532,9 +30009,7 @@ async def calculadora_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             "• Cálculo de IVA e impuestos\n"
             "• APV — Ahorro Previsional\n"
             "• Inversión Proyectada\n\n"
-            "👇 Opciones para abrir:\n"
-            "   1️⃣ Abrir directo en navegador (botón superior)\n"
-            "   2️⃣ Continuar en chat privado conmigo (botón inferior, recomendado)"
+            "👇 Presiona el botón para abrir la calculadora en tu chat privado conmigo (mejor experiencia, sin salir de Telegram):"
         )
 
     await update.message.reply_text(texto, reply_markup=keyboard)
@@ -31509,6 +31984,18 @@ def main():
             BotCommand("economia", "Dashboard economico + simuladores + IA"),
             BotCommand("emergencia", "🚨 Reportar emergencia"),
             BotCommand("calculadora", "🧮 Suite Económica Pro"),
+            # === FASE 23: SISTEMA DE IDENTIDAD VISIBLE ===
+            BotCommand("quien", "🆔 Identificar usuario (responde a mensaje o @user)"),
+            BotCommand("cofrades", "👥 Lista todos los miembros con identidad"),
+            # === FASE 25: CRM + TAREAS + CALENDARIO (3 mejoras) ===
+            BotCommand("oportunidad", "💼 Crear oportunidad CRM"),
+            BotCommand("oportunidades", "📊 Ver tus oportunidades"),
+            BotCommand("pipeline", "🎯 Pipeline visual"),
+            BotCommand("tarea_crear", "📋 Crear tarea (asignable)"),
+            BotCommand("mis_tareas", "📋 Tus tareas pendientes"),
+            BotCommand("tareas_asignadas", "📤 Tareas que asignaste"),
+            BotCommand("disponibilidad", "📅 Ver disponibilidad de un cofrade"),
+            BotCommand("mi_calendario", "📆 Tu calendario próximo"),
         ]
         try:
             await app.bot.set_my_commands(commands)
