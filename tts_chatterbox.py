@@ -2,18 +2,8 @@
 TTS — Google Cloud Text-to-Speech
 Voz: es-US-Neural2-A (femenina, latinoamericana, natural)
 Gratuito: 1,000,000 caracteres/mes
-
-FASE 11 (FIX CRITICO SSML): Resuelve problemas de SSML detectados:
-- Eliminado prosody ANIDADO (Google rechazaba el SSML silenciosamente)
-- audioConfig.speakingRate/pitch NO se duplica con SSML (causaba doble efecto y
-  rechazos)
-- effectsProfileId solo se usa en modo texto plano (incompatible con SSML en
-  algunos casos)
-- Voz default Neural2-A (mejor para SSML que Wavenet)
-- Si SSML falla, fallback automatico a texto plano sin que el usuario lo note
-- Cache blindado: cada texto+voz+config se cachea para minimizar llamadas a Google
 """
-import os, io, logging, asyncio, hashlib, base64, requests, re
+import os, io, logging, asyncio, hashlib, base64, requests
 from pathlib import Path
 from typing import Optional
 
@@ -21,373 +11,31 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_TTS_KEY = os.getenv("GOOGLE_TTS_KEY", "")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-# FASE 12 (USUARIO ELIGIÓ): Default Neural2-C masculina, la voz más natural y cálida
-# para Cofradía según pruebas comparativas del comando /test_tts.
-# Otras opciones disponibles cambiando GOOGLE_TTS_VOICE en Render:
-#   - es-US-Neural2-A: femenina latina natural
-#   - es-US-Neural2-C: MASCULINA cálida (default actual elegido por usuario) ✅
-#   - es-US-Neural2-B: masculina alternativa
-#   - es-ES-Neural2-D: femenina con acento España
-# IMPORTANTE: Studio voices NO existen en español todavía. Para máxima naturalidad
-# en español, Neural2 es la opción más alta. Wavenet sonaba más robótica.
-VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-C")
-VOICE_LANGUAGE = os.getenv("GOOGLE_TTS_LANG", "es-US")
-# FASE 12: Parámetros ajustados a valores que Google TTS pronuncia con mayor naturalidad
-# Velocidad 1.0 = velocidad normal humana. 0.95 = ligeramente pausada (recomendado para naturalidad)
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.95"))
-# Pitch 0 = neutral. Valores negativos = más grave; positivos = más agudo.
-# FASE 12 (USUARIO ELIGIÓ Neural2-C masculina): pitch 0.0 = tono natural masculino.
-# Si quieres ajustar, cambia GOOGLE_TTS_PITCH en Render:
-#   0.0 = natural (recomendado para Neural2-C)
-#   +1.0 a +2.0 = ligeramente más agudo (suaviza voz masculina)
-#   -1.0 a -2.0 = más grave (autoritario)
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "0.0"))
-
-# FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
-# Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
-_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "false").strip().lower()
-USE_SSML = _ssml_raw in ("true", "1", "yes", "si", "on", "y", "s")
-
-# LOG INMEDIATO al cargar el modulo: visible al iniciar bot
-print(f"━━━ [TTS_CHATTERBOX] CONFIG ━━━")
-print(f"  GOOGLE_TTS_KEY: {'CONFIGURADA' if GOOGLE_TTS_KEY else 'NO CONFIGURADA'}")
-print(f"  VOICE_NAME    : {VOICE_NAME}")
-print(f"  SPEAKING_RATE : {SPEAKING_RATE}")
-print(f"  PITCH         : {PITCH}")
-print(f"  GOOGLE_TTS_SSML (raw env): '{os.getenv('GOOGLE_TTS_SSML', '<no_set>')}'")
-print(f"  USE_SSML detectado: {USE_SSML}  {'✅ SSML ACTIVADO' if USE_SSML else '⚠️ SSML DESACTIVADO (modo v91 plano)'}")
-print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-logger.info(f"[TTS] SSML={USE_SSML} (env raw='{os.getenv('GOOGLE_TTS_SSML', '<no_set>')}')")
+# es-US-Wavenet-A: voz femenina más cálida y natural que Neural2
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Wavenet-A")
+VOICE_LANGUAGE = "es-US"
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.85"))  # más pausada = más natural
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "-4.0"))  # más grave = más cálida
 
 CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/tmp/tts_cache_gtts"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 
-# FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
-# Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
-# y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v18-pronunciacion-natural-2026-05-03"
-
-# FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
-# Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
-try:
-    import time as _t_purge
-    _ahora_purge = _t_purge.time()
-    _purgados = 0
-    for _f in CACHE_DIR.glob("*.mp3"):
-        # Si el archivo es de antes del deploy de Fase 12 → eliminar
-        if _ahora_purge - _f.stat().st_mtime > 0:  # cualquier archivo previo
-            try:
-                _f.unlink()
-                _purgados += 1
-            except Exception:
-                pass
-    if _purgados > 0:
-        print(f"🗑️ [TTS] Caché viejo purgado: {_purgados} archivos eliminados")
-        logger.info(f"🗑️ [TTS] Caché viejo purgado: {_purgados} archivos al iniciar")
-except Exception as _e_purge:
-    pass
-
 
 def _cache_key(texto: str) -> str:
-    # FASE 12: incluir VERSION_TAG en clave para invalidar caches viejos
-    return hashlib.md5(
-        f"{TTS_VERSION_TAG}_{texto}_{VOICE_NAME}_{SPEAKING_RATE}_{PITCH}_{USE_SSML}".encode()
-    ).hexdigest()
+    return hashlib.md5(f"{texto}_{VOICE_NAME}_{SPEAKING_RATE}_{PITCH}".encode()).hexdigest()
 
 
 def _limpiar_texto(texto: str) -> str:
+    import re
     texto = re.sub(r"[*_`]", "", texto)
     texto = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", texto)
-    texto = re.sub(r"[^\w\s,.!?;:()\-áéíóúüñÁÉÍÓÚÜÑ%$/]", " ", texto)
+    texto = re.sub(r"[^\w\s,.!?;:()\-áéíóúüñÁÉÍÓÚÜÑ]", " ", texto)
     return re.sub(r"\s+", " ", texto).strip()
 
 
-def _texto_a_ssml(texto: str) -> str:
-    """FASE 14: SSML mejorado con DICCIONARIO DE PRONUNCIACIONES FORZADAS.
-    
-    Resuelve el problema de Google TTS Neural2-C que pronuncia mal acentos
-    en nombres propios y términos específicos.
-    
-    Técnicas aplicadas:
-    - SIN prosody anidado (causaba rechazo en algunos casos)
-    - <break> y <say-as> son los más confiables
-    - Escape XML correcto de & < > " '
-    - <sub alias="..."> para forzar pronunciación silábica correcta
-    - Diccionario chileno: nombres, lugares, términos navales/financieros
-    
-    Aplica:
-    - Expansión de abreviaturas chilenas (UF→"U F", IPC→"I P C", etc.)
-    - Pronunciación correcta de números/montos con <say-as>
-    - Pausas naturales en puntuación (<break>)
-    - Pronunciación forzada de nombres propios con tildes
-    """
-    if not texto:
-        return texto
-    
-    # ════════════════════════════════════════════════════════════════════
-    # FASE 14: DICCIONARIO DE PRONUNCIACIONES FORZADAS
-    # Google TTS Neural2-C a veces pronuncia mal palabras con acentos.
-    # Por ejemplo "Germán" → "Gérman" (acento en sílaba incorrecta).
-    # 
-    # SOLUCIÓN: usar <sub alias="..."> que reemplaza cómo el motor PRONUNCIA
-    # la palabra (sin cambiar cómo se escribe en pantalla).
-    # 
-    # El alias usa escritura fonética con tildes para forzar acentuación correcta:
-    #   "Germán" → alias "Jermán" (la J fuerza inicio fuerte y la tilde acentúa la á)
-    #   "Milei"  → alias "Milei" (ya está bien; lo dejamos para evitar leerlo "Meli")
-    # 
-    # IMPORTANTE: las claves son sensibles a tildes para evitar reemplazar
-    # palabras sin acento.
-    # ════════════════════════════════════════════════════════════════════
-    PRONUNCIACIONES_FORZADAS = {
-        # ═══════════════════════════════════════════════════════════════════
-        # FASE 18: DICCIONARIO REVISADO con pronunciación NATURAL chilena
-        # 
-        # Principio guía: NO alargar artificialmente con triples consonantes
-        # ('Andréesss') porque suena raro. En lugar de eso:
-        #   - Separación silábica clara con guion (Mi-lei → Mi-lei suena bien)
-        #   - Uso de letras fonéticas correctas (h muda → j en latinoamericano)
-        #   - Solo doblar UNA letra cuando ayuda al énfasis (Cofradíia)
-        # 
-        # Basado en el "Diccionario de dudas de la lengua española" (Manuel Seco)
-        # y en las reglas de pronunciación rioplatense / chilena.
-        # ═══════════════════════════════════════════════════════════════════
-        
-        # ── NOMBRES PROPIOS DEL USUARIO Y SU CÍRCULO ──
-        'Germán': 'Jermán',          # H muda → J (pronunciación latinoamericana)
-        'germán': 'jermán',
-        'Pérey': 'Pérei',             # Y final → I (más natural en español)
-        'pérey': 'pérei',
-        'Perey': 'Pérei',
-        'perey': 'pérei',
-        
-        # ── PERSONAJES PÚBLICOS / AUTORES MENCIONADOS EN RAG ──
-        'Milei': 'Mi-léi',            # Separación silábica para evitar "Meli"
-        'Friedman': 'Frídman',        # Pronunciación germano-americana
-        'Hayek': 'Háyek',
-        'Keynes': 'Kéins',            # Pronunciación inglesa estándar
-        'Boric': 'Bóric',
-        'Kast': 'Kast',
-        'Piñera': 'Piñéra',
-        'Bachelet': 'Báchelet',
-        'Goleman': 'Gólman',          # Daniel Goleman (autor "Inteligencia Emocional")
-        'Oppenheimer': 'Ópenjáimer',  # Oppenheimer alemán → ópenjáimer
-        'Drucker': 'Drácker',         # Peter Drucker
-        'Buffett': 'Báfet',
-        'Munger': 'Mánguer',
-        'Soros': 'Sóros',
-        'Powell': 'Pául',             # Jerome Powell (Fed)
-        'Costa': 'Cósta',             # Rosanna Costa (BCCh)
-        'Trump': 'Tramp',             # Pronunciación inglesa
-        'Lagarde': 'Lagárd',          # Christine Lagarde (BCE)
-        
-        # ── TÉRMINOS NAVALES Y DE LA COFRADÍA ──
-        'Cofradía': 'Cofradía',       # Sin alargamiento, ya tiene tilde
-        'cofradía': 'cofradía',
-        'Cofrades': 'Cofrádes',       # Énfasis en sílaba tónica
-        'cofrades': 'cofrádes',
-        'náutico': 'náutico',
-        'náutica': 'náutica',
-        'capitán': 'capitán',
-        'almirante': 'almirante',
-        'oficial': 'oficiál',
-        'Armada': 'Armáda',
-        'armada': 'armáda',
-        
-        # ── TÉRMINOS ECONÓMICOS Y FINANCIEROS ──
-        'inflación': 'inflasión',     # Pronunciación chilena (s en vez de θ)
-        'política': 'política',
-        'económico': 'económico',
-        'económica': 'económica',
-        'macroeconómico': 'macroeconómico',
-        'monetaria': 'monetária',
-        'monetario': 'monetário',
-        'financiera': 'financiéra',
-        'financiero': 'financiéro',
-        
-        # ── PAÍSES Y LUGARES ──
-        'América': 'América',
-        'Argentina': 'Arjentína',     # G suena como J en español
-        'Chile': 'Chíle',
-        'España': 'España',
-        'México': 'Méjico',           # X de México suena J (regla histórica)
-        'Brasil': 'Brasíl',
-        'Colombia': 'Colómbia',
-        'Perú': 'Perú',
-        'Venezuela': 'Venesuéla',
-        'Ecuador': 'Ekuadór',
-        'Estados Unidos': 'Estádos Unídos',
-        'Dubai': 'Dubái',             # Acento agudo
-        'Dubái': 'Dubái',
-        'Emiratos': 'Emirátos',
-        
-        # ── NOMBRES PROPIOS CHILENOS COMUNES ──
-        'Andrés': 'Andrés',
-        'Sebastián': 'Sebastián',
-        'Cristóbal': 'Cristóbal',
-        'José': 'José',
-        'Tomás': 'Tomás',
-        'Nicolás': 'Nicolás',
-        'Martín': 'Martín',
-        'Joaquín': 'Joakín',          # Q+u → k
-        'Iván': 'Iván',
-        'Inés': 'Inés',
-        'María': 'María',
-        'Ramón': 'Ramón',
-        'Simón': 'Simón',
-        'Adrián': 'Adrián',
-        'Hernán': 'Jernán',           # H muda → J (latinoamericano)
-        'Julián': 'Julián',
-        'Fabián': 'Fabián',
-        'Felipe': 'Felípe',
-        'Rodrigo': 'Rodrígo',
-        'Patricio': 'Patrício',
-        'Gonzalo': 'Gonsálo',         # Z chilena → S
-        'Alejandro': 'Alejándro',
-        'Francisco': 'Fransísco',     # Z chilena → S
-        'Eduardo': 'Eduárdo',
-        
-        # ── VERBOS Y EXPRESIONES COMUNES ──
-        'háblame': 'jáblame',         # H → J latinoamericano
-        'cuéntame': 'cuéntame',
-        'háganos': 'jáganos',
-        'búsqueda': 'búsqueda',
-        'préstamo': 'préstamo',
-        'táctica': 'táctica',
-        'práctica': 'práctica',
-        'logística': 'lojística',     # G suave → J
-        'estratégica': 'estratéjica',
-        
-        # ── CARGOS Y TÍTULOS ──
-        'doctor': 'doctór',
-        'doctora': 'doctóra',
-        'ingeniero': 'injenié-ro',
-        'ingeniera': 'injenié-ra',
-        'profesor': 'profesór',
-        'profesora': 'profesóra',
-        'gerente': 'jerénte',
-        'comandante': 'comandánte',
-    }
-    
-    # 1. ESCAPE XML estricto (CRÍTICO — un solo & sin escapar rompe todo el SSML)
-    t = (texto
-         .replace('&', '&amp;')
-         .replace('<', '&lt;')
-         .replace('>', '&gt;')
-         .replace('"', '&quot;')
-         .replace("'", '&apos;'))
-    
-    # 2. PRONUNCIACIONES FORZADAS — antes de cualquier otro tag, usando <sub>
-    # Procesamos primero las claves más largas para evitar matches parciales
-    claves_ordenadas = sorted(PRONUNCIACIONES_FORZADAS.keys(), key=len, reverse=True)
-    for palabra_original in claves_ordenadas:
-        alias_pronunciacion = PRONUNCIACIONES_FORZADAS[palabra_original]
-        # Usar word boundary para no matchear partes de otras palabras
-        # \b funciona con UTF-8 en Python regex
-        patron = r'\b' + re.escape(palabra_original) + r'\b'
-        # <sub alias="X">Y</sub>: muestra Y pero pronuncia X
-        reemplazo = f'<sub alias="{alias_pronunciacion}">{palabra_original}</sub>'
-        t = re.sub(patron, reemplazo, t)
-    
-    # 3. EXPANSIONES DE ABREVIATURAS CHILENAS (después de <sub>, no chocan)
-    abreviaturas = [
-        (r'\bUF\b', 'U efe'),
-        (r'\bCLP\b', 'pesos chilenos'),
-        (r'\bUSD\b', 'dólares'),
-        (r'\bEUR\b', 'euros'),
-        (r'\bUTM\b', 'U te eme'),
-        (r'\bIPC\b', 'I pe ce'),
-        (r'\bTPM\b', 'te pe eme'),
-        (r'\bAFP\b', 'a efe pe'),
-        (r'\bAPV\b', 'a pe ve'),
-        (r'\bTMC\b', 'te eme ce'),
-        (r'\bCMF\b', 'ce eme efe'),
-        (r'\bINE\b', 'I ene e'),
-        (r'\bBCCh\b', 'Banco Central'),
-        (r'\bSII\b', 'ese i i'),
-        (r'\bIVA\b', 'iva'),
-        (r'\bPYME[Ss]?\b', 'pymes'),
-        (r'\bRUT\b', 'rut'),
-    ]
-    for patt, repl in abreviaturas:
-        t = re.sub(patt, repl, t)
-    
-    # 4. NÚMEROS Y MONTOS — usar <say-as> para pronunciación correcta
-    def _format_monto(m):
-        num = m.group(1).replace('.', '').replace(',', '')
-        if num.isdigit():
-            return f'<say-as interpret-as="cardinal">{num}</say-as> pesos'
-        return m.group(0)
-    t = re.sub(r'\$\s*([\d.,]+)', _format_monto, t)
-    
-    def _format_pct(m):
-        num = m.group(1).replace(',', '.')
-        return f'{num} por ciento'  # más simple, no usar say-as con decimales
-    t = re.sub(r'(\d+[,\.]?\d*)\s*%', _format_pct, t)
-    
-    # 5. PAUSAS NATURALES con <break> (separadas con espacios para evitar adyacencia)
-    t = t.replace('. ', '. <break time="500ms"/> ')
-    t = t.replace(': ', ': <break time="350ms"/> ')
-    t = t.replace('; ', '; <break time="350ms"/> ')
-    t = t.replace(', ', ', <break time="200ms"/> ')
-    t = t.replace('? ', '? <break time="500ms"/> ')
-    t = t.replace('! ', '! <break time="500ms"/> ')
-    
-    # 6. WRAP EN <speak> SIMPLE — SIN prosody (evita conflicto con audioConfig)
-    # CRITICO: NO duplicar rate/pitch aquí, se aplican via audioConfig
-    ssml = f'<speak>{t}</speak>'
-    return ssml
-
-
 def _llamar_google_tts(texto: str) -> Optional[bytes]:
-    """FASE 11: Llamada robusta a Google TTS con SSML opcional.
-    
-    Cuando USE_SSML=True:
-    - Envía SSML en input.ssml
-    - audioConfig SIN speakingRate/pitch duplicado (ya que <prosody> los manejaría
-      pero ahora no usamos <prosody>, así que aplicamos rate/pitch via audioConfig)
-    - SIN effectsProfileId (incompatible con SSML en algunos casos)
-    
-    Cuando USE_SSML=False (modo v91):
-    - Texto plano + audioConfig completo con effectsProfileId
-    """
     url = f"{GOOGLE_TTS_URL}?key={GOOGLE_TTS_KEY}"
-    
-    # FASE 11: Intentar SSML si está activado — payload SIMPLIFICADO
-    if USE_SSML:
-        try:
-            ssml = _texto_a_ssml(texto)
-            # Logging del SSML para diagnóstico (primeros 200 chars)
-            print(f"🔊 [TTS-SSML] Generando SSML: {ssml[:200]}...")
-            payload_ssml = {
-                "input": {"ssml": ssml},
-                "voice": {"languageCode": VOICE_LANGUAGE, "name": VOICE_NAME},
-                "audioConfig": {
-                    "audioEncoding":    "MP3",
-                    "speakingRate":     SPEAKING_RATE,  # rate aplicado aquí (sin prosody en SSML)
-                    "pitch":            PITCH,           # pitch aplicado aquí
-                    "volumeGainDb":     2.0,             # ligero boost
-                    # NO usar effectsProfileId con SSML — causa rechazos en Neural2
-                }
-            }
-            r = requests.post(url, json=payload_ssml, timeout=15)
-            if r.status_code == 200:
-                audio = base64.b64decode(r.json().get("audioContent", ""))
-                if audio:
-                    print(f"✅ [TTS-SSML] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
-                    logger.info(f"✅ [TTS-SSML] Google {VOICE_NAME} OK ({len(audio):,} bytes)")
-                    return audio
-            # SSML rechazado → loggear DETALLE COMPLETO para diagnóstico
-            err_text = r.text[:500] if r.text else 'sin detalle'
-            print(f"⚠️ [TTS-SSML] Google rechazó SSML ({r.status_code}): {err_text}")
-            logger.warning(f"Google TTS SSML rechazado HTTP {r.status_code}: {err_text}")
-            print(f"⚠️ [TTS-SSML] Cayendo a TEXTO PLANO automáticamente")
-        except Exception as e:
-            print(f"⚠️ [TTS-SSML] excepción: {e}, usando texto plano")
-            logger.warning(f"Google TTS SSML excepción: {e}")
-    
-    # MODO TEXTO PLANO (default si SSML=false, o fallback si SSML falló)
     payload = {
         "input": {"text": texto},
         "voice": {
@@ -403,12 +51,14 @@ def _llamar_google_tts(texto: str) -> Optional[bytes]:
         }
     }
     try:
-        r = requests.post(url, json=payload, timeout=15)
+        # FASE 27: timeout aumentado de 15s a 60s para textos largos (hasta 4500 chars)
+        # Google TTS Neural2 puede tardar ~30s en sintetizar 4000+ chars sin perder calidad
+        r = requests.post(url, json=payload, timeout=60)
         if r.status_code == 200:
             audio = base64.b64decode(r.json().get("audioContent", ""))
             if audio:
-                print(f"✅ [TTS] Google {VOICE_NAME} OK texto-plano ({len(audio):,} bytes)")
-                logger.info(f"✅ [TTS] Google {VOICE_NAME} OK texto-plano ({len(audio):,} bytes)")
+                print(f"✅ [TTS] Google Neural2 OK ({len(audio):,} bytes)")
+                logger.info(f"✅ [TTS] Google Neural2 OK ({len(audio):,} bytes)")
                 return audio
         else:
             print(f"❌ [TTS] Google TTS {r.status_code}: {r.text[:200]}")
@@ -450,20 +100,13 @@ async def texto_a_voz(
     if len(texto_limpio) > 4500:
         texto_limpio = texto_limpio[:4497] + "..."
 
-    # FASE 12: Banner mejorado por cada llamada — identifica EXACTAMENTE qué voz se usa
-    print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print(f"🎤 [TTS REQUEST] versión={TTS_VERSION_TAG}")
-    print(f"🎤   GOOGLE_TTS_KEY: {'CONFIGURADA' if GOOGLE_TTS_KEY else 'NO_CONFIGURADA'}")
-    print(f"🎤   VOICE_NAME    : {VOICE_NAME}")
-    print(f"🎤   USE_SSML      : {USE_SSML}")
-    print(f"🎤   Texto (primeros 80 chars): '{texto_limpio[:80]}'")
-    logger.info(f"🎤 [TTS REQUEST] voz={VOICE_NAME} ssml={USE_SSML} key={'SI' if GOOGLE_TTS_KEY else 'NO'}")
+    print(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'} | voz={VOICE_NAME}")
+    logger.info(f"🎤 [TTS] GOOGLE_TTS_KEY={'SÍ' if GOOGLE_TTS_KEY else 'NO'}")
 
     if USE_CACHE:
         f_cache = CACHE_DIR / f"{_cache_key(texto_limpio)}.mp3"
         if f_cache.exists():
-            print(f"🎵 [TTS] Audio desde caché ({f_cache.stat().st_size:,} bytes)")
-            print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            print("🎵 [TTS] Audio desde caché")
             return f_cache.read_bytes()
 
     if GOOGLE_TTS_KEY:
@@ -472,21 +115,12 @@ async def texto_a_voz(
         if audio:
             if USE_CACHE:
                 f_cache.write_bytes(audio)
-            print(f"🎤 [TTS RESULT] ✅ GOOGLE TTS → {len(audio):,} bytes generados")
-            print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return audio
-        # Google TTS falló → fallback a edge-tts Catalina
-        print(f"🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina (sonará más robótica)")
-        logger.warning(f"⚠️ Google TTS falló — usando edge-tts Catalina como fallback")
-        result = await _edge_tts_fallback(texto_limpio)
-        print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return result
+        return await _edge_tts_fallback(texto_limpio)
     else:
-        print(f"⏭️ [TTS] Sin GOOGLE_TTS_KEY → usando edge-tts Catalina")
-        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada — usando Catalina como fallback")
-        result = await _edge_tts_fallback(texto_limpio)
-        print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return result
+        print("⏭️ [TTS] Sin GOOGLE_TTS_KEY → Catalina")
+        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada")
+        return await _edge_tts_fallback(texto_limpio)
 
 
 async def limpiar_cache_tts(dias: int = 7):

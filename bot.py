@@ -7015,344 +7015,1637 @@ async def start_no_registrado_texto(update: Update, context: ContextTypes.DEFAUL
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _ayuda_html_generar(es_admin: bool = False) -> str:
-    """Genera el HTML descargable de /ayuda.
+    """Genera el HTML descargable de /ayuda — VERSIÓN MEJORADA FASE 27.
+    
+    Características:
+    - Buscador flotante en tiempo real (filtra comandos por nombre/descripción)
+    - Modal con definición detallada + 3+ ejemplos prácticos al click en cada comando
+    - Navegación lateral por categorías
+    - SVG animados ilustrativos (sin librerías externas para discreción tecnológica)
+    - Responsive (móvil + desktop)
     
     Args:
         es_admin: Si True, incluye comandos administrativos exclusivos del owner.
-                  Si False, solo comandos visibles para todos los usuarios.
-    
-    Returns:
-        String con el HTML completo (sin librerías externas para discreción).
     """
     
-    # ─── CSS común (paleta dorado/azul Cofradía) ───
+    # ─── CSS COMÚN (paleta dorado/azul Cofradía + nuevos componentes) ───
     css_common = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { background: linear-gradient(135deg,#0a1628 0%,#0f2f59 50%,#1a3a6a 100%); color: #e0e6ed; min-height: 100vh; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; padding: 2rem 1rem; line-height: 1.55; }
-.container { max-width: 1280px; margin: 0 auto; }
-header { text-align: center; padding: 28px 0 22px; border-bottom: 2px solid #c3a55a; margin-bottom: 28px; position: relative; }
+html, body { background: linear-gradient(135deg,#0a1628 0%,#0f2f59 50%,#1a3a6a 100%); color: #e0e6ed; min-height: 100vh; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; line-height: 1.55; scroll-behavior: smooth; }
+body { padding: 0; }
+.layout { display: grid; grid-template-columns: 240px 1fr; gap: 0; min-height: 100vh; }
+
+/* ─── NAVEGACIÓN LATERAL ─── */
+nav.sidebar { background: rgba(10,22,40,.85); border-right: 1px solid rgba(195,165,90,.2); padding: 24px 16px; position: sticky; top: 0; height: 100vh; overflow-y: auto; backdrop-filter: blur(12px); }
+nav.sidebar h3 { color: #c3a55a; font-size: .9em; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid rgba(195,165,90,.25); }
+nav.sidebar a { display: block; color: #aebfd0; padding: 8px 12px; text-decoration: none; border-radius: 6px; font-size: .92em; margin-bottom: 4px; transition: all .2s; border-left: 3px solid transparent; }
+nav.sidebar a:hover { background: rgba(195,165,90,.1); color: #c3a55a; border-left-color: #c3a55a; }
+nav.sidebar a .nav-icon { display: inline-block; width: 22px; margin-right: 8px; text-align: center; }
+nav.sidebar a .nav-count { float: right; background: rgba(195,165,90,.2); color: #c3a55a; padding: 1px 8px; border-radius: 10px; font-size: .75em; font-weight: 700; }
+
+/* ─── CONTENIDO PRINCIPAL ─── */
+.main { padding: 28px 32px 60px; max-width: 1100px; }
+header { text-align: center; padding: 24px 0 22px; border-bottom: 2px solid #c3a55a; margin-bottom: 28px; }
 header h1 { color: #c3a55a; font-size: 2.4em; margin-bottom: 8px; letter-spacing: -.02em; text-shadow: 0 2px 10px rgba(195,165,90,.3); }
 header h1::before { content: "\\2693 "; }
 header .subtitle { color: #aebfd0; font-size: 1.05em; font-weight: 400; }
 header .badge { display: inline-block; background: linear-gradient(135deg,#c3a55a,#d4b878); color: #0a1628; padding: 4px 12px; border-radius: 16px; font-weight: 700; font-size: .85em; margin-top: 12px; box-shadow: 0 4px 12px rgba(195,165,90,.25); }
 
+/* ─── BUSCADOR FLOTANTE ─── */
+.search-bar { position: sticky; top: 0; z-index: 100; background: linear-gradient(135deg,rgba(10,22,40,.95),rgba(15,47,89,.92)); backdrop-filter: blur(16px); padding: 16px 24px; margin: -28px -32px 24px; border-bottom: 1px solid rgba(195,165,90,.2); box-shadow: 0 4px 16px rgba(0,0,0,.3); }
+.search-input-wrap { position: relative; max-width: 600px; margin: 0 auto; }
+.search-input { width: 100%; padding: 14px 22px 14px 52px; background: rgba(10,22,40,.6); border: 2px solid rgba(195,165,90,.3); border-radius: 14px; color: #e0e6ed; font-size: 1.02em; transition: all .25s; outline: none; }
+.search-input:focus { border-color: #c3a55a; background: rgba(10,22,40,.85); box-shadow: 0 0 24px rgba(195,165,90,.25); }
+.search-input::placeholder { color: rgba(174,191,208,.55); }
+.search-icon { position: absolute; left: 18px; top: 50%; transform: translateY(-50%); color: #c3a55a; font-size: 1.25em; pointer-events: none; }
+.search-clear { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: #aebfd0; cursor: pointer; padding: 6px 10px; background: rgba(195,165,90,.15); border-radius: 8px; font-size: .85em; display: none; }
+.search-stats { text-align: center; margin-top: 10px; color: #88a8c8; font-size: .82em; min-height: 1em; }
+.search-hint { text-align: center; margin-top: 6px; color: rgba(174,191,208,.5); font-size: .75em; font-style: italic; }
+
+/* ─── BLOQUE INTRO: TARJETA + INVITACIÓN (FASE 28) ─── */
+.intro-block { background: linear-gradient(135deg,rgba(195,165,90,.12),rgba(195,165,90,.04)); border: 1px solid rgba(195,165,90,.3); border-radius: 16px; padding: 26px; margin: 0 0 28px; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+.intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
+.intro-card h3 { color: #c3a55a; font-size: 1.18em; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid rgba(195,165,90,.25); }
+.intro-card .step { background: rgba(10,22,40,.5); border-left: 3px solid #c3a55a; padding: 10px 14px; border-radius: 0 8px 8px 0; margin-bottom: 8px; font-size: .92em; }
+.intro-card .step strong { color: #c3a55a; }
+.intro-card .step .step-num { display: inline-block; background: rgba(195,165,90,.2); color: #c3a55a; font-weight: 700; padding: 1px 8px; border-radius: 8px; margin-right: 8px; font-size: .85em; }
+.invite-box { background: linear-gradient(135deg,rgba(15,47,89,.7),rgba(26,58,106,.4)); border: 2px dashed rgba(195,165,90,.5); border-radius: 12px; padding: 18px; text-align: center; margin-top: 10px; }
+.invite-box p { color: #d4dde8; font-size: .92em; margin-bottom: 12px; line-height: 1.5; }
+.invite-link { display: block; background: rgba(10,22,40,.7); color: #c3a55a; padding: 12px 16px; border-radius: 8px; font-family: 'Consolas','Courier New',monospace; word-break: break-all; font-size: .9em; cursor: pointer; transition: all .2s; border: 1px solid rgba(195,165,90,.3); margin-bottom: 10px; user-select: all; }
+.invite-link:hover { background: rgba(195,165,90,.15); border-color: #c3a55a; color: #d4b878; }
+.copy-btn { display: inline-block; background: linear-gradient(135deg,#c3a55a,#d4b878); color: #0a1628; padding: 8px 22px; border-radius: 8px; font-weight: 700; cursor: pointer; border: none; font-size: .9em; transition: all .25s; }
+.copy-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(195,165,90,.4); }
+.copy-btn.copied { background: linear-gradient(135deg,#5cb85c,#7dd47d); }
+
+/* ─── PREVIEW DEL BOT EN MODAL (FASE 28) ─── */
+.modal-bot-preview { background: rgba(10,22,40,.85); border: 1px solid rgba(195,165,90,.25); border-radius: 12px; padding: 16px; margin-top: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.3); }
+.modal-bot-preview .preview-label { display: flex; align-items: center; color: #c3a55a; font-size: .82em; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(195,165,90,.15); }
+.modal-bot-preview .preview-label::before { content: ""; display: inline-block; width: 28px; height: 28px; background: linear-gradient(135deg,#c3a55a,#d4b878); border-radius: 50%; margin-right: 10px; flex-shrink: 0; }
+.bot-msg-sim { background: rgba(15,47,89,.5); border-radius: 10px; padding: 14px 16px; color: #d4dde8; font-size: .92em; line-height: 1.55; font-family: 'Segoe UI'; white-space: pre-wrap; word-wrap: break-word; }
+.bot-msg-sim b, .bot-msg-sim strong { color: #c3a55a; font-weight: 700; }
+.bot-msg-sim em { color: #88a8c8; font-style: italic; }
+.bot-msg-sim code { background: rgba(195,165,90,.1); padding: 1px 6px; border-radius: 4px; color: #d4b878; font-family: 'Consolas','Courier New',monospace; font-size: .9em; }
+.match-highlight { background: rgba(195,165,90,.25); color: #d4b878; padding: 0 3px; border-radius: 3px; }
+
+/* ─── KPIs ─── */
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 22px 0 36px; }
 .kpi { background: linear-gradient(135deg,rgba(15,47,89,.7),rgba(26,58,106,.4)); border: 1px solid rgba(195,165,90,.25); border-radius: 12px; padding: 16px; text-align: center; transition: all .3s; }
 .kpi:hover { border-color: #c3a55a; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(195,165,90,.15); }
 .kpi-num { font-size: 2.3em; font-weight: 800; color: #c3a55a; text-shadow: 0 0 18px rgba(195,165,90,.3); line-height: 1; }
 .kpi-lbl { color: #aebfd0; font-size: .82em; margin-top: 6px; text-transform: uppercase; letter-spacing: .8px; }
 
-section.cat { background: linear-gradient(135deg,rgba(15,47,89,.55),rgba(26,58,106,.3)); border: 1px solid rgba(195,165,90,.18); border-radius: 14px; padding: 22px 26px; margin-bottom: 22px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
-section.cat h2 { color: #c3a55a; font-size: 1.5em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid rgba(195,165,90,.25); }
+/* ─── CATEGORÍAS Y COMANDOS ─── */
+section.cat { background: linear-gradient(135deg,rgba(15,47,89,.55),rgba(26,58,106,.3)); border: 1px solid rgba(195,165,90,.18); border-radius: 14px; padding: 22px 26px; margin-bottom: 22px; box-shadow: 0 4px 16px rgba(0,0,0,.2); scroll-margin-top: 90px; }
+section.cat h2 { color: #c3a55a; font-size: 1.5em; margin-bottom: 6px; padding-bottom: 10px; border-bottom: 1px solid rgba(195,165,90,.25); }
 section.cat h2 .cat-icon { display: inline-block; width: 38px; height: 38px; background: linear-gradient(135deg,#c3a55a,#d4b878); border-radius: 8px; text-align: center; line-height: 38px; margin-right: 12px; font-size: .9em; color: #0a1628; vertical-align: middle; }
+section.cat .cat-desc { color: #88a8c8; font-size: .95em; margin-bottom: 18px; font-style: italic; }
 
-.cmd-list { display: grid; grid-template-columns: 1fr; gap: 14px; }
-.cmd { background: rgba(10,22,40,.55); border-left: 3px solid #c3a55a; border-radius: 8px; padding: 14px 18px; transition: all .25s; }
-.cmd:hover { background: rgba(10,22,40,.85); border-left-color: #d4b878; }
+.cmd-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.cmd { background: rgba(10,22,40,.55); border-left: 3px solid #c3a55a; border-radius: 8px; padding: 14px 18px; transition: all .25s; cursor: pointer; position: relative; }
+.cmd:hover { background: rgba(10,22,40,.85); border-left-color: #d4b878; transform: translateX(2px); box-shadow: 0 4px 14px rgba(195,165,90,.12); }
+.cmd::after { content: "\\2192"; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); color: rgba(195,165,90,.4); font-size: 1.4em; transition: all .25s; }
+.cmd:hover::after { color: #c3a55a; transform: translateY(-50%) translateX(4px); }
 .cmd-name { color: #c3a55a; font-family: 'Consolas','Courier New',monospace; font-size: 1.05em; font-weight: 700; }
-.cmd-desc { color: #d4dde8; margin-top: 6px; font-size: .96em; }
-.cmd-example { color: #88a8c8; margin-top: 8px; font-size: .88em; padding: 8px 12px; background: rgba(195,165,90,.06); border-radius: 6px; border-left: 2px solid rgba(195,165,90,.4); font-family: 'Consolas','Courier New',monospace; }
-.cmd-example::before { content: "Ejemplo: "; color: #c3a55a; font-weight: 700; font-family: 'Segoe UI'; }
+.cmd-desc { color: #d4dde8; margin-top: 5px; font-size: .94em; }
+.cmd-tag { display: inline-block; background: rgba(195,165,90,.15); color: #c3a55a; padding: 2px 8px; border-radius: 8px; font-size: .72em; margin-left: 8px; font-weight: 600; }
+.cmd.hidden { display: none; }
 
-footer { text-align: center; padding: 28px 0 12px; margin-top: 36px; border-top: 1px solid rgba(195,165,90,.2); color: #88a8c8; font-size: .88em; }
+/* ─── MODAL FLOTANTE ─── */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(5,10,20,.85); backdrop-filter: blur(8px); z-index: 1000; justify-content: center; align-items: center; padding: 20px; }
+.modal-overlay.show { display: flex; animation: fadeIn .2s; }
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+.modal { background: linear-gradient(135deg,#0f2f59 0%,#1a3a6a 100%); border: 1px solid rgba(195,165,90,.4); border-radius: 16px; max-width: 720px; width: 100%; max-height: 88vh; overflow-y: auto; box-shadow: 0 24px 60px rgba(0,0,0,.6), 0 0 80px rgba(195,165,90,.15); animation: slideUp .3s; }
+@keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+.modal-head { padding: 22px 26px 18px; border-bottom: 2px solid rgba(195,165,90,.3); position: sticky; top: 0; background: linear-gradient(135deg,#0f2f59 0%,#1a3a6a 100%); }
+.modal-cmd-name { color: #c3a55a; font-family: 'Consolas','Courier New',monospace; font-size: 1.45em; font-weight: 700; margin-bottom: 4px; }
+.modal-cmd-cat { display: inline-block; color: #aebfd0; font-size: .82em; text-transform: uppercase; letter-spacing: 1.2px; margin-top: 6px; }
+.modal-close { position: absolute; right: 18px; top: 18px; background: rgba(195,165,90,.18); color: #c3a55a; border: none; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; font-size: 1.4em; transition: all .2s; }
+.modal-close:hover { background: #c3a55a; color: #0a1628; transform: rotate(90deg); }
+.modal-body { padding: 22px 26px; }
+.modal-section { margin-bottom: 22px; }
+.modal-section h4 { color: #c3a55a; font-size: 1em; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid rgba(195,165,90,.15); }
+.modal-def { color: #d4dde8; font-size: 1.02em; line-height: 1.65; }
+.modal-example { background: rgba(10,22,40,.6); border-left: 3px solid #c3a55a; border-radius: 6px; padding: 12px 16px; margin-bottom: 10px; font-family: 'Consolas','Courier New',monospace; color: #d4dde8; font-size: .93em; }
+.modal-example .ex-label { color: #c3a55a; font-weight: 700; font-size: .82em; font-family: 'Segoe UI'; text-transform: uppercase; letter-spacing: 1px; display: block; margin-bottom: 4px; }
+.modal-tip { background: rgba(195,165,90,.08); border: 1px dashed rgba(195,165,90,.3); border-radius: 8px; padding: 12px 16px; color: #d4dde8; font-size: .94em; margin-top: 12px; }
+.modal-tip::before { content: "\\1F4A1 "; }
+
+/* ─── DIAGRAMAS / GRÁFICOS ─── */
+.viz-block { margin: 28px 0; padding: 24px; background: linear-gradient(135deg,rgba(10,22,40,.55),rgba(15,47,89,.4)); border-radius: 14px; border: 1px solid rgba(195,165,90,.2); }
+.viz-title { color: #c3a55a; font-size: 1.15em; font-weight: 700; margin-bottom: 14px; text-align: center; text-transform: uppercase; letter-spacing: 1.5px; }
+
+/* ─── FOOTER ─── */
+footer { text-align: center; padding: 32px 0 16px; margin-top: 40px; border-top: 1px solid rgba(195,165,90,.2); color: #88a8c8; font-size: .88em; }
 footer .gold { color: #c3a55a; font-weight: 600; }
 
-@media (max-width: 700px) {
+/* ─── RESPONSIVE ─── */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  nav.sidebar { position: static; height: auto; max-height: 200px; border-right: none; border-bottom: 1px solid rgba(195,165,90,.2); }
+  .main { padding: 20px 16px 40px; }
+  .search-bar { margin: -20px -16px 20px; padding: 14px 16px; }
   header h1 { font-size: 1.8em; }
   section.cat { padding: 18px 16px; }
-  .cmd-name { font-size: .95em; }
 }
+
+/* Scrollbar customizado */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: rgba(10,22,40,.4); }
+::-webkit-scrollbar-thumb { background: rgba(195,165,90,.4); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #c3a55a; }
 """
     
-    # ─── Diagrama SVG decorativo "uso del bot" (sin librerías) ───
-    svg_uso = """<svg viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;height:auto;display:block;margin:18px auto;">
+    # ─── Diagrama SVG: flujo de uso ───
+    svg_uso = """<svg viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;height:auto;display:block;margin:8px auto;">
   <defs>
     <linearGradient id="gradGold" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0%" stop-color="#c3a55a"/>
       <stop offset="100%" stop-color="#d4b878"/>
     </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="4" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   </defs>
-  
-  <text x="400" y="28" text-anchor="middle" fill="#c3a55a" font-size="18" font-weight="700" font-family="Segoe UI">FLUJO DE USO DEL BOT</text>
-  
-  <!-- Nodo 1 -->
-  <circle cx="80" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
-  <text x="80" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">1</text>
-  <text x="80" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">REGISTRO</text>
-  <text x="80" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/start</text>
-  
-  <line x1="125" y1="120" x2="195" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
-  
-  <!-- Nodo 2 -->
-  <circle cx="240" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
-  <text x="240" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">2</text>
-  <text x="240" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">PERFIL</text>
-  <text x="240" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/mi_tarjeta</text>
-  
-  <line x1="285" y1="120" x2="355" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
-  
-  <!-- Nodo 3 -->
-  <circle cx="400" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
-  <text x="400" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">3</text>
-  <text x="400" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">CONECTAR</text>
-  <text x="400" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/conectar /directorio</text>
-  
-  <line x1="445" y1="120" x2="515" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
-  
-  <!-- Nodo 4 -->
-  <circle cx="560" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
-  <text x="560" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">4</text>
-  <text x="560" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">PRODUCIR</text>
-  <text x="560" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/oportunidad /tarea_crear</text>
-  
-  <line x1="605" y1="120" x2="675" y2="120" stroke="#c3a55a" stroke-width="2" stroke-dasharray="5,5"/>
-  
-  <!-- Nodo 5 -->
-  <circle cx="720" cy="120" r="42" fill="url(#gradGold)" filter="url(#glow)"/>
-  <text x="720" y="115" text-anchor="middle" fill="#0a1628" font-size="22" font-weight="700">5</text>
-  <text x="720" y="135" text-anchor="middle" fill="#0a1628" font-size="11" font-weight="600">ANALIZAR</text>
-  <text x="720" y="180" text-anchor="middle" fill="#aebfd0" font-size="10">/economia /pipeline</text>
+  <circle cx="80" cy="100" r="38" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="80" y="95" text-anchor="middle" fill="#0a1628" font-size="20" font-weight="700">1</text>
+  <text x="80" y="115" text-anchor="middle" fill="#0a1628" font-size="10" font-weight="600">REGISTRO</text>
+  <text x="80" y="160" text-anchor="middle" fill="#aebfd0" font-size="11">/start</text>
+  <line x1="120" y1="100" x2="195" y2="100" stroke="#c3a55a" stroke-width="2" stroke-dasharray="4,4"/>
+  <circle cx="240" cy="100" r="38" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="240" y="95" text-anchor="middle" fill="#0a1628" font-size="20" font-weight="700">2</text>
+  <text x="240" y="115" text-anchor="middle" fill="#0a1628" font-size="10" font-weight="600">PERFIL</text>
+  <text x="240" y="160" text-anchor="middle" fill="#aebfd0" font-size="11">/mi_tarjeta</text>
+  <line x1="280" y1="100" x2="355" y2="100" stroke="#c3a55a" stroke-width="2" stroke-dasharray="4,4"/>
+  <circle cx="400" cy="100" r="38" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="400" y="95" text-anchor="middle" fill="#0a1628" font-size="20" font-weight="700">3</text>
+  <text x="400" y="115" text-anchor="middle" fill="#0a1628" font-size="10" font-weight="600">CONECTAR</text>
+  <text x="400" y="160" text-anchor="middle" fill="#aebfd0" font-size="11">/conectar</text>
+  <line x1="440" y1="100" x2="515" y2="100" stroke="#c3a55a" stroke-width="2" stroke-dasharray="4,4"/>
+  <circle cx="560" cy="100" r="38" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="560" y="95" text-anchor="middle" fill="#0a1628" font-size="20" font-weight="700">4</text>
+  <text x="560" y="115" text-anchor="middle" fill="#0a1628" font-size="10" font-weight="600">PRODUCIR</text>
+  <text x="560" y="160" text-anchor="middle" fill="#aebfd0" font-size="11">/oportunidad</text>
+  <line x1="600" y1="100" x2="675" y2="100" stroke="#c3a55a" stroke-width="2" stroke-dasharray="4,4"/>
+  <circle cx="720" cy="100" r="38" fill="url(#gradGold)" filter="url(#glow)"/>
+  <text x="720" y="95" text-anchor="middle" fill="#0a1628" font-size="20" font-weight="700">5</text>
+  <text x="720" y="115" text-anchor="middle" fill="#0a1628" font-size="10" font-weight="600">ANALIZAR</text>
+  <text x="720" y="160" text-anchor="middle" fill="#aebfd0" font-size="11">/economia</text>
 </svg>"""
-
-    # ─── Comandos de USUARIO (todos pueden usar) ───
+    
+    # ─── Gráfico SVG: distribución de comandos por categoría ───
+    # (Generamos uno dinámico al final con datos reales)
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # CATEGORÍAS DE COMANDOS (USUARIO)
+    # Cada comando ahora tiene: nombre, descripción corta, definición detallada,
+    # 3+ ejemplos prácticos, tip opcional
+    # ═══════════════════════════════════════════════════════════════════════
+    
     categorias_usuario = [
+        # ═══ INICIO Y CUENTA ═══
         {
+            "id": "inicio",
             "icon": "🚀",
             "titulo": "Inicio y Cuenta",
+            "descripcion": "Comandos esenciales para registrarte, gestionar tu cuenta y empezar a usar la plataforma.",
             "comandos": [
-                ("/start", "Iniciar el bot y registrarte en la Cofradía", None),
-                ("/mi_cuenta", "Ver el estado de tu suscripción", None),
-                ("/mi_perfil", "Ver tu perfil de actividad", None),
-                ("/renovar", "Renovar tu suscripción", None),
-                ("/activar [código]", "Activar un código de acceso", "/activar COFR-2026-XYZ"),
-                ("/ayuda", "Ver este menú de ayuda con HTML descargable", None),
+                {
+                    "name": "/start",
+                    "desc": "Iniciar el bot y registrarte en la Cofradía",
+                    "keywords": "start iniciar comenzar arrancar empezar bienvenida onboarding nuevo registro registrar primera vez",
+                    "definicion": "Punto de entrada al bot. Si es tu primera vez, inicia el proceso de onboarding (preguntas de ingreso). Si ya estás registrado, te muestra el menú principal con las funcionalidades disponibles según tu plan de suscripción.",
+                    "ejemplos": [
+                        ("/start", "Iniciar la plataforma desde cero"),
+                        ("/start calculadora", "Iniciar y abrir directamente la Suite Económica Pro"),
+                        ("/start codigo_INV2026", "Iniciar con un código de invitación previo"),
+                        ("/start verificar_123456", "Iniciar el flujo de verificación oficial"),
+                        ("/start registro", "Iniciar el cuestionario de identidad oficial"),
+                    ],
+                    "bot_response": "<b>⚓ Bienvenido a Cofradía Premium</b>\n━━━━━━━━━━━━━━━━━━━━\n\nHola Juan, estás registrado correctamente.\n\n<b>📌 Acceso rápido:</b>\n• <code>/mi_tarjeta</code> — Tu tarjeta profesional\n• <code>/cofrades</code> — Lista de miembros\n• <code>/conectar</code> — Match profesional con IA\n• <code>/economia</code> — Dashboard económico Chile\n• <code>/ayuda</code> — Manual completo\n\n<em>Estado: Activo · Última sesión: hoy</em>",
+                    "tip": "Después de /start, completa tu /mi_tarjeta para que otros cofrades te conozcan profesionalmente.",
+                },
+                {
+                    "name": "/registrarse",
+                    "desc": "Registro manual (usar solo si /start falla)",
+                    "definicion": "Comando alternativo para registro manual. Solo útil cuando el flujo automático de /start no se completó correctamente. Inicia el cuestionario de identidad oficial paso a paso.",
+                    "ejemplos": [
+                        ("/registrarse", "Iniciar registro manual cuando /start no respondió"),
+                    ],
+                    "tip": "Si /start funciona, no uses este comando. Está reservado como respaldo técnico.",
+                },
+                {
+                    "name": "/mi_cuenta",
+                    "desc": "Ver el estado de tu suscripción",
+                    "definicion": "Muestra el detalle completo de tu cuenta: plan vigente, fecha de inicio, fecha de expiración, días restantes, último pago, beneficios activos y opciones de renovación.",
+                    "ejemplos": [
+                        ("/mi_cuenta", "Ver el estado actual de tu suscripción"),
+                    ],
+                    "tip": "Si tu cuenta está por vencer, recibirás avisos automáticos 30, 15 y 7 días antes.",
+                },
+                {
+                    "name": "/mi_perfil",
+                    "desc": "Ver tu perfil de actividad y participación",
+                    "definicion": "Muestra estadísticas personales: mensajes enviados, conexiones realizadas, oportunidades en pipeline, tareas pendientes/completadas, eventos próximos y posición en el ranking de actividad.",
+                    "ejemplos": [
+                        ("/mi_perfil", "Ver tu resumen completo de actividad"),
+                    ],
+                    "tip": "Tu perfil se actualiza en tiempo real con cada acción que realizas en la plataforma.",
+                },
+                # FASE 28: Removidos /renovar y /activar del manual de usuario por estrategia comercial.
+                # Los usuarios no deben ver estos comandos antes de tiempo (período gratuito oculto).
+                {
+                    "name": "/ayuda",
+                    "desc": "Ver este menú de ayuda con HTML descargable",
+                    "definicion": "Muestra el menú completo de comandos disponibles según tu rol y adjunta este HTML profesional descargable con búsqueda, ejemplos detallados y modal explicativo de cada comando.",
+                    "ejemplos": [
+                        ("/ayuda", "Ver el menú completo y descargar este manual"),
+                    ],
+                    "tip": "Este HTML se actualiza automáticamente cuando se agregan nuevos comandos.",
+                },
             ],
         },
+        # ═══ IDENTIDAD ═══
         {
+            "id": "identidad",
             "icon": "🆔",
             "titulo": "Identidad y Comunidad",
+            "descripcion": "Identifica a otros cofrades, gestiona tu tarjeta profesional y descubre quiénes son los miembros de la Cofradía.",
             "comandos": [
-                ("/quien", "Identificar a un usuario (responde a un mensaje suyo, o usa @user)", "/quien @Pedro_RRHH"),
-                ("/cofrades", "Ver listado completo de miembros con identidad oficial", None),
-                ("/dotacion", "Total de integrantes activos de la Cofradía", None),
-                ("/mi_tarjeta", "Crear o ver tu tarjeta profesional", None),
-                ("/web_tarjeta", "Descargar tu tarjeta como HTML profesional", None),
-                ("/directorio [filtro]", "Buscar en el directorio profesional", "/directorio gerente comercial"),
-                ("/recomendar @user [texto]", "Recomendar a un cofrade", "/recomendar @Juan Excelente abogado tributario"),
-                ("/mis_recomendaciones", "Ver las recomendaciones que has recibido", None),
+                {
+                    "name": "/quien",
+                    "desc": "Identificar a un cofrade",
+                    "keywords": "quien identificar identidad usuario persona miembro cofrade nombre profesional verificar averiguar",
+                    "definicion": "Muestra la identidad oficial verificada de un cofrade: nombre completo, cargo, empresa, áreas de expertise y datos de contacto profesional. Se puede usar respondiendo a un mensaje suyo, mencionándolo con @, o pasando su ID.",
+                    "ejemplos": [
+                        ("/quien @Pedro_RRHH", "Identificar por username de Telegram"),
+                        ("/quien", "Respondiendo a un mensaje suyo, identificarlo"),
+                        ("/quien 1234567890", "Identificar por ID numérico de Telegram"),
+                        ("/quien Pedro Ramírez", "Identificar por nombre conocido"),
+                        ("/quien @Juan_Naval", "Ver tarjeta profesional de @Juan_Naval"),
+                    ],
+                    "bot_response": "<b>🆔 Identidad de Pedro Ramírez</b>\n━━━━━━━━━━━━━━━━━━━━\n\n<b>Nombre:</b> Pedro Ramírez Soto ✓\n<b>Cargo:</b> Gerente RRHH\n<b>Empresa:</b> Constructora del Pacífico\n<b>Promoción:</b> 1995\n<b>Especialidad:</b> Gestión talento, RRLL\n<b>Disponibilidad:</b> Abierto a oportunidades\n\n<b>📱 Contacto:</b>\n• Telegram: @Pedro_RRHH\n• Email: pedro@empresa.cl\n\n<em>✓ Verificado oficialmente · Cofrade desde 2024</em>",
+                    "tip": "Los cofrades verificados oficialmente tienen un ✓ dorado al lado de su nombre.",
+                },
+                {
+                    "name": "/identidad",
+                    "desc": "Alias del comando /quien",
+                    "definicion": "Es exactamente el mismo comando que /quien, con el mismo comportamiento. Existe como alias para usuarios que prefieren la palabra 'identidad' por su semántica.",
+                    "ejemplos": [
+                        ("/identidad @Juan", "Idéntico a /quien @Juan"),
+                    ],
+                    "tip": "Usa el que te resulte más intuitivo. Ambos hacen lo mismo.",
+                },
+                {
+                    "name": "/cofrades",
+                    "desc": "Ver listado completo de miembros",
+                    "definicion": "Muestra el directorio completo de cofrades verificados con paginación. Cada entrada incluye nombre, cargo, empresa y un indicador visual de su estado de verificación.",
+                    "ejemplos": [
+                        ("/cofrades", "Ver el listado completo paginado"),
+                        ("/cofrades 2", "Ver la segunda página"),
+                    ],
+                    "tip": "Para buscar por área profesional, mejor usa /directorio o /buscar_profesional.",
+                },
+                {
+                    "name": "/miembros",
+                    "desc": "Alias del comando /cofrades",
+                    "definicion": "Es el mismo comando que /cofrades. Existe para usuarios que prefieren la palabra 'miembros' en lugar de 'cofrades'.",
+                    "ejemplos": [
+                        ("/miembros", "Idéntico a /cofrades"),
+                    ],
+                    "tip": "Ambos generan el mismo resultado.",
+                },
+                {
+                    "name": "/dotacion",
+                    "desc": "Total de integrantes activos",
+                    "definicion": "Muestra el número total de cofrades activos, dividido por estado de suscripción (activos, vencidos, en período de gracia) y otros indicadores de salud de la comunidad.",
+                    "ejemplos": [
+                        ("/dotacion", "Ver el total de cofrades activos"),
+                    ],
+                    "tip": "Útil para ver el crecimiento de la Cofradía en el tiempo.",
+                },
+                {
+                    "name": "/mi_tarjeta",
+                    "desc": "Crear o ver tu tarjeta profesional",
+                    "keywords": "mi tarjeta presentación profesional perfil datos información business card crear identidad",
+                    "definicion": "Muestra tu tarjeta profesional digital con tus datos de identidad: nombre, cargo, empresa, biografía corta, áreas de expertise, contacto y enlaces. Si no tienes tarjeta, te guía a crearla desde cero respondiendo paso a paso las preguntas que el bot te hará.",
+                    "ejemplos": [
+                        ("/mi_tarjeta", "Ver/editar tu tarjeta profesional"),
+                        ("/mi_tarjeta", "Iniciar creación si no tienes tarjeta"),
+                        ("/mi_tarjeta", "Verificar datos de identidad al día"),
+                        ("/mi_tarjeta", "Editar tu información profesional"),
+                        ("/mi_tarjeta", "Mostrar tu identidad oficial al grupo"),
+                    ],
+                    "bot_response": "<b>🪪 Tu Tarjeta Profesional</b>\n━━━━━━━━━━━━━━━━━━━━\n\n<b>👤 Nombre:</b> Juan Pérez González\n<b>💼 Cargo:</b> Gerente Comercial\n<b>🏢 Empresa:</b> Naviera Sur SpA\n<b>🌎 Ciudad:</b> Valparaíso, Chile\n<b>📅 Promoción:</b> 1998\n<b>🎯 Especialidad:</b> Comercio exterior, logística\n<b>📱 Contacto:</b> @Juan_Naval · juan@naviera.cl\n\n<em>Botones: [✏️ Editar] [📤 Enviar a cofrade] [🌐 Versión web]</em>",
+                    "tip": "Una tarjeta completa aumenta tus chances de matching en /conectar y /buscar_profesional.",
+                },
+                {
+                    "name": "/web_tarjeta",
+                    "desc": "Descargar tu tarjeta como HTML",
+                    "definicion": "Genera un HTML profesional descargable de tu tarjeta personal, ideal para enviar por email, compartir en redes profesionales o adjuntar a propuestas comerciales.",
+                    "ejemplos": [
+                        ("/web_tarjeta", "Generar tu tarjeta en HTML profesional"),
+                    ],
+                    "tip": "El HTML incluye QR para acceso directo a tu perfil dentro del bot.",
+                },
+                {
+                    "name": "/directorio [filtro]",
+                    "desc": "Buscar en el directorio profesional",
+                    "definicion": "Búsqueda inteligente sobre el directorio. Filtra cofrades por cargo, empresa, área profesional o palabras clave de su biografía y expertise.",
+                    "ejemplos": [
+                        ("/directorio gerente comercial", "Buscar gerentes comerciales"),
+                        ("/directorio finanzas", "Buscar profesionales del área de finanzas"),
+                        ("/directorio Codelco", "Buscar cofrades que trabajan en Codelco"),
+                    ],
+                    "tip": "Combina varias palabras para refinar la búsqueda. El bot usa coincidencia parcial.",
+                },
+                {
+                    "name": "/recomendar @user [texto]",
+                    "desc": "Recomendar a un cofrade",
+                    "definicion": "Deja una recomendación profesional pública sobre otro cofrade que aparecerá en su perfil. Las recomendaciones suman puntos al receptor y aumentan su credibilidad en la comunidad.",
+                    "ejemplos": [
+                        ("/recomendar @Juan Excelente abogado tributario, asesoró mi empresa con resultados óptimos.", "Recomendación detallada"),
+                        ("/recomendar @Maria Profesional rigurosa en auditoría externa.", "Recomendación corta y específica"),
+                    ],
+                    "tip": "Las recomendaciones más valoradas son específicas y mencionan logros concretos.",
+                },
+                {
+                    "name": "/mis_recomendaciones",
+                    "desc": "Ver las recomendaciones que has recibido",
+                    "definicion": "Muestra todas las recomendaciones públicas que otros cofrades han dejado sobre ti, con la fecha y el autor. Ayuda a construir tu prestigio dentro de la comunidad.",
+                    "ejemplos": [
+                        ("/mis_recomendaciones", "Ver todas las recomendaciones recibidas"),
+                    ],
+                    "tip": "Si quieres aumentar tus recomendaciones, primero ayuda activamente a otros cofrades.",
+                },
             ],
         },
+        # ═══ CONEXIONES ═══
         {
+            "id": "conexiones",
             "icon": "🤝",
             "titulo": "Conexiones Inteligentes",
+            "descripcion": "Encuentra a la persona correcta en el momento correcto: matching inteligente con IA basado en tus necesidades.",
             "comandos": [
-                ("/conectar [necesidad]", "Matching inteligente con miembros relevantes", "/conectar busco asesor previsional"),
-                ("/expertise [tema]", "Buscar expertos en un tema específico", "/expertise ciberseguridad"),
-                ("/buscar_profesional [área]", "Buscar profesionales por área", "/buscar_profesional finanzas"),
-                ("/buscar_apoyo [área]", "Buscar cofrades en búsqueda laboral", "/buscar_apoyo logística"),
-                ("/empleo [cargo]", "Buscar ofertas de empleo publicadas", "/empleo gerente operaciones"),
+                {
+                    "name": "/conectar [necesidad]",
+                    "desc": "Matching inteligente con cofrades relevantes",
+                    "keywords": "conectar matching match conexión red networking encontrar persona buscar profesional inteligencia artificial necesidad",
+                    "definicion": "El bot analiza tu necesidad usando IA, la cruza con los perfiles, expertise y conocimientos capturados de los cofrades, y te sugiere los 3-5 más relevantes para conectar contigo. Puede sugerirte presentaciones automáticas.",
+                    "ejemplos": [
+                        ("/conectar busco asesor previsional para empresa de 50 personas", "Buscar asesor especializado"),
+                        ("/conectar necesito alguien que sepa de comercio exterior con China", "Match por experiencia geográfica"),
+                        ("/conectar quiero conocer a alguien del rubro logístico portuario", "Networking sectorial"),
+                        ("/conectar busco mentor en gestión de fondos de inversión", "Mentoría por área específica"),
+                        ("/conectar necesito experto en compliance bancario para PYME", "Asesoría regulatoria"),
+                        ("/conectar alguien con experiencia exportando a Asia", "Match por mercado objetivo"),
+                    ],
+                    "bot_response": "<b>🤝 Matching · Asesor previsional</b>\n━━━━━━━━━━━━━━━━━━━━\n<em>3 mejores matches encontrados</em>\n\n<b>1. Pedro Ramírez</b> — Score 95%\nGerente RRHH · 25 años en previsional\n<em>Razón: experto declarado en pensiones AFP y APV.</em>\n\n<b>2. Andrea Soto</b> — Score 87%\nAsesora Senior · Análisis previsional B2B\n<em>Razón: capturó conocimiento sobre reforma 2024.</em>\n\n<b>3. Roberto Silva</b> — Score 78%\nConsultor independiente\n<em>Razón: certificado como asesor previsional.</em>",
+                    "tip": "Cuanto más específica sea tu necesidad, mejor será el matching. Incluye sector, tamaño y contexto.",
+                },
+                {
+                    "name": "/expertise [tema]",
+                    "desc": "Buscar expertos en un tema específico",
+                    "definicion": "Encuentra cofrades cuyo expertise declarado o conocimiento capturado incluye el tema que buscas. Devuelve hasta 10 resultados ordenados por relevancia.",
+                    "ejemplos": [
+                        ("/expertise ciberseguridad", "Buscar expertos en ciberseguridad"),
+                        ("/expertise compliance bancario Chile", "Búsqueda específica regional"),
+                        ("/expertise machine learning aplicado a finanzas", "Búsqueda interdisciplinaria"),
+                    ],
+                    "tip": "Después de identificar al experto, usa /quien @él para ver su contacto profesional.",
+                },
+                {
+                    "name": "/buscar_profesional [área]",
+                    "desc": "Buscar profesionales por área",
+                    "definicion": "Búsqueda específicamente orientada a contratar servicios o asesoría profesional. Filtra por área (legal, financiera, técnica, etc.) y muestra disponibilidad declarada.",
+                    "ejemplos": [
+                        ("/buscar_profesional finanzas corporativas", "Buscar asesor financiero"),
+                        ("/buscar_profesional auditoría externa", "Buscar auditor independiente"),
+                        ("/buscar_profesional construcción civil", "Buscar profesional del rubro"),
+                    ],
+                    "tip": "Si el cofrade aparece como 'disponible para proyectos', puedes contactarlo directamente.",
+                },
+                {
+                    "name": "/buscar_apoyo [área]",
+                    "desc": "Buscar cofrades en búsqueda laboral",
+                    "definicion": "Identifica cofrades que han declarado estar en proceso de búsqueda laboral activa. Útil para apoyar a la red con referencias, contactos o vacantes que conozcas.",
+                    "ejemplos": [
+                        ("/buscar_apoyo logística", "Cofrades buscando empleo en logística"),
+                        ("/buscar_apoyo TI", "Cofrades del rubro tecnológico en búsqueda"),
+                        ("/buscar_apoyo gerencia general", "Profesionales senior en búsqueda"),
+                    ],
+                    "tip": "Apoyar a otros cofrades activamente mejora tu reputación y suma puntos en la comunidad.",
+                },
+                {
+                    "name": "/buscar_especialista_sec [área]",
+                    "desc": "Buscar especialistas certificados SEC",
+                    "definicion": "Búsqueda específica para encontrar especialistas con certificación SEC (Superintendencia de Electricidad y Combustibles). Útil en proyectos eléctricos, gas o combustibles que requieren profesionales certificados.",
+                    "ejemplos": [
+                        ("/buscar_especialista_sec instaladores eléctricos clase A", "Especialistas eléctricos clase A"),
+                        ("/buscar_especialista_sec gas categoría 2", "Instaladores gas certificados"),
+                        ("/buscar_especialista_sec combustibles líquidos", "Especialistas en combustibles"),
+                    ],
+                    "tip": "Solo aparecen cofrades que han verificado su certificación SEC oficialmente.",
+                },
+                {
+                    "name": "/empleo [cargo]",
+                    "desc": "Buscar ofertas de empleo publicadas",
+                    "definicion": "Muestra ofertas de empleo publicadas por cofrades con permisos de headhunter o por la administración. Filtra por cargo, empresa o sector.",
+                    "ejemplos": [
+                        ("/empleo gerente operaciones", "Buscar ofertas para gerente operaciones"),
+                        ("/empleo TI", "Ofertas del rubro tecnológico"),
+                        ("/empleo Santiago full time", "Ofertas en Santiago full time"),
+                    ],
+                    "tip": "Las ofertas tienen vigencia limitada. Postula pronto si te interesa una.",
+                },
             ],
         },
+        # ═══ CRM ═══
         {
+            "id": "crm",
             "icon": "💼",
-            "titulo": "CRM Conversacional (NUEVO)",
+            "titulo": "CRM Conversacional",
+            "descripcion": "Gestiona tus oportunidades comerciales desde Telegram. Pipeline visual, forecast ponderado y seguimiento sin abandonar el chat.",
+            "tag": "NUEVO",
             "comandos": [
-                ("/oportunidad título | cliente | monto | fecha", "Crear oportunidad comercial", "/oportunidad Consultoría TI Q3 | Aramark | 45000000 | 2026-08-30"),
-                ("/oportunidades", "Ver tus oportunidades activas", None),
-                ("/op_actualizar [id] [etapa]", "Mover oportunidad de etapa (prospecto → contactado → propuesta → negociación → cerrado_ganado)", "/op_actualizar 5 propuesta"),
-                ("/op_nota [id] [texto]", "Agregar nota a una oportunidad", "/op_nota 5 Llamada con cliente, pidió 10% descuento"),
-                ("/pipeline", "Ver tu pipeline visual con forecast ponderado", None),
+                {
+                    "name": "/oportunidad [datos]",
+                    "desc": "Crear oportunidad comercial",
+                    "definicion": "Registra una nueva oportunidad de negocio en tu pipeline personal. La estructura es: título | cliente | monto | fecha de cierre. Por defecto se crea en etapa 'prospecto' con 20% de probabilidad.",
+                    "ejemplos": [
+                        ("/oportunidad Consultoría TI Q3 | Aramark | 45000000 | 2026-08-30", "Oportunidad completa con todos los datos"),
+                        ("/oportunidad Auditoría compliance | Banco XYZ | 18000000", "Sin fecha de cierre estimada"),
+                        ("/oportunidad Asesoría tributaria | PYME ABC | 3500000 | 2026-06-15", "Oportunidad de ticket bajo"),
+                    ],
+                    "tip": "Mientras más datos completes al crear, más útil será el forecast del pipeline.",
+                },
+                {
+                    "name": "/oportunidades",
+                    "desc": "Ver tus oportunidades activas",
+                    "definicion": "Lista tus oportunidades activas ordenadas por fecha de actualización (las más recientes primero). Muestra el monto bruto total y el forecast ponderado por probabilidad de cierre.",
+                    "ejemplos": [
+                        ("/oportunidades", "Ver tus oportunidades activas"),
+                    ],
+                    "tip": "Si tienes muchas oportunidades, usa /pipeline para ver el resumen visual por etapa.",
+                },
+                {
+                    "name": "/op_actualizar [id] [etapa]",
+                    "desc": "Mover oportunidad de etapa",
+                    "definicion": "Cambia la etapa de una oportunidad. Las etapas son: prospecto → contactado → propuesta → negociación → cerrado_ganado / cerrado_perdido. La probabilidad se ajusta automáticamente.",
+                    "ejemplos": [
+                        ("/op_actualizar 5 contactado", "Mover de prospecto a contactado"),
+                        ("/op_actualizar 5 propuesta", "Avanzar a fase de propuesta enviada"),
+                        ("/op_actualizar 5 cerrado_ganado", "Cerrar como ganada"),
+                        ("/op_actualizar 5 cerrado_perdido", "Cerrar como perdida"),
+                    ],
+                    "tip": "Cada cambio se registra en el historial de la oportunidad para auditoría.",
+                },
+                {
+                    "name": "/op_nota [id] [texto]",
+                    "desc": "Agregar nota a una oportunidad",
+                    "definicion": "Añade una nota cronológica a una oportunidad: detalles de llamadas, requerimientos del cliente, próximas acciones. Las notas quedan en el historial visible.",
+                    "ejemplos": [
+                        ("/op_nota 5 Llamada con cliente, pidió 10% descuento", "Registrar resultado de llamada"),
+                        ("/op_nota 5 Reunión cerrada para 15/05 a las 10:00 con CEO", "Programar próxima reunión"),
+                        ("/op_nota 5 Enviada propuesta v3 con términos negociados", "Registrar envío de propuesta"),
+                    ],
+                    "tip": "Mantén notas claras y fechadas. En 6 meses agradecerás haberlas escrito.",
+                },
+                {
+                    "name": "/pipeline",
+                    "desc": "Ver tu pipeline visual",
+                    "definicion": "Muestra el pipeline completo agrupado por etapa, con cantidad de oportunidades y monto total en cada una. Incluye forecast ponderado total (suma del monto × probabilidad).",
+                    "ejemplos": [
+                        ("/pipeline", "Ver tu pipeline visual personal"),
+                    ],
+                    "tip": "El forecast ponderado es tu indicador más realista de ingresos esperados.",
+                },
             ],
         },
+        # ═══ TAREAS ═══
         {
+            "id": "tareas",
             "icon": "📋",
-            "titulo": "Tareas y Proyectos (NUEVO)",
+            "titulo": "Tareas y Proyectos",
+            "descripcion": "Crea, asigna y completa tareas con otros cofrades. Notificaciones automáticas a quien se asigna y al creador.",
+            "tag": "NUEVO",
             "comandos": [
-                ("/tarea_crear título | @usuario | prioridad | fecha", "Crear tarea (asignable a otros cofrades)", "/tarea_crear Preparar informe Q3 | @Juan | alta | 2026-08-15"),
-                ("/mis_tareas", "Ver tus tareas pendientes ordenadas por prioridad", None),
-                ("/tareas_asignadas", "Ver tareas que has asignado a otros", None),
-                ("/tarea_completar [id]", "Marcar una tarea como completada", "/tarea_completar 12"),
-                ("/tarea_progreso [id]", "Marcar una tarea como en progreso", "/tarea_progreso 12"),
+                {
+                    "name": "/tarea_crear [datos]",
+                    "desc": "Crear tarea (asignable a cofrades)",
+                    "definicion": "Crea una tarea con título | @usuario asignado | prioridad | fecha vencimiento. Si no especificas usuario, se asigna a ti mismo. Prioridades: baja, media, alta, urgente. Notifica automáticamente al asignado.",
+                    "ejemplos": [
+                        ("/tarea_crear Preparar informe Q3 | @Juan | alta | 2026-08-15", "Tarea completa asignada con fecha"),
+                        ("/tarea_crear Revisar contrato cliente XYZ | media", "Tarea para mí mismo de prioridad media"),
+                        ("/tarea_crear Llamar a proveedor Aramark | @Maria | urgente | 2026-05-04", "Tarea urgente con vencimiento hoy"),
+                    ],
+                    "tip": "Las tareas con prioridad 'urgente' se destacan visualmente en /mis_tareas.",
+                },
+                {
+                    "name": "/tarea [desc]",
+                    "desc": "Crear nueva tarea (atajo)",
+                    "definicion": "Versión simplificada de /tarea_crear. Solo requiere la descripción de la tarea. Se asigna a ti mismo con prioridad media y sin fecha de vencimiento.",
+                    "ejemplos": [
+                        ("/tarea Llamar al banco mañana", "Tarea simple para uno mismo"),
+                        ("/tarea Revisar email de Pedro", "Recordatorio rápido"),
+                        ("/tarea Preparar minuta de reunión", "Pendiente sin fecha"),
+                    ],
+                    "tip": "Para tareas más complejas con asignación a otros, usa /tarea_crear.",
+                },
+                {
+                    "name": "/mis_tareas",
+                    "desc": "Ver tus tareas pendientes",
+                    "definicion": "Lista todas las tareas asignadas a ti que están pendientes o en progreso, ordenadas por prioridad (urgente → alta → media → baja) y luego por fecha de vencimiento. Marca las vencidas con ⚠️.",
+                    "ejemplos": [
+                        ("/mis_tareas", "Ver tus tareas pendientes"),
+                    ],
+                    "tip": "Revisa esta lista todas las mañanas para planificar tu día.",
+                },
+                {
+                    "name": "/tareas_asignadas",
+                    "desc": "Ver tareas que asignaste a otros",
+                    "definicion": "Muestra las tareas que tú creaste y asignaste a otros cofrades. Útil para hacer seguimiento de delegaciones y verificar el avance.",
+                    "ejemplos": [
+                        ("/tareas_asignadas", "Ver tus delegaciones activas"),
+                    ],
+                    "tip": "Recibirás notificación automática cuando un asignado complete una tarea tuya.",
+                },
+                {
+                    "name": "/tarea_completar [id]",
+                    "desc": "Marcar una tarea como completada",
+                    "definicion": "Marca como completada la tarea con el ID indicado. Solo el asignado o el creador pueden marcarla. Se notifica automáticamente al creador.",
+                    "ejemplos": [
+                        ("/tarea_completar 12", "Marcar tarea #12 como completada"),
+                    ],
+                    "tip": "Las tareas completadas no se eliminan, quedan en el historial para auditoría.",
+                },
+                {
+                    "name": "/tarea_progreso [id]",
+                    "desc": "Marcar tarea como en progreso",
+                    "definicion": "Cambia el estado de una tarea de 'pendiente' a 'en progreso'. Útil para señalar al creador que ya estás trabajando en ella.",
+                    "ejemplos": [
+                        ("/tarea_progreso 12", "Indicar que ya estás trabajando en la tarea #12"),
+                    ],
+                    "tip": "Si una tarea se queda mucho tiempo en progreso, considera dividirla en subtareas.",
+                },
             ],
         },
+        # ═══ CALENDARIO ═══
         {
+            "id": "calendario",
             "icon": "📅",
-            "titulo": "Calendario Compartido (NUEVO)",
+            "titulo": "Calendario Compartido",
+            "descripcion": "Agenda reuniones con otros cofrades verificando disponibilidad real con semáforo visual. Detección automática de conflictos.",
+            "tag": "NUEVO",
             "comandos": [
-                ("/disponibilidad @usuario [fecha]", "Ver semáforo 🟢🔴 de disponibilidad por hora", "/disponibilidad @Pedro 2026-05-15"),
-                ("/agendar @usuario fecha hora duración título", "Agendar reunión con un cofrade", "/agendar @Pedro 2026-05-15 14:00 60 Revisión propuesta Aramark"),
-                ("/mi_calendario", "Ver tus eventos próximos en 14 días", None),
-                ("/confirmar_evento [id]", "Confirmar asistencia a un evento", "/confirmar_evento 8"),
-                ("/rechazar_evento [id]", "Rechazar invitación a un evento", "/rechazar_evento 8"),
+                {
+                    "name": "/disponibilidad @user [fecha]",
+                    "desc": "Ver semáforo de disponibilidad por hora",
+                    "definicion": "Muestra un semáforo (🟢 libre / 🔴 ocupado) hora por hora desde 8am a 19pm para el usuario indicado en la fecha que pidas. Si no especificas fecha, asume hoy.",
+                    "ejemplos": [
+                        ("/disponibilidad @Pedro 2026-05-15", "Ver disponibilidad de Pedro el 15 de mayo"),
+                        ("/disponibilidad @Maria", "Ver disponibilidad de Maria hoy"),
+                        ("/disponibilidad @Juan 15/05/2026", "Formato fecha alternativo"),
+                    ],
+                    "tip": "Antes de agendar, siempre revisa la disponibilidad para evitar conflictos.",
+                },
+                {
+                    "name": "/agendar [datos]",
+                    "desc": "Agendar reunión con un cofrade",
+                    "definicion": "Crea una reunión: @usuario | fecha YYYY-MM-DD | hora HH:MM | duración en minutos | título. Detecta conflictos automáticamente y notifica al invitado para que confirme o rechace.",
+                    "ejemplos": [
+                        ("/agendar @Pedro 2026-05-15 14:00 60 Revisión propuesta Aramark", "Reunión de 1 hora a las 14:00"),
+                        ("/agendar @Maria 2026-06-20 09:30 30 Café virtual de networking", "Reunión corta de 30 min"),
+                        ("/agendar @Juan 2026-05-10 16:00 90 Workshop estrategia Q3", "Workshop de 1.5 horas"),
+                    ],
+                    "tip": "La reunión queda en estado 'pendiente' hasta que el invitado la confirme.",
+                },
+                {
+                    "name": "/mi_calendario",
+                    "desc": "Ver tus eventos próximos en 14 días",
+                    "definicion": "Lista todos tus eventos confirmados o pendientes para los próximos 14 días, ordenados cronológicamente. Muestra el estado de cada uno (confirmado, pendiente, rechazado).",
+                    "ejemplos": [
+                        ("/mi_calendario", "Ver tu agenda de las próximas 2 semanas"),
+                    ],
+                    "tip": "Los eventos creados por ti aparecen con 👑 (eres el creador), los invitados con ✅ confirmado o ⏳ pendiente.",
+                },
+                {
+                    "name": "/mi_agenda",
+                    "desc": "Ver tu agenda personal",
+                    "definicion": "Versión simplificada de /mi_calendario, enfocada en compromisos personales del día y próximos 7 días. Útil para revisión matutina rápida.",
+                    "ejemplos": [
+                        ("/mi_agenda", "Ver tu agenda de los próximos 7 días"),
+                    ],
+                    "tip": "Combina con /mis_tareas en la mañana para planificar tu día completo.",
+                },
+                {
+                    "name": "/confirmar_evento [id]",
+                    "desc": "Confirmar asistencia a un evento",
+                    "definicion": "Confirma tu asistencia a un evento al que fuiste invitado. El creador del evento recibe notificación automática de tu confirmación.",
+                    "ejemplos": [
+                        ("/confirmar_evento 8", "Confirmar asistencia al evento #8"),
+                    ],
+                    "tip": "Confirma o rechaza pronto para que el creador pueda planificar.",
+                },
+                {
+                    "name": "/rechazar_evento [id]",
+                    "desc": "Rechazar invitación a un evento",
+                    "definicion": "Rechaza una invitación a evento. Útil cuando tienes conflicto de horario o no puedes asistir. El creador recibe notificación.",
+                    "ejemplos": [
+                        ("/rechazar_evento 8", "Rechazar la invitación al evento #8"),
+                    ],
+                    "tip": "Si quieres reprogramar en lugar de rechazar, contacta directamente al creador.",
+                },
+                {
+                    "name": "/asistir [id]",
+                    "desc": "Confirmar asistencia a evento de Cofradía",
+                    "definicion": "Confirma tu asistencia a un evento oficial de la Cofradía (cenas, charlas, encuentros). Diferente de /confirmar_evento que es para reuniones uno-a-uno.",
+                    "ejemplos": [
+                        ("/asistir 12", "Confirmar asistencia al evento oficial #12"),
+                    ],
+                    "tip": "Los eventos oficiales pueden tener cupo limitado: confirma pronto.",
+                },
+                {
+                    "name": "/feriados [año]",
+                    "desc": "Feriados legales de Chile",
+                    "definicion": "Muestra el calendario completo de feriados legales chilenos (irrenunciables y normales) para el año indicado. Útil para planificar reuniones y eventos.",
+                    "ejemplos": [
+                        ("/feriados 2026", "Feriados del 2026"),
+                        ("/feriados", "Feriados del año vigente"),
+                        ("/feriados 2027", "Feriados del año siguiente"),
+                    ],
+                    "tip": "Los feriados irrenunciables no permiten apertura comercial; los normales sí.",
+                },
             ],
         },
+        # ═══ BÚSQUEDA AVANZADA ═══
         {
+            "id": "busqueda",
             "icon": "🔍",
             "titulo": "Búsqueda Avanzada",
+            "descripcion": "5 motores de búsqueda paralelos: histórico del grupo, IA, web, biblioteca de documentos y conocimiento capturado de cofrades.",
             "comandos": [
-                ("/buscar [texto]", "Buscar en el historial del grupo", "/buscar reforma previsional"),
-                ("/buscar_ia [consulta]", "Búsqueda inteligente con análisis", "/buscar_ia ¿Qué se dijo del salario mínimo en marzo?"),
-                ("/buscar_web [consulta]", "Búsqueda en Internet", "/buscar_web últimas noticias mercado bursátil"),
-                ("/rag_consulta [pregunta]", "Consultar la biblioteca de documentos y libros", "/rag_consulta principios de negociación Harvard"),
-                ("/publicaciones @usuario", "Ver publicaciones de un usuario específico", "/publicaciones @Pedro_RRHH"),
-                ("/temas @usuario", "Temas que toca un usuario (análisis IA)", "/temas @Pedro_RRHH"),
+                {
+                    "name": "/buscar [texto]",
+                    "desc": "Buscar en el historial del grupo",
+                    "definicion": "Búsqueda directa de texto en el histórico de mensajes del grupo. Devuelve los mensajes más relevantes con autor y fecha. Útil para recuperar información compartida.",
+                    "ejemplos": [
+                        ("/buscar reforma previsional", "Mensajes que mencionan reforma previsional"),
+                        ("/buscar dólar 1000", "Discusiones sobre el dólar a $1000"),
+                        ("/buscar Aramark contrato", "Conversaciones sobre Aramark y contratos"),
+                    ],
+                    "tip": "Si no encuentras lo que buscas con /buscar, prueba con /buscar_ia para análisis inteligente.",
+                },
+                {
+                    "name": "/buscar_ia [consulta]",
+                    "desc": "Búsqueda inteligente con análisis IA",
+                    "definicion": "Combina búsqueda en histórico + biblioteca + conocimiento + análisis IA. Genera una respuesta sintetizada citando fuentes. Es el motor de búsqueda más potente del bot.",
+                    "ejemplos": [
+                        ("/buscar_ia ¿Qué se dijo del salario mínimo en marzo?", "Análisis de discusión histórica"),
+                        ("/buscar_ia Resumen de opiniones sobre la AFP Modelo", "Síntesis de opiniones del grupo"),
+                        ("/buscar_ia Recomendaciones sobre inversión en oro 2026", "Investigación sobre tema específico"),
+                    ],
+                    "tip": "Las preguntas formuladas como pregunta natural ('¿qué dijeron de X?') dan mejores resultados.",
+                },
+                {
+                    "name": "/buscar_web [consulta]",
+                    "desc": "Búsqueda en Internet",
+                    "definicion": "Realiza una búsqueda web actualizada usando motores de búsqueda externos, sintetiza los resultados con IA y devuelve un resumen con fuentes consultadas.",
+                    "ejemplos": [
+                        ("/buscar_web últimas noticias mercado bursátil", "Noticias actuales del mercado"),
+                        ("/buscar_web nuevos requerimientos SII 2026", "Información oficial actualizada"),
+                        ("/buscar_web cumbre G20 noviembre 2026", "Eventos internacionales recientes"),
+                    ],
+                    "tip": "Para datos económicos en tiempo real, prefiere /economia o /indicadores.",
+                },
+                {
+                    "name": "/rag_consulta [pregunta]",
+                    "desc": "Consultar la biblioteca de documentos",
+                    "definicion": "Busca en la biblioteca de libros y documentos indexados (RAG vectorial). Útil para preguntas sobre teoría, principios, casos de estudio y referencias bibliográficas.",
+                    "ejemplos": [
+                        ("/rag_consulta principios de negociación Harvard", "Buscar principios en libros indexados"),
+                        ("/rag_consulta gestión de crisis comunicacional", "Casos y teoría sobre crisis"),
+                        ("/rag_consulta liderazgo según Drucker", "Teoría específica de un autor"),
+                    ],
+                    "tip": "El RAG cita capítulo y página específica. Útil para validar fuentes en informes.",
+                },
+                {
+                    "name": "/finanzas [consulta]",
+                    "desc": "Asesoría financiera basada en libros",
+                    "definicion": "Consulta especializada en finanzas que cruza libros indexados de finanzas, casos prácticos y mejores prácticas. Es gratuita y no consume coins.",
+                    "ejemplos": [
+                        ("/finanzas ¿cómo armar un fondo de emergencia?", "Asesoría básica personal"),
+                        ("/finanzas estrategias de cobertura cambiaria PYME", "Asesoría empresarial técnica"),
+                        ("/finanzas cuándo conviene refinanciar un crédito", "Decisión financiera puntual"),
+                    ],
+                    "tip": "Para análisis personalizado profundo, considera /mentor (servicio premium).",
+                },
+                {
+                    "name": "/publicaciones @usuario",
+                    "desc": "Ver publicaciones de un usuario",
+                    "definicion": "Muestra todos los mensajes públicos de un cofrade específico, ordenados cronológicamente. Útil para conocer su línea editorial o áreas de interés frecuentes.",
+                    "ejemplos": [
+                        ("/publicaciones @Pedro_RRHH", "Ver todas las publicaciones de Pedro"),
+                        ("/publicaciones @Maria 30", "Últimas 30 publicaciones de Maria"),
+                    ],
+                    "tip": "Útil antes de un primer contacto, para tener tema de conversación.",
+                },
+                {
+                    "name": "/temas @usuario",
+                    "desc": "Temas que toca un usuario (análisis IA)",
+                    "definicion": "Análisis inteligente con IA de los temas que más trata un cofrade en sus publicaciones. Devuelve los 5-7 temas principales con porcentajes de frecuencia.",
+                    "ejemplos": [
+                        ("/temas @Pedro_RRHH", "Temas que trata Pedro frecuentemente"),
+                        ("/temas @Maria", "Análisis temático de Maria"),
+                    ],
+                    "tip": "Combina /publicaciones (qué escribió) y /temas (sobre qué) para conocer mejor a un cofrade.",
+                },
+                {
+                    "name": "/stats_usuario @usuario",
+                    "desc": "Estadísticas de participación",
+                    "definicion": "Estadísticas detalladas de un cofrade: cantidad de mensajes, hora pico de actividad, días más activos, palabras más usadas y nivel de engagement con la comunidad.",
+                    "ejemplos": [
+                        ("/stats_usuario @Pedro", "Stats de actividad de Pedro"),
+                        ("/stats_usuario @Maria", "Análisis de participación de Maria"),
+                    ],
+                    "tip": "Útil para identificar cofrades muy activos o que necesitan apoyo para participar más.",
+                },
             ],
         },
+        # ═══ COMUNIDAD ═══
         {
+            "id": "comunidad",
             "icon": "📢",
             "titulo": "Comunidad y Eventos",
+            "descripcion": "Anuncios, consultas profesionales, encuestas, eventos y celebraciones colectivas.",
             "comandos": [
-                ("/anuncios", "Ver tablón de anuncios actuales", None),
-                ("/publicar", "Publicar un anuncio en el grupo", None),
-                ("/eventos", "Ver próximos eventos de la Cofradía", None),
-                ("/cumpleanos_mes", "Ver cumpleaños del mes en curso", None),
-                ("/consultas", "Ver consultas profesionales abiertas", None),
-                ("/consultar [tema]", "Hacer una consulta profesional al grupo", "/consultar Recomendación de notario en Las Condes"),
-                ("/responder [id_consulta] [texto]", "Responder a una consulta abierta", None),
+                {
+                    "name": "/anuncios",
+                    "desc": "Ver tablón de anuncios actuales",
+                    "definicion": "Muestra los anuncios vigentes publicados por la administración o cofrades autorizados. Incluye eventos próximos, alertas importantes y comunicaciones oficiales.",
+                    "ejemplos": [
+                        ("/anuncios", "Ver tablón de anuncios vigentes"),
+                    ],
+                    "tip": "Los anuncios marcados con 🔴 son urgentes y requieren atención inmediata.",
+                },
+                {
+                    "name": "/publicar",
+                    "desc": "Publicar un anuncio en el grupo",
+                    "definicion": "Inicia el flujo guiado para publicar un anuncio. Te pide tipo (informativo/urgente), título y contenido. Pasa por moderación automática antes de publicarse.",
+                    "ejemplos": [
+                        ("/publicar", "Iniciar flujo guiado de publicación"),
+                    ],
+                    "tip": "Anuncios comerciales propios deben tener disclaimer y respetar la guía editorial.",
+                },
+                {
+                    "name": "/eventos",
+                    "desc": "Ver próximos eventos",
+                    "definicion": "Calendario completo de eventos oficiales de la Cofradía: cenas, charlas, encuentros, actividades sociales. Cada uno con fecha, lugar, descripción y formulario de asistencia.",
+                    "ejemplos": [
+                        ("/eventos", "Ver todos los eventos próximos"),
+                    ],
+                    "tip": "Confirma asistencia con /asistir [id] para que la organización planifique correctamente.",
+                },
+                {
+                    "name": "/cumpleanos_mes",
+                    "desc": "Cumpleaños del mes",
+                    "definicion": "Lista los cofrades que cumplen años en el mes en curso, ordenados por día. Permite enviar saludos públicos coordinados.",
+                    "ejemplos": [
+                        ("/cumpleanos_mes", "Ver cumpleañeros del mes"),
+                    ],
+                    "tip": "Saludar a un cofrade el día de su cumpleaños suma puntos en el ranking de comunidad.",
+                },
+                {
+                    "name": "/consultas",
+                    "desc": "Ver consultas profesionales abiertas",
+                    "definicion": "Lista todas las consultas profesionales activas que han hecho otros cofrades. Si conoces la respuesta, puedes contestarlas con /responder.",
+                    "ejemplos": [
+                        ("/consultas", "Ver consultas abiertas"),
+                    ],
+                    "tip": "Responder consultas suma puntos y aumenta tu visibilidad como experto.",
+                },
+                {
+                    "name": "/consultar [tema]",
+                    "desc": "Hacer una consulta profesional al grupo",
+                    "definicion": "Publica una consulta dirigida a la comunidad. Otros cofrades pueden responder con sus experiencias o referencias profesionales.",
+                    "ejemplos": [
+                        ("/consultar Recomendación de notario en Las Condes", "Pedir recomendación profesional"),
+                        ("/consultar ¿Qué AFP eligen? Tengo 35 años y perfil moderado", "Consulta de criterio"),
+                        ("/consultar Buena empresa de mudanzas para oficinas Providencia", "Consulta de proveedor"),
+                    ],
+                    "tip": "Cuanto más específica la consulta (incluye contexto), mejores respuestas recibirás.",
+                },
+                {
+                    "name": "/responder [id_consulta] [texto]",
+                    "desc": "Responder a una consulta abierta",
+                    "definicion": "Aporta tu respuesta o experiencia a una consulta abierta. La respuesta queda visible para todos y suma puntos al respondedor.",
+                    "ejemplos": [
+                        ("/responder 15 Te recomiendo al notario Cristián Vergara, 1ra Las Condes", "Respuesta con referencia concreta"),
+                        ("/responder 22 Yo estoy en AFP Modelo desde 2015 con buena rentabilidad", "Respuesta de experiencia personal"),
+                    ],
+                    "tip": "Las mejores respuestas son específicas, breves y con datos verificables.",
+                },
+                {
+                    "name": "/ver_consulta [ID]",
+                    "desc": "Ver consulta específica con respuestas",
+                    "definicion": "Abre una consulta específica con todas sus respuestas, autor de cada una y fechas. Útil para revisar discusiones técnicas en detalle.",
+                    "ejemplos": [
+                        ("/ver_consulta 15", "Ver consulta #15 completa con respuestas"),
+                    ],
+                    "tip": "Las consultas marcadas como ✓ resueltas tienen una respuesta destacada por el autor original.",
+                },
+                {
+                    "name": "/encuesta [pregunta] | [opc1] | [opc2] ...",
+                    "desc": "Crear encuesta en el grupo",
+                    "definicion": "Crea una encuesta con la pregunta y de 2 a 10 opciones de respuesta. Útil para tomar el pulso de la comunidad sobre decisiones, eventos o preferencias.",
+                    "ejemplos": [
+                        ("/encuesta ¿Próxima cena en Las Condes o Providencia? | Las Condes | Providencia", "Encuesta binaria simple"),
+                        ("/encuesta ¿Mejor mes para encuentro anual? | Mayo | Junio | Julio | Agosto", "Encuesta de calendario"),
+                        ("/encuesta ¿Tema más interesante? | IA | Finanzas | RRHH | Comercio Exterior", "Encuesta de intereses temáticos"),
+                    ],
+                    "tip": "Las encuestas activas se cierran automáticamente a los 7 días.",
+                },
+                {
+                    "name": "/alertas",
+                    "desc": "Ver/gestionar alertas configuradas",
+                    "definicion": "Muestra tus alertas configuradas. Una alerta avisa por mensaje privado cuando alguien menciona ciertas palabras clave en el grupo. Útil para monitorear temas de interés.",
+                    "ejemplos": [
+                        ("/alertas", "Ver tus alertas activas"),
+                    ],
+                    "tip": "Puedes crear hasta 5 alertas simultáneas. Ideal para no perderte temas estratégicos.",
+                },
+                {
+                    "name": "/alertas [palabras]",
+                    "desc": "Crear alerta sobre palabras clave",
+                    "definicion": "Crea una nueva alerta que te notificará por privado cuando aparezcan las palabras indicadas en mensajes del grupo. La búsqueda es por inclusión parcial.",
+                    "ejemplos": [
+                        ("/alertas dólar 1000", "Alerta cuando se mencione 'dólar 1000'"),
+                        ("/alertas reforma previsional", "Alerta sobre el tema reforma previsional"),
+                        ("/alertas Aramark", "Alerta sobre menciones de Aramark"),
+                    ],
+                    "tip": "Las alertas no notifican mensajes propios. Solo de otros cofrades.",
+                },
             ],
         },
+        # ═══ ESTADÍSTICAS ═══
         {
+            "id": "stats",
             "icon": "📊",
             "titulo": "Estadísticas y Gamificación",
+            "descripcion": "Rankings, insignias, puntos y métricas de actividad. Mide tu impacto en la comunidad.",
             "comandos": [
-                ("/estadisticas", "Ver estadísticas generales del grupo", None),
-                ("/graficos", "Ver gráficos de actividad mensual", None),
-                ("/top_usuarios", "Ranking de participación", None),
-                ("/top10", "Top 10 cofrades del mes", None),
-                ("/ranking", "Ranking del mes e histórico completo", None),
-                ("/mis_puntos", "Ver tus puntos y posición en el ranking", None),
-                ("/mis_insignias", "Ver tus 10 insignias posibles y desbloqueadas", None),
-                ("/resumen", "Resumen de actividad del día", None),
-                ("/resumen_semanal", "Resumen de los últimos 7 días", None),
+                {
+                    "name": "/estadisticas",
+                    "desc": "Estadísticas generales del grupo",
+                    "definicion": "Muestra estadísticas globales del grupo: total mensajes, usuarios activos, conexiones realizadas, oportunidades en pipeline colectivo y eventos del periodo.",
+                    "ejemplos": [
+                        ("/estadisticas", "Ver estadísticas globales"),
+                    ],
+                    "tip": "Útil para ver el pulso general de la comunidad mes a mes.",
+                },
+                {
+                    "name": "/graficos",
+                    "desc": "Gráficos de actividad mensual",
+                    "definicion": "Genera un dashboard visual con gráficos de actividad por mes, distribución de mensajes por hora del día, top usuarios más activos y crecimiento de la comunidad.",
+                    "ejemplos": [
+                        ("/graficos", "Ver dashboard visual de actividad"),
+                    ],
+                    "tip": "Los gráficos se generan en HTML descargable. Ábrelos en tu navegador para ver detalle.",
+                },
+                {
+                    "name": "/top_usuarios",
+                    "desc": "Ranking de participación",
+                    "definicion": "Top 20 cofrades con más actividad acumulada (mensajes, ayudas, conexiones, recomendaciones). Reconoce públicamente a los más participativos.",
+                    "ejemplos": [
+                        ("/top_usuarios", "Ver top 20 más activos"),
+                    ],
+                    "tip": "El top se actualiza diariamente. Subir posiciones suma insignias automáticas.",
+                },
+                {
+                    "name": "/top10",
+                    "desc": "Top 10 cofrades del mes",
+                    "definicion": "Top 10 cofrades del mes en curso. Más selectivo que /top_usuarios, refleja la actividad inmediata. Reset cada primer día del mes.",
+                    "ejemplos": [
+                        ("/top10", "Ver top 10 del mes en curso"),
+                    ],
+                    "tip": "Estar en el top 10 te otorga la insignia 'Cofrade Destacado del Mes'.",
+                },
+                {
+                    "name": "/ranking",
+                    "desc": "Ranking del mes e histórico completo",
+                    "definicion": "Ranking completo del mes con tu posición específica, brecha con los líderes y comparación histórica con tu posición de los 3 meses anteriores.",
+                    "ejemplos": [
+                        ("/ranking", "Ver ranking completo y tu posición"),
+                    ],
+                    "tip": "El sistema de puntos premia la calidad y la frecuencia: quality > quantity.",
+                },
+                {
+                    "name": "/mis_puntos",
+                    "desc": "Ver tus puntos y posición",
+                    "definicion": "Detalle de tus puntos actuales, desglosados por categoría: mensajes, ayudas, conexiones, recomendaciones, eventos. Muestra tu posición global y el detalle de los últimos 30 días.",
+                    "ejemplos": [
+                        ("/mis_puntos", "Ver tu balance de puntos"),
+                    ],
+                    "tip": "Los puntos se convierten automáticamente a Cofradía Coins canjeables por servicios.",
+                },
+                {
+                    "name": "/mis_insignias",
+                    "desc": "Ver insignias desbloqueadas",
+                    "definicion": "Muestra las 10 insignias posibles del sistema con cuáles ya desbloqueaste. Cada insignia tiene requisitos específicos: actividad, calidad, conexiones, etc.",
+                    "ejemplos": [
+                        ("/mis_insignias", "Ver tus 10 insignias y progreso"),
+                    ],
+                    "tip": "La insignia 'Conector Maestro' (10 conexiones exitosas) es la más codiciada.",
+                },
+                {
+                    "name": "/resumen",
+                    "desc": "Resumen de actividad del día",
+                    "definicion": "Resumen ejecutivo del día: mensajes destacados, decisiones tomadas, conexiones nuevas, eventos próximos. Generado con IA.",
+                    "ejemplos": [
+                        ("/resumen", "Ver resumen del día actual"),
+                    ],
+                    "tip": "Útil al final del día para no perderte lo importante si no leíste todo.",
+                },
+                {
+                    "name": "/resumen_semanal",
+                    "desc": "Resumen de los últimos 7 días",
+                    "definicion": "Síntesis ejecutiva de la semana con IA: temas más discutidos, decisiones, nuevos miembros, eventos relevantes y tendencias.",
+                    "ejemplos": [
+                        ("/resumen_semanal", "Ver resumen de los últimos 7 días"),
+                    ],
+                    "tip": "Ideal para ponerte al día después de vacaciones.",
+                },
+                {
+                    "name": "/resumen_mes",
+                    "desc": "Resumen mensual",
+                    "definicion": "Resumen ejecutivo del mes completo con IA: hitos, tendencias, top temas, top conectores y proyecciones para el mes siguiente.",
+                    "ejemplos": [
+                        ("/resumen_mes", "Ver resumen del mes en curso"),
+                    ],
+                    "tip": "Perfecto para reportes ejecutivos personales o presentaciones gerenciales.",
+                },
+                {
+                    "name": "/categorias",
+                    "desc": "Categorías de conversación",
+                    "definicion": "Muestra cómo se distribuyen los temas de conversación del grupo en categorías (finanzas, política, tecnología, RRHH, etc.) con porcentajes y tendencias.",
+                    "ejemplos": [
+                        ("/categorias", "Ver distribución de temas del grupo"),
+                    ],
+                    "tip": "Útil para identificar qué áreas dominan la conversación y dónde puedes aportar.",
+                },
+                {
+                    "name": "/mi_dashboard",
+                    "desc": "Tu dashboard personal completo",
+                    "definicion": "Dashboard personal exhaustivo: tu actividad, conexiones, oportunidades, tareas, eventos, ranking, puntos, insignias, recomendaciones recibidas. Tu cuadro de mandos.",
+                    "tag": "GRATIS",
+                    "ejemplos": [
+                        ("/mi_dashboard", "Ver tu dashboard personal completo"),
+                    ],
+                    "tip": "Tu cuadro de mando integral. Revísalo semanalmente para medir tu progreso.",
+                },
             ],
         },
+        # ═══ ECONOMÍA ═══
         {
+            "id": "economia",
             "icon": "💰",
             "titulo": "Economía y Finanzas",
+            "descripcion": "Indicadores macroeconómicos en tiempo real, dashboards y suite de calculadoras financieras profesionales.",
             "comandos": [
-                ("/economia", "Dashboard económico Chile + simuladores + análisis", None),
-                ("/indicadores", "Indicadores económicos con análisis individualizado", None),
-                ("/calculadora", "Suite Económica Pro: créditos, IPC, UF, IVA, APV", None),
+                {
+                    "name": "/economia",
+                    "desc": "Dashboard económico Chile completo",
+                    "keywords": "economia dashboard chile indicadores macroeconomicos finanzas IPSA cobre dolar UF",
+                    "definicion": "Dashboard HTML completo con indicadores macroeconómicos chilenos en tiempo real, gráficos históricos, simuladores financieros (créditos, UF, IVA, APV) y análisis IA macroeconómico con recomendaciones de política.",
+                    "ejemplos": [
+                        ("/economia", "Abrir dashboard económico completo"),
+                        ("/economia", "Revisar análisis IA macroeconómico"),
+                        ("/economia", "Ver simuladores financieros"),
+                        ("/economia", "Consulta diaria antes de comité directivo"),
+                        ("/economia", "Material para reunión gerencial"),
+                    ],
+                    "bot_response": "<b>📊 Dashboard Económico · Chile</b>\n━━━━━━━━━━━━━━━━━━━━\n\n<em>Generando dashboard completo...</em>\n\n📎 <code>economia_chile_20260504.html</code>\n\n<b>📈 Datos incluidos:</b>\n• Indicadores en tiempo real (UF, dólar, IPSA, cobre)\n• Gráficos históricos 12 meses\n• Simuladores: créditos, UF, IVA, APV\n• Análisis IA con recomendaciones\n• 7 noticias del periodo\n\n<em>Descarga el HTML y ábrelo en tu navegador.</em>",
+                    "tip": "El análisis IA se actualiza diariamente. Útil para reuniones gerenciales y comités de inversión.",
+                },
+                {
+                    "name": "/indicadores",
+                    "desc": "Indicadores económicos con análisis",
+                    "keywords": "indicadores macroeconomicos chile UF dolar IPC TPM cobre IPSA AFP analisis",
+                    "definicion": "Reporte de indicadores chilenos clave (UF, dólar, euro, IPC, TPM, cobre, IPSA, AFP) con análisis individualizado de cada uno y noticias del periodo que los impactan.",
+                    "ejemplos": [
+                        ("/indicadores", "Ver indicadores con análisis individual"),
+                        ("/indicadores", "Revisión rápida diaria de mercados"),
+                        ("/indicadores", "Consultar UF y dólar de hoy"),
+                        ("/indicadores", "Ver evolución del cobre"),
+                        ("/indicadores", "Análisis previo a llamada con cliente"),
+                    ],
+                    "bot_response": "<b>📊 Indicadores Económicos · Chile</b>\n━━━━━━━━━━━━━━━━━━━━\n\n💰 <b>UF:</b> $39.451 (+0,02%)\n💵 <b>Dólar:</b> $945 (-1,2%)\n💶 <b>Euro:</b> $1.025 (-0,8%)\n📊 <b>IPSA:</b> 6.852 (+0,29%)\n🟫 <b>Cobre:</b> US$4,52/lb (+1,2%)\n📈 <b>TPM:</b> 5,75% (sin cambios)\n📉 <b>IPC mensual:</b> 0,4%\n\n<em>📎 Versión HTML completa con análisis IA y noticias adjunta.</em>",
+                    "tip": "Más conciso que /economia, ideal para revisión rápida diaria.",
+                },
+                {
+                    "name": "/calculadora",
+                    "desc": "Suite Económica Pro",
+                    "definicion": "Suite completa de calculadoras financieras: simulador créditos hipotecarios, conversión UF/CLP/USD/EUR, calculadora IPC y reajustes, IVA e impuestos, APV (Ahorro Previsional Voluntario), inversión proyectada.",
+                    "ejemplos": [
+                        ("/calculadora", "Abrir Suite Económica Pro"),
+                    ],
+                    "tip": "Se abre embebida en Telegram (chat privado) para mejor experiencia.",
+                },
             ],
         },
+        # ═══ COINS ═══
         {
+            "id": "coins",
             "icon": "🪙",
             "titulo": "Cofradía Coins",
+            "descripcion": "Moneda virtual interna ganada por participación. Canjeable por servicios premium, descuentos y privilegios.",
             "comandos": [
-                ("/mis_coins", "Balance, historial y servicios canjeables", None),
+                {
+                    "name": "/mis_coins",
+                    "desc": "Balance, historial y servicios canjeables",
+                    "definicion": "Muestra tu balance actual de Cofradía Coins, historial de ingresos (cómo las ganaste) y egresos (cómo las usaste), y catálogo de servicios canjeables con sus precios.",
+                    "ejemplos": [
+                        ("/mis_coins", "Ver balance y servicios canjeables"),
+                    ],
+                    "tip": "Las coins se ganan participando: 5 por mensaje útil, 50 por conexión exitosa, 100 por evento.",
+                },
             ],
         },
+        # ═══ AGENTE INTELIGENTE ═══
         {
+            "id": "agente",
             "icon": "🤖",
             "titulo": "Agente Inteligente",
+            "descripcion": "Tu asistente IA personal: planes de networking, matching automático, briefing diario y captura de conocimiento experto.",
             "comandos": [
-                ("/agente", "Plan de networking personalizado con IA", None),
-                ("/match", "Match inteligente con cofrades compatibles", None),
-                ("/briefing", "Briefing diario de networking", None),
-                ("/capturar_conocimiento [tema]", "Aportar conocimiento experto a la base", "/capturar_conocimiento estrategia tributaria PYME"),
+                {
+                    "name": "/agente",
+                    "desc": "Plan de networking personalizado con IA",
+                    "definicion": "El agente IA analiza tu perfil, oportunidades, objetivos y la red disponible, y te genera un plan de networking personalizado: a quién contactar esta semana, con qué objetivo y con qué mensaje sugerido.",
+                    "ejemplos": [
+                        ("/agente", "Generar tu plan de networking de la semana"),
+                    ],
+                    "tip": "Ejecutalo cada lunes para empezar la semana con un plan claro de conexiones.",
+                },
+                {
+                    "name": "/match",
+                    "desc": "Match inteligente con cofrades compatibles",
+                    "definicion": "Algoritmo de matching que cruza tus intereses, expertise, ubicación y objetivos con otros cofrades. Devuelve los 3 mejores matches con score de compatibilidad y razón sugerida para conectar.",
+                    "ejemplos": [
+                        ("/match", "Encontrar cofrades altamente compatibles contigo"),
+                    ],
+                    "tip": "Si te interesa alguien sugerido, usa /conectar [razón] para iniciar la conversación.",
+                },
+                {
+                    "name": "/briefing",
+                    "desc": "Briefing diario de networking",
+                    "definicion": "Briefing matutino con: cumpleaños del día, eventos próximos, oportunidades pendientes de seguimiento, cofrades por contactar y temas top del momento.",
+                    "ejemplos": [
+                        ("/briefing", "Ver briefing matutino del día"),
+                    ],
+                    "tip": "Ejecutalo cada mañana antes de empezar tu jornada laboral.",
+                },
+                {
+                    "name": "/capturar_conocimiento [tema]",
+                    "desc": "Aportar conocimiento experto",
+                    "definicion": "Inicia un flujo guiado donde aportas tu conocimiento experto sobre un tema específico. Tu aporte queda en la base de RAG y puede ser consultado por otros cofrades cuando busquen ese tema.",
+                    "ejemplos": [
+                        ("/capturar_conocimiento estrategia tributaria PYME", "Aportar tu expertise tributario"),
+                        ("/capturar_conocimiento gestión talento humano sector minero", "Aportar conocimiento de RRHH"),
+                        ("/capturar_conocimiento cumplimiento normativo CMF", "Aportar expertise regulatorio"),
+                    ],
+                    "tip": "Cada conocimiento capturado te da +200 coins y mejora tu visibilidad como experto.",
+                },
             ],
         },
+        # ═══ DOCUMENTOS Y CV ═══
         {
+            "id": "documentos",
+            "icon": "📄",
+            "titulo": "Documentos y CV",
+            "descripcion": "Servicios premium para gestionar tu carrera profesional: CV, simulador de entrevistas, análisis LinkedIn y mentor IA.",
+            "comandos": [
+                {
+                    "name": "/generar_cv [orientación]",
+                    "desc": "CV profesional generado con IA",
+                    "definicion": "Genera un CV profesional optimizado para una orientación específica (cargo, sector, país). El bot toma tu /mi_tarjeta y experiencia declarada, los procesa con IA y produce un PDF profesional. Costo: $2.500 CLP o 25 coins.",
+                    "tag": "PREMIUM",
+                    "ejemplos": [
+                        ("/generar_cv gerente comercial sector retail", "CV orientado a cargo gerencial retail"),
+                        ("/generar_cv consultor independiente fintech", "CV para consultoría en fintech"),
+                        ("/generar_cv expatriado España", "CV optimizado para mercado español"),
+                    ],
+                    "tip": "Cuanto más específica la orientación, más optimizado el CV final.",
+                },
+                {
+                    "name": "/entrevista [cargo]",
+                    "desc": "Simulador de entrevista IA",
+                    "definicion": "Simulador completo de entrevista para un cargo específico. La IA hace 8-10 preguntas progresivas, evalúa tus respuestas y al final te da feedback detallado con áreas de mejora. Costo: $5.000 CLP o 50 coins.",
+                    "tag": "PREMIUM",
+                    "ejemplos": [
+                        ("/entrevista gerente operaciones", "Entrevista para cargo gerencial"),
+                        ("/entrevista CFO startup tech", "Entrevista CFO en sector tecnológico"),
+                        ("/entrevista jefe de proyecto construcción", "Entrevista cargo medio en construcción"),
+                    ],
+                    "tip": "Practica entrevistas reales una semana antes de tener una. Mejora tus respuestas.",
+                },
+                {
+                    "name": "/analisis_linkedin",
+                    "desc": "Análisis profesional de tu perfil LinkedIn",
+                    "definicion": "Subes el link o el screenshot de tu perfil LinkedIn y la IA hace un análisis exhaustivo: fortalezas, debilidades, oportunidades de mejora del headline, descripción, experiencia y recomendaciones SEO. Costo: $3.000 CLP o 30 coins.",
+                    "tag": "PREMIUM",
+                    "ejemplos": [
+                        ("/analisis_linkedin", "Iniciar análisis de tu perfil LinkedIn"),
+                    ],
+                    "tip": "Después de aplicar las mejoras, vuelve a hacer /analisis_linkedin en 30 días para medir impacto.",
+                },
+                {
+                    "name": "/mentor",
+                    "desc": "Plan de mentoría IA personalizado",
+                    "definicion": "Plan de mentoría personalizada con IA: objetivos a 3-6-12 meses, plan semanal de acciones, recursos recomendados y check-in automático. Costo: $4.000 CLP o 40 coins.",
+                    "tag": "PREMIUM",
+                    "ejemplos": [
+                        ("/mentor", "Iniciar tu plan de mentoría personalizada"),
+                    ],
+                    "tip": "El plan se revisa automáticamente cada 30 días con tu progreso.",
+                },
+            ],
+        },
+        # ═══ EMERGENCIA ═══
+        {
+            "id": "emergencia",
+            "icon": "🚨",
+            "titulo": "Emergencia",
+            "descripcion": "Sistema de alerta para emergencias profesionales o personales que requieren apoyo inmediato de la red.",
+            "comandos": [
+                {
+                    "name": "/emergencia",
+                    "desc": "Reportar una emergencia",
+                    "definicion": "Inicia el flujo guiado de reporte de emergencia. Te pregunta tipo (médica, legal, profesional, personal), nivel de urgencia y descripción. Notifica al admin y a cofrades con expertise relevante para apoyo inmediato.",
+                    "ejemplos": [
+                        ("/emergencia", "Iniciar reporte de emergencia"),
+                    ],
+                    "tip": "Reservado para situaciones reales. El uso indebido se sanciona con suspensión.",
+                },
+            ],
+        },
+        # ═══ VOZ ═══
+        {
+            "id": "voz",
             "icon": "🎤",
             "titulo": "Voz y Audio",
+            "descripcion": "Habla al bot, recibe respuestas en voz natural. Manos libres mientras conduces o estás ocupado.",
             "comandos": [
-                ("Mensaje de voz", "Envía un audio mencionando «Bot» y te respondo con voz natural y texto", None),
-                ("«Bot, comando [nombre]»", "Ejecuta un comando hablándole al bot por audio", None),
+                {
+                    "name": "Mensaje de voz simple",
+                    "desc": "Hablar al bot por audio",
+                    "definicion": "Envía un mensaje de voz mencionando 'Bot' al inicio o que el grupo lo reconozca. El bot transcribe tu audio, lo procesa y responde tanto por texto como por voz natural sintetizada.",
+                    "ejemplos": [
+                        ("Audio: 'Bot, ¿qué eventos hay esta semana?'", "Pregunta por voz al bot"),
+                        ("Audio: 'Bot, busca a Pedro de RRHH'", "Búsqueda por voz"),
+                        ("Audio: 'Bot, ¿cuál es el dólar hoy?'", "Consulta económica por voz"),
+                    ],
+                    "tip": "Habla claro y a velocidad normal. La transcripción es muy precisa en español chileno.",
+                },
+                {
+                    "name": "Comando por voz",
+                    "desc": "Ejecutar comando hablando",
+                    "definicion": "Puedes ejecutar cualquier comando hablándole al bot con la frase 'Bot, comando [nombre]' seguido de los argumentos. Útil para manos libres.",
+                    "ejemplos": [
+                        ("Audio: 'Bot, comando ayuda'", "Equivale a escribir /ayuda"),
+                        ("Audio: 'Bot, comando indicadores'", "Equivale a /indicadores"),
+                        ("Audio: 'Bot, comando mis tareas'", "Equivale a /mis_tareas"),
+                    ],
+                    "tip": "Reemplaza 'guion bajo' por espacio: 'mis tareas' = /mis_tareas.",
+                },
             ],
         },
     ]
 
-    # ─── Comandos de ADMIN (solo OWNER ve) ───
+    # ═══════════════════════════════════════════════════════════════════════
+    # CATEGORÍAS DE COMANDOS (ADMIN)
+    # ═══════════════════════════════════════════════════════════════════════
+    
     categorias_admin = [
         {
+            "id": "admin_users",
             "icon": "👑",
             "titulo": "Gestión de Usuarios",
+            "descripcion": "Aprobar ingresos, editar datos, generar códigos de invitación y verificar identidades oficiales.",
             "comandos": [
-                ("/aprobar_solicitud [ID]", "Aprobar el ingreso de un nuevo usuario", "/aprobar_solicitud 1234567890"),
-                ("/eliminar_solicitud [ID]", "Eliminar a un usuario", "/eliminar_solicitud 1234567890"),
-                ("/editar_usuario [ID] [campo] [valor]", "Editar datos de un usuario", "/editar_usuario 1234567890 telefono +56912345678"),
-                ("/buscar_usuario [nombre]", "Buscar el ID de un usuario por nombre", "/buscar_usuario Pedro Ramírez"),
-                ("/ver_solicitudes", "Ver solicitudes pendientes de aprobación", None),
-                ("/generar_codigo", "Generar un código de activación de invitación", None),
-                ("/verificar [ID]", "Marcar un usuario como verificado oficialmente", None),
+                {
+                    "name": "/aprobar_solicitud [ID]",
+                    "desc": "Aprobar el ingreso de un nuevo usuario",
+                    "definicion": "Aprueba una solicitud pendiente de ingreso. El usuario recibe notificación automática y se le activa el plan de prueba o el plan asignado.",
+                    "ejemplos": [
+                        ("/aprobar_solicitud 1234567890", "Aprobar usuario por ID Telegram"),
+                    ],
+                    "tip": "Antes de aprobar, revisa /ver_solicitudes para ver el contexto del solicitante.",
+                },
+                {
+                    "name": "/eliminar_solicitud [ID]",
+                    "desc": "Eliminar a un usuario",
+                    "definicion": "Elimina/expulsa a un usuario del sistema. Es una acción reversible si se restaura desde backup. Útil para casos de spam o uso indebido.",
+                    "ejemplos": [
+                        ("/eliminar_solicitud 1234567890", "Eliminar usuario por ID"),
+                    ],
+                    "tip": "Considera primero /editar_usuario para suspender en lugar de eliminar.",
+                },
+                {
+                    "name": "/editar_usuario [ID] [campo] [valor]",
+                    "desc": "Editar datos de un usuario",
+                    "definicion": "Modifica un campo específico del registro de un usuario: estado, nombre, plan, expertise, etc.",
+                    "ejemplos": [
+                        ("/editar_usuario 1234567890 telefono +56912345678", "Cambiar teléfono"),
+                        ("/editar_usuario 1234567890 estado suspendido", "Suspender al usuario"),
+                        ("/editar_usuario 1234567890 plan premium", "Cambiar a plan premium"),
+                    ],
+                    "tip": "Los campos editables son los mismos que aparecen en /quien.",
+                },
+                {
+                    "name": "/buscar_usuario [nombre]",
+                    "desc": "Buscar el ID de un usuario por nombre",
+                    "definicion": "Búsqueda inversa: del nombre obtienes el ID Telegram. Útil cuando necesitas operar sobre un usuario y solo conoces su nombre.",
+                    "ejemplos": [
+                        ("/buscar_usuario Pedro Ramírez", "Buscar ID de Pedro Ramírez"),
+                    ],
+                    "tip": "Si hay coincidencias parciales, devuelve hasta 5 candidatos.",
+                },
+                {
+                    "name": "/ver_solicitudes",
+                    "desc": "Ver solicitudes pendientes",
+                    "definicion": "Lista todas las solicitudes de ingreso pendientes de aprobación, con datos del solicitante y referencia (quién lo invitó).",
+                    "ejemplos": [
+                        ("/ver_solicitudes", "Ver bandeja de solicitudes"),
+                    ],
+                    "tip": "Procesa las solicitudes al menos cada 48h para mantener buena experiencia.",
+                },
+                {
+                    "name": "/generar_codigo",
+                    "desc": "Generar código de invitación",
+                    "definicion": "Genera un código único de invitación que puedes entregar a un prospecto. Cuando lo use con /activar [código] entrará automáticamente con tu referido como creador.",
+                    "ejemplos": [
+                        ("/generar_codigo", "Generar código nuevo"),
+                    ],
+                    "tip": "Los códigos tienen vigencia de 30 días por defecto.",
+                },
+                {
+                    "name": "/verificar [ID]",
+                    "desc": "Marcar usuario como verificado",
+                    "definicion": "Marca a un usuario como oficialmente verificado. Le aparece el ✓ dorado al lado de su nombre en todo el sistema.",
+                    "ejemplos": [
+                        ("/verificar 1234567890", "Verificar oficialmente al usuario"),
+                    ],
+                    "tip": "Verifica solo después de validar identidad real (foto + documento).",
+                },
             ],
         },
         {
+            "id": "admin_comercial",
             "icon": "💼",
             "titulo": "Gestión Comercial",
+            "descripcion": "Panel de cobros, vista consolidada del pipeline y reportes ejecutivos del rendimiento de la plataforma.",
             "comandos": [
-                ("/cobros_admin", "Panel de cobros y suscripciones", None),
-                ("/pipeline todos", "Ver el pipeline CRM consolidado de todos los cofrades", None),
-                ("/oportunidades todas", "Ver todas las oportunidades del grupo", None),
-                ("/reporte_ejecutivo", "Generar reporte ejecutivo completo en HTML", None),
-                ("/dashboard_admin", "Acceder al panel admin web", None),
+                {
+                    "name": "/cobros_admin",
+                    "desc": "Panel de cobros y suscripciones",
+                    "definicion": "Panel completo del estado financiero: usuarios pagando, atrasos, próximos a vencer, ingresos del mes, pronóstico, churn rate y métricas SaaS clave.",
+                    "ejemplos": [
+                        ("/cobros_admin", "Ver panel de cobros"),
+                    ],
+                    "tip": "Revisa el pronóstico mensual cada lunes para anticipar problemas de cash flow.",
+                },
+                {
+                    "name": "/pipeline todos",
+                    "desc": "Pipeline CRM consolidado",
+                    "definicion": "Vista consolidada del pipeline CRM de todos los cofrades. Muestra el monto total bruto y forecast ponderado por etapa de toda la red.",
+                    "ejemplos": [
+                        ("/pipeline todos", "Ver pipeline completo de la red"),
+                    ],
+                    "tip": "Métrica clave para medir la salud comercial de la comunidad como un todo.",
+                },
+                {
+                    "name": "/oportunidades todas",
+                    "desc": "Todas las oportunidades del grupo",
+                    "definicion": "Lista de oportunidades activas de todos los cofrades con detalle. Útil para identificar megadeals, oportunidades de colaboración entre cofrades o sectores calientes.",
+                    "ejemplos": [
+                        ("/oportunidades todas", "Ver todas las oportunidades activas"),
+                    ],
+                    "tip": "Si dos cofrades tienen oportunidades en el mismo cliente, podrías facilitar una colaboración.",
+                },
+                {
+                    "name": "/reporte_ejecutivo",
+                    "desc": "Reporte ejecutivo HTML completo",
+                    "definicion": "Genera un reporte ejecutivo HTML descargable con todas las métricas clave: usuarios, ingresos, actividad, pipeline, eventos, top cofrades, tendencias del periodo.",
+                    "ejemplos": [
+                        ("/reporte_ejecutivo", "Generar reporte ejecutivo HTML"),
+                    ],
+                    "tip": "Ideal para enviar a inversionistas, board o como evidencia ante auditorías.",
+                },
+                {
+                    "name": "/dashboard_admin",
+                    "desc": "Panel admin web",
+                    "definicion": "Acceso al panel admin web embebido en Telegram con vistas avanzadas: control de tenants, feature flags, monitoreo de servicios, gestión de límites.",
+                    "ejemplos": [
+                        ("/dashboard_admin", "Abrir panel admin web"),
+                    ],
+                    "tip": "Requiere token de admin configurado en variables de entorno del servidor.",
+                },
             ],
         },
         {
+            "id": "admin_eventos",
             "icon": "📅",
             "titulo": "Eventos y Anuncios",
+            "descripcion": "Crea eventos oficiales, envía notificaciones masivas y gestiona la comunicación corporativa de la Cofradía.",
             "comandos": [
-                ("/nuevo_evento fecha | título | lugar | desc", "Crear un evento de la Cofradía", "/nuevo_evento 2026-08-15 19:00 | Cena de gala | Club Naval | Tenida formal"),
-                ("/notificar [mensaje]", "Enviar notificación masiva a todos los miembros", None),
-                ("/dotacion", "Ver dotación completa con detalle administrativo", None),
+                {
+                    "name": "/nuevo_evento [datos]",
+                    "desc": "Crear evento de la Cofradía",
+                    "definicion": "Crea un evento oficial: fecha YYYY-MM-DD HH:MM | título | lugar | descripción. Notifica automáticamente a todos los cofrades.",
+                    "ejemplos": [
+                        ("/nuevo_evento 2026-08-15 19:00 | Cena de gala anual | Club Naval | Tenida formal", "Cena formal anual"),
+                        ("/nuevo_evento 2026-05-20 18:30 | Charla AFP Modelo | Online | Streaming Zoom", "Charla virtual"),
+                        ("/nuevo_evento 2026-09-15 12:00 | Almuerzo gerencial | Hotel W | RSVP obligatorio", "Almuerzo restringido"),
+                    ],
+                    "tip": "Eventos con cupo limitado deben mencionarlo en la descripción explícitamente.",
+                },
+                {
+                    "name": "/notificar [mensaje]",
+                    "desc": "Notificación masiva",
+                    "definicion": "Envía un mensaje privado a todos los cofrades activos. Úsalo solo para anuncios de alta importancia para evitar fatiga de notificaciones.",
+                    "ejemplos": [
+                        ("/notificar Recordatorio: cena de gala el viernes 20:00", "Recordatorio importante"),
+                        ("/notificar Mantención sistema: 3am-5am domingo", "Aviso técnico"),
+                    ],
+                    "tip": "Limita estas notificaciones a 1-2 por mes máximo.",
+                },
             ],
         },
         {
+            "id": "admin_hh",
             "icon": "🕵️",
             "titulo": "Headhunters / Reclutamiento",
+            "descripcion": "Panel para gestionar ofertas de empleo publicadas por cofrades autorizados como headhunters.",
             "comandos": [
-                ("/publicar_empleo título | empresa | descripción", "Publicar oferta de empleo", "/publicar_empleo Gerente TI | Banco XYZ | Buscamos líder técnico..."),
-                ("/empleos_admin", "Gestionar empleos publicados", None),
-                ("/postulantes [id_empleo]", "Ver postulantes a un empleo", None),
+                {
+                    "name": "/publicar_empleo [datos]",
+                    "desc": "Publicar oferta de empleo",
+                    "definicion": "Publica una oferta de empleo: título | empresa | descripción detallada. Aparece en /empleo para todos los cofrades.",
+                    "ejemplos": [
+                        ("/publicar_empleo Gerente TI | Banco XYZ | Buscamos líder técnico para área de innovación", "Oferta gerencial detallada"),
+                        ("/publicar_empleo Analista Senior Compliance | Fintech ABC | 5+ años exp...", "Oferta analista"),
+                    ],
+                    "tip": "Incluye rango salarial cuando sea posible para mejorar el matching.",
+                },
+                {
+                    "name": "/empleos_admin",
+                    "desc": "Gestionar empleos publicados",
+                    "definicion": "Panel de gestión de las ofertas de empleo activas: ver postulantes, cerrar ofertas, actualizar descripciones, archivar.",
+                    "ejemplos": [
+                        ("/empleos_admin", "Ver panel de empleos"),
+                    ],
+                    "tip": "Cierra ofertas vencidas para mantener la calidad del feed de oportunidades.",
+                },
+                {
+                    "name": "/postulantes [id_empleo]",
+                    "desc": "Ver postulantes a un empleo",
+                    "definicion": "Lista los cofrades que han postulado a una oferta específica con sus tarjetas profesionales.",
+                    "ejemplos": [
+                        ("/postulantes 5", "Ver postulantes a la oferta #5"),
+                    ],
+                    "tip": "Las postulaciones llegan con CV y carta motivacional adjunta.",
+                },
             ],
         },
         {
+            "id": "admin_biblio",
             "icon": "📚",
             "titulo": "Biblioteca y Conocimiento",
+            "descripcion": "Gestión de la biblioteca RAG: libros, documentos y conocimientos capturados que alimentan a /buscar_ia y /rag_consulta.",
             "comandos": [
-                ("/agregar_libro", "Agregar libro a la biblioteca RAG", None),
-                ("/listar_libros", "Listar todos los libros indexados", None),
-                ("/eliminar_libro [id]", "Eliminar un libro de la biblioteca", None),
-                ("/conocimientos", "Ver conocimientos capturados de cofrades", None),
+                {
+                    "name": "/agregar_libro",
+                    "desc": "Agregar libro a la biblioteca",
+                    "definicion": "Inicia el flujo guiado para agregar un nuevo libro a la biblioteca RAG. Sube el PDF, especifica metadatos (autor, año, tema) y el sistema lo indexa con embeddings vectoriales.",
+                    "ejemplos": [
+                        ("/agregar_libro", "Iniciar flujo de carga de libro"),
+                    ],
+                    "tip": "Después de agregar, prueba /rag_consulta con preguntas del libro para validar indexación.",
+                },
+                {
+                    "name": "/listar_libros",
+                    "desc": "Listar todos los libros",
+                    "definicion": "Lista todos los libros indexados en la biblioteca con su autor, año, tema y cantidad de chunks vectorizados.",
+                    "ejemplos": [
+                        ("/listar_libros", "Ver biblioteca completa"),
+                    ],
+                    "tip": "Mantén la biblioteca curada: elimina libros desactualizados o de baja calidad.",
+                },
+                {
+                    "name": "/eliminar_libro [id]",
+                    "desc": "Eliminar libro de la biblioteca",
+                    "definicion": "Elimina un libro de la biblioteca. Borra también todos sus chunks vectorizados de la BD para que ya no aparezca en consultas RAG.",
+                    "ejemplos": [
+                        ("/eliminar_libro 8", "Eliminar libro #8"),
+                    ],
+                    "tip": "Operación irreversible. Confirma antes de ejecutar.",
+                },
+                {
+                    "name": "/conocimientos",
+                    "desc": "Ver conocimientos capturados",
+                    "definicion": "Lista los conocimientos capturados de cofrades vía /capturar_conocimiento. Permite curar, validar y promover los aportes más valiosos.",
+                    "ejemplos": [
+                        ("/conocimientos", "Ver conocimientos capturados"),
+                    ],
+                    "tip": "Premia con coins extra los conocimientos de excelente calidad.",
+                },
             ],
         },
         {
+            "id": "admin_backup",
             "icon": "💾",
             "titulo": "Mantenimiento y Backup",
+            "descripcion": "Backups automáticos, restauración, integridad de datos y limpieza de cachés del sistema.",
             "comandos": [
-                ("/backup_manual", "Iniciar backup manual de la base de datos", None),
-                ("/listar_backups", "Listar backups disponibles", None),
-                ("/restore_backup [id]", "Restaurar un backup específico", None),
-                ("/integridad_rag", "Verificar integridad de los datos RAG", None),
-                ("/limpiar_cache", "Limpiar cachés temporales del sistema", None),
+                {
+                    "name": "/backup_manual",
+                    "desc": "Iniciar backup manual",
+                    "definicion": "Lanza un backup completo manual de la base de datos. Comprime, sube al almacenamiento de respaldo y registra en el historial.",
+                    "ejemplos": [
+                        ("/backup_manual", "Lanzar backup ahora"),
+                    ],
+                    "tip": "Hay backups automáticos diarios. Usa este solo antes de cambios mayores.",
+                },
+                {
+                    "name": "/listar_backups",
+                    "desc": "Listar backups disponibles",
+                    "definicion": "Lista todos los backups disponibles con fecha, tamaño y tipo (auto/manual). Útil antes de una operación de restore.",
+                    "ejemplos": [
+                        ("/listar_backups", "Ver historial de backups"),
+                    ],
+                    "tip": "Conserva al menos 30 días de backups diarios para auditorías y recuperación.",
+                },
+                {
+                    "name": "/restore_backup [id]",
+                    "desc": "Restaurar un backup",
+                    "definicion": "Restaura un backup específico. Operación crítica que reemplaza el estado actual de la BD por el del backup seleccionado.",
+                    "ejemplos": [
+                        ("/restore_backup 12", "Restaurar backup #12"),
+                    ],
+                    "tip": "OPERACIÓN IRREVERSIBLE. Haz backup actual antes de restaurar uno antiguo.",
+                },
+                {
+                    "name": "/integridad_rag",
+                    "desc": "Verificar integridad RAG",
+                    "definicion": "Audita la base de datos vectorial RAG: revisa chunks huérfanos, embeddings corruptos, libros sin indexar y reporta problemas detectados.",
+                    "ejemplos": [
+                        ("/integridad_rag", "Verificar salud del RAG"),
+                    ],
+                    "tip": "Ejecuta cada semana. Si detecta problemas, considera reindexar.",
+                },
+                {
+                    "name": "/limpiar_cache",
+                    "desc": "Limpiar cachés del sistema",
+                    "definicion": "Limpia las cachés en memoria: indicadores diarios, economía, búsquedas, audios TTS. Útil cuando los datos se ven 'pegados' o desactualizados.",
+                    "ejemplos": [
+                        ("/limpiar_cache", "Limpiar todas las cachés"),
+                    ],
+                    "tip": "Después de ejecutar, los próximos comandos serán más lentos pero con datos frescos.",
+                },
             ],
         },
         {
+            "id": "admin_audit",
             "icon": "📈",
             "titulo": "Analítica y Auditoría",
+            "descripcion": "Estadísticas avanzadas, registro de auditoría, diagnóstico técnico y monitoreo de servicios externos.",
             "comandos": [
-                ("/estadisticas_avanzadas", "Estadísticas avanzadas para el administrador", None),
-                ("/auditoria", "Ver registro de auditoría de acciones", None),
-                ("/diagnostico", "Diagnóstico técnico de la plataforma", None),
-                ("/saldos", "Ver estado de servicios y saldos", None),
+                {
+                    "name": "/estadisticas_avanzadas",
+                    "desc": "Estadísticas avanzadas",
+                    "definicion": "Estadísticas avanzadas reservadas al admin: cohortes, retention, churn, NPS, CAC, LTV, métricas SaaS y otros KPIs ejecutivos.",
+                    "ejemplos": [
+                        ("/estadisticas_avanzadas", "Ver KPIs ejecutivos"),
+                    ],
+                    "tip": "Métricas clave para ronda de inversión o reportes a junta directiva.",
+                },
+                {
+                    "name": "/auditoria",
+                    "desc": "Registro de auditoría",
+                    "definicion": "Log completo de acciones administrativas: aprobaciones, eliminaciones, cambios de plan, ediciones de usuarios, cambios de configuración. Cumplimiento normativo.",
+                    "ejemplos": [
+                        ("/auditoria", "Ver últimas 100 acciones"),
+                        ("/auditoria 7", "Acciones de los últimos 7 días"),
+                    ],
+                    "tip": "Mantén log mínimo de 12 meses para cumplir con regulaciones de protección de datos.",
+                },
+                {
+                    "name": "/diagnostico",
+                    "desc": "Diagnóstico técnico",
+                    "definicion": "Diagnóstico completo del estado de la plataforma: latencias, errores, servicios externos respondiendo, estado de la BD, espacio en disco, memoria.",
+                    "ejemplos": [
+                        ("/diagnostico", "Ver salud de la plataforma"),
+                    ],
+                    "tip": "Si detecta problemas, contacta al soporte técnico antes de que afecte usuarios.",
+                },
+                {
+                    "name": "/saldos",
+                    "desc": "Estado de servicios y saldos",
+                    "definicion": "Estado de los servicios externos contratados: saldos en APIs de pago, límites mensuales, alertas de saldo bajo, proyección de consumo.",
+                    "ejemplos": [
+                        ("/saldos", "Ver saldos y límites de servicios"),
+                    ],
+                    "tip": "Recarga servicios pagos antes de que se agoten para evitar interrupciones.",
+                },
             ],
         },
     ]
-    
+
+    # Seleccionar categorías según rol
     categorias = categorias_admin if es_admin else categorias_usuario
     titulo = "Comandos Administrativos" if es_admin else "Comandos Disponibles"
     sub = "Acceso exclusivo del fundador y administrador" if es_admin else "Manual completo de uso de la plataforma Cofradía Premium"
     badge_text = "PANEL ADMIN · v7.0" if es_admin else "PLATAFORMA · v7.0"
     
-    # Calcular KPIs
+    # ═══════════════════════════════════════════════════════════════════════
+    # FASE 28: ENRIQUECIMIENTO AUTOMÁTICO de keywords y bot_response
+    # Para cada comando que no tenga estos campos, los derivamos de nombre + desc.
+    # Esto hace que la búsqueda semántica funcione para TODOS los comandos
+    # sin requerir que cada uno los tenga definidos manualmente.
+    # ═══════════════════════════════════════════════════════════════════════
+    _SINONIMOS_AUTO = {
+        'crear': 'crear nuevo agregar añadir generar',
+        'ver': 'ver mostrar consultar listar revisar',
+        'buscar': 'buscar encontrar filtrar localizar hallar',
+        'eliminar': 'eliminar borrar quitar remover',
+        'editar': 'editar modificar cambiar actualizar',
+        'enviar': 'enviar mandar compartir',
+        'tarea': 'tarea trabajo pendiente todo encargo',
+        'evento': 'evento reunión cita meeting encuentro',
+        'oportunidad': 'oportunidad venta deal lead negocio cliente prospecto',
+        'cofrade': 'cofrade miembro persona profesional usuario',
+        'agendar': 'agendar programar reservar calendario',
+        'mi': 'mi propio personal',
+        'tarjeta': 'tarjeta presentación profesional perfil identidad',
+        'puntos': 'puntos coins reputación reconocimiento',
+        'ranking': 'ranking posición top clasificación',
+        'consulta': 'consulta pregunta duda',
+        'reporte': 'reporte informe análisis estadística dashboard',
+        'economia': 'economía indicadores macroeconómicos finanzas',
+        'calendario': 'calendario agenda eventos compromisos',
+        'mensaje': 'mensaje texto chat conversación',
+    }
+    
+    for cat in categorias:
+        for cmd in cat["comandos"]:
+            # Si no tiene keywords, generarlas automáticamente
+            if "keywords" not in cmd or not cmd.get("keywords"):
+                kw_set = set()
+                fuente = (cmd["name"] + " " + cmd["desc"]).lower()
+                # Limpiar caracteres especiales
+                fuente_limpia = fuente.replace('/', ' ').replace('[', ' ').replace(']', ' ').replace('@', ' ')
+                # Tomar palabras significativas (>3 chars)
+                for palabra in fuente_limpia.split():
+                    palabra = palabra.strip('.,;:()')
+                    if len(palabra) >= 3:
+                        kw_set.add(palabra)
+                        # Agregar sinónimos si la palabra está en el diccionario
+                        for clave, sinonimos in _SINONIMOS_AUTO.items():
+                            if clave in palabra:
+                                kw_set.update(sinonimos.split())
+                cmd["keywords"] = " ".join(sorted(kw_set))
+            
+            # Si no tiene bot_response, generar uno genérico
+            if "bot_response" not in cmd or not cmd.get("bot_response"):
+                cmd["bot_response"] = (
+                    "<b>📌 " + cmd["name"].split(" ")[0] + "</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "<em>" + cmd["desc"] + "</em>\n\n"
+                    "<em>El bot procesa tu solicitud y responde en formato visual con datos relevantes, opciones interactivas y, si aplica, audio sintetizado.</em>"
+                )
+    
+    # KPIs
     total_cmds = sum(len(c["comandos"]) for c in categorias)
     total_cats = len(categorias)
     
-    # ─── Construir HTML ───
+    # ═══ JS para buscador y modal ═══
+    # Construir DICCIONARIO de comandos para el modal
+    import json
+    cmd_data = {}
+    for cat in categorias:
+        for cmd in cat["comandos"]:
+            cmd_data[cmd["name"]] = {
+                "desc": cmd["desc"],
+                "definicion": cmd["definicion"],
+                "ejemplos": cmd["ejemplos"],
+                "tip": cmd.get("tip", ""),
+                "categoria": cat["titulo"],
+                "icono_cat": cat["icon"],
+                # FASE 28: campos para búsqueda semántica + preview del bot
+                "keywords": cmd.get("keywords", ""),
+                "bot_response": cmd.get("bot_response", ""),
+            }
+    cmd_data_json = json.dumps(cmd_data, ensure_ascii=False)
+    
+    # ─── Construcción del HTML ───
     html_parts = [f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -7362,7 +8655,34 @@ footer .gold { color: #c3a55a; font-weight: 600; }
 <style>{css_common}</style>
 </head>
 <body>
-<div class="container">
+<div class="layout">
+
+<!-- ─── NAVEGACIÓN LATERAL ─── -->
+<nav class="sidebar">
+<h3>⚓ Navegación</h3>
+"""]
+    for cat in categorias:
+        html_parts.append(
+            f'<a href="#{cat["id"]}"><span class="nav-icon">{cat["icon"]}</span>{cat["titulo"]}'
+            f'<span class="nav-count">{len(cat["comandos"])}</span></a>\n'
+        )
+    
+    html_parts.append(f"""</nav>
+
+<!-- ─── CONTENIDO PRINCIPAL ─── -->
+<main class="main">
+
+<!-- BUSCADOR FLOTANTE -->
+<div class="search-bar">
+<div class="search-input-wrap">
+<span class="search-icon">🔍</span>
+<input type="text" class="search-input" id="searchBox" placeholder="Buscar comando, tema o concepto (ej: agendar reunión, networking, oportunidades...)" autocomplete="off">
+<span class="search-clear" id="searchClear">Limpiar</span>
+</div>
+<div class="search-stats" id="searchStats"></div>
+<div class="search-hint">💡 Búsqueda inteligente: combina palabras clave o conceptos (ej: "buscar persona TI" o "crear tarea urgente")</div>
+</div>
+
 <header>
 <h1>{titulo}</h1>
 <p class="subtitle">{sub}</p>
@@ -7373,39 +8693,270 @@ footer .gold { color: #c3a55a; font-weight: 600; }
 <div class="kpi"><div class="kpi-num">{total_cmds}</div><div class="kpi-lbl">Comandos</div></div>
 <div class="kpi"><div class="kpi-num">{total_cats}</div><div class="kpi-lbl">Categorías</div></div>
 <div class="kpi"><div class="kpi-num">24/7</div><div class="kpi-lbl">Disponibilidad</div></div>
-<div class="kpi"><div class="kpi-num">∞</div><div class="kpi-lbl">Conocimiento</div></div>
+<div class="kpi"><div class="kpi-num">∞</div><div class="kpi-lbl">Posibilidades</div></div>
 </div>
 
-{svg_uso if not es_admin else ''}
+""")
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # FASE 28: BLOQUE INTRO — Tutorial Tarjeta de Presentación + Link de invitación
+    # Solo se muestra a usuarios (no admin). Estratégico para onboarding y crecimiento.
+    # ═══════════════════════════════════════════════════════════════════════
+    if not es_admin:
+        html_parts.append("""<div class="intro-block">
+<div class="intro-grid">
 
-"""]
+<div class="intro-card">
+<h3>🪪 Cómo crear tu Tarjeta de Presentación</h3>
+<div class="step"><span class="step-num">1</span>Inicia un <strong>chat privado</strong> conmigo en <code>@Cofradia_Premium_Bot</code></div>
+<div class="step"><span class="step-num">2</span>Escribe el comando <code>/mi_tarjeta</code> y presiona enviar</div>
+<div class="step"><span class="step-num">3</span>Responde una a una mis preguntas: <strong>nombre completo, cargo, empresa, especialidad, contacto</strong></div>
+<div class="step"><span class="step-num">4</span>Confirma tus datos finales cuando te muestre el resumen</div>
+<div class="step"><span class="step-num">5</span>¡Listo! Tu tarjeta queda visible para todos los cofrades en <code>/cofrades</code> y <code>/directorio</code></div>
+</div>
 
-    # Generar cada categoría
+<div class="intro-card">
+<h3>🔗 Invita a otros marinos a Cofradía</h3>
+<div class="invite-box">
+<p>Comparte este enlace con marinos que aún no son parte. Cada cofrade que sumes <strong>fortalece la red</strong> y multiplica las oportunidades de todos.</p>
+<a class="invite-link" href="https://t.me/+MSQuQxeVpsExMThh" target="_blank" id="inviteLink">https://t.me/+MSQuQxeVpsExMThh</a>
+<button class="copy-btn" onclick="copiarInvite()" id="copyBtn">📋 Copiar link de invitación</button>
+</div>
+</div>
+
+</div>
+</div>
+
+""")
+    
+    # SVG flujo solo para usuarios
+    if not es_admin:
+        html_parts.append(f'<div class="viz-block"><div class="viz-title">Flujo de uso del Bot</div>{svg_uso}</div>')
+    
+    # Categorías y comandos
     for cat in categorias:
-        html_parts.append(f"""<section class="cat">
-<h2><span class="cat-icon">{cat['icon']}</span>{cat['titulo']}</h2>
+        tag_html = f'<span class="cmd-tag">{cat.get("tag", "")}</span>' if cat.get("tag") else ''
+        html_parts.append(f"""<section class="cat" id="{cat['id']}">
+<h2><span class="cat-icon">{cat['icon']}</span>{cat['titulo']}{tag_html}</h2>
+<p class="cat-desc">{cat['descripcion']}</p>
 <div class="cmd-list">
 """)
-        for cmd_name, cmd_desc, cmd_example in cat["comandos"]:
-            esc_name = cmd_name.replace('<','&lt;').replace('>','&gt;')
-            esc_desc = cmd_desc.replace('<','&lt;').replace('>','&gt;')
-            html_parts.append(f"""<div class="cmd">
-<div class="cmd-name">{esc_name}</div>
+        for cmd in cat["comandos"]:
+            esc_name = cmd["name"].replace('<','&lt;').replace('>','&gt;').replace('"', '&quot;').replace("'", '&#39;')
+            esc_desc = cmd["desc"].replace('<','&lt;').replace('>','&gt;')
+            tag_cmd = f'<span class="cmd-tag">{cmd.get("tag", "")}</span>' if cmd.get("tag") else ''
+            # FASE 28: data-search incluye keywords para búsqueda semántica (sinónimos, conceptos)
+            kw = cmd.get("keywords", "").lower().replace('"', '&quot;')
+            data_search = f'{esc_name.lower()} {esc_desc.lower()} {kw}'.strip()
+            html_parts.append(f"""<div class="cmd" data-name="{esc_name}" data-search="{data_search}" onclick="abrirModal('{esc_name}')">
+<div class="cmd-name">{esc_name}{tag_cmd}</div>
 <div class="cmd-desc">{esc_desc}</div>
+</div>
 """)
-            if cmd_example:
-                esc_ex = cmd_example.replace('<','&lt;').replace('>','&gt;')
-                html_parts.append(f'<div class="cmd-example">{esc_ex}</div>\n')
-            html_parts.append('</div>\n')
         html_parts.append('</div></section>\n')
     
-    # Footer (sin mencionar tecnologías)
-    html_parts.append(f"""
+    # MODAL FLOTANTE
+    html_parts.append("""
+<!-- ─── MODAL FLOTANTE ─── -->
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)cerrarModal()">
+<div class="modal">
+<div class="modal-head">
+<button class="modal-close" onclick="cerrarModal()">×</button>
+<div class="modal-cmd-name" id="modalName"></div>
+<div class="modal-cmd-cat" id="modalCat"></div>
+</div>
+<div class="modal-body" id="modalBody"></div>
+</div>
+</div>
+
 <footer>
 <p><span class="gold">⚓ Cofradía Premium</span> · Plataforma de Networking Profesional</p>
-<p style="margin-top: 6px;">Generado automáticamente · {('Visualización exclusiva del administrador' if es_admin else 'Manual del usuario')}</p>
+<p style="margin-top: 6px;">Manual generado automáticamente · Búsqueda en tiempo real · Click en cualquier comando para detalles</p>
 </footer>
+
+</main>
 </div>
+
+<script>
+// ─── DATOS DE COMANDOS ───
+const CMD_DATA = """ + cmd_data_json + """;
+
+// ─── BUSCADOR EN TIEMPO REAL ───
+const searchBox = document.getElementById('searchBox');
+const searchClear = document.getElementById('searchClear');
+const searchStats = document.getElementById('searchStats');
+
+function filtrar() {
+  const q = searchBox.value.trim().toLowerCase();
+  const todasCmds = document.querySelectorAll('.cmd');
+  let visibles = 0, total = todasCmds.length;
+  
+  // FASE 28: Búsqueda semántica - dividir query en términos individuales
+  // y buscar cada uno por separado en data-search (que ya incluye keywords)
+  const terms = q.length > 0 ? q.split(' ').map(t => t.trim()).filter(t => t.length > 1) : [];
+  
+  todasCmds.forEach(el => {
+    const data = (el.getAttribute('data-search') || '').toLowerCase();
+    let match = !q;
+    
+    if (q) {
+      // Match exacto de la query completa (alta prioridad)
+      if (data.includes(q)) {
+        match = true;
+      } else if (terms.length > 1) {
+        // Match semántico: TODOS los términos deben aparecer (no necesariamente juntos)
+        match = terms.every(t => data.includes(t));
+      } else if (terms.length === 1) {
+        // Un solo término: match parcial (ya cubierto por data.includes(q))
+        match = data.includes(terms[0]);
+      }
+    }
+    
+    if (match) {
+      el.classList.remove('hidden');
+      visibles++;
+    } else {
+      el.classList.add('hidden');
+    }
+  });
+  
+  // Mostrar/ocultar categorías vacías
+  document.querySelectorAll('section.cat').forEach(sec => {
+    const visiblesCat = sec.querySelectorAll('.cmd:not(.hidden)').length;
+    sec.style.display = visiblesCat === 0 ? 'none' : '';
+  });
+  
+  // Stats
+  if (q) {
+    searchStats.textContent = visibles + ' de ' + total + ' comandos coinciden con "' + q + '"';
+    searchClear.style.display = 'block';
+  } else {
+    searchStats.textContent = '';
+    searchClear.style.display = 'none';
+  }
+}
+
+searchBox.addEventListener('input', filtrar);
+searchClear.addEventListener('click', () => {
+  searchBox.value = '';
+  filtrar();
+  searchBox.focus();
+});
+
+// ─── MODAL ───
+function abrirModal(cmdName) {
+  const data = CMD_DATA[cmdName];
+  if (!data) return;
+  
+  document.getElementById('modalName').textContent = cmdName;
+  document.getElementById('modalCat').textContent = data.icono_cat + ' ' + data.categoria;
+  
+  let bodyHTML = '<div class="modal-section"><h4>Definición Detallada</h4><div class="modal-def">' 
+    + data.definicion + '</div></div>';
+  
+  if (data.ejemplos && data.ejemplos.length > 0) {
+    bodyHTML += '<div class="modal-section"><h4>Ejemplos Prácticos</h4>';
+    data.ejemplos.forEach(([uso, contexto]) => {
+      bodyHTML += '<div class="modal-example">'
+        + '<span class="ex-label">' + (contexto || 'Uso') + '</span>'
+        + uso.replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        + '</div>';
+    });
+    bodyHTML += '</div>';
+  }
+  
+  // FASE 28: Preview de respuesta del bot (imagen ilustrativa)
+  if (data.bot_response) {
+    bodyHTML += '<div class="modal-section"><h4>Respuesta del Bot (referencia)</h4>'
+      + '<div class="modal-bot-preview">'
+      + '<div class="preview-label">Cofradía Premium Bot</div>'
+      + '<div class="bot-msg-sim">' + data.bot_response + '</div>'
+      + '</div></div>';
+  }
+  
+  if (data.tip) {
+    bodyHTML += '<div class="modal-tip">' + data.tip + '</div>';
+  }
+  
+  document.getElementById('modalBody').innerHTML = bodyHTML;
+  document.getElementById('modalOverlay').classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+
+function cerrarModal() {
+  document.getElementById('modalOverlay').classList.remove('show');
+  document.body.style.overflow = '';
+}
+
+// FASE 28: Copiar link de invitación al portapapeles
+// (Función inerte en HTML admin: el botón y bloque intro solo existen en HTML usuario.
+// Mantener compartida simplifica el código sin afectar funcionalidad.)
+function copiarInvite() {
+  const link = 'https://t.me/+MSQuQxeVpsExMThh';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(() => {
+      const btn = document.getElementById('copyBtn');
+      if (btn) {
+        const txtOrig = btn.textContent;
+        btn.textContent = '✅ ¡Copiado!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = txtOrig;
+          btn.classList.remove('copied');
+        }, 2000);
+      }
+    }).catch(() => {
+      alert('No se pudo copiar. Selecciona manualmente: ' + link);
+    });
+  } else {
+    // Fallback para navegadores sin clipboard API
+    const tmp = document.createElement('textarea');
+    tmp.value = link;
+    document.body.appendChild(tmp);
+    tmp.select();
+    try {
+      document.execCommand('copy');
+      const btn = document.getElementById('copyBtn');
+      if (btn) {
+        btn.textContent = '✅ ¡Copiado!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = '📋 Copiar link de invitación';
+          btn.classList.remove('copied');
+        }, 2000);
+      }
+    } catch (e) {
+      alert('Selecciona manualmente: ' + link);
+    }
+    document.body.removeChild(tmp);
+  }
+}
+
+// Cerrar con Escape
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') cerrarModal();
+});
+
+// Atajo: Ctrl+K o Cmd+K para enfocar búsqueda
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    searchBox.focus();
+    searchBox.select();
+  }
+});
+
+// Smooth scroll del menú lateral
+document.querySelectorAll('nav.sidebar a').forEach(link => {
+  link.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(link.getAttribute('href'));
+    if (target) {
+      target.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+  });
+});
+</script>
 </body>
 </html>""")
     
@@ -27800,6 +29351,17 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     except Exception as _e_glm_n:
                         logger.debug(f"GLM5 noticias falló: {_e_glm_n}")
                 
+                # FASE 27: tercera capa - DeepSeek como último recurso (es de pago)
+                if not news_ia or len(news_ia.strip()) < 200:
+                    logger.info("FASE 27: Noticias /indicadores - GLM5 también falló, probando DeepSeek...")
+                    try:
+                        news_ia = await asyncio.wait_for(
+                            loop.run_in_executor(None, llamar_deepseek, prompt_news, 2000, 0.3),
+                            timeout=45.0
+                        )
+                    except Exception as _e_dsk_n:
+                        logger.debug(f"DeepSeek noticias falló: {_e_dsk_n}")
+                
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
@@ -27811,7 +29373,9 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning(f"Error generando noticias /indicadores: {_e_news}")
             
             # FASE 24: si NO hay noticias después de todo, fallback con contexto general
+            es_fallback_noticias = False  # FASE 27: marcar para no cachear
             if not noticias_html or len(noticias_html.strip()) < 50:
+                es_fallback_noticias = True
                 noticias_html = (
                     '<div class="news-item">&#127758; <b>Politica monetaria global:</b> '
                     'La Reserva Federal de EE.UU. mantiene su trayectoria de tasas mientras evalua datos '
@@ -27838,11 +29402,15 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
             # ── Guardar cache del día ──
-            _indicadores_cache['fecha'] = hoy
-            _indicadores_cache['all_data'] = all_data
-            _indicadores_cache['explicaciones'] = explicaciones
-            _indicadores_cache['html_content'] = html_content
-            logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores)")
+            # FASE 27: NO cachear si las noticias son fallback genérico (para reintentar IA en próxima ejecución)
+            if not es_fallback_noticias:
+                _indicadores_cache['fecha'] = hoy
+                _indicadores_cache['all_data'] = all_data
+                _indicadores_cache['explicaciones'] = explicaciones
+                _indicadores_cache['html_content'] = html_content
+                logger.info(f"📈 Cache diario guardado ({len(datos)} indicadores) — IA real OK")
+            else:
+                logger.warning(f"⚠️ Cache indicadores NO guardado: noticias son fallback (IA falló). Próxima ejecución reintentará.")
 
         # 6. Mensaje de texto con ICONOS
         sep = "━" * 30
