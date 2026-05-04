@@ -4988,6 +4988,22 @@ margin-left:10px;transition:.15s}
 font-weight:600;letter-spacing:.02em;transition:.15s;margin-left:6px;
 background:rgba(56,189,248,.10);color:#38bdf8;border:1px solid rgba(56,189,248,.35)}
 .btn-anunciar:hover{background:rgba(56,189,248,.22)}
+/* FASE 24: KPI clickeable con efecto hover */
+.kpi-card-clickable:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(195,165,90,.15)}
+/* FASE 24: Modal overlay para info detallada de KPIs */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(6px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .2s ease-out}
+.modal-overlay .modal-box{background:linear-gradient(145deg,#0f1f3a,#1a2f4f);border:1px solid rgba(195,165,90,.4);border-radius:16px;width:100%;max-width:540px;max-height:90vh;overflow-y:auto;box-shadow:0 30px 80px rgba(0,0,0,.7);animation:popIn .25s ease-out}
+.modal-overlay .modal-lg{max-width:680px}
+.modal-overlay .modal-header{padding:18px 22px;border-bottom:1px solid rgba(195,165,90,.2);display:flex;justify-content:space-between;align-items:center}
+.modal-overlay .modal-header h3{margin:0;color:#c3a55a;font-size:1.15em}
+.modal-overlay .modal-close{background:none;border:none;color:#8899aa;font-size:1.8em;cursor:pointer;line-height:1;padding:0 6px;transition:color .15s}
+.modal-overlay .modal-close:hover{color:#e74c3c}
+.modal-overlay .modal-body{padding:20px 22px;color:#cfd8e3;line-height:1.5}
+.modal-overlay .modal-footer{padding:14px 22px;border-top:1px solid rgba(195,165,90,.15);text-align:right}
+.modal-overlay .btn-cancel{padding:8px 18px;background:rgba(195,165,90,.12);color:#c3a55a;border:1px solid rgba(195,165,90,.4);border-radius:8px;cursor:pointer;font-weight:600;transition:.15s}
+.modal-overlay .btn-cancel:hover{background:rgba(195,165,90,.2)}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes popIn{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
 .btn-invitar:disabled{opacity:.6;cursor:not-allowed}
 .btn-normalizar{background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.4);
 padding:8px 14px;border-radius:8px;cursor:pointer;font-size:.88em;font-weight:600;margin-left:8px}
@@ -5061,6 +5077,31 @@ border-radius:8px;color:#e0e6ed;font-size:.95em;margin-top:6px;font-family:inher
 <div id="empresas" class="tab-content">
 <button class="refresh-btn" onclick="cargarEmpresas()">↻ Refrescar</button>
 <h3 style="color:#c3a55a;margin-top:0">Empresas con IntelliBot</h3>
+<!-- FASE 24: Filtros con tooltips explicativos -->
+<div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<input id="filtro-empresas" type="text" placeholder="🔍 Filtrar por nombre, tenant ID o email..." 
+  oninput="filtrarEmpresas()" 
+  title="Busca empresas por su nombre comercial, tenant_id (identificador interno) o email de contacto. La búsqueda es case-insensitive."
+  style="flex:1;min-width:240px;padding:9px 13px;background:#0a1628;
+  border:1px solid rgba(195,165,90,.3);border-radius:8px;color:#e0e6ed;font-size:.9em">
+<select id="filtro-empresas-estado" onchange="filtrarEmpresas()" 
+  title="Activa = empresa con suscripción vigente y bot operativo. Inactiva = empresa en pausa o sin pagar."
+  style="padding:9px 13px;background:#0a1628;
+  border:1px solid rgba(195,165,90,.3);border-radius:8px;color:#e0e6ed;font-size:.9em">
+<option value="">Todas (Activas + Inactivas)</option>
+<option value="activa">Solo Activas</option>
+<option value="inactiva">Solo Inactivas</option>
+</select>
+<select id="filtro-empresas-plan" onchange="filtrarEmpresas()" 
+  title="Plan Premium: todas las funciones habilitadas. Plan Standard: features limitadas. Plan Trial: período de prueba gratuito."
+  style="padding:9px 13px;background:#0a1628;
+  border:1px solid rgba(195,165,90,.3);border-radius:8px;color:#e0e6ed;font-size:.9em">
+<option value="">Todos los planes</option>
+<option value="premium">Premium</option>
+<option value="standard">Standard</option>
+<option value="trial">Trial</option>
+</select>
+</div>
 <div id="empresas-list"><div class="loading">Cargando empresas...</div></div>
 </div>
 
@@ -5161,10 +5202,46 @@ async function cargarEmpresas(){
       cont.innerHTML = '<div class="card">No hay empresas registradas todavía.</div>';
       return;
     }
-    cont.innerHTML = data.empresas.map(e => renderEmpresa(e)).join('');
+    // FASE 24: guardar para filtrado
+    window._empresasCache = data.empresas;
+    renderEmpresasFiltered();
   }catch(err){
     cont.innerHTML = `<div class="error">Error: ${err.message}</div>`;
   }
+}
+
+// FASE 24: filtrar empresas según búsqueda y filtros
+function filtrarEmpresas(){
+  renderEmpresasFiltered();
+}
+
+function renderEmpresasFiltered(){
+  const cont = document.getElementById('empresas-list');
+  if(!window._empresasCache) return;
+  
+  const busqueda = (document.getElementById('filtro-empresas')?.value || '').toLowerCase().trim();
+  const estado = document.getElementById('filtro-empresas-estado')?.value || '';
+  const plan = (document.getElementById('filtro-empresas-plan')?.value || '').toLowerCase();
+  
+  let filtradas = window._empresasCache;
+  
+  if(busqueda){
+    filtradas = filtradas.filter(e => 
+      (e.nombre || '').toLowerCase().includes(busqueda) ||
+      (e.tenant_id || '').toLowerCase().includes(busqueda) ||
+      (e.contacto_email || '').toLowerCase().includes(busqueda)
+    );
+  }
+  if(estado === 'activa') filtradas = filtradas.filter(e => e.activa);
+  if(estado === 'inactiva') filtradas = filtradas.filter(e => !e.activa);
+  if(plan) filtradas = filtradas.filter(e => (e.plan || '').toLowerCase() === plan);
+  
+  if(filtradas.length === 0){
+    cont.innerHTML = '<div class="card" style="text-align:center;padding:30px;color:#8899aa">🔍 No hay empresas que coincidan con los filtros aplicados.</div>';
+    return;
+  }
+  
+  cont.innerHTML = filtradas.map(e => renderEmpresa(e)).join('');
 }
 
 function renderEmpresa(e){
@@ -5495,7 +5572,7 @@ async function renovarUsuario(userId, nombre){
   }
 }
 
-// FASE 23: anunciar identidad de un cofrade en el grupo Cofradía
+// FASE 24: anunciar identidad de un cofrade en el grupo Cofradía
 async function anunciarIdentidad(userId, nombre){
   if(!confirm("¿Anunciar la identidad de " + nombre + " en el grupo Cofradía?\\n\\nSe enviará una tarjeta de identidad clickeable al grupo principal con su nombre oficial registrado.")){
     return;
@@ -5515,6 +5592,50 @@ async function anunciarIdentidad(userId, nombre){
   } catch(e) {
     alert("❌ Error de red: " + e.message);
   }
+}
+
+// FASE 24: modal de detalle al click sobre KPI
+function abrirInfoKPI(label, valor){
+  const info = window._kpiInfoDict ? window._kpiInfoDict[label] : null;
+  if(!info){
+    alert(label + ': ' + valor);
+    return;
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box modal-lg">
+      <div class="modal-header">
+        <h3>📊 ${label}</h3>
+        <button class="modal-close" onclick="cerrarInfoKPI()">×</button>
+      </div>
+      <div class="modal-body">
+        <div style="text-align:center;font-size:3.5em;font-weight:800;color:#c3a55a;margin:8px 0 16px">${valor}</div>
+        <div style="background:rgba(195,165,90,.06);border-left:3px solid #c3a55a;padding:14px 18px;border-radius:8px;margin-bottom:14px">
+          <div style="font-weight:600;color:#c3a55a;margin-bottom:6px">📖 ¿Qué significa?</div>
+          <div style="color:#cfd8e3;line-height:1.6">${escapeHtml(info.desc||'Sin descripción.')}</div>
+        </div>
+        ${info.ejemplo ? `
+        <div style="background:rgba(46,204,113,.06);border-left:3px solid #2ecc71;padding:14px 18px;border-radius:8px;margin-bottom:14px">
+          <div style="font-weight:600;color:#2ecc71;margin-bottom:6px">💡 Ejemplo</div>
+          <div style="color:#cfd8e3;line-height:1.6">${escapeHtml(info.ejemplo)}</div>
+        </div>` : ''}
+        ${info.formula ? `
+        <div style="background:rgba(155,89,182,.06);border-left:3px solid #9b59b6;padding:14px 18px;border-radius:8px">
+          <div style="font-weight:600;color:#9b59b6;margin-bottom:6px">🔧 Fórmula técnica</div>
+          <code style="color:#e0e6ed;font-size:.88em;display:block;font-family:monospace">${escapeHtml(info.formula)}</code>
+        </div>` : ''}
+      </div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="cerrarInfoKPI()">Cerrar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+function cerrarInfoKPI(){
+  const ov = document.querySelector('.modal-overlay');
+  if(ov) ov.remove();
 }
 
 // FASE 23: renovar a TODOS los que vencen pronto (botón global)
@@ -5794,13 +5915,105 @@ async function cargarDashboard(){
     
     const k = data.kpis || {};
     
-    // ═══ KPI CARDS ═══
-    const kpiCard = (label, valor, sublabel, color) => 
-      '<div style="background:linear-gradient(135deg,#0f1f3a,#0a1628);border:1px solid ' + (color||'rgba(195,165,90,.3)') + ';border-radius:12px;padding:18px;text-align:center">' +
+    // FASE 24: Diccionario con info detallada de cada KPI (mostrada al click)
+    const kpiInfo = {
+      'Total Usuarios': {
+        desc: 'Total de cuentas registradas en el bot (activas + inactivas + admin).',
+        ejemplo: 'Si tienes 254 usuarios, son 254 personas que iniciaron sesión y se registraron al menos una vez.',
+        formula: 'COUNT(*) FROM suscripciones',
+      },
+      'Activos 7 días': {
+        desc: 'Usuarios que enviaron al menos 1 mensaje en los últimos 7 días.',
+        ejemplo: 'Mide engagement reciente. Si baja, puede indicar que la comunidad está perdiendo actividad.',
+        formula: 'COUNT(DISTINCT user_id) WHERE fecha >= NOW() - 7 days',
+      },
+      'Activos 30 días': {
+        desc: 'Usuarios activos en últimos 30 días. Métrica estándar MAU (Monthly Active Users).',
+        ejemplo: 'Si tienes 254 usuarios y 180 activos 30d, tu MAU rate es 70.9%.',
+        formula: 'COUNT(DISTINCT user_id) WHERE fecha >= NOW() - 30 days',
+      },
+      'Total Mensajes': {
+        desc: 'Mensajes históricos totales acumulados en el grupo.',
+        ejemplo: 'Crece monotonamente. Útil para mostrar la salud histórica de la comunidad.',
+        formula: 'COUNT(*) FROM mensajes',
+      },
+      'Mensajes 30d': {
+        desc: 'Volumen de mensajes en últimos 30 días. Indicador de actividad reciente.',
+        ejemplo: 'Si bajan los mensajes pero sube el #activos, hay menos conversaciones por persona.',
+        formula: 'COUNT(*) WHERE fecha >= NOW() - 30 days',
+      },
+      'Con Tarjeta': {
+        desc: 'Usuarios que crearon su Tarjeta Profesional (con al menos 1 campo lleno).',
+        ejemplo: 'Una tarjeta llena permite al usuario ser encontrado con /conectar y /buscar_profesional.',
+        formula: 'COUNT(*) FROM tarjetas_profesional',
+      },
+      'Sin Tarjeta': {
+        desc: 'Usuarios registrados que aún NO crearon su Tarjeta Profesional.',
+        ejemplo: 'Usa el botón 📩 Invitar al lado de cada uno para mandarles el tutorial.',
+        formula: 'total_usuarios - con_tarjeta',
+      },
+      'Nuevos Mes': {
+        desc: 'Usuarios que se registraron en los últimos 30 días.',
+        ejemplo: 'Indicador de crecimiento. Si está bajo, considera campañas de invitación.',
+        formula: 'COUNT(*) WHERE fecha_registro >= NOW() - 30 days',
+      },
+      '✅ Verificados': {
+        desc: 'Usuarios marcados como "identidad verificada" por un administrador.',
+        ejemplo: 'Una marca de seguridad: el admin confirmó manualmente que la persona es quien dice ser.',
+        formula: 'COUNT(*) WHERE verificado_admin = TRUE',
+      },
+      '⚪ Sin verificar': {
+        desc: 'Usuarios que aún NO han sido verificados por admin.',
+        ejemplo: 'No significa que sean falsos, solo que pendientes de revisión por admin.',
+        formula: 'total - verificados',
+      },
+      '⚠️ Vencen 7d': {
+        desc: 'Suscripciones que vencerán en los próximos 7 días. Acción urgente.',
+        ejemplo: 'Usa el botón "🔄 Renovar Vencen Pronto" para extenderlas gratis y silencioso.',
+        formula: 'fecha_expiracion < NOW() + 7 days AND fecha_expiracion > NOW()',
+      },
+      '⏰ Vencen 30d': {
+        desc: 'Suscripciones que vencen en próximos 8-30 días. Sin urgencia inmediata.',
+        ejemplo: 'Programa una renovación masiva preventiva si esperas no estar disponible.',
+        formula: 'fecha_expiracion BETWEEN NOW()+7d AND NOW()+30d',
+      },
+      '✓ Vigentes': {
+        desc: 'Suscripciones activas con más de 30 días de vigencia restante.',
+        ejemplo: 'No requieren acción. Son la base estable de tu plataforma.',
+        formula: 'fecha_expiracion > NOW() + 30 days',
+      },
+      '♾️ Vitalicios': {
+        desc: 'Suscripciones sin fecha de vencimiento (fecha_expiracion >= 2099).',
+        ejemplo: 'Owner, fundadores y cuentas privilegiadas. No requieren renovación.',
+        formula: 'fecha_expiracion >= 2099-01-01',
+      },
+      '🗣️ Han escrito': {
+        desc: 'Usuarios que enviaron al menos 1 mensaje en TODA la historia.',
+        ejemplo: 'Diferencia clave entre lurkers (silenciosos) y participantes activos.',
+        formula: 'COUNT(DISTINCT user_id) FROM mensajes',
+      },
+      '🔇 Silenciosos': {
+        desc: 'Usuarios registrados que NUNCA enviaron un mensaje.',
+        ejemplo: 'Posibles cuentas inactivas o gente que se registró pero no participó.',
+        formula: 'total - usuarios_que_escribieron',
+      },
+    };
+    
+    // ═══ KPI CARDS ═══ (FASE 24: clickeables + tooltip)
+    const kpiCard = (label, valor, sublabel, color) => {
+      const info = kpiInfo[label] || {desc: '', ejemplo: '', formula: ''};
+      const tooltip = (info.desc || '') + (info.ejemplo ? '\\n\\nEjemplo: ' + info.ejemplo : '');
+      return '<div class="kpi-card-clickable" onclick="abrirInfoKPI(' + JSON.stringify(label).replace(/"/g,'&quot;') + ',' + JSON.stringify(String(valor)).replace(/"/g,'&quot;') + ')" ' +
+        'title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
+        'style="background:linear-gradient(135deg,#0f1f3a,#0a1628);border:1px solid ' + (color||'rgba(195,165,90,.3)') + ';border-radius:12px;padding:18px;text-align:center;cursor:pointer;transition:transform .15s, box-shadow .15s">' +
       '<div style="font-size:2.2em;font-weight:700;color:' + (color||'#c3a55a') + ';line-height:1">' + valor + '</div>' +
       '<div style="font-size:.8em;color:#8899aa;text-transform:uppercase;letter-spacing:.05em;margin-top:8px;font-weight:600">' + label + '</div>' +
       (sublabel ? '<div style="font-size:.78em;color:#5a6b7d;margin-top:4px">' + sublabel + '</div>' : '') +
       '</div>';
+    };
+    
+    // FASE 24: guardar diccionario kpiInfo en window para que el modal pueda accederlo
+    window._kpiInfoDict = kpiInfo;
     
     kpiBox.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:16px">' +
       kpiCard('Total Usuarios', k.total_usuarios||0, k.nuevos_30d + ' nuevos en 30d', '#c3a55a') +
@@ -6650,6 +6863,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /recomendar @user [texto] - Recomendar cofrade
 /mis_recomendaciones - Ver recomendaciones
 
+🆔 IDENTIDAD VISIBLE (FASE 23)
+/quien - Identifica al usuario (responde a un mensaje, o usa @username/ID)
+/identidad - Alias de /quien
+/cofrades - Lista TODOS los miembros con identidad oficial
+/miembros - Alias de /cofrades
+
 📢 COMUNIDAD
 /publicar [cat] titulo | desc - Publicar anuncio
 /anuncios [categoría] - Ver tablón de anuncios
@@ -6768,6 +6987,16 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /set_precios - Configurar precios
 /set_precio [srv] [pesos] [coins] - Editar precios
 /dar_coins [user_id] [cant] - Regalar coins
+
+🆔 ADMIN IDENTIDAD (FASE 23)
+/verificar - Marca usuario como identidad verificada (responder a mensaje, o /verificar @user, /verificar 123456)
+
+🔄 ADMIN RENOVACIÓN SILENCIOSA (FASE 23)
+/renovar 123456 90 - Renueva 1 usuario por 90 días (silencioso, no notifica)
+/renovar @username 180 - Renueva por username
+/renovar vence_pronto 90 - Renueva a TODOS los que vencen en 30 días
+/renovar todos 365 - Renueva a TODOS los activos
+(También disponible desde Panel de Control con botón 🔄 Renovar)
 /cobros_admin - Panel de cobros
 /pagos_pendientes - Ver pagos pendientes
 /vencimientos - Suscripciones por vencer
@@ -7355,11 +7584,12 @@ async def quien_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @requiere_suscripcion
-async def directorio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /directorio — muestra lista de TODOS los miembros del grupo
+async def cofrades_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /cofrades — muestra lista de TODOS los miembros del grupo
     con sus identidades oficiales (nombre real + KDT + verificación).
     
     Útil para que cualquier miembro pueda saber quién es quién en el grupo.
+    Muestra TODOS, paginado si excede el límite de Telegram (4096 chars).
     """
     try:
         conn = get_db_connection()
@@ -20232,10 +20462,11 @@ async def directorio_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             ORDER BY nombre_completo LIMIT 15""",
                          tuple(f"%{busqueda}%" for _ in range(5)))
         else:
+            # FASE 24: si no hay búsqueda, mostrar TODOS los que tienen tarjeta (sin LIMIT 20)
             if DATABASE_URL:
-                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo LIMIT 20")
+                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo")
             else:
-                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo LIMIT 20")
+                c.execute("SELECT nombre_completo, profesion, empresa, servicios, ciudad, telefono, email FROM tarjetas_profesional ORDER BY nombre_completo")
         
         resultados = c.fetchall()
         conn.close()
@@ -20592,9 +20823,37 @@ OTROS PROFESIONALES EN COFRADÍA:
 Para cada conexión sugerida, indica brevemente por qué sería útil conectarse (sinergia comercial, misma industria, servicios complementarios, misma ciudad, etc).
 Responde en español, de forma concisa. No uses asteriscos ni formatos."""
 
-        respuesta = llamar_groq(prompt, max_tokens=600, temperature=0.5)
-        if not respuesta:
-            respuesta = "No pude generar sugerencias en este momento."
+        # FASE 24: timeout estricto + cascada Groq -> GLM5
+        respuesta = None
+        try:
+            loop = asyncio.get_running_loop()
+            respuesta = await asyncio.wait_for(
+                loop.run_in_executor(None, llamar_groq, prompt, 600, 0.5),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("/conectar Groq timeout 30s, usando GLM5")
+        except Exception as _e_g:
+            logger.debug(f"/conectar Groq falló: {_e_g}")
+        
+        if not respuesta or len(respuesta.strip()) < 100:
+            try:
+                respuesta = await asyncio.wait_for(
+                    loop.run_in_executor(None, llamar_glm5, prompt, 600, 0.5),
+                    timeout=30.0
+                )
+            except Exception as _e_glm_c:
+                logger.debug(f"/conectar GLM5 falló: {_e_glm_c}")
+        
+        if not respuesta or len(respuesta.strip()) < 100:
+            # FASE 24: fallback básico - mostrar 5 perfiles cualquiera del directorio
+            respuesta = "Los servicios de IA estan ocupados. Aqui tienes 5 cofrades del directorio que podrias contactar:\n\n"
+            for i, o in enumerate(otros[:5], 1):
+                nombre = o['nombre_completo'] if DATABASE_URL else o[1]
+                prof = (o['profesion'] if DATABASE_URL else o[2]) or 'Sin profesion declarada'
+                emp = (o['empresa'] if DATABASE_URL else o[3]) or 'Sin empresa declarada'
+                respuesta += f"{i}. {nombre}\n   Profesion: {prof}\n   Empresa: {emp}\n\n"
+            respuesta += "\nIntenta /conectar nuevamente en unos minutos para sugerencias inteligentes con IA."
         
         header = f"🔗 CONEXIONES SUGERIDAS\n{'━' * 28}\n\n"
         footer = "\n\n💡 /directorio para ver el directorio completo"
@@ -26827,7 +27086,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     explicaciones[cod] = explicacion
 
 
-            # PASO 5: Noticias HTML con análisis IA completo
+            # PASO 5: Noticias HTML con análisis IA completo (FASE 24: robusto con fallbacks)
             noticias_html = ""
             if noticias_bcch:
                 for n in noticias_bcch[:5]:
@@ -26846,7 +27105,27 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
                     f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
                 )
-                news_ia = llamar_groq(prompt_news, max_tokens=2000, temperature=0.3)
+                # FASE 24: timeout estricto + fallback a GLM5
+                news_ia = None
+                try:
+                    news_ia = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_groq, prompt_news, 2000, 0.3),
+                        timeout=45.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Noticias /indicadores Groq timeout 45s, usando GLM5")
+                except Exception as _e_g:
+                    logger.debug(f"Groq noticias falló: {_e_g}")
+                
+                if not news_ia or len(news_ia.strip()) < 200:
+                    try:
+                        news_ia = await asyncio.wait_for(
+                            loop.run_in_executor(None, llamar_glm5, prompt_news, 2000, 0.3),
+                            timeout=45.0
+                        )
+                    except Exception as _e_glm_n:
+                        logger.debug(f"GLM5 noticias falló: {_e_glm_n}")
+                
                 if news_ia:
                     for line in news_ia.strip().split('\n'):
                         line = line.strip().lstrip('-•*0123456789.').strip()
@@ -26854,8 +27133,31 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                             # Detectar si menciona alza o baja para iconos
                             icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
                             noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
-            except Exception:
-                pass
+            except Exception as _e_news:
+                logger.warning(f"Error generando noticias /indicadores: {_e_news}")
+            
+            # FASE 24: si NO hay noticias después de todo, fallback con contexto general
+            if not noticias_html or len(noticias_html.strip()) < 50:
+                noticias_html = (
+                    '<div class="news-item">&#127758; <b>Politica monetaria global:</b> '
+                    'La Reserva Federal de EE.UU. mantiene su trayectoria de tasas mientras evalua datos '
+                    'de inflacion. El Banco Central de Chile (BCCh) ajusta la TPM segun la trayectoria del IPC.</div>'
+                    '<div class="news-item">&#128200; <b>Cobre y demanda china:</b> '
+                    'El precio del cobre fluctua segun datos de manufactura china y politicas de estimulo. '
+                    'Codelco y BHP siguen siendo referentes de produccion mundial.</div>'
+                    '<div class="news-item">&#128181; <b>Tipo de cambio:</b> '
+                    'El peso chileno depende del diferencial de tasas Fed-BCCh, flujos no residentes, '
+                    'precio del cobre y eventos geopoliticos globales.</div>'
+                    '<div class="news-item">&#128201; <b>Inflacion local:</b> '
+                    'El INE publica el IPC los primeros 8 dias de cada mes. La canasta refleja arriendos, '
+                    'electricidad, combustibles y alimentos como rubros principales.</div>'
+                    '<div class="news-item">&#128178; <b>Mercados y AFP:</b> '
+                    'El IPSA refleja la valuacion de las 30 acciones mas transadas. Las AFP son flujos '
+                    'estructurales que afectan tanto renta variable como fija local.</div>'
+                    '<div class="news-item">&#127757; <b>Geopolitica:</b> '
+                    'Tensiones en Medio Oriente, guerra Ucrania, aranceles EE.UU.-China son drivers '
+                    'que afectan petroleo, oro, dolar global y commodities.</div>'
+                )
 
             html_content = await loop.run_in_executor(
                 None, generar_html_indicadores, all_data, explicaciones, noticias_html
@@ -27022,6 +27324,11 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _economia_cache = {'fecha': '', 'html': None}
+
+# FASE 24: cache diario para informes que no varían en el día
+# (se invalida automáticamente cada día calendario en Chile)
+_reporte_ejec_cache = {'fecha': '', 'html': None, 'data': None}
+_tts_audio_cache = {}  # key: hash(texto), value: {fecha, audio_path}
 
 
 def generar_html_economia(all_data, datos_cmf, datos_afp, analisis_ia='', analisis_proyectado='', datos_pib=None):
@@ -28066,10 +28373,50 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         analisis_proy = analisis_proy.replace(_full, '\n\n' + _full)
                                         break
                             analisis_proy = analisis_proy.replace('INFORME PROFESIONAL AL MINISTRO DE HACIENDA Y ECONOM\u00cdA DE CHILE', 'INFORME PROFESIONAL PARA EL MINISTERIO DE HACIENDA')
-                except Exception:
+                except Exception as _e_groq_eco:
+                    logger.warning(f"Groq paralelo falló en /economia: {_e_groq_eco}")
                     try:
                         analisis_ia = await loop.run_in_executor(None, lambda: llamar_groq(pr1, max_tokens=1200, temperature=0.3)) or ''
                     except Exception: pass
+                
+                # FASE 24: si Groq falló para AMBOS análisis, intentar GLM5 como respaldo
+                if not analisis_ia or len(analisis_ia.strip()) < 200:
+                    logger.info("FASE 24: Análisis IA macroeconómico vacío, intentando GLM5...")
+                    try:
+                        analisis_ia = await loop.run_in_executor(None, lambda: llamar_glm5(pr1, max_tokens=1200, temperature=0.4)) or ''
+                    except Exception as _e_glm:
+                        logger.debug(f"GLM5 falló: {_e_glm}")
+                
+                if not analisis_proy or len(analisis_proy.strip()) < 200:
+                    logger.info("FASE 24: Análisis Proyectado vacío, intentando GLM5...")
+                    try:
+                        analisis_proy = await loop.run_in_executor(None, lambda: llamar_glm5(pr2, max_tokens=3500, temperature=0.4)) or ''
+                    except Exception as _e_glm:
+                        logger.debug(f"GLM5 falló para proyectado: {_e_glm}")
+                
+                # FASE 24: si ambos todavía vacíos, generar fallback genérico (mejor que pantalla vacía)
+                if not analisis_ia or len(analisis_ia.strip()) < 100:
+                    analisis_ia = (
+                        "ANALISIS MACROECONOMICO\n\n"
+                        "Los servicios de IA estan temporalmente no disponibles. Sin embargo, los indicadores arriba "
+                        "muestran el estado actual de la economia chilena.\n\n"
+                        "PANORAMA GENERAL: Revisa la TPM y el IPC para entender la politica monetaria. El dolar y el cobre "
+                        "son los drivers principales de la economia chilena. La UF y UTM se reajustan con el IPC mensual.\n\n"
+                        "RECOMENDACION: Ejecute /economia nuevamente en unos minutos para regenerar el analisis con IA. "
+                        "Tambien puede consultar /indicadores para un analisis individualizado por indicador."
+                    )
+                
+                if not analisis_proy or len(analisis_proy.strip()) < 100:
+                    analisis_proy = (
+                        "ANALISIS PROYECTADO\n\n"
+                        "Los servicios de IA estan temporalmente no disponibles para generar el informe proyectado completo.\n\n"
+                        "Mientras tanto, considera estos puntos clave:\n"
+                        "1. La TPM del Banco Central define la trayectoria de tasas de credito.\n"
+                        "2. El IPC mensual marca los reajustes UF y UTM.\n"
+                        "3. El precio del cobre afecta la cuenta corriente y el dolar.\n"
+                        "4. El IPSA es proxy del valor de las acciones chilenas.\n\n"
+                        "Ejecute /economia nuevamente en unos minutos para regenerar el informe completo con IA."
+                    )
             await msg.edit_text("📊 Generando dashboard HTML...")
             html_content = await loop.run_in_executor(
                 None, generar_html_economia, all_data, datos_cmf, datos_afp, analisis_ia, analisis_proy, datos_pib)
@@ -29502,11 +29849,12 @@ def main():
     # Handlers de búsqueda
     application.add_handler(CommandHandler("buscar", buscar_comando))
     application.add_handler(CommandHandler("buscar_ia", buscar_ia_comando))
-    # FASE 23: SISTEMA DE IDENTIDAD VISIBLE
+    # FASE 23/24: SISTEMA DE IDENTIDAD VISIBLE
     application.add_handler(CommandHandler("quien", quien_comando))
     application.add_handler(CommandHandler("identidad", quien_comando))  # alias
-    application.add_handler(CommandHandler("directorio", directorio_comando))
-    application.add_handler(CommandHandler("miembros", directorio_comando))  # alias
+    # FASE 24: /cofrades muestra todos con identidad (nuevo - sin conflicto con /directorio)
+    application.add_handler(CommandHandler("cofrades", cofrades_comando))
+    application.add_handler(CommandHandler("miembros", cofrades_comando))  # alias
     application.add_handler(CommandHandler("verificar", verificar_comando))
     # Fase 9: Busqueda por autor (quien public\u00f3 qu\u00e9 en el grupo)
     application.add_handler(CommandHandler("publicaciones", publicaciones_comando))
