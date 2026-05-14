@@ -827,6 +827,153 @@ def stats_embeddings():
     }
 
 
+def actualizar_embedding_perfil(user_id: int, conn=None) -> bool:
+    """FASE 30: Genera/actualiza el embedding semántico del perfil profesional.
+    
+    Llamar después de crear o editar una tarjeta para que /conectar pueda hacer
+    matching semántico real. El embedding se construye combinando:
+    nombre + profesión + empresa + servicios + ciudad.
+    
+    Args:
+        user_id: ID del usuario cuyo perfil se va a embebir
+        conn: conexión opcional reutilizable; si es None se abre y cierra una nueva
+    
+    Returns:
+        True si se actualizó exitosamente, False en caso contrario.
+    """
+    if not DATABASE_URL:
+        return False  # SQLite no soporta pgvector
+    
+    cerrar_conn = False
+    try:
+        if conn is None:
+            conn = get_db_connection()
+            if not conn:
+                return False
+            cerrar_conn = True
+        
+        c = conn.cursor()
+        c.execute(
+            "SELECT nombre_completo, profesion, empresa, servicios, ciudad FROM tarjetas_profesional WHERE user_id = %s",
+            (user_id,)
+        )
+        row = c.fetchone()
+        if not row:
+            return False
+        
+        # Construir texto combinado para el embedding (representación profesional completa)
+        partes = []
+        for campo in ['nombre_completo', 'profesion', 'empresa', 'servicios', 'ciudad']:
+            v = row[campo] if DATABASE_URL else row[['nombre_completo', 'profesion', 'empresa', 'servicios', 'ciudad'].index(campo)]
+            if v and str(v).strip():
+                partes.append(str(v).strip())
+        
+        if not partes:
+            return False
+        
+        texto_perfil = " · ".join(partes)
+        
+        # Generar embedding con Gemini
+        emb = generar_embedding_gemini(texto_perfil, tipo='RETRIEVAL_DOCUMENT')
+        if not emb:
+            return False
+        
+        # Guardar en BD
+        try:
+            c.execute(
+                "UPDATE tarjetas_profesional SET embedding_perfil = %s::vector WHERE user_id = %s",
+                (embedding_to_pgvector(emb), user_id)
+            )
+            conn.commit()
+            return True
+        except Exception as _e_upd:
+            logger.debug(f"FASE 30: error actualizando embedding_perfil de {user_id}: {_e_upd}")
+            return False
+    
+    except Exception as e:
+        logger.warning(f"FASE 30: error en actualizar_embedding_perfil: {e}")
+        return False
+    finally:
+        if cerrar_conn and conn:
+            try: conn.close()
+            except: pass
+
+
+def buscar_cofrades_por_similitud(query: str, limit: int = 5, threshold: float = 0.55):
+    """FASE 30: Busca cofrades semánticamente similares a una consulta.
+    
+    Usado por /conectar para matching profesional inteligente con IA.
+    Devuelve los cofrades cuyo perfil (profesión + empresa + servicios + ciudad)
+    es semánticamente similar a la necesidad del usuario.
+    
+    Args:
+        query: necesidad/búsqueda del usuario (ej: "busco asesor previsional")
+        limit: máximo de resultados (default 5)
+        threshold: similitud mínima 0..1 (default 0.55)
+    
+    Returns:
+        lista de dicts con {user_id, nombre, profesion, empresa, ciudad, score}
+        o lista vacía si no hay coincidencias o si pgvector no está disponible.
+    """
+    if not DATABASE_URL or not query or len(query.strip()) < 3:
+        return []
+    
+    try:
+        # Generar embedding de la query
+        q_emb = generar_embedding_gemini(query.strip(), tipo='RETRIEVAL_QUERY')
+        if not q_emb:
+            return []
+        
+        conn = get_db_connection()
+        if not conn:
+            return []
+        c = conn.cursor()
+        
+        try:
+            c.execute(
+                """SELECT user_id, nombre_completo, profesion, empresa, ciudad, telefono, email,
+                          1 - (embedding_perfil <=> %s::vector) AS similitud
+                   FROM tarjetas_profesional
+                   WHERE embedding_perfil IS NOT NULL
+                   ORDER BY embedding_perfil <=> %s::vector
+                   LIMIT %s""",
+                (embedding_to_pgvector(q_emb), embedding_to_pgvector(q_emb), limit * 2)
+            )
+            rows = c.fetchall()
+        except Exception as _e_q:
+            # pgvector no instalado o columna no existe
+            logger.debug(f"FASE 30: búsqueda por similitud falló (cayendo a fallback): {_e_q}")
+            conn.close()
+            return []
+        
+        conn.close()
+        
+        # Filtrar por threshold
+        resultados = []
+        for r in rows:
+            sim = float(r['similitud'] if DATABASE_URL else r[7])
+            if sim < threshold:
+                continue
+            resultados.append({
+                'user_id': r['user_id'] if DATABASE_URL else r[0],
+                'nombre': r['nombre_completo'] if DATABASE_URL else r[1],
+                'profesion': r['profesion'] if DATABASE_URL else r[2],
+                'empresa': r['empresa'] if DATABASE_URL else r[3],
+                'ciudad': r['ciudad'] if DATABASE_URL else r[4],
+                'telefono': r['telefono'] if DATABASE_URL else r[5],
+                'email': r['email'] if DATABASE_URL else r[6],
+                'score': sim,
+            })
+            if len(resultados) >= limit:
+                break
+        
+        return resultados
+    
+    except Exception as e:
+        logger.warning(f"FASE 30: error en buscar_cofrades_por_similitud: {e}")
+        return []
+
+
 # ======================================================================
 # ===  MEJORA 4: SISTEMA DE FEEDBACK  =================================
 # ======================================================================
@@ -1498,6 +1645,21 @@ def init_db():
                 c.execute("ALTER TABLE tarjetas_profesional ADD COLUMN IF NOT EXISTS nro_kdt TEXT DEFAULT ''")
             except Exception:
                 pass
+            
+            # FASE 30: agregar columna embedding_perfil para matching semántico en /conectar
+            # Dim 768 = Gemini text-embedding-004. Si pgvector no está, falla silenciosamente
+            # y el sistema sigue funcionando con búsqueda por keywords (fallback automático).
+            if _PGVECTOR_OK:
+                try:
+                    c.execute("ALTER TABLE tarjetas_profesional ADD COLUMN IF NOT EXISTS embedding_perfil vector(768)")
+                    logger.info("FASE 30: ✅ columna embedding_perfil agregada a tarjetas_profesional")
+                except Exception as _e_emb_perfil:
+                    logger.warning(f"FASE 30: no se pudo agregar embedding_perfil: {_e_emb_perfil}")
+                try:
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_tarjetas_embedding ON tarjetas_profesional USING hnsw (embedding_perfil vector_cosine_ops)")
+                    logger.info("FASE 30: ✅ índice HNSW creado en tarjetas_profesional.embedding_perfil")
+                except Exception as _e_idx_perfil:
+                    logger.debug(f"FASE 30: índice HNSW tarjetas (puede crearse después): {_e_idx_perfil}")
             
             c.execute('''CREATE TABLE IF NOT EXISTS alertas_usuario (
                 id SERIAL PRIMARY KEY,
@@ -18930,6 +19092,149 @@ async def rag_reindexar_embeddings_comando(update: Update, context: ContextTypes
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 30: COMANDO /rag_reindexar_perfiles
+# Genera embeddings semánticos para todos los perfiles existentes en
+# tarjetas_profesional. Después de ejecutarlo, /conectar funcionará con
+# matching semántico real.
+# ═══════════════════════════════════════════════════════════════════════════
+async def rag_reindexar_perfiles_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_reindexar_perfiles - Genera embeddings semánticos de tarjetas profesionales."""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador puede re-indexar perfiles.")
+        return
+    
+    if not DATABASE_URL:
+        await update.message.reply_text("⚠️ Esta operación solo funciona con PostgreSQL (Supabase).")
+        return
+    
+    if not GEMINI_API_KEY:
+        await update.message.reply_text("⚠️ GEMINI_API_KEY no configurada. No se pueden generar embeddings.")
+        return
+    
+    msg = await update.message.reply_text(
+        "🔄 <b>Generando embeddings de perfiles profesionales</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ Contando perfiles pendientes...",
+        parse_mode='HTML'
+    )
+    
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Verificar columna embedding_perfil
+        try:
+            c.execute("SELECT COUNT(*) AS total FROM tarjetas_profesional WHERE embedding_perfil IS NULL")
+            total_pendientes = (c.fetchone()['total']) or 0
+        except Exception as _e_col:
+            await msg.edit_text(
+                "❌ <b>Columna embedding_perfil no encontrada</b>\n\n"
+                "Posibles causas:\n"
+                "1. La extensión pgvector no está habilitada en Supabase\n"
+                "2. El bot no se ha redespliegado después de FASE 30\n\n"
+                f"<code>Error: {str(_e_col)[:200]}</code>",
+                parse_mode='HTML'
+            )
+            conn.close()
+            return
+        
+        if total_pendientes == 0:
+            c.execute("SELECT COUNT(*) AS total FROM tarjetas_profesional WHERE embedding_perfil IS NOT NULL")
+            total_con_emb = (c.fetchone()['total']) or 0
+            await msg.edit_text(
+                f"✅ <b>Todos los perfiles ya tienen embeddings</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 Total perfiles con embedding: {total_con_emb}\n\n"
+                f"<em>El sistema /conectar ya usa matching semántico real con IA.</em>\n"
+                f"<em>Prueba: <code>/conectar busco asesor previsional</code></em>",
+                parse_mode='HTML'
+            )
+            conn.close()
+            return
+        
+        await msg.edit_text(
+            f"🔄 <b>Procesando perfiles</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Perfiles pendientes: <b>{total_pendientes}</b>\n"
+            f"⏱️ Tiempo estimado: ~{max(1, total_pendientes // 60)} min\n\n"
+            f"<em>Esto sucede una sola vez. Los nuevos perfiles se procesan al crearse.</em>",
+            parse_mode='HTML'
+        )
+        
+        # Procesar uno por uno (los perfiles son pocos en comparación a chunks)
+        c.execute("SELECT user_id FROM tarjetas_profesional WHERE embedding_perfil IS NULL")
+        usuarios_pendientes = [(r['user_id']) for r in c.fetchall()]
+        
+        procesados = 0
+        fallidos = 0
+        loop = asyncio.get_running_loop()
+        ultimo_update_msg = time.time()
+        
+        for uid in usuarios_pendientes:
+            try:
+                # actualizar_embedding_perfil maneja todo: lectura BD, generación embedding, update
+                exito = await loop.run_in_executor(None, actualizar_embedding_perfil, uid)
+                if exito:
+                    procesados += 1
+                else:
+                    fallidos += 1
+                
+                # Pausa pequeña para no saturar Gemini
+                await asyncio.sleep(0.05)
+                
+                # Actualizar progreso cada 3 segundos
+                if time.time() - ultimo_update_msg > 3:
+                    pct = (procesados + fallidos) / total_pendientes * 100
+                    await msg.edit_text(
+                        f"🔄 <b>Procesando perfiles</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📊 Progreso: <b>{procesados + fallidos} / {total_pendientes}</b> ({pct:.1f}%)\n"
+                        f"✅ Procesados: {procesados}\n"
+                        f"⚠️ Fallidos: {fallidos}\n",
+                        parse_mode='HTML'
+                    )
+                    ultimo_update_msg = time.time()
+            except Exception as _e_indv:
+                logger.warning(f"FASE 30: error procesando perfil {uid}: {_e_indv}")
+                fallidos += 1
+        
+        # Crear/recrear índice HNSW
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tarjetas_embedding ON tarjetas_profesional USING hnsw (embedding_perfil vector_cosine_ops)")
+            conn.commit()
+            logger.info("FASE 30: índice HNSW de perfiles creado/verificado")
+        except Exception as _e_idx_p:
+            logger.warning(f"FASE 30: índice HNSW perfiles: {_e_idx_p}")
+        
+        conn.close()
+        
+        await msg.edit_text(
+            f"✅ <b>Embeddings de perfiles completados</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ Procesados exitosos: <b>{procesados}</b>\n"
+            f"⚠️ Fallidos: {fallidos}\n"
+            f"🚀 Índice HNSW: creado\n\n"
+            f"<b>¿Qué cambió?</b>\n"
+            f"El comando /conectar ahora hace matching semántico real con IA.\n\n"
+            f"<b>Prueba estos ejemplos:</b>\n"
+            f"  • <code>/conectar busco asesor previsional</code>\n"
+            f"  • <code>/conectar necesito experto en comercio exterior</code>\n"
+            f"  • <code>/conectar quien sabe de gestión portuaria</code>",
+            parse_mode='HTML'
+        )
+    
+    except Exception as e:
+        logger.error(f"FASE 30: error en /rag_reindexar_perfiles: {e}", exc_info=True)
+        await msg.edit_text(
+            f"❌ <b>Error reprocesando perfiles</b>\n\n"
+            f"<code>{str(e)[:300]}</code>",
+            parse_mode='HTML'
+        )
+
+
 async def eliminar_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /eliminar_pdf [nombre] - Elimina un PDF del RAG (solo owner)"""
     user_id = update.effective_user.id
@@ -23072,6 +23377,14 @@ async def mi_tarjeta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                              (user_id, nombre_completo, valor))
             conn.commit()
             conn.close()
+            
+            # FASE 30: Regenerar embedding semántico del perfil (para /conectar inteligente)
+            # Se ejecuta async en background para no bloquear la respuesta al usuario
+            try:
+                actualizar_embedding_perfil(user_id)
+            except Exception as _e_emb_perfil:
+                logger.debug(f"FASE 30: no se pudo actualizar embedding perfil: {_e_emb_perfil}")
+            
             await update.message.reply_text(f"✅ {campo.capitalize()} actualizado: {valor}\n\nVer tarjeta: /mi_tarjeta")
             otorgar_coins(user_id, 15, 'Actualizar tarjeta profesional')
             # FASE 12: +10 puntos gamificacion por actualizar tarjeta (solo la primera vez al dia)
@@ -23411,11 +23724,61 @@ async def anuncios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @requiere_suscripcion
 async def conectar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /conectar - Sugerir conexiones profesionales"""
+    """Comando /conectar - Sugerir conexiones profesionales.
+    
+    FASE 30: si se pasa una necesidad como argumento (ej: '/conectar busco asesor previsional'),
+    usa búsqueda semántica con embeddings sobre tarjetas_profesional para matching real.
+    Si no, sugiere conexiones basadas en el perfil del usuario (modo clásico con IA).
+    """
     user_id = update.effective_user.id
+    necesidad = ' '.join(context.args).strip() if context.args else ''
     msg = await update.message.reply_text("🔗 Analizando tu perfil y buscando conexiones...")
     
     try:
+        # ═══════════════════════════════════════════════════════════════
+        # FASE 30 - MODO SEMÁNTICO: si hay necesidad explícita, usar embeddings
+        # ═══════════════════════════════════════════════════════════════
+        if necesidad and len(necesidad) >= 5:
+            matches = buscar_cofrades_por_similitud(necesidad, limit=5, threshold=0.55)
+            if matches:
+                logger.info(f"FASE 30 /conectar SEMÁNTICO: {len(matches)} matches para '{necesidad[:60]}'")
+                
+                # Excluir al propio usuario de los resultados
+                matches = [m for m in matches if m['user_id'] != user_id][:5]
+                
+                if matches:
+                    respuesta = f"🎯 <b>Matches profesionales para tu necesidad</b>\n"
+                    respuesta += f"<em>Búsqueda: \"{necesidad}\"</em>\n"
+                    respuesta += "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    
+                    for i, m_data in enumerate(matches, 1):
+                        score_pct = int(m_data['score'] * 100)
+                        respuesta += f"<b>{i}. {m_data['nombre'] or 'Sin nombre'}</b> — Score {score_pct}%\n"
+                        if m_data.get('profesion'):
+                            respuesta += f"   💼 {m_data['profesion']}"
+                            if m_data.get('empresa'):
+                                respuesta += f" @ {m_data['empresa']}"
+                            respuesta += "\n"
+                        elif m_data.get('empresa'):
+                            respuesta += f"   🏢 {m_data['empresa']}\n"
+                        if m_data.get('ciudad'):
+                            respuesta += f"   🌎 {m_data['ciudad']}\n"
+                        if m_data.get('telefono'):
+                            respuesta += f"   📱 {m_data['telefono']}\n"
+                        if m_data.get('email'):
+                            respuesta += f"   📧 {m_data['email']}\n"
+                        respuesta += "\n"
+                    
+                    respuesta += "<em>💡 Matching basado en similitud semántica real con IA.</em>\n"
+                    respuesta += "<em>Usa /quien @usuario para ver más detalles.</em>"
+                    
+                    await msg.edit_text(respuesta, parse_mode='HTML')
+                    registrar_servicio_usado(user_id, 'conectar')
+                    return
+        
+        # ═══════════════════════════════════════════════════════════════
+        # MODO CLÁSICO: sin necesidad explícita, sugerir basado en perfil del usuario
+        # ═══════════════════════════════════════════════════════════════
         conn = get_db_connection()
         if not conn:
             await msg.edit_text("❌ Error de conexión")
@@ -23432,7 +23795,10 @@ async def conectar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not mi_tarjeta:
             conn.close()
             await msg.edit_text("📇 Primero crea tu tarjeta profesional con /mi_tarjeta para que pueda sugerirte conexiones.\n\n"
-                               "Ejemplo: /mi_tarjeta profesion Ingeniero Civil")
+                               "Ejemplo: /mi_tarjeta profesion Ingeniero Civil\n\n"
+                               "<em>O usa /conectar [tu necesidad] para buscar directamente.\n"
+                               "Ej: /conectar busco asesor previsional para mi empresa</em>",
+                               parse_mode='HTML')
             return
         
         mi_prof = (mi_tarjeta['profesion'] if DATABASE_URL else mi_tarjeta[0]) or ''
@@ -23440,7 +23806,38 @@ async def conectar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mi_serv = (mi_tarjeta['servicios'] if DATABASE_URL else mi_tarjeta[2]) or ''
         mi_ciudad = (mi_tarjeta['ciudad'] if DATABASE_URL else mi_tarjeta[3]) or ''
         
-        # Buscar conexiones potenciales con IA
+        # FASE 30: usar embeddings para encontrar perfiles similares al propio
+        if DATABASE_URL:
+            mi_texto_perfil = " · ".join([p for p in [mi_prof, mi_emp, mi_serv, mi_ciudad] if p])
+            if mi_texto_perfil:
+                matches_propio = buscar_cofrades_por_similitud(
+                    f"Perfil complementario para: {mi_texto_perfil}",
+                    limit=8, threshold=0.50
+                )
+                # Filtrar al usuario actual
+                matches_propio = [m for m in matches_propio if m['user_id'] != user_id][:5]
+                
+                if matches_propio:
+                    conn.close()
+                    respuesta = "🤝 <b>Conexiones sugeridas para tu perfil</b>\n"
+                    respuesta += "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    for i, m_data in enumerate(matches_propio, 1):
+                        score_pct = int(m_data['score'] * 100)
+                        respuesta += f"<b>{i}. {m_data['nombre'] or 'Sin nombre'}</b> — Afinidad {score_pct}%\n"
+                        if m_data.get('profesion'):
+                            respuesta += f"   💼 {m_data['profesion']}"
+                            if m_data.get('empresa'):
+                                respuesta += f" @ {m_data['empresa']}"
+                            respuesta += "\n"
+                        if m_data.get('ciudad'):
+                            respuesta += f"   🌎 {m_data['ciudad']}\n"
+                        respuesta += "\n"
+                    respuesta += "<em>💡 Tip: usa <code>/conectar [tu necesidad específica]</code> para matching más preciso.</em>"
+                    await msg.edit_text(respuesta, parse_mode='HTML')
+                    registrar_servicio_usado(user_id, 'conectar')
+                    return
+        
+        # FALLBACK CLÁSICO: buscar con IA generativa (sin embeddings)
         if DATABASE_URL:
             c.execute("""SELECT user_id, nombre_completo, profesion, empresa, servicios, ciudad 
                         FROM tarjetas_profesional WHERE user_id != %s LIMIT 50""", (user_id,))
@@ -23472,14 +23869,16 @@ OTROS PROFESIONALES EN COFRADÍA:
 {otros_texto}
 
 Para cada conexión sugerida, indica brevemente por qué sería útil conectarse (sinergia comercial, misma industria, servicios complementarios, misma ciudad, etc).
-Responde en español, de forma concisa. No uses asteriscos ni formatos."""
+Responde en español, de forma concisa. No uses asteriscos ni formatos.
 
-        # FASE 24: timeout estricto + cascada Groq -> GLM5
+REGLAS ANTI-DELIRIO: SOLO menciona personas que aparezcan EXACTAMENTE en la lista de arriba.
+NUNCA inventes nombres, profesiones o empresas que no estén en el contexto."""
+
         respuesta = None
         try:
             loop = asyncio.get_running_loop()
             respuesta = await asyncio.wait_for(
-                loop.run_in_executor(None, llamar_groq, prompt, 600, 0.5),
+                loop.run_in_executor(None, llamar_groq, prompt, 600, 0.3),  # FASE 30: temp reducida
                 timeout=30.0
             )
         except asyncio.TimeoutError:
@@ -23490,7 +23889,7 @@ Responde en español, de forma concisa. No uses asteriscos ni formatos."""
         if not respuesta or len(respuesta.strip()) < 100:
             try:
                 respuesta = await asyncio.wait_for(
-                    loop.run_in_executor(None, llamar_glm5, prompt, 600, 0.5),
+                    loop.run_in_executor(None, llamar_glm5, prompt, 600, 0.3),
                     timeout=30.0
                 )
             except Exception as _e_glm_c:
@@ -33905,6 +34304,234 @@ async def rechazar_evento_comando(update: Update, context: ContextTypes.DEFAULT_
         conn.close()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 30: ROUTER DE CONSULTAS ESTADÍSTICAS / FACTUALES
+# Resuelve con SQL directo preguntas que tienen respuesta exacta en la BD,
+# evitando llamadas a LLM (que delira con datos imprecisos).
+# Patrones detectados:
+#   - "cuántos integrantes/miembros/cofrades hay"
+#   - "qué profesiones/cargos hay"
+#   - "lista de cofrades"
+#   - "estadísticas/resumen del grupo"
+# Si la pregunta no es estadística → devuelve None y el flujo normal continúa.
+# ═══════════════════════════════════════════════════════════════════════════
+async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
+    """Detecta y responde preguntas estadísticas con SQL directo (anti-delirio).
+    
+    Returns:
+        str con respuesta HTML formateada si la pregunta es estadística,
+        None si la pregunta requiere el flujo normal (LLM + RAG).
+    """
+    msg = mensaje.lower().strip()
+    
+    # FASE 30: Normalizar acentos para detección más robusta
+    import unicodedata as _un
+    msg_n = _un.normalize('NFKD', msg)
+    msg_n = ''.join(ch for ch in msg_n if not _un.combining(ch))
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PATRÓN 1: "cuántos integrantes/miembros/cofrades hay"
+    # (Detección sobre texto SIN acentos para más cobertura)
+    # ──────────────────────────────────────────────────────────────────
+    patrones_cuantos = [
+        'cuantos integrantes', 'cuantos miembros', 'cuantos cofrades',
+        'cuantos socios', 'cuantas personas', 'cuanta gente',
+        'numero de integrantes', 'numero de miembros', 'numero de cofrades',
+        'total de miembros', 'total de cofrades', 'total de integrantes',
+        'cantidad de integrantes', 'cantidad de miembros', 'cantidad de cofrades',
+        'cuantos somos', 'cuantos hay', 'cuanta dotacion',
+        'tamano del grupo', 'tamano de la cofradia',
+        'dotacion total', 'dotacion actual',
+    ]
+    quiere_conteo = any(p in msg_n for p in patrones_cuantos)
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PATRÓN 2: "qué profesiones/cargos/empresas hay"
+    # ──────────────────────────────────────────────────────────────────
+    patrones_profesiones = [
+        'profesiones mas', 'profesiones recurrentes', 'profesiones comunes',
+        'profesiones hay', 'profesiones tiene', 'que profesiones',
+        'cargos mas', 'cargos recurrentes', 'cargos hay', 'cargos comunes',
+        'que cargos', 'que profesiones',
+        'industrias mas', 'industrias hay', 'industrias comunes',
+        'que industrias', 'que rubros', 'rubros mas',
+        'empresas hay', 'empresas representadas', 'que empresas',
+        'ciudades hay', 'donde estan', 'donde viven',
+        'perfil de los miembros', 'perfil profesional del grupo',
+    ]
+    quiere_profesiones = any(p in msg_n for p in patrones_profesiones)
+    
+    if not quiere_conteo and not quiere_profesiones:
+        return None
+    
+    # ──────────────────────────────────────────────────────────────────
+    # Resolver con SQL directo
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        
+        partes = []
+        prefijo = f"{user_name}, " if user_name else ""
+        
+        # CONTEO DE INTEGRANTES
+        if quiere_conteo:
+            try:
+                if DATABASE_URL:
+                    c.execute("SELECT COUNT(*) AS n FROM suscripciones WHERE estado IN ('activa', 'gracia', 'verificado')")
+                    row = c.fetchone()
+                    total_activos = row['n'] if row else 0
+                else:
+                    c.execute("SELECT COUNT(*) FROM suscripciones WHERE estado IN ('activa', 'gracia', 'verificado')")
+                    row = c.fetchone()
+                    total_activos = row[0] if row else 0
+                
+                # Conteo de tarjetas profesionales completadas
+                if DATABASE_URL:
+                    c.execute("SELECT COUNT(*) AS n FROM tarjetas_profesional")
+                    row2 = c.fetchone()
+                    total_tarjetas = row2['n'] if row2 else 0
+                else:
+                    c.execute("SELECT COUNT(*) FROM tarjetas_profesional")
+                    row2 = c.fetchone()
+                    total_tarjetas = row2[0] if row2 else 0
+                
+                # Verificados
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT COUNT(*) AS n FROM suscripciones WHERE verificado_admin = TRUE")
+                        total_verif = (c.fetchone()['n']) or 0
+                    else:
+                        c.execute("SELECT COUNT(*) FROM suscripciones WHERE verificado_admin = 1")
+                        total_verif = c.fetchone()[0] or 0
+                except Exception:
+                    total_verif = 0
+                
+                # Crecimiento últimos 30 días
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT COUNT(*) AS n FROM suscripciones WHERE fecha_registro >= CURRENT_DATE - INTERVAL '30 days'")
+                        nuevos_mes = (c.fetchone()['n']) or 0
+                    else:
+                        c.execute("SELECT COUNT(*) FROM suscripciones WHERE fecha_registro >= date('now', '-30 days')")
+                        nuevos_mes = c.fetchone()[0] or 0
+                except Exception:
+                    nuevos_mes = 0
+                
+                partes.append(
+                    f"<b>👥 Integrantes de la Cofradía Premium</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"<b>Total activos:</b> <b>{total_activos}</b> cofrades\n"
+                    f"<b>Con tarjeta profesional:</b> {total_tarjetas}\n"
+                    f"<b>Verificados oficialmente:</b> {total_verif} ✓\n"
+                    f"<b>Nuevos últimos 30 días:</b> +{nuevos_mes}"
+                )
+            except Exception as e:
+                logger.warning(f"FASE 30: error conteo integrantes: {e}")
+        
+        # PROFESIONES MÁS RECURRENTES
+        if quiere_profesiones:
+            try:
+                # Buscar en tarjetas_profesional las profesiones declaradas
+                if DATABASE_URL:
+                    c.execute("""
+                        SELECT profesion, COUNT(*) AS n
+                        FROM tarjetas_profesional
+                        WHERE profesion IS NOT NULL AND TRIM(profesion) != ''
+                        GROUP BY profesion
+                        ORDER BY n DESC
+                        LIMIT 12
+                    """)
+                else:
+                    c.execute("""
+                        SELECT profesion, COUNT(*) AS n
+                        FROM tarjetas_profesional
+                        WHERE profesion IS NOT NULL AND TRIM(profesion) != ''
+                        GROUP BY profesion
+                        ORDER BY n DESC
+                        LIMIT 12
+                    """)
+                profesiones = c.fetchall()
+                
+                # FASE 30: Top empresas (la columna 'industria' NO existe en el schema real)
+                # Schema real de tarjetas_profesional: nombre_completo, profesion, empresa, 
+                # servicios, telefono, email, ciudad, linkedin, nro_kdt
+                empresas = []
+                try:
+                    c.execute("""
+                        SELECT empresa, COUNT(*) AS n
+                        FROM tarjetas_profesional
+                        WHERE empresa IS NOT NULL AND TRIM(empresa) != ''
+                        GROUP BY empresa
+                        ORDER BY n DESC
+                        LIMIT 8
+                    """)
+                    empresas = c.fetchall()
+                except Exception as _e_emp:
+                    logger.debug(f"FASE 30: error consultando empresas: {_e_emp}")
+                
+                # FASE 30: Top ciudades
+                ciudades = []
+                try:
+                    c.execute("""
+                        SELECT ciudad, COUNT(*) AS n
+                        FROM tarjetas_profesional
+                        WHERE ciudad IS NOT NULL AND TRIM(ciudad) != ''
+                        GROUP BY ciudad
+                        ORDER BY n DESC
+                        LIMIT 6
+                    """)
+                    ciudades = c.fetchall()
+                except Exception as _e_ciu:
+                    logger.debug(f"FASE 30: error consultando ciudades: {_e_ciu}")
+                
+                bloque = "<b>🎯 Profesiones más recurrentes</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+                
+                if profesiones:
+                    bloque += "<b>Top profesiones:</b>\n"
+                    for p in profesiones[:10]:
+                        nombre = (p['profesion'] if DATABASE_URL else p[0]) or 'Sin especificar'
+                        cant = p['n'] if DATABASE_URL else p[1]
+                        bloque += f"  • {nombre}: <b>{cant}</b>\n"
+                else:
+                    bloque += "<em>Aún no hay suficientes tarjetas profesionales completadas. Anima a los cofrades a completar /mi_tarjeta.</em>\n"
+                
+                if empresas:
+                    bloque += "\n<b>Top empresas representadas:</b>\n"
+                    for e in empresas[:6]:
+                        nombre = (e['empresa'] if DATABASE_URL else e[0]) or 'Sin especificar'
+                        cant = e['n'] if DATABASE_URL else e[1]
+                        bloque += f"  • {nombre}: <b>{cant}</b>\n"
+                
+                if ciudades:
+                    bloque += "\n<b>Top ciudades:</b>\n"
+                    for c_ciu in ciudades[:5]:
+                        nombre = (c_ciu['ciudad'] if DATABASE_URL else c_ciu[0]) or 'Sin especificar'
+                        cant = c_ciu['n'] if DATABASE_URL else c_ciu[1]
+                        bloque += f"  • {nombre}: <b>{cant}</b>\n"
+                
+                partes.append(bloque)
+            except Exception as e:
+                logger.warning(f"FASE 30: error profesiones: {e}")
+        
+        conn.close()
+        
+        if not partes:
+            return None
+        
+        # Construir respuesta final
+        resp = ("Buenas noticias " + prefijo + ", aquí los datos exactos de la base:\n\n" if prefijo else "")
+        resp += "\n\n".join(partes)
+        resp += "\n\n<em>📊 Datos obtenidos directamente de la base de datos.</em>"
+        return resp
+    
+    except Exception as e:
+        logger.error(f"FASE 30: error en router SQL: {e}", exc_info=True)
+        return None
+
+
 def main():
     """Función principal"""
     logger.info("🚀 Iniciando Bot Cofradía Premium...")
@@ -34177,7 +34804,7 @@ def main():
     application.add_handler(CommandHandler("ranking", ranking_comando))
     application.add_handler(CommandHandler("mis_puntos", mis_puntos_comando))
     application.add_handler(CommandHandler("mis_insignias", mis_insignias_comando))
-    application.add_handler(CommandHandler("conectar", conectar_comando))
+    # /conectar se registra más abajo (versión FASE 30 con embeddings semánticos)
     application.add_handler(CommandHandler("buscar_profesional", buscar_profesional_comando))
     application.add_handler(CommandHandler("buscar_apoyo", buscar_apoyo_comando))
     application.add_handler(CommandHandler("buscar_especialista_sec", buscar_especialista_sec_comando))
@@ -34207,7 +34834,7 @@ def main():
     application.add_handler(CommandHandler("set_precios", set_precios_comando))
     application.add_handler(CommandHandler("pagos_pendientes", pagos_pendientes_comando))
     application.add_handler(CommandHandler("vencimientos", vencimientos_comando))
-    application.add_handler(CommandHandler("renovar", renovar_comando))
+    # /renovar ya registrado arriba (línea ~34760)
     application.add_handler(CommandHandler("vencimientos_mes", vencimientos_mes_comando))
     application.add_handler(CommandHandler("ingresos", ingresos_comando))
     application.add_handler(CommandHandler("ingreso", ingresos_comando))  # alias
@@ -34231,6 +34858,7 @@ def main():
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
+    application.add_handler(CommandHandler("rag_reindexar_perfiles", rag_reindexar_perfiles_comando))  # FASE 30
     application.add_handler(CommandHandler("rag_enriquecer", rag_enriquecer_keywords_comando))
     application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
@@ -34299,10 +34927,10 @@ def main():
     # === AGENTE INTELIGENTE DE NETWORKING (v5.0) ===
     application.add_handler(CommandHandler("agente", agente_networking_comando))
     application.add_handler(CommandHandler("match", match_networking_comando))
-    application.add_handler(CommandHandler("agendar", agendar_comando))
+    # /agendar y /mis_tareas ya registrados arriba (las definiciones segundas en el archivo
+    # son las que prevalecen en Python; estos handlers apuntan a las mismas funciones)
     application.add_handler(CommandHandler("mi_agenda", mi_agenda_comando))
     application.add_handler(CommandHandler("tarea", nueva_tarea_comando))
-    application.add_handler(CommandHandler("mis_tareas", mis_tareas_comando))
     application.add_handler(CommandHandler("briefing", briefing_diario_comando))
     # Handlers dinámicos para /completar_ID, /ok_ID, /eliminar_agenda_ID
     application.add_handler(MessageHandler(
@@ -34569,6 +35197,18 @@ def main():
                     return  # El comando fue ejecutado, no necesitamos respuesta de IA
                 # Si falló la ejecución, continuar con flujo normal
             
+            # ═══════════════════════════════════════════════════════════════════
+            # FASE 30: ROUTER DE CONSULTAS ESTADÍSTICAS (anti-delirio)
+            # Si la pregunta es de tipo "cuántos/cuáles/listar X", responder con
+            # SQL directo a la BD, NO con LLM. Esto evita delirios en preguntas
+            # que tienen respuesta exacta verificable.
+            # ═══════════════════════════════════════════════════════════════════
+            respuesta_sql = await _intentar_responder_con_sql(mensaje, user_name)
+            if respuesta_sql:
+                logger.info(f"FASE 30: respondido con SQL directo - '{mensaje[:60]}'")
+                await update.message.reply_text(respuesta_sql, parse_mode='HTML')
+                return
+            
             # ===== BÚSQUEDA PARALELA EN TODAS LAS FUENTES (3 hilos simultáneos) =====
             from concurrent.futures import ThreadPoolExecutor as _TPE_priv
             
@@ -34676,42 +35316,59 @@ def main():
                 
                 instruccion = (
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
-                    f"OBLIGATORIO:\n"
+                    f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
                     f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
                     f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
                     f"2. SINTETIZA los fragmentos en respuesta completa y fluida (300-500 palabras).\n"
-                    f"3. PROHIBIDO decir 'no tengo información' o 'no encuentro' — los fragmentos SÍ "
-                    f"contienen lo que el usuario pregunta.\n"
-                    f"4. Comienza directo con la respuesta. Cita pasajes clave entre comillas cuando "
-                    f"sea ilustrativo. Cierra con conclusión útil."
+                    f"3. **GROUNDING ESTRICTO**: SI los fragmentos NO contienen suficiente información para "
+                    f"responder con precisión, DILO HONESTAMENTE: 'Los documentos mencionan [X], pero no "
+                    f"abordan directamente [tema preguntado]'. NO inventes para llenar el vacío.\n"
+                    f"4. PROHIBIDO INVENTAR: nombres de personas, cifras, fechas, eventos o citas que NO estén\n"
+                    f"   literalmente en los fragmentos.\n"
+                    f"5. Comienza directo con la respuesta. Cita pasajes clave entre comillas cuando "
+                    f"sea ilustrativo. Cierra con conclusión basada SOLO en los fragmentos."
                 )
                 ctx_rag = contexto_completo[:7000]
                 fuentes_str_final = fuentes_str
                 logger.info(f"💬 Modo RAG para '{mensaje[:40]}'")
             else:
-                # MODO B: docs no son sobre el tema → responder desde conocimiento LLM
+                # FASE 30: MODO B reescrito anti-delirio
+                # ANTES: forzaba al LLM a inventar diciendo "no menciones documentos, solo responde lo que sabes"
+                # AHORA: pide transparencia explícita y permite reconocer falta de información
                 instruccion = (
-                    "La base de documentos indexados no contiene información sobre este tema específico. "
-                    "RESPONDE directamente desde tu conocimiento como LLM experto (LLaMA 3.3 70B, hasta 2024). "
-                    "No menciones documentos, no pidas más contexto. Solo responde lo que sabes."
+                    "Los documentos indexados de la Cofradía NO contienen información específica sobre este tema. "
+                    "REGLAS ESTRICTAS ANTI-DELIRIO:\n"
+                    "1. SI la pregunta requiere DATOS ESPECÍFICOS de la Cofradía (nombres, cifras, eventos, "
+                    "miembros particulares), responde HONESTAMENTE: \"No tengo esa información específica "
+                    "en mi base de datos de la Cofradía\". NUNCA INVENTES nombres ni datos.\n"
+                    "2. SI la pregunta es de CONOCIMIENTO GENERAL (conceptos, teoría, definiciones), "
+                    "responde con tu conocimiento general (LLaMA 3.3, hasta 2024) y empieza diciendo: "
+                    "\"Aunque no tengo info específica de la Cofradía sobre esto, según mi conocimiento general...\"\n"
+                    "3. NUNCA inventes nombres de cofrades, documentos, eventos o cifras.\n"
+                    "4. SIEMPRE termina sugiriendo un comando útil (/cofrades, /buscar_ia, /economia, etc.) "
+                    "o pidiendo al usuario que use /capturar_conocimiento para que la información quede disponible."
                 )
-                ctx_rag = ""  # No pasar docs irrelevantes al LLM
-                fuentes_str_final = "Conocimiento propio del modelo"
-                logger.info(f"💬 Modo LLM para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
+                ctx_rag = ""
+                fuentes_str_final = "Conocimiento propio + transparencia"
+                logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
-            prompt = f"""Eres el asistente experto de la Cofradía de Networking, comunidad de oficiales navales chilenos (LLaMA 3.3 70B, conocimiento hasta 2024).
+            prompt = f"""Eres el asistente experto de la Cofradía Premium, comunidad profesional chilena.
 
-Responde a {user_name} empezando con "{user_name}," de forma directa, natural y profesional.{intent_hint}
+Responde a {user_name} empezando con "{user_name}," de forma directa, profesional y honesta.{intent_hint}
 
 INSTRUCCIÓN PRINCIPAL: {instruccion}
 
-REGLAS GENERALES:
-- Nunca digas "no tengo información" sobre temas que el sistema confirma tener.
-- Respeta GRAFÍA EXACTA de nombres propios (Germán con tilde, Milei con i-e-i, etc.).
-- Estructura: introducción al tema → desarrollo con detalles → cierre útil.
-- Tono cálido y profesional, como un experto explicando a un colega.
-- En español, sin asteriscos, sin markdown excesivo.
+REGLAS GENERALES (FASE 30 ANTI-DELIRIO):
+1. **GROUNDING ESTRICTO**: Solo afirma datos que aparezcan en el contexto provisto o sean
+   conocimiento general verificable. NO inventes documentos, nombres, fechas, cifras o eventos.
+2. **TRANSPARENCIA**: Si te falta información, dilo. Mejor una respuesta corta y honesta
+   que una larga inventada.
+3. **GRAFÍA EXACTA**: Respeta nombres propios (Germán con tilde, Milei con i-e-i).
+4. **TONO**: Cálido y profesional, sin asteriscos ni markdown excesivo.
+5. **ESTRUCTURA**: introducción → desarrollo CON DATOS REALES O HONESTIDAD → cierre útil con comando sugerido.
+6. **DETECTOR DE PREGUNTAS FACTUALES**: si la pregunta es "cuántos X" o "qué profesiones hay",
+   sugiere al usuario ejecutar /dotacion o /buscar_profesional para datos exactos.
 
 {ctx_rag}
 {contexto_tarjetas[:600] if contexto_tarjetas else ''}
@@ -34720,9 +35377,10 @@ REGLAS GENERALES:
 PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             fuentes_str = fuentes_str_final
-
-            await msg.edit_text("🧠 Generando respuesta completa...")
-            respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.7)
+            
+            await msg.edit_text("🧠 Generando respuesta...")
+            # FASE 30: temperature reducida de 0.7 a 0.3 para minimizar delirios
+            respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.3)
             
             if not respuesta:
                 respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
