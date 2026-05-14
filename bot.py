@@ -727,6 +727,106 @@ def _similitud_coseno(v1, v2):
     n1 = sum(a*a for a in v1)**0.5; n2 = sum(b*b for b in v2)**0.5
     return dot/(n1*n2) if n1 and n2 else 0.0
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 29: EMBEDDINGS SEMÁNTICOS REALES CON GEMINI
+# Reemplaza el hash MD5 con embeddings vectoriales reales de 768 dimensiones.
+# Modelo: gemini-embedding-001 (gratis hasta 1.500 req/min en Google AI Studio)
+# Documentación: https://ai.google.dev/gemini-api/docs/embeddings
+# ═══════════════════════════════════════════════════════════════════════════
+
+_EMBEDDING_CACHE = {}  # cache LRU simple para queries frecuentes
+_EMBEDDING_CACHE_MAX = 500  # máximo en RAM
+_EMBEDDING_STATS = {'hits': 0, 'misses': 0, 'failures': 0}
+
+def generar_embedding_gemini(texto: str, tipo: str = 'RETRIEVAL_DOCUMENT'):
+    """Genera un embedding vectorial real de 768 dimensiones usando Gemini.
+    
+    Args:
+        texto: texto a embebir (máximo ~8000 chars / 2048 tokens)
+        tipo: 'RETRIEVAL_DOCUMENT' para chunks indexados, 
+              'RETRIEVAL_QUERY' para consultas del usuario
+    
+    Returns:
+        list[float] con 768 valores normalizados, o None si falla.
+        En caso de fallo, el llamador debe usar _calcular_embedding_simple() como fallback.
+    """
+    if not texto or not texto.strip():
+        return None
+    
+    # Truncar texto muy largo (Gemini soporta ~2048 tokens ≈ 8000 chars)
+    texto = texto.strip()
+    if len(texto) > 8000:
+        texto = texto[:8000]
+    
+    # Cache: queries repetidas no consumen API
+    cache_key = f"{tipo}::{hash(texto)}"
+    if cache_key in _EMBEDDING_CACHE:
+        _EMBEDDING_STATS['hits'] += 1
+        return _EMBEDDING_CACHE[cache_key]
+    
+    _EMBEDDING_STATS['misses'] += 1
+    
+    if not GEMINI_API_KEY:
+        logger.debug("FASE 29: GEMINI_API_KEY no configurada, no se puede generar embedding")
+        return None
+    
+    try:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"text-embedding-004:embedContent?key={GEMINI_API_KEY}")
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": texto}]},
+            "taskType": tipo,
+            "outputDimensionality": 768,
+        }
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code != 200:
+            _EMBEDDING_STATS['failures'] += 1
+            logger.warning(f"FASE 29: Gemini embedding HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        
+        data = resp.json()
+        embedding = data.get('embedding', {}).get('values')
+        if not embedding or len(embedding) != 768:
+            _EMBEDDING_STATS['failures'] += 1
+            logger.warning(f"FASE 29: Gemini embedding inválido (len={len(embedding) if embedding else 0})")
+            return None
+        
+        # Guardar en cache (LRU simple)
+        if len(_EMBEDDING_CACHE) >= _EMBEDDING_CACHE_MAX:
+            # Eliminar el primer elemento (LRU básico)
+            _EMBEDDING_CACHE.pop(next(iter(_EMBEDDING_CACHE)))
+        _EMBEDDING_CACHE[cache_key] = embedding
+        
+        return embedding
+    
+    except Exception as e:
+        _EMBEDDING_STATS['failures'] += 1
+        logger.warning(f"FASE 29: Error generando embedding Gemini: {e}")
+        return None
+
+
+def embedding_to_pgvector(emb):
+    """Convierte una lista de floats a formato pgvector '[0.1,0.2,...]'."""
+    if not emb:
+        return None
+    return '[' + ','.join(f'{v:.6f}' for v in emb) + ']'
+
+
+def stats_embeddings():
+    """Estadísticas de uso del cache de embeddings."""
+    total = _EMBEDDING_STATS['hits'] + _EMBEDDING_STATS['misses']
+    hit_rate = (_EMBEDDING_STATS['hits'] / total * 100) if total > 0 else 0
+    return {
+        'hits': _EMBEDDING_STATS['hits'],
+        'misses': _EMBEDDING_STATS['misses'],
+        'failures': _EMBEDDING_STATS['failures'],
+        'cache_size': len(_EMBEDDING_CACHE),
+        'hit_rate': f"{hit_rate:.1f}%",
+    }
+
+
 # ======================================================================
 # ===  MEJORA 4: SISTEMA DE FEEDBACK  =================================
 # ======================================================================
@@ -1319,6 +1419,15 @@ def init_db():
             except Exception:
                 pass
             
+            # FASE 29: Habilitar pgvector para búsqueda semántica con embeddings reales
+            try:
+                c.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                logger.info("FASE 29: ✅ extensión pgvector habilitada en PostgreSQL")
+                _PGVECTOR_OK = True
+            except Exception as _e_ext:
+                logger.warning(f"FASE 29: pgvector no disponible (continuando con búsqueda por keywords): {_e_ext}")
+                _PGVECTOR_OK = False
+            
             # Tabla RAG chunks para memoria semántica
             c.execute('''CREATE TABLE IF NOT EXISTS rag_chunks (
                 id SERIAL PRIMARY KEY,
@@ -1328,6 +1437,21 @@ def init_db():
                 keywords TEXT,
                 fecha_indexado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
+            
+            # FASE 29: agregar columna embedding vector(768) si pgvector está habilitado
+            # Dimensión 768 corresponde al modelo Gemini text-embedding-004
+            if _PGVECTOR_OK:
+                try:
+                    c.execute("ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS embedding vector(768)")
+                except Exception as _e_col:
+                    logger.warning(f"FASE 29: no se pudo agregar columna embedding: {_e_col}")
+                # Crear índice HNSW para búsqueda rápida (solo si hay datos)
+                try:
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_rag_embedding ON rag_chunks USING hnsw (embedding vector_cosine_ops)")
+                    logger.info("FASE 29: ✅ índice HNSW creado en rag_chunks.embedding")
+                except Exception as _e_idx:
+                    # El índice HNSW puede fallar si la tabla está vacía, no es crítico
+                    logger.debug(f"FASE 29: índice HNSW no creado (puede crearse después): {_e_idx}")
             
             # Tabla cache SEC
             c.execute('''CREATE TABLE IF NOT EXISTS sec_cache (
@@ -10731,15 +10855,25 @@ async def buscar_ia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Aunque no haya RAG, la IA puede responder con su propio conocimiento
         if ia_disponible:
             await msg.edit_text("🧠 Consultando conocimiento del asistente IA...")
-            prompt_fallback = f"""Eres el asistente IA de la Cofradía de Networking. No encontré información sobre "{consulta}" en los documentos indexados de la comunidad, pero respondo desde mi conocimiento general como LLM experto.
+            prompt_fallback = f"""Eres el asistente IA de la Cofradía Premium. La consulta del usuario es:
 
-Pregunta: {consulta}
+"{consulta}"
 
-Responde de forma completa y útil en español. No menciones que "no hay documentos" — simplemente responde lo que sabes. Máximo 350 palabras."""
-            respuesta_fb = llamar_groq(prompt_fallback, max_tokens=800, temperature=0.5)
+⚠️ IMPORTANTE: NO encontré información específica sobre esta consulta en los documentos
+indexados de la comunidad. Respondo desde mi conocimiento general como LLM.
+
+INSTRUCCIONES ANTI-DELIRIO:
+1. Empieza con: "No tengo información específica en los documentos de la Cofradía sobre esto, 
+   pero según mi conocimiento general:" (o frase similar transparente)
+2. Da una respuesta general, honesta, basada en hechos verificables
+3. Si la pregunta requiere datos específicos (fechas, cifras, eventos recientes) y NO los conoces 
+   con certeza, dilo: "no tengo datos verificados sobre [X]" en lugar de inventar
+4. Sugiere al usuario consultar fuentes oficiales o pedir al admin que indexe documentos del tema
+5. Máximo 300 palabras, en español, sin asteriscos ni markdown"""
+            respuesta_fb = llamar_groq(prompt_fallback, max_tokens=800, temperature=0.3)  # temp reducida de 0.5 a 0.3
             if respuesta_fb:
                 await msg.delete()
-                await enviar_mensaje_largo(update, f"🔍 {consulta}\n📊 Fuente: Conocimiento IA\n{'━'*25}\n\n{respuesta_fb}")
+                await enviar_mensaje_largo(update, f"🔍 {consulta}\n📊 Fuente: Conocimiento IA general (sin docs locales)\n{'━'*25}\n\n{respuesta_fb}")
                 registrar_servicio_usado(update.effective_user.id, 'buscar_ia')
                 return
         
@@ -10780,37 +10914,48 @@ Responde de forma completa y útil en español. No menciones que "no hay documen
     await msg.edit_text("🧠 Analizando resultados con IA...")
     
     contexto_completo = formatear_contexto_unificado(resultados, consulta)
-    # FASE 3 FIX: prompts reforzados para forzar citas especificas
+    # FASE 29: prompts anti-delirio con grounding estricto
     if rag_conf in ('alta', 'media'):
         modo_buscar = (
-            "DEBES citar datos ESPECÍFICOS de los fragmentos: nombres de autores, "
-            "títulos de capítulos, conceptos exactos, cifras, ejemplos concretos. "
-            "NO des respuestas genéricas tipo 'el libro habla sobre X' — extrae "
-            "FRASES e IDEAS CONCRETAS del texto."
+            "Hay documentos relevantes. DEBES basarte 100% en los fragmentos provistos.\n"
+            "Cita datos ESPECÍFICOS: nombres de autores, títulos de capítulos, conceptos\n"
+            "exactos, cifras, ejemplos concretos. NO des respuestas genéricas tipo 'el libro\n"
+            "habla sobre X' — extrae FRASES e IDEAS CONCRETAS del texto."
         )
     else:
-        modo_buscar = "No hay documentos directamente relevantes. Responde con tu conocimiento experto."
+        modo_buscar = (
+            "⚠️ No hay documentos con confianza alta. Si los fragmentos disponibles NO\n"
+            "responden la consulta con precisión, DILO HONESTAMENTE en lugar de inventar.\n"
+            "Frase recomendada: 'Los documentos disponibles no responden directamente esto,\n"
+            "pero mencionan [lo que sí está]'."
+        )
     
-    prompt = f"""Eres el asistente de la Cofradía de Networking (oficiales de la Armada de Chile).
+    prompt = f"""Eres el asistente experto de la Cofradía Premium, una comunidad profesional chilena.
 
 {modo_buscar}
 
-REGLAS IMPORTANTES:
-(1) Si los fragmentos contienen datos concretos, CÍTALOS textualmente o parafraséalos con precisión.
-(2) Menciona el nombre del documento cuando cites algo relevante.
-(3) Si un fragmento menciona un concepto, EXPLÍCALO con el detalle que aparece en el texto.
-(4) NO inventes personas de la Cofradía ni modifiques cifras/fechas.
-(5) EVITA respuestas genéricas. Prefiere respuestas DENSAS en información específica del material.
+REGLAS ANTI-DELIRIO (FASE 29) — OBLIGATORIAS:
+(1) **GROUNDING ESTRICTO**: si afirmas algo, debe estar literalmente en los fragmentos.
+    Antes de escribir cualquier dato (cifra, fecha, nombre), verifica que aparezca en el contexto.
+(2) **PROHIBIDO INVENTAR**: no inventes personas, cifras, fechas, eventos, citas o "ejemplos".
+    No completes información faltante con tu conocimiento general sin avisar.
+(3) **TRANSPARENCIA**: si la información es parcial, dilo. Frase: "Los fragmentos solo
+    mencionan [X], no aportan datos sobre [Y]".
+(4) **CITACIÓN**: cuando hagas una afirmación importante, indica el documento de origen.
+(5) **GRAFÍA EXACTA**: copia nombres tal como aparecen (Milei → Milei, no "Meli").
+(6) **CONTRADICCIONES**: si dos fragmentos se contradicen, MENCIONA la contradicción
+    en lugar de elegir uno arbitrariamente.
 
 CONSULTA: "{consulta}"
 
 CONTEXTO (confianza RAG: {rag_conf}):
-{contexto_completo if contexto_completo else "(Sin contexto relevante - usa tu conocimiento)"}
+{contexto_completo if contexto_completo else "(Sin contexto relevante - reconoce esto explícitamente al usuario)"}
 
-Responde en español, de forma completa y con datos concretos del material. Sin asteriscos. Máximo 500 palabras."""
+Responde en español, basándote SOLO en lo que aparece en el contexto. Sin asteriscos.
+Máximo 500 palabras. Prefiere una respuesta corta y precisa antes que una larga inventada."""
 
-    # FASE 3 FIX: max_tokens 1000→1400 para permitir respuestas mas densas
-    respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.3)
+    # FASE 29: temperature reducida a 0.25 para minimizar delirios
+    respuesta = llamar_groq(prompt, max_tokens=1400, temperature=0.25)
     
     await msg.delete()
     
@@ -15350,9 +15495,24 @@ def indexar_pdf_en_rag(filename, texto, file_id=None):
             })
             
             if DATABASE_URL:
-                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
-                           VALUES (%s, %s, %s, %s)""",
-                         (source, chunk_text, metadata, keywords_enriquecidas))
+                # FASE 29: Generar embedding del chunk con Gemini (gratis, 768 dimensiones)
+                emb_chunk = generar_embedding_gemini(chunk_text, tipo='RETRIEVAL_DOCUMENT')
+                if emb_chunk:
+                    pgv_chunk = embedding_to_pgvector(emb_chunk)
+                    try:
+                        c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords, embedding) 
+                                   VALUES (%s, %s, %s, %s, %s::vector)""",
+                                 (source, chunk_text, metadata, keywords_enriquecidas, pgv_chunk))
+                    except Exception:
+                        # Si la columna embedding no existe (pgvector no instalado), insertar sin ella
+                        c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                                   VALUES (%s, %s, %s, %s)""",
+                                 (source, chunk_text, metadata, keywords_enriquecidas))
+                else:
+                    # Sin embedding (Gemini no disponible): insertar sin él
+                    c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                               VALUES (%s, %s, %s, %s)""",
+                             (source, chunk_text, metadata, keywords_enriquecidas))
             else:
                 c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
                            VALUES (?, ?, ?, ?)""",
@@ -17609,10 +17769,24 @@ async def capturar_conocimiento_comando(update: Update, context: ContextTypes.DE
             chunk_text_full = f"TEMA: {tema}\n\nCONOCIMIENTO CAPTURADO POR {user_full}:\n{contenido}"
             
             if DATABASE_URL:
-                c.execute("""
-                    INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
-                    VALUES (%s, %s, %s, %s)
-                """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}'))
+                # FASE 29: embedding del conocimiento capturado
+                emb_conoc = generar_embedding_gemini(chunk_text_full, tipo='RETRIEVAL_DOCUMENT')
+                if emb_conoc:
+                    try:
+                        c.execute("""
+                            INSERT INTO rag_chunks (source, chunk_text, keywords, metadata, embedding)
+                            VALUES (%s, %s, %s, %s, %s::vector)
+                        """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}', embedding_to_pgvector(emb_conoc)))
+                    except Exception:
+                        c.execute("""
+                            INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
+                            VALUES (%s, %s, %s, %s)
+                        """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}'))
+                else:
+                    c.execute("""
+                        INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
+                        VALUES (%s, %s, %s, %s)
+                    """, (source_label, chunk_text_full, keywords_auto, f'autor={user_full}'))
             else:
                 c.execute("""
                     INSERT INTO rag_chunks (source, chunk_text, keywords, metadata)
@@ -18217,7 +18391,7 @@ async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             
             nombres_docs_str = "\n".join(f'  • "{n}"' for n in nombres_docs_exactos[:5]) if nombres_docs_exactos else "(varios documentos)"
             
-            prompt = f"""Eres el asistente experto de la Cofradía de Networking, una comunidad profesional chilena de alto nivel.
+            prompt = f"""Eres el asistente experto de la Cofradía Premium, una comunidad profesional chilena de alto nivel.
 
 CONSULTA DEL USUARIO: "{query}"
 
@@ -18225,34 +18399,39 @@ DOCUMENTOS RELEVANTES ENCONTRADOS ({total_rag} fragmentos, confianza {rag_conf.u
 {nombres_docs_str}
 
 ═══════════════════════════════════════════════════════════
-INSTRUCCIONES OBLIGATORIAS PARA RESPONDER:
+INSTRUCCIONES OBLIGATORIAS PARA RESPONDER (FASE 29 ANTI-DELIRIO):
 ═══════════════════════════════════════════════════════════
 
-1. RESPETAR GRAFÍA EXACTA: copia los nombres propios, autores, conceptos y términos
-   técnicos EXACTAMENTE como aparecen en el contexto. NO los modifiques (ejemplo: si
-   el documento dice "Milei", NUNCA escribas "Meli" o "Mile"; si dice "Germán",
-   NO escribas "German" sin tilde).
+1. **GROUNDING ESTRICTO**: tu respuesta DEBE basarse 100% en los fragmentos provistos.
+   - PROHIBIDO inventar datos, cifras, fechas, nombres o citas que no estén en el contexto
+   - PROHIBIDO usar tu conocimiento general si no aparece en los fragmentos
+   - Si los fragmentos NO contienen información suficiente para responder con precisión,
+     dilo HONESTAMENTE: "Los documentos disponibles no abordan directamente [tema], 
+     pero sí mencionan [lo que sí está]". NUNCA inventes para llenar el vacío.
 
-2. USAR LOS FRAGMENTOS: el sistema YA validó que estos fragmentos contienen información
-   relevante. Tu trabajo es SINTETIZARLOS, no rechazarlos.
-   PROHIBIDO decir frases como "no tengo información sobre", "no encuentro",
-   "lamentablemente no puedo", "los fragmentos no mencionan".
+2. **GRAFÍA EXACTA**: copia nombres propios, autores, conceptos y términos técnicos
+   EXACTAMENTE como aparecen en el contexto. NO modifiques ortografía
+   (ej: si dice "Milei", NUNCA "Meli"; si dice "Germán", NO "German" sin tilde).
 
-3. ESTRUCTURA DE RESPUESTA:
+3. **CITACIÓN**: cuando hagas una afirmación importante, indica el fragmento de origen
+   entre paréntesis. Ej: "El libro plantea X (según fragmento 2)".
+
+4. **ESTRUCTURA DE RESPUESTA**:
    - Comienza directo con la respuesta (sin preámbulos largos)
    - Da una visión general en el primer párrafo
    - Profundiza con detalles específicos en párrafos siguientes
-   - Cita pasajes clave entre comillas cuando sea ilustrativo
-   - Cierra con una conclusión útil o invitación a profundizar
+   - Cita pasajes textuales entre comillas cuando sea ilustrativo
+   - Si los fragmentos contradicen entre sí, MENCIONA la contradicción
+   - Cierra con una conclusión basada SOLO en lo que aparece en los fragmentos
 
-4. TONO Y EXTENSIÓN:
-   - Cálido, profesional, como un experto que domina el tema
-   - Entre 250 y 500 palabras (suficiente para ser completo, sin ser pesado)
+5. **TONO Y EXTENSIÓN**:
+   - Cálido, profesional, riguroso
+   - Entre 250 y 500 palabras (suficiente sin ser pesado)
    - Sin asteriscos, sin markdown, sin viñetas exageradas
-   - Usa puntuación clara para que la respuesta fluya como conversación natural
+   - Puntuación clara y fluida
 
-5. SI HAY CONFLICTO ENTRE FRAGMENTOS: prefiere los que aparezcan más veces o sean
-   más específicos. Menciona la fuente cuando agregue valor (ej: "según el libro X...").
+6. **VERIFICACIÓN AUTO-IMPUESTA**: antes de afirmar algo, pregúntate
+   "¿Esto está literalmente en los fragmentos?". Si no, NO lo escribas.
 
 ═══════════════════════════════════════════════════════════
 CONTEXTO COMPLETO DE LOS DOCUMENTOS:
@@ -18260,9 +18439,9 @@ CONTEXTO COMPLETO DE LOS DOCUMENTOS:
 {contexto_completo}
 
 ═══════════════════════════════════════════════════════════
-RECORDATORIO FINAL: el usuario llama Germán (con tilde en la "a"). Si te diriges a él,
-respeta esa grafía. Sintetiza los fragmentos en una respuesta valiosa, completa y
-fluida, como si estuvieras conversando."""
+RECORDATORIO FINAL: el usuario se llama Germán (con tilde). Si te diriges a él,
+respeta esa grafía. Tu valor es la PRECISIÓN: prefiero una respuesta corta y exacta
+a una larga inventada. NUNCA delires ni inventes información que no esté en el contexto."""
             
             respuesta = llamar_groq(prompt, max_tokens=2000, temperature=0.3)
             
@@ -18578,6 +18757,177 @@ async def rag_reindexar_comando(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Error re-indexando RAG: {e}")
         await msg.edit_text(f"❌ Error re-indexando: {str(e)[:200]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 29: COMANDO /rag_reindexar_embeddings
+# Procesa los chunks existentes en rag_chunks y les genera embeddings con
+# Gemini text-embedding-004 (768 dim). No re-indexa los PDFs, solo agrega
+# los embeddings que faltan. Procesa en lotes de 50 con progreso visible.
+# ═══════════════════════════════════════════════════════════════════════════
+async def rag_reindexar_embeddings_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /rag_reindexar_embeddings - Genera embeddings Gemini para chunks existentes."""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Solo el administrador puede re-indexar embeddings.")
+        return
+    
+    if not DATABASE_URL:
+        await update.message.reply_text("⚠️ Esta operación solo funciona con PostgreSQL (Supabase).")
+        return
+    
+    if not GEMINI_API_KEY:
+        await update.message.reply_text("⚠️ GEMINI_API_KEY no configurada. No se pueden generar embeddings.")
+        return
+    
+    msg = await update.message.reply_text(
+        "🔄 <b>Reprocesando embeddings semánticos</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ Contando chunks pendientes...",
+        parse_mode='HTML'
+    )
+    
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Verificar que la columna embedding existe
+        try:
+            c.execute("SELECT COUNT(*) AS total FROM rag_chunks WHERE embedding IS NULL")
+            total_pendientes = (c.fetchone()['total'] if DATABASE_URL else c.fetchone()[0])
+        except Exception as _e_col:
+            await msg.edit_text(
+                "❌ <b>Columna embedding no encontrada</b>\n\n"
+                "La extensión pgvector parece no estar habilitada. "
+                "Verifica que en Supabase esté instalada la extensión 'vector' "
+                "en Dashboard → Database → Extensions.\n\n"
+                f"<code>Error: {str(_e_col)[:200]}</code>",
+                parse_mode='HTML'
+            )
+            conn.close()
+            return
+        
+        if total_pendientes == 0:
+            c.execute("SELECT COUNT(*) AS total FROM rag_chunks WHERE embedding IS NOT NULL")
+            total_con_emb = (c.fetchone()['total'] if DATABASE_URL else c.fetchone()[0])
+            await msg.edit_text(
+                f"✅ <b>Todos los chunks ya tienen embeddings</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 Total con embedding: {total_con_emb}\n\n"
+                f"<em>El sistema ya está optimizado para búsqueda semántica real.</em>",
+                parse_mode='HTML'
+            )
+            conn.close()
+            return
+        
+        await msg.edit_text(
+            f"🔄 <b>Reprocesando embeddings</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Chunks pendientes: <b>{total_pendientes}</b>\n"
+            f"⏱️ Tiempo estimado: ~{max(1, total_pendientes // 60)} min\n\n"
+            f"<em>Procesando en lotes de 50...</em>",
+            parse_mode='HTML'
+        )
+        
+        # Procesar en lotes de 50
+        procesados = 0
+        fallidos = 0
+        loop = asyncio.get_running_loop()
+        ultimo_update_msg = time.time()
+        
+        while procesados + fallidos < total_pendientes:
+            try:
+                c.execute(
+                    "SELECT id, chunk_text FROM rag_chunks WHERE embedding IS NULL LIMIT 50"
+                )
+                lote = c.fetchall()
+                if not lote:
+                    break
+                
+                for row in lote:
+                    chunk_id = row['id'] if DATABASE_URL else row[0]
+                    chunk_text = row['chunk_text'] if DATABASE_URL else row[1]
+                    
+                    if not chunk_text:
+                        fallidos += 1
+                        continue
+                    
+                    # Generar embedding (en thread pool para no bloquear)
+                    emb = await loop.run_in_executor(
+                        None,
+                        generar_embedding_gemini,
+                        chunk_text[:8000],
+                        'RETRIEVAL_DOCUMENT'
+                    )
+                    
+                    if emb:
+                        try:
+                            c.execute(
+                                "UPDATE rag_chunks SET embedding = %s::vector WHERE id = %s",
+                                (embedding_to_pgvector(emb), chunk_id)
+                            )
+                            procesados += 1
+                        except Exception as _e_upd:
+                            logger.warning(f"FASE 29: error update embedding chunk {chunk_id}: {_e_upd}")
+                            fallidos += 1
+                    else:
+                        fallidos += 1
+                    
+                    # Pequeña pausa para no saturar Gemini (1500 req/min = ~40ms entre llamadas)
+                    await asyncio.sleep(0.05)
+                
+                conn.commit()
+                
+                # Actualizar mensaje cada 5 segundos
+                if time.time() - ultimo_update_msg > 5:
+                    porcentaje = (procesados + fallidos) / total_pendientes * 100
+                    await msg.edit_text(
+                        f"🔄 <b>Reprocesando embeddings</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📊 Progreso: <b>{procesados + fallidos} / {total_pendientes}</b> ({porcentaje:.1f}%)\n"
+                        f"✅ Procesados: {procesados}\n"
+                        f"⚠️ Fallidos: {fallidos}\n\n"
+                        f"<em>Continuando...</em>",
+                        parse_mode='HTML'
+                    )
+                    ultimo_update_msg = time.time()
+            
+            except Exception as _e_lote:
+                logger.error(f"FASE 29: error procesando lote: {_e_lote}")
+                fallidos += 50  # asumimos todo el lote falló
+        
+        # Crear/recrear índice HNSW ahora que hay datos
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_rag_embedding ON rag_chunks USING hnsw (embedding vector_cosine_ops)")
+            conn.commit()
+            logger.info("FASE 29: índice HNSW creado/verificado")
+        except Exception as _e_idx:
+            logger.warning(f"FASE 29: índice HNSW: {_e_idx}")
+        
+        conn.close()
+        
+        # Estadísticas finales
+        stats_emb = stats_embeddings()
+        await msg.edit_text(
+            f"✅ <b>Embeddings completados</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ Procesados exitosos: <b>{procesados}</b>\n"
+            f"⚠️ Fallidos: {fallidos}\n"
+            f"📊 Cache hit rate: {stats_emb['hit_rate']}\n"
+            f"🚀 Índice HNSW: creado\n\n"
+            f"<em>El sistema ahora usa búsqueda semántica real. "
+            f"Prueba /rag_consulta o /buscar_ia para ver la diferencia.</em>",
+            parse_mode='HTML'
+        )
+    
+    except Exception as e:
+        logger.error(f"FASE 29: error en /rag_reindexar_embeddings: {e}", exc_info=True)
+        await msg.edit_text(
+            f"❌ <b>Error reprocesando embeddings</b>\n\n"
+            f"<code>{str(e)[:300]}</code>",
+            parse_mode='HTML'
+        )
 
 
 async def eliminar_pdf_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -19594,9 +19944,21 @@ def indexar_google_drive_rag():
             })
             
             if DATABASE_URL:
-                c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
-                           VALUES (%s, %s, %s, %s)""",
-                         ('BD_Grupo_Laboral', chunk, metadata, keywords))
+                # FASE 29: embedding del chunk del grupo laboral
+                emb_gl = generar_embedding_gemini(chunk, tipo='RETRIEVAL_DOCUMENT')
+                if emb_gl:
+                    try:
+                        c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords, embedding) 
+                                   VALUES (%s, %s, %s, %s, %s::vector)""",
+                                 ('BD_Grupo_Laboral', chunk, metadata, keywords, embedding_to_pgvector(emb_gl)))
+                    except Exception:
+                        c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                                   VALUES (%s, %s, %s, %s)""",
+                                 ('BD_Grupo_Laboral', chunk, metadata, keywords))
+                else:
+                    c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
+                               VALUES (%s, %s, %s, %s)""",
+                             ('BD_Grupo_Laboral', chunk, metadata, keywords))
             else:
                 c.execute("""INSERT INTO rag_chunks (source, chunk_text, metadata, keywords) 
                            VALUES (?, ?, ?, ?)""",
@@ -19844,11 +20206,14 @@ def _fase6_fuzzy_match_simple(query_word, target_word, max_dist=2):
 
 def buscar_rag(query, limit=5):
     """
-    Búsqueda RAG bifásica:
+    Búsqueda RAG en CASCADA:
+    Fase 0 — pgvector + Gemini embeddings (búsqueda SEMÁNTICA REAL) ← NUEVO FASE 29
     Fase 1 — Búsqueda por NOMBRE DE DOCUMENTO (nombres propios, títulos, autores)
     Fase 2 — Búsqueda semántica general balanceada (máx. 3 chunks por documento)
     
-    FASE 6 OPTIMIZADA: caché LRU + sinónimos reactivos + fuzzy fallback.
+    FASE 29: pgvector con embeddings reales de 768 dimensiones (Gemini).
+    Si pgvector falla o no hay resultados de calidad, cae automáticamente
+    a las fases 1 y 2 (búsqueda por keywords, comportamiento original).
     
     Retorna: (lista de (texto, source), score_maximo)
     """
@@ -19870,6 +20235,67 @@ def buscar_rag(query, limit=5):
         
         c = conn.cursor()
         
+        # ═══════════════════════════════════════════════════════════════════
+        # FASE 29 — FASE 0: BÚSQUEDA SEMÁNTICA REAL CON pgvector + Gemini
+        # Solo si: (1) PostgreSQL, (2) pgvector instalado, (3) hay embeddings
+        # Si encuentra ≥ 3 resultados con similitud ≥ 0.65, usa esos y termina.
+        # Si encuentra menos o de baja calidad, cae a fases 1-2 (keywords).
+        # ═══════════════════════════════════════════════════════════════════
+        if DATABASE_URL and query and len(query.strip()) > 2:
+            try:
+                # Generar embedding de la query
+                query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
+                if query_emb:
+                    pgvec_query = embedding_to_pgvector(query_emb)
+                    # Búsqueda por similitud coseno (operador <=> de pgvector)
+                    # Threshold: solo resultados con similitud > 0.55 (1 - 0.45 = 0.55)
+                    c.execute(
+                        """SELECT chunk_text, source, 
+                                  1 - (embedding <=> %s::vector) AS similitud
+                           FROM rag_chunks 
+                           WHERE embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector 
+                           LIMIT %s""",
+                        (pgvec_query, pgvec_query, limit * 2)
+                    )
+                    rows_pgvec = c.fetchall()
+                    
+                    if rows_pgvec:
+                        # Filtrar por threshold de similitud mínima 0.55
+                        resultados_pgvec = []
+                        max_sim = 0.0
+                        for row in rows_pgvec:
+                            chunk_text = row['chunk_text'] if DATABASE_URL else row[0]
+                            source = row['source'] if DATABASE_URL else row[1]
+                            sim = float(row['similitud'] if DATABASE_URL else row[2])
+                            if sim >= 0.55:
+                                resultados_pgvec.append((chunk_text, source))
+                                if sim > max_sim:
+                                    max_sim = sim
+                            if len(resultados_pgvec) >= limit:
+                                break
+                        
+                        if len(resultados_pgvec) >= 3 and max_sim >= 0.65:
+                            # Resultados de alta calidad: usar SOLO pgvector
+                            logger.info(f"🎯 FASE 29 pgvector HIT: {len(resultados_pgvec)} resultados, sim_max={max_sim:.3f}")
+                            conn.close()
+                            # Cachear y devolver
+                            if _query_norm_cache:
+                                _fase6_cache_set(_query_norm_cache, (resultados_pgvec, max_sim))
+                            return resultados_pgvec, max_sim
+                        elif resultados_pgvec:
+                            # Resultados parciales: continuar con keywords pero guardar como complemento
+                            logger.info(f"FASE 29 pgvector PARCIAL: {len(resultados_pgvec)} resultados (sim_max={max_sim:.3f}), complementando con keywords...")
+                            # Continuar con las fases 1-2 (keywords) más abajo
+                else:
+                    logger.debug("FASE 29: no se pudo generar embedding de la query, usando keywords")
+            except Exception as _e_pgvec:
+                # Si pgvector falla (no instalado, sin embeddings, etc.) caer a keywords
+                logger.debug(f"FASE 29 pgvector falló (cayendo a keywords): {_e_pgvec}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # FASE 1 + 2 (ORIGINALES): Búsqueda por keywords (fallback robusto)
+        # ═══════════════════════════════════════════════════════════════════
         import unicodedata
         def normalizar(texto):
             texto = unicodedata.normalize('NFKD', texto.lower())
@@ -29311,7 +29737,7 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
                     explicaciones[cod] = explicacion
 
 
-            # PASO 5: Noticias HTML con análisis IA completo (FASE 24: robusto con fallbacks)
+            # PASO 5: Noticias HTML con análisis IA completo (FASE 29: cascada robusta validada)
             noticias_html = ""
             if noticias_bcch:
                 for n in noticias_bcch[:5]:
@@ -29319,58 +29745,128 @@ async def indicadores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 _anio_n = _ahora_chile().strftime('%Y')
                 _fecha_n = _ahora_chile().strftime('%d/%m/%Y')
+                _mes_n = _ahora_chile().strftime('%B %Y').lower()
+                
+                # FASE 29: Prompt mucho más estricto y con contexto de datos reales
+                ctx_datos = ""
+                try:
+                    if all_data:
+                        partes = []
+                        for cod, v in list(all_data.items())[:6]:
+                            if isinstance(v, dict) and 'valor' in v:
+                                partes.append(f"{cod}={v['valor']}")
+                        if partes:
+                            ctx_datos = "Indicadores actuales: " + ", ".join(partes) + ".\n\n"
+                except Exception:
+                    pass
+                
                 prompt_news = (
-                    f"Eres analista economico senior. HOY es {_fecha_n} ({_anio_n}).\n"
-                    f"Escribe 7 noticias REALES de esta semana que impactan indicadores de Chile.\n\n"
-                    "OBLIGATORIO cubrir: geopolitica (guerras, bloqueos maritimos Iran), "
-                    "Fed EE.UU., cobre, Banco Central Chile, cripto, economia Chile, aranceles.\n\n"
-                    "CADA noticia DEBE tener 3 lineas minimo:\n"
-                    "Linea 1: TITULO de la noticia\n"
-                    "Linea 2: Descripcion detallada con datos concretos\n"
-                    "Linea 3: IMPACTO: indicadores afectados con flechas (alza/baja y por que)\n\n"
-                    f"SOLO noticias de {_anio_n}. NUNCA anos anteriores. Sin emojis ni asteriscos. 7 noticias."
+                    f"Eres analista economico senior. HOY es {_fecha_n}.\n"
+                    f"{ctx_datos}"
+                    f"Genera EXACTAMENTE 7 noticias economicas REALES de {_mes_n} que impactan los indicadores chilenos.\n\n"
+                    "FORMATO ESTRICTO (sin viñetas ni numeración):\n"
+                    "TITULO: [titulo breve]\n"
+                    "DESCRIPCION: [hechos concretos con cifras]\n"
+                    "IMPACTO: [indicadores afectados con flechas ↑↓]\n"
+                    "---\n"
+                    "(repetir 7 veces, separadas por ---)\n\n"
+                    "TEMAS OBLIGATORIOS:\n"
+                    "1. Politica monetaria Fed/BCCh (tasas)\n"
+                    "2. Precio del cobre y demanda china\n"
+                    "3. Tipo de cambio USD/CLP\n"
+                    "4. Inflacion IPC Chile mes vigente\n"
+                    "5. Mercados financieros IPSA/Wall Street\n"
+                    "6. Geopolitica (guerras, petroleo, aranceles)\n"
+                    "7. Sector exportador/mineria/salmoneras\n\n"
+                    f"OBLIGATORIO: solo noticias de {_anio_n}. NUNCA inventar fechas pasadas.\n"
+                    "NO uses emojis, asteriscos, comillas dobles ni markdown."
                 )
-                # FASE 24: timeout estricto + fallback a GLM5
+                
+                # FASE 29: cascada Groq → GLM5 → DeepSeek con timeouts y validación estricta
                 news_ia = None
+                
+                def _validar_noticias(texto):
+                    """Valida que el texto contenga al menos 3 noticias parseables."""
+                    if not texto or len(texto.strip()) < 300:
+                        return False
+                    # Buscar al menos 3 secciones separadas (por --- o por bloques largos)
+                    secciones = [s.strip() for s in texto.split('---') if len(s.strip()) > 50]
+                    if len(secciones) >= 3:
+                        return True
+                    # Fallback: contar líneas largas (>40 chars)
+                    lineas_largas = [l for l in texto.split('\n') if len(l.strip()) > 40]
+                    return len(lineas_largas) >= 5
+                
+                # Intento 1: Groq
                 try:
                     news_ia = await asyncio.wait_for(
-                        loop.run_in_executor(None, llamar_groq, prompt_news, 2000, 0.3),
+                        loop.run_in_executor(None, llamar_groq, prompt_news, 2500, 0.3),
                         timeout=45.0
                     )
+                    if not _validar_noticias(news_ia):
+                        logger.warning(f"FASE 29: Groq devolvió noticias inválidas (len={len(news_ia or '')})")
+                        news_ia = None
                 except asyncio.TimeoutError:
-                    logger.warning("Noticias /indicadores Groq timeout 45s, usando GLM5")
+                    logger.warning("FASE 29: Groq timeout 45s en noticias /indicadores")
                 except Exception as _e_g:
-                    logger.debug(f"Groq noticias falló: {_e_g}")
+                    logger.warning(f"FASE 29: Groq noticias falló: {_e_g}")
                 
-                if not news_ia or len(news_ia.strip()) < 200:
+                # Intento 2: GLM5
+                if not news_ia:
+                    logger.info("FASE 29: probando GLM5 para noticias /indicadores...")
                     try:
                         news_ia = await asyncio.wait_for(
-                            loop.run_in_executor(None, llamar_glm5, prompt_news, 2000, 0.3),
+                            loop.run_in_executor(None, llamar_glm5, prompt_news, 2500, 0.3),
                             timeout=45.0
                         )
+                        if not _validar_noticias(news_ia):
+                            logger.warning(f"FASE 29: GLM5 devolvió noticias inválidas (len={len(news_ia or '')})")
+                            news_ia = None
                     except Exception as _e_glm_n:
-                        logger.debug(f"GLM5 noticias falló: {_e_glm_n}")
+                        logger.warning(f"FASE 29: GLM5 noticias falló: {_e_glm_n}")
                 
-                # FASE 27: tercera capa - DeepSeek como último recurso (es de pago)
-                if not news_ia or len(news_ia.strip()) < 200:
-                    logger.info("FASE 27: Noticias /indicadores - GLM5 también falló, probando DeepSeek...")
+                # Intento 3: DeepSeek (pago, último recurso)
+                if not news_ia:
+                    logger.info("FASE 29: probando DeepSeek para noticias /indicadores...")
                     try:
                         news_ia = await asyncio.wait_for(
-                            loop.run_in_executor(None, llamar_deepseek, prompt_news, 2000, 0.3),
-                            timeout=45.0
+                            loop.run_in_executor(None, llamar_deepseek, prompt_news, 2500, 0.3),
+                            timeout=60.0
                         )
+                        if not _validar_noticias(news_ia):
+                            logger.warning(f"FASE 29: DeepSeek devolvió noticias inválidas (len={len(news_ia or '')})")
+                            news_ia = None
                     except Exception as _e_dsk_n:
-                        logger.debug(f"DeepSeek noticias falló: {_e_dsk_n}")
+                        logger.warning(f"FASE 29: DeepSeek noticias falló: {_e_dsk_n}")
                 
+                # FASE 29: Parser robusto que acepta dos formatos (--- o líneas sueltas)
                 if news_ia:
-                    for line in news_ia.strip().split('\n'):
-                        line = line.strip().lstrip('-•*0123456789.').strip()
-                        if len(line) > 15:
-                            # Detectar si menciona alza o baja para iconos
-                            icon = '&#128200;' if any(w in line.lower() for w in ['alza','sube','subi','crece','creci']) else '&#128201;' if any(w in line.lower() for w in ['baja','cae','cay','disminuy','retrocede']) else '&#127758;'
-                            noticias_html += '<div class="news-item">' + icon + ' ' + line.replace('<','&lt;').replace('**','') + '</div>'
+                    logger.info(f"FASE 29: noticias generadas OK (len={len(news_ia)})")
+                    bloques = []
+                    if '---' in news_ia:
+                        bloques = [b.strip() for b in news_ia.split('---') if len(b.strip()) > 30]
+                    else:
+                        # Parser fallback: agrupar líneas en bloques de 3
+                        lineas = [l.strip() for l in news_ia.split('\n') if len(l.strip()) > 20]
+                        bloques = lineas
+                    
+                    for bloque in bloques[:8]:
+                        bloque_limpio = bloque.replace('**', '').replace('<', '&lt;').replace('>', '&gt;')
+                        if not bloque_limpio:
+                            continue
+                        # Detectar icono según contenido
+                        bl_low = bloque_limpio.lower()
+                        if any(w in bl_low for w in ['alza','sube','subi','crece','creci','aumenta','impulsa']):
+                            icon = '&#128200;'
+                        elif any(w in bl_low for w in ['baja','cae','cay','disminuy','retrocede','derrumba']):
+                            icon = '&#128201;'
+                        else:
+                            icon = '&#127758;'
+                        noticias_html += '<div class="news-item">' + icon + ' ' + bloque_limpio + '</div>'
+                else:
+                    logger.error("FASE 29: todos los LLMs fallaron para noticias /indicadores")
             except Exception as _e_news:
-                logger.warning(f"Error generando noticias /indicadores: {_e_news}")
+                logger.error(f"FASE 29: Error generando noticias /indicadores: {_e_news}", exc_info=True)
             
             # FASE 24: si NO hay noticias después de todo, fallback con contexto general
             es_fallback_noticias = False  # FASE 27: marcar para no cachear
@@ -33734,6 +34230,7 @@ def main():
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
+    application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
     application.add_handler(CommandHandler("rag_enriquecer", rag_enriquecer_keywords_comando))
     application.add_handler(CommandHandler("rag_backup", rag_backup_comando))
     application.add_handler(CommandHandler("eliminar_pdf", eliminar_pdf_comando))
