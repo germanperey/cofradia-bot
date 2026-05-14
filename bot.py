@@ -780,7 +780,7 @@ def generar_embedding_gemini(texto: str, tipo: str = 'RETRIEVAL_DOCUMENT'):
             "taskType": tipo,
             "outputDimensionality": 768,
         }
-        resp = requests.post(url, json=payload, timeout=15)
+        resp = requests.post(url, json=payload, timeout=5)  # FASE 30.1: timeout 5s (era 15s) — embeddings deben ser rápidos
         if resp.status_code != 200:
             _EMBEDDING_STATS['failures'] += 1
             logger.warning(f"FASE 29: Gemini embedding HTTP {resp.status_code}: {resp.text[:200]}")
@@ -1449,10 +1449,23 @@ def cache_stats():
 # ==================== CONEXIÓN A BASE DE DATOS ====================
 
 def get_db_connection():
-    """Obtiene conexión a la base de datos (Supabase PostgreSQL o SQLite fallback)"""
+    """Obtiene conexión a la base de datos (Supabase PostgreSQL o SQLite fallback).
+    
+    FASE 30.1: timeouts agregados para evitar colgadas eternas.
+    - connect_timeout: 10s para establecer conexión
+    - keepalives: detectar conexiones muertas y reconectar
+    """
     if DATABASE_URL:
         try:
-            conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+            conn = psycopg2.connect(
+                DATABASE_URL,
+                cursor_factory=RealDictCursor,
+                connect_timeout=10,        # FASE 30.1: máx 10s para conectar
+                keepalives=1,              # Habilitar keepalives TCP
+                keepalives_idle=30,        # Después de 30s idle
+                keepalives_interval=10,    # Reintentar cada 10s
+                keepalives_count=3,        # 3 reintentos antes de dar por muerta
+            )
             return conn
         except Exception as e:
             logger.error(f"Error conectando a Supabase: {e}")
@@ -35198,16 +35211,34 @@ def main():
                 # Si falló la ejecución, continuar con flujo normal
             
             # ═══════════════════════════════════════════════════════════════════
-            # FASE 30: ROUTER DE CONSULTAS ESTADÍSTICAS (anti-delirio)
-            # Si la pregunta es de tipo "cuántos/cuáles/listar X", responder con
-            # SQL directo a la BD, NO con LLM. Esto evita delirios en preguntas
-            # que tienen respuesta exacta verificable.
+            # FASE 30.1: FEEDBACK INMEDIATO + ROUTER ESTADÍSTICO RÁPIDO
+            # 1. Enviar "🧠 Pensando..." al usuario en <1s
+            # 2. Router SQL rápido (<5s) para preguntas estadísticas
+            # 3. Si no es estadística → flujo normal con timeout total
             # ═══════════════════════════════════════════════════════════════════
-            respuesta_sql = await _intentar_responder_con_sql(mensaje, user_name)
-            if respuesta_sql:
-                logger.info(f"FASE 30: respondido con SQL directo - '{mensaje[:60]}'")
-                await update.message.reply_text(respuesta_sql, parse_mode='HTML')
-                return
+            msg = None
+            try:
+                msg = await update.message.reply_text("🧠 Pensando...")
+            except Exception:
+                pass
+            
+            # FASE 30.1: Router SQL anti-delirio (5s máx)
+            try:
+                respuesta_sql = await asyncio.wait_for(
+                    _intentar_responder_con_sql(mensaje, user_name),
+                    timeout=5.0
+                )
+                if respuesta_sql:
+                    logger.info(f"FASE 30.1: ⚡ respondido SQL directo - '{mensaje[:60]}'")
+                    if msg:
+                        try: await msg.delete()
+                        except: pass
+                    await update.message.reply_text(respuesta_sql, parse_mode='HTML')
+                    return
+            except asyncio.TimeoutError:
+                logger.warning(f"FASE 30.1: router SQL timeout (>5s), continuando con flujo normal")
+            except Exception as _e_router:
+                logger.warning(f"FASE 30.1: error router SQL (no-fatal): {_e_router}")
             
             # ===== BÚSQUEDA PARALELA EN TODAS LAS FUENTES (3 hilos simultáneos) =====
             from concurrent.futures import ThreadPoolExecutor as _TPE_priv
@@ -35256,13 +35287,57 @@ def main():
                 except Exception: pass
                 return ctx, fnt
             
-            with _TPE_priv(max_workers=3) as pool:
-                fut_rag = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
-                fut_tar = pool.submit(_buscar_tarjetas_priv, mensaje)
-                fut_ev = pool.submit(_buscar_eventos_priv)
-                resultados_busq = fut_rag.result()
-                contexto_tarjetas, fnt_tar = fut_tar.result()
-                contexto_eventos, fnt_ev = fut_ev.result()
+            # FASE 30.1: BÚSQUEDA PARALELA CON TIMEOUT DURO (no más colgadas eternas)
+            # Cada fuente tiene 10s máximo. Si tarda más, se descarta y se sigue con el resto.
+            loop = asyncio.get_running_loop()
+            
+            async def _ejecutar_busqueda_con_timeout():
+                """Ejecuta las 3 búsquedas paralelas con timeout estricto de 10s total."""
+                with _TPE_priv(max_workers=3) as pool:
+                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
+                    fut_tar_th = pool.submit(_buscar_tarjetas_priv, mensaje)
+                    fut_ev_th = pool.submit(_buscar_eventos_priv)
+                    
+                    # Wrap each in asyncio
+                    fut_rag_aw = loop.run_in_executor(None, fut_rag_th.result, 10)
+                    fut_tar_aw = loop.run_in_executor(None, fut_tar_th.result, 10)
+                    fut_ev_aw = loop.run_in_executor(None, fut_ev_th.result, 10)
+                    
+                    results = await asyncio.gather(fut_rag_aw, fut_tar_aw, fut_ev_aw, return_exceptions=True)
+                    return results
+            
+            # Defaults vacíos por si cualquier búsqueda falla
+            resultados_busq = {'historial': [], 'rag': [], 'fuentes_usadas': [],
+                              'rag_score_max': 0.0, 'rag_confianza': 'ninguna', 'rag_tematica': 'desconocida'}
+            contexto_tarjetas = ""
+            contexto_eventos = ""
+            fnt_tar = []
+            fnt_ev = []
+            
+            try:
+                resultados = await asyncio.wait_for(_ejecutar_busqueda_con_timeout(), timeout=12.0)
+                
+                # Resultado RAG
+                if not isinstance(resultados[0], Exception):
+                    resultados_busq = resultados[0] or resultados_busq
+                else:
+                    logger.warning(f"FASE 30.1: búsqueda RAG falló/timeout: {resultados[0]}")
+                
+                # Resultado tarjetas
+                if not isinstance(resultados[1], Exception):
+                    contexto_tarjetas, fnt_tar = resultados[1] or ("", [])
+                else:
+                    logger.warning(f"FASE 30.1: búsqueda tarjetas falló/timeout: {resultados[1]}")
+                
+                # Resultado eventos
+                if not isinstance(resultados[2], Exception):
+                    contexto_eventos, fnt_ev = resultados[2] or ("", [])
+                else:
+                    logger.warning(f"FASE 30.1: búsqueda eventos falló/timeout: {resultados[2]}")
+            except asyncio.TimeoutError:
+                logger.error(f"FASE 30.1: TIMEOUT GLOBAL 12s en búsqueda paralela. Continuando sin contexto.")
+            except Exception as _e_par:
+                logger.error(f"FASE 30.1: error búsqueda paralela: {_e_par}")
             
             contexto_completo = formatear_contexto_unificado(resultados_busq, query_para_busqueda)
             fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
@@ -35378,36 +35453,96 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             fuentes_str = fuentes_str_final
             
-            await msg.edit_text("🧠 Generando respuesta...")
+            if msg:
+                try: await msg.edit_text("🧠 Generando respuesta...")
+                except: pass
+            
+            # FASE 30.1: Cada LLM con TIMEOUT ESTRICTO para que la respuesta total no exceda 15s
             # FASE 30: temperature reducida de 0.7 a 0.3 para minimizar delirios
-            respuesta = llamar_groq(prompt, max_tokens=1800, temperature=0.3)
+            respuesta = None
             
-            if not respuesta:
-                respuesta = llamar_gemini_texto(prompt, max_tokens=1800, temperature=0.7)
+            # Capa 1: Groq (más rápido, ~3-5s típico)
+            try:
+                respuesta = await asyncio.wait_for(
+                    loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
+            except Exception as _e_gr:
+                logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
             
-            if not respuesta:
-                respuesta = llamar_glm5(prompt, max_tokens=1800, temperature=0.7)
+            # Capa 2: Gemini (rápido también)
+            if not respuesta or len(respuesta.strip()) < 50:
+                try:
+                    respuesta = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_gemini_texto, prompt, 1800, 0.5),
+                        timeout=12.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("FASE 30.1: Gemini timeout 12s, intentando GLM5")
+                except Exception as _e_ge:
+                    logger.warning(f"FASE 30.1: Gemini error: {_e_ge}")
             
-            # FASE 19: agregar DeepSeek como 4to fallback (5M tokens free)
-            if not respuesta:
-                logger.warning("⚠️ Chat privado: GLM falló — fallback DeepSeek")
-                respuesta = llamar_deepseek(prompt, max_tokens=1800, temperature=0.7)
+            # Capa 3: GLM5
+            if not respuesta or len(respuesta.strip()) < 50:
+                try:
+                    respuesta = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_glm5, prompt, 1800, 0.5),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("FASE 30.1: GLM5 timeout 15s")
+                except Exception as _e_gl:
+                    logger.warning(f"FASE 30.1: GLM5 error: {_e_gl}")
             
+            # Capa 4: DeepSeek (último recurso, pago)
+            if not respuesta or len(respuesta.strip()) < 50:
+                logger.warning("⚠️ Chat privado: cascada falló — fallback DeepSeek")
+                try:
+                    respuesta = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_deepseek, prompt, 1800, 0.5),
+                        timeout=20.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("FASE 30.1: DeepSeek también timeout — respuesta de emergencia")
+                except Exception as _e_dk:
+                    logger.error(f"FASE 30.1: DeepSeek error: {_e_dk}")
+            
+            # FASE 30.1: Si TODOS los LLMs fallan, dar respuesta honesta y útil
+            if not respuesta or len(respuesta.strip()) < 50:
+                respuesta = (
+                    f"{user_name}, los servicios de IA están saturados en este momento. "
+                    f"Por favor intenta de nuevo en 1-2 minutos.\n\n"
+                    f"Mientras tanto puedes usar comandos directos:\n"
+                    f"• /dotacion — Ver total de cofrades\n"
+                    f"• /cofrades — Listado de miembros\n"
+                    f"• /buscar_profesional [área] — Buscar profesionales\n"
+                    f"• /conectar [necesidad] — Matching con IA\n"
+                    f"• /economia — Dashboard económico"
+                )
+            
+            # FASE 30.1: envío final robusto (msg puede ser None si reply_text inicial falló)
             if respuesta:
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
                 respuesta_completa = respuesta + footer
-                try:
-                    await msg.delete()
-                except: pass
+                if msg:
+                    try: await msg.delete()
+                    except: pass
                 await enviar_mensaje_largo(update, respuesta_completa.replace('*', '').replace('_', ' '))
-                # Enviar tambien como audio (TTS)
+                # Enviar tambien como audio (TTS) — async no bloqueante
                 try:
-                    audio_priv = await generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3")
+                    audio_priv = await asyncio.wait_for(
+                        generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3"),
+                        timeout=15.0
+                    )
                     if audio_priv and os.path.exists(audio_priv):
                         with open(audio_priv, 'rb') as af:
                             await update.message.reply_voice(voice=af)
                         os.remove(audio_priv)
+                except asyncio.TimeoutError:
+                    logger.warning("FASE 30.1: TTS timeout 15s, omitiendo audio")
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
                 # Mejora 4: Botones de feedback
@@ -35416,13 +35551,26 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 except Exception:
                     pass
             else:
-                await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
+                # Última opción: mensaje de error claro
+                if msg:
+                    try:
+                        await msg.edit_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
+                    except: pass
+                else:
+                    try:
+                        await update.message.reply_text("Lo siento, no pude procesar tu consulta en este momento. Intenta de nuevo.")
+                    except: pass
                 
         except Exception as e:
             logger.error(f"Error en chat privado: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            await msg.edit_text(f"❌ Error procesando consulta: {str(e)[:100]}")
+            try:
+                if msg:
+                    await msg.edit_text(f"❌ Error procesando consulta: {str(e)[:100]}")
+                else:
+                    await update.message.reply_text(f"❌ Error procesando consulta: {str(e)[:100]}")
+            except: pass
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, responder_chat_privado))
     
