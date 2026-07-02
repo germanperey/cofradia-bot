@@ -1320,7 +1320,7 @@ _VOICE_COMMAND_MAP = {
     'ayuda': 'ayuda', 'empleo': 'empleo',
     'calculadora': 'calculadora', 'feriados': 'feriados',
     'eventos': 'eventos', 'directorio': 'directorio',
-    'emergencia': 'emergencia', 'dashboard': 'mi_dashboard',
+    'emergencia': 'emergencia', 'clima': 'clima', 'dashboard': 'mi_dashboard',
     'reporte': 'reporte_ejecutivo',
 }
 
@@ -3225,7 +3225,7 @@ COMANDOS_VOZ = {
     'calculadora': 'calculadora',
     'suite economica': 'calculadora',
     'feriados': 'feriados',
-    'emergencia': 'emergencia',
+    'emergencia': 'emergencia', 'clima': 'clima',
     'agente': 'agente',
     'networking': 'agente',
     'match': 'match',
@@ -9368,6 +9368,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /indicadores - Indicadores económicos Chile + IA 📈
 /economia - Dashboard económico + simuladores 🏦
 /calculadora - Suite Económica Pro (calculadora) 🧮
+/clima [ciudad] - Pronóstico del tiempo 7 días 🌤️
 
 📊 TU DASHBOARD (GRATIS)
 ⭐ /mi_dashboard - Tu dashboard personal ⭐
@@ -26945,6 +26946,9 @@ CATALOGO_COMANDOS_INTENCION = {
     'mis_coins': 'Ver saldo de Cofra-Coins',
     # Emergencia
     'emergencia': 'Reportar emergencia (4 tipos) con alerta a todos',
+    # FASE 31
+    'clima': 'Pronóstico del tiempo diario y semanal por ciudad',
+    'saldos': 'Saldos de APIs y servicios de pago (solo admin)',
     'ayuda': 'Ver todos los comandos disponibles',
 }
 
@@ -32450,6 +32454,758 @@ async def match_hh_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASE 31-A: CENTRO DE SALDOS Y PAGOS DE APIs — /saldos + alerta semanal
+# Consulta saldo real de DeepSeek (único con API de balance) y verifica el
+# estado operativo de cada servicio. Muestra links directos de pago/recarga.
+# Job semanal (lunes 9:30 Chile) envía el reporte al OWNER con alertas
+# anticipadas de saldo bajo y de pagos mensuales por vencer.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Links oficiales de pago/recarga de cada servicio (editable)
+SERVICIOS_PAGO_URLS = {
+    'deepseek':   'https://platform.deepseek.com/top_up',
+    'groq':       'https://console.groq.com/settings/billing',
+    'gemini':     'https://aistudio.google.com/apikey',
+    'glm':        'https://z.ai',
+    'google_tts': 'https://console.cloud.google.com/billing',
+    'rapidapi':   'https://rapidapi.com/developer/billing',
+    'supabase':   'https://supabase.com/dashboard',
+    'render':     'https://dashboard.render.com/billing',
+}
+
+
+def consultar_saldos_apis() -> list:
+    """FASE 31: Consulta saldo/estado de TODOS los servicios externos del bot.
+
+    Retorna lista de dicts: {nombre, emoji, saldo, deuda, estado, url, nota}
+    - DeepSeek: saldo REAL vía API oficial (user/balance).
+    - Resto: verificación de estado operativo (ping ligero) + plan.
+    Cada consulta tiene timeout corto y try/except propio: un servicio caído
+    jamás bloquea el reporte completo.
+    """
+    servicios = []
+
+    # ── 1. DeepSeek (PAGADO — saldo real) ────────────────────────────────
+    try:
+        ds = consultar_saldo_deepseek()
+        if ds:
+            saldo = ds.get('total_balance_usd', 0.0)
+            umbral_bajo = float(os.environ.get('DEEPSEEK_ALERTA_SALDO_BAJO', '1.00'))
+            if saldo <= umbral_bajo:
+                estado = '🔴 SALDO BAJO — recargar YA'
+            elif saldo <= umbral_bajo * 3:
+                estado = '🟡 Saldo medio — recargar pronto'
+            else:
+                estado = '🟢 Operativo'
+            servicios.append({
+                'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
+                'saldo': f'${saldo:.2f} USD', 'deuda': 'Prepago — sin deuda',
+                'estado': estado, 'url': SERVICIOS_PAGO_URLS['deepseek'],
+                'nota': 'Único LLM pagado (último de la cascada)'})
+        else:
+            servicios.append({
+                'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
+                'saldo': 'No disponible', 'deuda': '—',
+                'estado': '⚠️ API sin respuesta' if DEEPSEEK_API_KEY else '⚪ Sin configurar',
+                'url': SERVICIOS_PAGO_URLS['deepseek'], 'nota': ''})
+    except Exception as _e31:
+        logger.debug(f'Saldos: DeepSeek {_e31}')
+
+    # ── 2. Groq (GRATIS — LLM principal) ─────────────────────────────────
+    try:
+        estado = '⚪ Sin configurar'
+        if GROQ_API_KEY:
+            try:
+                r = requests.get('https://api.groq.com/openai/v1/models',
+                                 headers={'Authorization': f'Bearer {GROQ_API_KEY}'},
+                                 timeout=8)
+                estado = '🟢 Operativo' if r.status_code == 200 else f'🟡 Respuesta {r.status_code}'
+            except Exception:
+                estado = '🔴 Sin respuesta'
+        servicios.append({
+            'nombre': 'Groq (LLM principal)', 'emoji': '⚡',
+            'saldo': 'Plan gratuito', 'deuda': '$0',
+            'estado': estado, 'url': SERVICIOS_PAGO_URLS['groq'],
+            'nota': 'LLaMA 3.3 70B — 1° de la cascada'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: Groq {_e31}')
+
+    # ── 3. Gemini (GRATIS — LLM 2° + OCR + embeddings RAG) ───────────────
+    try:
+        estado = '⚪ Sin configurar'
+        if GEMINI_API_KEY:
+            try:
+                r = requests.get(
+                    f'https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=1',
+                    timeout=8)
+                estado = '🟢 Operativo' if r.status_code == 200 else f'🟡 Respuesta {r.status_code}'
+            except Exception:
+                estado = '🔴 Sin respuesta'
+        servicios.append({
+            'nombre': 'Gemini (LLM + OCR + RAG)', 'emoji': '💎',
+            'saldo': 'Plan gratuito', 'deuda': '$0',
+            'estado': estado, 'url': SERVICIOS_PAGO_URLS['gemini'],
+            'nota': '2° cascada + visión + embeddings'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: Gemini {_e31}')
+
+    # ── 4. GLM Z.AI (GRATIS — LLM 3°) ────────────────────────────────────
+    try:
+        servicios.append({
+            'nombre': 'GLM Z.AI (LLM alternativo)', 'emoji': '🔮',
+            'saldo': 'Plan gratuito', 'deuda': '$0',
+            'estado': '🟢 Configurado' if GLM_API_KEY else '⚪ Sin configurar',
+            'url': SERVICIOS_PAGO_URLS['glm'], 'nota': '3° de la cascada'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: GLM {_e31}')
+
+    # ── 5. Google Cloud TTS (voz del bot) ────────────────────────────────
+    try:
+        _tts_key = os.getenv('GOOGLE_TTS_KEY', '')
+        estado = '⚪ Sin configurar'
+        if _tts_key:
+            try:
+                r = requests.get(
+                    f'https://texttospeech.googleapis.com/v1/voices?key={_tts_key}&languageCode=es-US',
+                    timeout=8)
+                estado = '🟢 Operativo' if r.status_code == 200 else f'🟡 Respuesta {r.status_code}'
+            except Exception:
+                estado = '🔴 Sin respuesta'
+        servicios.append({
+            'nombre': 'Google Cloud TTS (voz)', 'emoji': '🎤',
+            'saldo': '1M caracteres/mes gratis', 'deuda': '$0 (dentro de cuota)',
+            'estado': estado, 'url': SERVICIOS_PAGO_URLS['google_tts'],
+            'nota': 'Facturación GCP si excede cuota'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: TTS {_e31}')
+
+    # ── 6. RapidAPI / JSearch (empleos) ──────────────────────────────────
+    try:
+        servicios.append({
+            'nombre': 'RapidAPI — JSearch (empleos)', 'emoji': '💼',
+            'saldo': 'Cuota mensual del plan', 'deuda': 'Según plan',
+            'estado': '🟢 Configurado' if RAPIDAPI_KEY else '⚪ Sin configurar',
+            'url': SERVICIOS_PAGO_URLS['rapidapi'],
+            'nota': 'Ver consumo en el dashboard de RapidAPI'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: RapidAPI {_e31}')
+
+    # ── 7. Supabase (base de datos) ──────────────────────────────────────
+    try:
+        estado = '🔴 Sin conexión'
+        try:
+            _c31 = get_db_connection()
+            if _c31:
+                _c31.close()
+                estado = '🟢 Operativo'
+        except Exception:
+            pass
+        servicios.append({
+            'nombre': 'Supabase (PostgreSQL + RAG)', 'emoji': '🗄️',
+            'saldo': 'Plan gratuito', 'deuda': '$0',
+            'estado': estado, 'url': SERVICIOS_PAGO_URLS['supabase'],
+            'nota': 'BD + pgvector + Storage backups'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: Supabase {_e31}')
+
+    # ── 8. Render (hosting 24/7) ─────────────────────────────────────────
+    try:
+        servicios.append({
+            'nombre': 'Render (servidor del bot)', 'emoji': '🖥️',
+            'saldo': 'Según plan contratado', 'deuda': 'Facturación mensual',
+            'estado': '🟢 Operativo (este bot corre aquí)',
+            'url': SERVICIOS_PAGO_URLS['render'],
+            'nota': 'Revisar ciclo de facturación en el dashboard'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: Render {_e31}')
+
+    return servicios
+
+
+def _pagos_mensuales_por_vencer(dias_aviso: int = 3) -> list:
+    """FASE 31: Detecta pagos mensuales próximos a vencer.
+
+    Configuración por env var opcional PAGOS_MENSUALES, formato:
+        "Render:5:https://dashboard.render.com/billing;OtroServicio:20:https://..."
+    (nombre : día del mes de cobro : url). Retorna lista de avisos si faltan
+    <= dias_aviso días para el día de cobro (considera cruce de mes).
+    """
+    avisos = []
+    try:
+        cfg = os.environ.get('PAGOS_MENSUALES', '').strip()
+        if not cfg:
+            return avisos
+        hoy = _ahora_chile()
+        for item in cfg.split(';'):
+            partes = item.strip().split(':', 2)
+            if len(partes) < 2:
+                continue
+            nombre = partes[0].strip()
+            try:
+                dia_cobro = int(partes[1].strip())
+            except ValueError:
+                continue
+            url = partes[2].strip() if len(partes) > 2 else ''
+            # Próxima fecha de cobro (este mes o el siguiente)
+            try:
+                if hoy.day <= dia_cobro:
+                    fecha_cobro = hoy.replace(day=min(dia_cobro, 28))
+                else:
+                    _sig = (hoy.replace(day=1) + timedelta(days=32)).replace(day=1)
+                    fecha_cobro = _sig.replace(day=min(dia_cobro, 28))
+                faltan = (fecha_cobro.date() - hoy.date()).days
+                if 0 <= faltan <= dias_aviso:
+                    txt = f'💳 {nombre}: pago vence en {faltan} día(s) (día {dia_cobro})'
+                    if url:
+                        txt += f'\n   🔗 Pagar: {url}'
+                    avisos.append(txt)
+            except Exception:
+                continue
+    except Exception as _e31:
+        logger.debug(f'Pagos mensuales: {_e31}')
+    return avisos
+
+
+def _reporte_saldos_texto(servicios: list, encabezado: str = '💰 SALDOS DE APIs Y SERVICIOS') -> str:
+    """FASE 31: Formatea el reporte de saldos para Telegram."""
+    lineas = [
+        f'{encabezado}',
+        '━' * 30,
+        f'🕐 {_ahora_chile().strftime("%d-%m-%Y %H:%M")} (hora Chile)',
+        '',
+    ]
+    for s in servicios:
+        lineas.append(f"{s['emoji']} {s['nombre']}")
+        lineas.append(f"   💵 Saldo: {s['saldo']}")
+        lineas.append(f"   🧾 Deuda: {s['deuda']}")
+        lineas.append(f"   📡 Estado: {s['estado']}")
+        if s.get('nota'):
+            lineas.append(f"   ℹ️ {s['nota']}")
+        lineas.append(f"   🔗 Pagar/gestionar: {s['url']}")
+        lineas.append('')
+    lineas.append('━' * 30)
+    lineas.append('💡 Toca los botones para ir directo a cada página de pago.')
+    return '\n'.join(lineas)
+
+
+def _teclado_saldos(servicios: list):
+    """FASE 31: Botones URL directos a cada página de pago (2 por fila)."""
+    fila, filas = [], []
+    for s in servicios:
+        fila.append(InlineKeyboardButton(f"{s['emoji']} {s['nombre'].split(' (')[0]}", url=s['url']))
+        if len(fila) == 2:
+            filas.append(fila)
+            fila = []
+    if fila:
+        filas.append(fila)
+    return InlineKeyboardMarkup(filas)
+
+
+async def saldos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /saldos — SOLO OWNER. Saldo, deuda y link de pago de cada API."""
+    user = update.effective_user
+    if not user or user.id != OWNER_ID:
+        await update.message.reply_text(
+            '🔒 Este comando es exclusivo del administrador del bot.')
+        return
+    msg_espera = await update.message.reply_text('💰 Consultando saldos de todos los servicios...')
+    try:
+        loop = asyncio.get_event_loop()
+        servicios = await asyncio.wait_for(
+            loop.run_in_executor(None, consultar_saldos_apis), timeout=45)
+        texto = _reporte_saldos_texto(servicios)
+        # Pagos mensuales por vencer (si están configurados)
+        avisos = _pagos_mensuales_por_vencer(dias_aviso=5)
+        if avisos:
+            texto += '\n\n⚠️ PAGOS POR VENCER:\n' + '\n'.join(avisos)
+        try:
+            await msg_espera.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            texto, reply_markup=_teclado_saldos(servicios),
+            disable_web_page_preview=True)
+        registrar_servicio_usado(user.id, 'saldos')
+    except asyncio.TimeoutError:
+        await msg_espera.edit_text('⏱️ Las consultas tardaron demasiado. Intenta de nuevo.')
+    except Exception as e:
+        logger.warning(f'/saldos error: {e}')
+        try:
+            await msg_espera.edit_text('❌ Error consultando saldos. Intenta de nuevo.')
+        except Exception:
+            pass
+
+
+async def job_saldos_semanal(context):
+    """FASE 31: Job SEMANAL (lunes 9:30 Chile) — reporte de saldos al OWNER
+    con alertas anticipadas de saldo bajo y pagos mensuales por vencer."""
+    if not OWNER_ID:
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        servicios = await asyncio.wait_for(
+            loop.run_in_executor(None, consultar_saldos_apis), timeout=60)
+        texto = _reporte_saldos_texto(
+            servicios, encabezado='📊 REPORTE SEMANAL — SALDOS DE APIs')
+        # Alertas anticipadas
+        alertas = []
+        for s in servicios:
+            if '🔴' in s['estado'] or 'BAJO' in s['estado']:
+                alertas.append(f"🚨 {s['nombre']}: {s['estado']} → {s['url']}")
+            elif '🟡' in s['estado']:
+                alertas.append(f"⚠️ {s['nombre']}: {s['estado']}")
+        alertas += _pagos_mensuales_por_vencer(dias_aviso=7)
+        if alertas:
+            texto += '\n\n🔔 ATENCIÓN ESTA SEMANA:\n' + '\n'.join(alertas)
+        else:
+            texto += '\n\n✅ Sin alertas: todos los servicios saludables.'
+        await context.bot.send_message(
+            chat_id=OWNER_ID, text=texto,
+            reply_markup=_teclado_saldos(servicios),
+            disable_web_page_preview=True)
+        logger.info('📊 Reporte semanal de saldos enviado al OWNER')
+    except Exception as e:
+        logger.warning(f'Job saldos semanal: {e}')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASE 31-B: PRONÓSTICO DEL TIEMPO — /clima [comuna o ciudad]
+# Fuente: Open-Meteo (gratuita, sin API key, datos oficiales de modelos
+# meteorológicos). Geocoding con preferencia Chile. Entrega:
+#   1) Resumen en Telegram: 7 días con mín/máx, viento y humedad.
+#   2) Dashboard HTML premium con iconos animados según el clima.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DIAS_ES = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+_MESES_ES = ['', 'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+             'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+
+# Código WMO → (emoji, descripción, tema visual)
+_WMO_MAP = {
+    0:  ('☀️', 'Despejado', 'sol'),
+    1:  ('🌤️', 'Mayormente despejado', 'sol'),
+    2:  ('⛅', 'Parcialmente nublado', 'nublado'),
+    3:  ('☁️', 'Nublado', 'nublado'),
+    45: ('🌫️', 'Niebla', 'nublado'),
+    48: ('🌫️', 'Niebla con escarcha', 'nublado'),
+    51: ('🌦️', 'Llovizna ligera', 'lluvia'),
+    53: ('🌦️', 'Llovizna moderada', 'lluvia'),
+    55: ('🌧️', 'Llovizna intensa', 'lluvia'),
+    56: ('🌧️', 'Llovizna helada', 'lluvia'),
+    57: ('🌧️', 'Llovizna helada intensa', 'lluvia'),
+    61: ('🌧️', 'Lluvia ligera', 'lluvia'),
+    63: ('🌧️', 'Lluvia moderada', 'lluvia'),
+    65: ('🌧️', 'Lluvia intensa', 'lluvia'),
+    66: ('🌧️', 'Lluvia helada', 'lluvia'),
+    67: ('🌧️', 'Lluvia helada intensa', 'lluvia'),
+    71: ('❄️', 'Nieve ligera', 'nieve'),
+    73: ('❄️', 'Nieve moderada', 'nieve'),
+    75: ('❄️', 'Nieve intensa', 'nieve'),
+    77: ('🌨️', 'Granos de nieve', 'nieve'),
+    80: ('🌧️', 'Chubascos ligeros', 'lluvia'),
+    81: ('🌧️', 'Chubascos moderados', 'lluvia'),
+    82: ('⛈️', 'Chubascos violentos', 'tormenta'),
+    85: ('🌨️', 'Chubascos de nieve', 'nieve'),
+    86: ('🌨️', 'Chubascos de nieve fuertes', 'nieve'),
+    95: ('⛈️', 'Tormenta eléctrica', 'tormenta'),
+    96: ('⛈️', 'Tormenta con granizo', 'tormenta'),
+    99: ('⛈️', 'Tormenta con granizo fuerte', 'tormenta'),
+}
+
+_TEMAS_CLIMA = {
+    'sol':      {'grad': 'linear-gradient(160deg,#0f2b46 0%,#1c5d99 45%,#f7b733 100%)', 'acc': '#ffd166'},
+    'nublado':  {'grad': 'linear-gradient(160deg,#232526 0%,#414345 60%,#6b7b8c 100%)', 'acc': '#aab7c4'},
+    'lluvia':   {'grad': 'linear-gradient(160deg,#0f2027 0%,#203a43 55%,#2c5364 100%)', 'acc': '#4fc3f7'},
+    'nieve':    {'grad': 'linear-gradient(160deg,#274060 0%,#5c7999 55%,#cfe8ef 100%)', 'acc': '#e0f7fa'},
+    'tormenta': {'grad': 'linear-gradient(160deg,#0b0b2b 0%,#3a1c71 55%,#928dab 100%)', 'acc': '#c792ea'},
+}
+
+
+def _wmo_info(codigo):
+    """FASE 31: Traduce código meteorológico WMO a (emoji, descripción, tema)."""
+    try:
+        return _WMO_MAP.get(int(codigo), ('🌡️', 'Variable', 'nublado'))
+    except Exception:
+        return ('🌡️', 'Variable', 'nublado')
+
+
+def _obtener_clima_ciudad(ciudad: str):
+    """FASE 31: Geocodifica la ciudad (preferencia Chile) y obtiene pronóstico
+    de 7 días desde Open-Meteo. Retorna dict listo para render, o None."""
+    try:
+        import urllib.parse as _up_cl
+        # ── 1. Geocoding (preferir resultados de Chile) ──────────────────
+        r_geo = requests.get(
+            'https://geocoding-api.open-meteo.com/v1/search',
+            params={'name': ciudad, 'count': 5, 'language': 'es', 'format': 'json'},
+            timeout=10)
+        if r_geo.status_code != 200:
+            return None
+        resultados = (r_geo.json() or {}).get('results') or []
+        if not resultados:
+            return None
+        lugar = next((x for x in resultados if x.get('country_code') == 'CL'),
+                     resultados[0])
+        lat, lon = lugar['latitude'], lugar['longitude']
+
+        # ── 2. Pronóstico 7 días + condición actual ──────────────────────
+        r_met = requests.get(
+            'https://api.open-meteo.com/v1/forecast',
+            params={
+                'latitude': lat, 'longitude': lon,
+                'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
+                         'wind_speed_10m_max,precipitation_probability_max',
+                'hourly': 'relative_humidity_2m',
+                'current': 'temperature_2m,relative_humidity_2m,'
+                           'wind_speed_10m,weather_code,apparent_temperature',
+                'timezone': 'auto', 'forecast_days': 7,
+            }, timeout=12)
+        if r_met.status_code != 200:
+            return None
+        met = r_met.json()
+        daily = met.get('daily', {})
+        hourly_hum = (met.get('hourly', {}) or {}).get('relative_humidity_2m') or []
+        cur = met.get('current', {}) or {}
+
+        fechas = daily.get('time', [])
+        dias = []
+        for i, fstr in enumerate(fechas[:7]):
+            try:
+                fdt = datetime.strptime(fstr, '%Y-%m-%d')
+                nombre_dia = 'Hoy' if i == 0 else _DIAS_ES[fdt.weekday()]
+                fecha_fmt = f'{fdt.day} {_MESES_ES[fdt.month][:3]}'
+            except Exception:
+                nombre_dia, fecha_fmt = fstr, fstr
+            # Humedad promedio del día (24 valores horarios por día)
+            bloque = hourly_hum[i * 24:(i + 1) * 24]
+            humedad = round(sum(bloque) / len(bloque)) if bloque else None
+            emoji, desc, tema = _wmo_info((daily.get('weather_code') or [3] * 7)[i])
+            dias.append({
+                'nombre': nombre_dia, 'fecha': fecha_fmt,
+                'tmin': round((daily.get('temperature_2m_min') or [0] * 7)[i]),
+                'tmax': round((daily.get('temperature_2m_max') or [0] * 7)[i]),
+                'viento': round((daily.get('wind_speed_10m_max') or [0] * 7)[i]),
+                'lluvia': (daily.get('precipitation_probability_max') or [0] * 7)[i],
+                'humedad': humedad if humedad is not None else '—',
+                'emoji': emoji, 'desc': desc, 'tema': tema,
+            })
+
+        emoji_hoy, desc_hoy, tema_hoy = _wmo_info(cur.get('weather_code', 3))
+        return {
+            'ciudad': lugar.get('name', ciudad),
+            'region': lugar.get('admin1', ''),
+            'pais': lugar.get('country', ''),
+            'actual': {
+                'temp': round(cur.get('temperature_2m', 0)),
+                'sensacion': round(cur.get('apparent_temperature',
+                                           cur.get('temperature_2m', 0))),
+                'humedad': round(cur.get('relative_humidity_2m', 0)),
+                'viento': round(cur.get('wind_speed_10m', 0)),
+                'emoji': emoji_hoy, 'desc': desc_hoy, 'tema': tema_hoy,
+            },
+            'dias': dias,
+        }
+    except requests.Timeout:
+        logger.warning('Clima: timeout Open-Meteo')
+        return None
+    except Exception as e:
+        logger.warning(f'Clima error: {e}')
+        return None
+
+
+_HTML_CLIMA_TEMPLATE = """<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pronóstico — __CIUDAD__</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif}
+body{min-height:100vh;background:__GRADIENTE__;background-attachment:fixed;color:#fff;padding:24px 16px 40px}
+.wrap{max-width:1080px;margin:0 auto}
+header{text-align:center;margin-bottom:26px}
+header h1{font-size:2.1rem;font-weight:800;letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.35)}
+header .sub{opacity:.85;margin-top:4px;font-size:1rem}
+.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:34px;
+ background:rgba(255,255,255,.10);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+ border:1px solid rgba(255,255,255,.22);border-radius:26px;padding:30px 34px;
+ box-shadow:0 14px 40px rgba(0,0,0,.30);margin-bottom:26px}
+.hero .icono{font-size:6.5rem;line-height:1;animation:flotar 3.4s ease-in-out infinite;
+ filter:drop-shadow(0 8px 16px rgba(0,0,0,.35))}
+@keyframes flotar{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
+.hero .temp{font-size:4.6rem;font-weight:800;line-height:1}
+.hero .desc{font-size:1.25rem;opacity:.92;margin-top:6px}
+.hero .mm{margin-top:8px;font-size:1.02rem;opacity:.85}
+.hero .datos{display:flex;gap:26px;flex-wrap:wrap}
+.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:14px 20px;text-align:center;min-width:110px}
+.dato .v{font-size:1.5rem;font-weight:700}
+.dato .l{font-size:.8rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.6px}
+h2.seccion{font-size:1.15rem;font-weight:700;opacity:.92;margin:6px 4px 14px;letter-spacing:.4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:14px;margin-bottom:28px}
+.card{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+ border:1px solid rgba(255,255,255,.20);border-radius:20px;padding:16px 12px;text-align:center;
+ transition:transform .25s,box-shadow .25s}
+.card:hover{transform:translateY(-6px);box-shadow:0 14px 30px rgba(0,0,0,.35)}
+.card.hoy{outline:2px solid __ACCENT__;background:rgba(255,255,255,.17)}
+.card .d{font-weight:700;font-size:.98rem}
+.card .f{font-size:.76rem;opacity:.75;margin-bottom:8px}
+.card .ic{font-size:2.6rem;margin:4px 0 6px;display:block}
+.card .tt{font-size:1.05rem;font-weight:700}
+.card .tt .min{opacity:.65;font-weight:500}
+.card .cd{font-size:.74rem;opacity:.85;margin-top:7px;line-height:1.55}
+.panel{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.20);
+ border-radius:22px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+#grafico{width:100%;height:340px}
+footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-height:1.7}
+@media(max-width:640px){.hero{gap:18px;padding:24px 18px}.hero .temp{font-size:3.6rem}
+ .hero .icono{font-size:5rem}#grafico{height:280px}}
+</style></head><body><div class="wrap">
+<header>
+  <h1>🌎 Pronóstico del Tiempo</h1>
+  <div class="sub">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado: __ACTUALIZADO__ (hora Chile)</div>
+</header>
+
+<div class="hero">
+  <div class="icono">__ICONO_HOY__</div>
+  <div>
+    <div class="temp">__TEMP_HOY__°</div>
+    <div class="desc">__DESC_HOY__</div>
+    <div class="mm">⬇️ Mín __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ Máx __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ Sensación __SENSACION__°</div>
+  </div>
+  <div class="datos">
+    <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l">Humedad</div></div>
+    <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l">km/h viento</div></div>
+    <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l">Prob. lluvia</div></div>
+  </div>
+</div>
+
+<h2 class="seccion">📅 Próximos 7 días</h2>
+<div class="grid">__TARJETAS__</div>
+
+<h2 class="seccion">📈 Evolución de temperaturas</h2>
+<div class="panel"><div id="grafico"></div></div>
+
+<footer>⚓ Cofradía de Networking — Servicio meteorológico del bot<br>
+Datos: modelos meteorológicos internacionales (Open-Meteo)</footer>
+</div>
+<script>
+var ch=echarts.init(document.getElementById('grafico'));
+ch.setOption({
+ backgroundColor:'transparent',
+ tooltip:{trigger:'axis'},
+ legend:{data:['Máxima','Mínima'],textStyle:{color:'#fff'}},
+ grid:{left:'4%',right:'4%',bottom:'6%',top:'14%',containLabel:true},
+ xAxis:{type:'category',data:__EJE_DIAS__,
+  axisLabel:{color:'#fff'},axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+ yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
+  splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
+ series:[
+  {name:'Máxima',type:'line',smooth:true,data:__SERIE_MAX__,symbolSize:9,
+   lineStyle:{width:4,color:'#ffb347'},itemStyle:{color:'#ffb347'},
+   areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
+    colorStops:[{offset:0,color:'rgba(255,179,71,.45)'},{offset:1,color:'rgba(255,179,71,0)'}]}},
+   label:{show:true,color:'#fff',formatter:'{c}°'}},
+  {name:'Mínima',type:'line',smooth:true,data:__SERIE_MIN__,symbolSize:9,
+   lineStyle:{width:4,color:'#4fc3f7'},itemStyle:{color:'#4fc3f7'},
+   areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
+    colorStops:[{offset:0,color:'rgba(79,195,247,.40)'},{offset:1,color:'rgba(79,195,247,0)'}]}},
+   label:{show:true,color:'#fff',formatter:'{c}°'}}
+ ]});
+window.addEventListener('resize',function(){ch.resize()});
+</script></body></html>"""
+
+
+def _generar_html_clima(d: dict) -> str:
+    """FASE 31: Renderiza el dashboard HTML del clima con tema dinámico."""
+    act = d['actual']
+    tema = _TEMAS_CLIMA.get(act['tema'], _TEMAS_CLIMA['nublado'])
+    dias = d['dias']
+
+    tarjetas = []
+    for i, dia in enumerate(dias):
+        tarjetas.append(
+            f'<div class="card{" hoy" if i == 0 else ""}">'
+            f'<div class="d">{dia["nombre"]}</div>'
+            f'<div class="f">{dia["fecha"]}</div>'
+            f'<span class="ic">{dia["emoji"]}</span>'
+            f'<div class="tt">{dia["tmax"]}° <span class="min">/ {dia["tmin"]}°</span></div>'
+            f'<div class="cd">{dia["desc"]}<br>💨 {dia["viento"]} km/h · 💧 {dia["humedad"]}%'
+            f'<br>🌧️ {dia["lluvia"]}%</div></div>')
+
+    region_pais = ', '.join(x for x in [d.get('region', ''), d.get('pais', '')] if x)
+    html = _HTML_CLIMA_TEMPLATE
+    reemplazos = {
+        '__CIUDAD__': d['ciudad'],
+        '__REGION_PAIS__': f'({region_pais})' if region_pais else '',
+        '__ACTUALIZADO__': _ahora_chile().strftime('%d-%m-%Y %H:%M'),
+        '__GRADIENTE__': tema['grad'],
+        '__ACCENT__': tema['acc'],
+        '__ICONO_HOY__': act['emoji'],
+        '__TEMP_HOY__': str(act['temp']),
+        '__DESC_HOY__': act['desc'],
+        '__TMIN_HOY__': str(dias[0]['tmin']),
+        '__TMAX_HOY__': str(dias[0]['tmax']),
+        '__SENSACION__': str(act['sensacion']),
+        '__HUM_HOY__': str(act['humedad']),
+        '__VIENTO_HOY__': str(act['viento']),
+        '__LLUVIA_HOY__': str(dias[0]['lluvia']),
+        '__TARJETAS__': ''.join(tarjetas),
+        '__EJE_DIAS__': json.dumps([x['nombre'][:3] + ' ' + x['fecha'] for x in dias]),
+        '__SERIE_MAX__': json.dumps([x['tmax'] for x in dias]),
+        '__SERIE_MIN__': json.dumps([x['tmin'] for x in dias]),
+    }
+    for k, v in reemplazos.items():
+        html = html.replace(k, v)
+    return html
+
+
+async def clima_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /clima [comuna o ciudad] — Pronóstico diario y semanal.
+    Resumen en el chat + dashboard HTML visual con iconos según el clima."""
+    ciudad = ' '.join(context.args).strip() if context.args else 'Santiago'
+    msg_espera = await update.message.reply_text(
+        f'🌤️ Consultando el pronóstico para {ciudad}...')
+    try:
+        loop = asyncio.get_event_loop()
+        datos = await asyncio.wait_for(
+            loop.run_in_executor(None, _obtener_clima_ciudad, ciudad), timeout=35)
+        if not datos:
+            await msg_espera.edit_text(
+                f'❌ No encontré la localidad "{ciudad}".\n\n'
+                '💡 Prueba con: /clima Providencia · /clima Valparaíso · '
+                '/clima Puerto Montt')
+            return
+
+        act = datos['actual']
+        region_pais = ', '.join(
+            x for x in [datos.get('region', ''), datos.get('pais', '')] if x)
+        lineas = [
+            f'🌎 PRONÓSTICO — {datos["ciudad"].upper()}',
+            f'📍 {region_pais}' if region_pais else '',
+            '━' * 30,
+            f'{act["emoji"]} AHORA: {act["temp"]}° · {act["desc"]}',
+            f'🌡️ Sensación {act["sensacion"]}° · 💧 {act["humedad"]}% · '
+            f'💨 {act["viento"]} km/h',
+            '',
+            '📅 PRÓXIMOS 7 DÍAS:',
+        ]
+        for dia in datos['dias']:
+            lineas.append(
+                f'{dia["emoji"]} {dia["nombre"]} {dia["fecha"]}: '
+                f'{dia["tmin"]}° / {dia["tmax"]}° · 💨 {dia["viento"]} km/h · '
+                f'💧 {dia["humedad"]}% · 🌧️ {dia["lluvia"]}%')
+        lineas += ['', '━' * 30,
+                   '📊 Te envío el dashboard visual completo...']
+        try:
+            await msg_espera.delete()
+        except Exception:
+            pass
+        await update.message.reply_text('\n'.join(x for x in lineas if x != ''))
+
+        # Dashboard HTML
+        try:
+            html = _generar_html_clima(datos)
+            buf = BytesIO(html.encode('utf-8'))
+            buf.name = f'Clima_{datos["ciudad"].replace(" ", "_")}.html'
+            fecha_arch = _ahora_chile().strftime('%Y%m%d')
+            await update.message.reply_document(
+                document=buf,
+                filename=f'Clima_{datos["ciudad"].replace(" ", "_")}_{fecha_arch}.html',
+                caption=(f'🌤️ Dashboard del tiempo — {datos["ciudad"]}\n'
+                         '📂 Ábrelo en tu navegador para ver los gráficos '
+                         'interactivos y el pronóstico completo.'))
+        except Exception as e_html:
+            logger.warning(f'Clima HTML: {e_html}')
+
+        if update.effective_user:
+            registrar_servicio_usado(update.effective_user.id, 'clima')
+    except asyncio.TimeoutError:
+        await msg_espera.edit_text(
+            '⏱️ El servicio meteorológico tardó demasiado. Intenta de nuevo.')
+    except Exception as e:
+        logger.warning(f'/clima error: {e}')
+        try:
+            await msg_espera.edit_text('❌ Error consultando el clima. Intenta de nuevo.')
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASE 31-C: ALARMA SONORA DE EMERGENCIA (reemplaza la nota de voz)
+#
+# LIMITACIÓN DE TELEGRAM (sin excepciones): un bot NO puede reproducir audio
+# automáticamente en el dispositivo del receptor. Ninguna app puede forzar
+# eso vía Bot API. Lo que SÍ suena AUTOMÁTICAMENTE en celular/tablet/PC es
+# el TONO DE NOTIFICACIÓN. Esta fase lo explota al máximo:
+#
+#   1) RÁFAGA de mensajes con sonido (3 seguidos, ~1 seg entre cada uno)
+#      → el dispositivo suena din-din-din como patrón de alarma.
+#   2) MENCIONES personalizadas (tg://user?id=) embebidas e invisibles
+#      → Telegram notifica CON SONIDO incluso a quienes tienen el grupo
+#        SILENCIADO. Este es el corazón de la "sirena".
+#   3) PIN del mensaje de alerta con notificación → aviso adicional a todos.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _obtener_menciones_emergencia(max_usuarios: int = 60) -> list:
+    """FASE 31: Menciones invisibles (word-joiner U+2060) de miembros activos.
+    Las menciones tg://user?id fuerzan notificación sonora AUNQUE el usuario
+    tenga el grupo silenciado."""
+    menciones = []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return menciones
+        c = conn.cursor()
+        c.execute(
+            f"SELECT user_id FROM suscripciones WHERE estado = 'activo' "
+            f"LIMIT {int(max_usuarios)}")
+        filas = c.fetchall()
+        conn.close()
+        for f in filas:
+            uid = f['user_id'] if DATABASE_URL else f[0]
+            if uid:
+                menciones.append(f'<a href="tg://user?id={uid}">\u2060</a>')
+    except Exception as _em31:
+        logger.debug(f'Menciones emergencia: {_em31}')
+    return menciones
+
+
+async def _alarma_sonora_emergencia(context, chat_id, tipo: str,
+                                    menciones: list = None,
+                                    rafagas: int = 3,
+                                    thread_id=None):
+    """FASE 31: Dispara la alarma de notificaciones (la 'sirena' real).
+
+    Envía una ráfaga de mensajes cortos con disable_notification=False y
+    menciones invisibles repartidas → múltiples tonos de notificación
+    consecutivos en cada dispositivo, incluso con el chat silenciado.
+    Retorna el último mensaje enviado (por si se quiere fijar)."""
+    ultimo = None
+    menciones = menciones or []
+    por_rafaga = (max(1, (len(menciones) + rafagas - 1) // rafagas)
+                  if menciones else 0)
+    for i in range(rafagas):
+        cuerpo = (
+            '🚨🚨🚨 <b>¡EMERGENCIA COFRADÍA!</b> 🚨🚨🚨\n'
+            f'🔔 ALARMA {i + 1}/{rafagas} — {tipo}\n'
+            '⚠️ <b>ATENCIÓN INMEDIATA — REVISA EL CHAT</b>')
+        if por_rafaga:
+            lote = menciones[i * por_rafaga:(i + 1) * por_rafaga]
+            if lote:
+                cuerpo += ''.join(lote)
+        try:
+            kwargs = dict(chat_id=chat_id, text=cuerpo, parse_mode='HTML',
+                          disable_notification=False)
+            if thread_id:
+                kwargs['message_thread_id'] = thread_id
+            ultimo = await context.bot.send_message(**kwargs)
+        except Exception as _ea31:
+            logger.debug(f'Alarma ráfaga {i + 1}: {_ea31}')
+        if i < rafagas - 1:
+            await asyncio.sleep(1.1)
+    return ultimo
+
+
 # SISTEMA DE EMERGENCIA — /emergencia
 # 4 botones: Choque vehicular, Asalto, Incendio, Accidente
 # Flujo: Tipo → Descripción (opcional) → Geo o Dirección → Broadcast al grupo
@@ -32635,25 +33391,53 @@ async def _emer_interceptar_texto(update: Update, context: ContextTypes.DEFAULT_
         raise ApplicationHandlerStop()
 
 async def emergencia_tel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback: muestra número de teléfono al presionar botón"""
+    """FASE 31: Callback 131-134 — envía CONTACTO nativo para llamar con 1 toque.
+
+    Telegram no permite botones inline con enlaces tel: (BUTTON_URL_INVALID).
+    La vía oficial es send_contact: al tocar la ficha del contacto, el
+    teléfono abre su marcador nativo con el botón LLAMAR."""
     query = update.callback_query
-    await query.answer()
     numeros = {
-        'emer_tel_131': ('🚑 AMBULANCIA (SAMU)', '131'),
-        'emer_tel_132': ('🚒 BOMBEROS', '132'),
-        'emer_tel_133': ('🚔 CARABINEROS', '133'),
-        'emer_tel_134': ('🔍 PDI (INVESTIGACIONES)', '134'),
+        'emer_tel_131': ('SAMU Ambulancia', '131', '🚑'),
+        'emer_tel_132': ('Bomberos', '132', '🚒'),
+        'emer_tel_133': ('Carabineros', '133', '🚔'),
+        'emer_tel_134': ('PDI Investigaciones', '134', '🔍'),
     }
     info = numeros.get(query.data)
-    if info:
-        nombre_serv, numero = info
-        await query.message.reply_text(
-            f"📞 {nombre_serv}\n\n"
-            f"👉 Marca este número:\n\n"
-            f"📱  {numero}\n\n"
-            "Copia el número y llama desde tu teléfono."
+    if not info:
+        await query.answer()
+        return
+    nombre_serv, numero, emoji_serv = info
+    try:
+        await query.answer(f'📞 Contacto {numero} enviado — tócalo y presiona LLAMAR')
+    except Exception:
+        pass
+    _thread_id = getattr(query.message, 'message_thread_id', None)
+    try:
+        await context.bot.send_contact(
+            chat_id=query.message.chat_id,
+            phone_number=numero,
+            first_name=f'{emoji_serv} {nombre_serv}',
+            last_name=f'({numero})',
+            message_thread_id=_thread_id,
         )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(f'{emoji_serv} {nombre_serv} — {numero}\n'
+                  '👆 Toca la ficha de contacto de arriba y presiona 📞 LLAMAR.'),
+            message_thread_id=_thread_id,
+        )
+    except Exception as _et31:
+        logger.debug(f'Contacto emergencia: {_et31}')
+        try:
+            await query.message.reply_text(
+                f'📞 {emoji_serv} {nombre_serv}\n\n📱 Marca: {numero}')
+        except Exception:
+            pass
 
+# FASE 31: _generar_sirena_ogg se CONSERVA como utilidad, pero YA NO se envía
+# como nota de voz: Telegram no auto-reproduce audios en el receptor. La
+# alarma real es _alarma_sonora_emergencia() (ráfaga de notificaciones).
 def _generar_sirena_ogg() -> BytesIO:
     """Genera sirena de emergencia potente (5s, max volumen, oscilacion rapida).
     Intenta convertir a OGG OPUS via ffmpeg (requerido para push-up Telegram).
@@ -32832,34 +33616,33 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
     ])
     tel_kb = InlineKeyboardMarkup(botones)
 
-    # 0. Generar sirena de emergencia (nota de voz push-up automático)
-    sirena_buf = None
-    try:
-        sirena_buf = _generar_sirena_ogg()
-        logger.info("🔊 Sirena de emergencia generada")
-    except Exception as _es:
-        logger.warning(f"No se pudo generar sirena: {_es}")
+    # 0. FASE 31: ALARMA SONORA por notificaciones (reemplaza la nota de voz).
+    # Telegram no permite auto-reproducir audio en el receptor: la alarma real
+    # es la ráfaga de notificaciones + menciones invisibles (suenan incluso
+    # con el grupo silenciado). Ver _alarma_sonora_emergencia().
+    menciones_emergencia = _obtener_menciones_emergencia(max_usuarios=60)
 
     # 1. Enviar al grupo principal + topics
     enviados = 0
     if COFRADIA_GROUP_ID:
-        # SIRENA PRIMERO (push-up automatico — el sonido llega antes que el texto)
-        if sirena_buf:
-            try:
-                sirena_buf.seek(0)
-                await context.bot.send_voice(
-                    chat_id=COFRADIA_GROUP_ID,
-                    voice=sirena_buf,
-                    caption="🚨🔊 SIRENA DE EMERGENCIA — " + tipo,
-                    duration=5
-                )
-            except Exception as _sv:
-                logger.debug(f"Sirena grupo: {_sv}")
-        # Texto de alerta despues
+        # FASE 31: ALARMA SONORA — ráfaga de notificaciones + menciones que
+        # rompen el silencio (suenan aunque el grupo esté silenciado)
+        await _alarma_sonora_emergencia(
+            context, COFRADIA_GROUP_ID, tipo,
+            menciones=menciones_emergencia, rafagas=3)
+        # Texto de alerta despues (+ PIN con notificación a todo el grupo)
         try:
-            await context.bot.send_message(
-                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb)
+            _msg_alerta31 = await context.bot.send_message(
+                chat_id=COFRADIA_GROUP_ID, text=alerta, reply_markup=tel_kb,
+                disable_notification=False)
             enviados += 1
+            try:
+                await context.bot.pin_chat_message(
+                    chat_id=COFRADIA_GROUP_ID,
+                    message_id=_msg_alerta31.message_id,
+                    disable_notification=False)
+            except Exception as _ep31:
+                logger.debug(f"Pin emergencia: {_ep31}")
         except Exception as _eg:
             logger.warning(f"Emergencia grupo: {_eg}")
         try:
@@ -32875,7 +33658,8 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                         try:
                             await context.bot.send_message(
                                 chat_id=COFRADIA_GROUP_ID, text=alerta,
-                                message_thread_id=tid, reply_markup=tel_kb)
+                                message_thread_id=tid, reply_markup=tel_kb,
+                                disable_notification=False)
                             enviados += 1
                         except Exception:
                             pass
@@ -32887,7 +33671,7 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
         try:
             await context.bot.send_message(
                 chat_id=OWNER_ID, text=f"🚨 EMERGENCIA REPORTADA\n\n{alerta}",
-                reply_markup=tel_kb)
+                reply_markup=tel_kb, disable_notification=False)
         except Exception:
             pass
 
@@ -32904,20 +33688,15 @@ async def _enviar_alerta_emergencia(update: Update, context: ContextTypes.DEFAUL
                 mid = m['user_id'] if DATABASE_URL else m[0]
                 if mid and mid != user.id and mid != OWNER_ID:
                     try:
-                        # SIRENA PRIMERO al privado (push-up automatico)
-                        if sirena_buf:
-                            try:
-                                sirena_buf.seek(0)
-                                await context.bot.send_voice(
-                                    chat_id=mid, voice=sirena_buf,
-                                    caption="🚨🔊 EMERGENCIA — " + tipo, duration=5)
-                            except Exception:
-                                pass
+                        # FASE 31: mini-ráfaga de alarma al privado (2 tonos)
+                        await _alarma_sonora_emergencia(
+                            context, mid, tipo, rafagas=2)
                         # Texto despues
                         await context.bot.send_message(
                             chat_id=mid,
                             text=f"🔊🔊🔊 ALERTA DE EMERGENCIA 🔊🔊🔊\n\n{alerta}",
-                            reply_markup=tel_kb)
+                            reply_markup=tel_kb,
+                            disable_notification=False)
                         miembros_notificados += 1
                     except Exception:
                         pass  # Usuario bloqueó al bot o nunca inició chat
@@ -34709,6 +35488,7 @@ def main():
             BotCommand("economia", "Dashboard economico + simuladores + IA"),
             BotCommand("emergencia", "🚨 Reportar emergencia"),
             BotCommand("calculadora", "🧮 Suite Económica Pro"),
+            BotCommand("clima", "🌤️ Pronóstico del tiempo (7 días)"),
             # === FASE 23: SISTEMA DE IDENTIDAD VISIBLE ===
             BotCommand("quien", "🆔 Identificar usuario (responde a mensaje o @user)"),
             BotCommand("cofrades", "👥 Lista todos los miembros con identidad"),
@@ -34741,6 +35521,7 @@ def main():
                     BotCommand("graficos", "Graficos de actividad"),
                     BotCommand("estadisticas", "Estadisticas del grupo"),
                     BotCommand("indicadores", "Indicadores economicos Chile"),
+                    BotCommand("clima", "🌤️ Pronóstico del tiempo"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
                     BotCommand("top10", "Top 10 Cofrades del mes"),
                     BotCommand("expertise", "Buscar expertos en un tema"),
@@ -34931,6 +35712,9 @@ def main():
     application.add_handler(CommandHandler("emergencia", emergencia_comando))
     application.add_handler(CommandHandler("calculadora", calculadora_comando))
     application.add_handler(CommandHandler("economia", economia_comando))
+    # FASE 31: clima + saldos de APIs
+    application.add_handler(CommandHandler("clima", clima_comando))
+    application.add_handler(CommandHandler("saldos", saldos_comando))
     # Mejoras: nuevos comandos
     application.add_handler(CommandHandler("reporte_ejecutivo", reporte_ejecutivo_comando))
     application.add_handler(CommandHandler("web_tarjeta", web_tarjeta_comando))
@@ -35770,6 +36554,19 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("📰 Newsletter semanal programada: lunes 9:00 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar newsletter: {e}")
+        
+        # FASE 31: Reporte semanal de saldos de APIs al OWNER (lunes 9:30 Chile)
+        # Incluye alertas anticipadas de saldo bajo y pagos mensuales por vencer.
+        try:
+            job_queue.run_daily(
+                job_saldos_semanal,
+                time=dt_time(hour=12, minute=30),  # 12:30 UTC = 9:30 Chile
+                days=(0,),  # Solo lunes
+                name='saldos_apis_semanal'
+            )
+            logger.info("💰 FASE 31: Reporte semanal de saldos programado: lunes 9:30 AM Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar reporte de saldos: {e}")
         
         # Recordatorio de eventos: diario a las 10:00 AM Chile
         async def recordar_eventos_proximos(context):
