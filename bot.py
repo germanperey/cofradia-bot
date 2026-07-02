@@ -236,7 +236,7 @@ _FASE8_SUGERENCIAS = {
         ('reporte_ejecutivo', 'Reporte ejecutivo del grupo (semanal)'),
     ],
     'estadisticas': [
-        ('graficos', 'Visualizaciones interactivas con ECharts'),
+        ('graficos', 'Visualizaciones interactivas del grupo'),
         ('reporte_ejecutivo', 'Reporte ejecutivo semanal del grupo'),
         ('top10', 'Top 10 Cofrades más activos del mes'),
     ],
@@ -12735,7 +12735,7 @@ TEMAS TRENDING: {topics_str}
 
 {f'CONTEXTO DE BIBLIOTECA (RAG):' + chr(10) + rag_context if rag_context else ''}
 
-INSTRUCCIONES PARA PARTICIPAR:
+INSTRUCCIONES PARA PARTICIPAR (ANTI-ALUCINACIÓN):
 1. Responde de forma BREVE (máximo 3-4 líneas), natural y amigable
 2. Dirígete al grupo en general o a {nombre_usuario} si es relevante
 3. Aporta un dato útil, tip, o sugerencia de comando del bot
@@ -12743,14 +12743,16 @@ INSTRUCCIONES PARA PARTICIPAR:
 5. NO seas invasivo ni repitas info obvia
 6. Sé como un cofrade más que aporta al grupo, no como un bot genérico
 7. Si puedes aportar un dato concreto del RAG, hazlo
-8. Siempre sugiere 1-2 comandos específicos que sean útiles para el tema
+8. COMANDOS: solo puedes mencionar comandos que aparezcan LITERALMENTE en la sección de herramientas de arriba. Cópialos EXACTOS (empiezan con / y NO llevan espacios, ej: /buscar_ia). Si ninguno aplica, NO menciones comandos.
+9. PROHIBIDO mencionar tecnologías, plataformas o guías externas (Discord, frameworks, librerías, sitios web). Esta comunidad opera SOLO en Telegram.
+10. PROHIBIDO inventar comandos, datos o fuentes que no estén en este prompt.
 
 MENSAJE QUE DISPARÓ TU PARTICIPACIÓN:
 "{texto_trigger}" — de {nombre_usuario}
 
 Genera UNA respuesta corta y útil:"""
 
-        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.7)
+        respuesta = llamar_groq(prompt, max_tokens=300, temperature=0.35)  # FIX Jul-2026: anti-alucinación (antes 0.7)
         if not respuesta:
             return
         
@@ -23571,6 +23573,25 @@ async def verificar_alertas_mensaje(user_id_autor, texto_mensaje, nombre_autor, 
     if not texto_mensaje or len(texto_mensaje) < 5:
         return
     texto_lower = texto_mensaje.lower()
+    # FIX (Jul-2026): si Telegram no trae apellido (nombre de 1 sola palabra),
+    # buscar el nombre completo del cofrade en tarjetas_profesional
+    try:
+        if nombre_autor and ' ' not in nombre_autor.strip():
+            conn_n = get_db_connection()
+            if conn_n:
+                cn = conn_n.cursor()
+                if DATABASE_URL:
+                    cn.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = %s LIMIT 1", (user_id_autor,))
+                else:
+                    cn.execute("SELECT nombre_completo FROM tarjetas_profesional WHERE user_id = ? LIMIT 1", (user_id_autor,))
+                row_n = cn.fetchone()
+                conn_n.close()
+                if row_n:
+                    nc = row_n['nombre_completo'] if DATABASE_URL else row_n[0]
+                    if nc and len(str(nc).strip()) > len(nombre_autor.strip()):
+                        nombre_autor = str(nc).strip()
+    except Exception:
+        pass
     try:
         conn = get_db_connection()
         if not conn:
@@ -31737,7 +31758,7 @@ async def economia_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(document=fh,
                 filename="dashboard_economia_chile_" + datetime.now().strftime('%Y%m%d') + ".html",
                 caption=("📊 Dashboard Económico Chile — Cofradía\n\n"
-                    "📈 14 indicadores + gráficos ECharts\n"
+                    "📈 14 indicadores + gráficos interactivos\n"
                     "🐔 AFP · 🏦 TMC · 💱 Histórico 5 años\n"
                     "📉 Inflación IPC 10 años\n\n"
                     "🧮 3 Simuladores: Hipotecario · APV · Inversión\n"
@@ -35394,14 +35415,19 @@ def main():
                     f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
                     f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
                     f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
-                    f"2. SINTETIZA los fragmentos en respuesta completa y fluida (300-500 palabras).\n"
+                    f"2. SINTETIZA los fragmentos en respuesta clara y fluida (150-300 palabras máximo).\n"
                     f"3. **GROUNDING ESTRICTO**: SI los fragmentos NO contienen suficiente información para "
                     f"responder con precisión, DILO HONESTAMENTE: 'Los documentos mencionan [X], pero no "
                     f"abordan directamente [tema preguntado]'. NO inventes para llenar el vacío.\n"
                     f"4. PROHIBIDO INVENTAR: nombres de personas, cifras, fechas, eventos o citas que NO estén\n"
                     f"   literalmente en los fragmentos.\n"
                     f"5. Comienza directo con la respuesta. Cita pasajes clave entre comillas cuando "
-                    f"sea ilustrativo. Cierra con conclusión basada SOLO en los fragmentos."
+                    f"sea ilustrativo. Cierra con conclusión basada SOLO en los fragmentos.\n"
+                    f"6. **FILTRO DE RELEVANCIA**: usa SOLO los fragmentos que respondan DIRECTAMENTE a la "
+                    f"pregunta. Si un fragmento habla de otra plataforma o tema (ej: Discord, tutoriales web "
+                    f"ajenos), IGNÓRALO por completo y NO lo menciones. Esta comunidad opera SOLO en Telegram.\n"
+                    f"7. NO cierres con preguntas retóricas tipo '¿Te parece si exploramos...?'. Cierra con "
+                    f"una afirmación útil o un comando sugerido."
                 )
                 ctx_rag = contexto_completo[:7000]
                 fuentes_str_final = fuentes_str
@@ -36168,7 +36194,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                     
                     # Cómo descargar reportes HTML
                     "📊 ¿Sabías que puedes DESCARGAR reportes interactivos?\n\n"
-                    "📈 /indicadores → Dashboard HTML con gráficos ECharts\n"
+                    "📈 /indicadores → Dashboard HTML interactivo\n"
                     "🏦 /economia → Simuladores + Análisis IA completo\n"
                     "📉 /graficos → Gráficos de actividad PNG\n"
                     "👤 /mi_dashboard → Tu dashboard personalizado\n\n"
