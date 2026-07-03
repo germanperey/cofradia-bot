@@ -20669,8 +20669,27 @@ def buscar_rag(query, limit=5):
         
         # Extraer términos relevantes — priorizar palabras largas (nombres propios, títulos)
         todas_palabras = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
-        # Palabras clave: las más largas y/o únicas (nombres propios suelen ser >= 4 letras)
-        palabras_clave = sorted(set(todas_palabras), key=len, reverse=True)
+        # FASE 31.2: NOMBRES PROPIOS PRIMERO. En "el libro de Milei de la
+        # inflación", ordenar solo por longitud ponía "inflacion" y
+        # "consiste" antes que "milei" → el autor quedaba fuera del top-2
+        # del matching por contenido. Un token capitalizado a mitad de
+        # oración es un nombre propio → máxima prioridad de búsqueda.
+        nombres_propios_q = set()
+        try:
+            _toks_raw = query.split()
+            for _i, _tk in enumerate(_toks_raw):
+                _lp = _tk.strip('¿?¡!.,;:()"\'«»')
+                if (len(_lp) >= 3 and _lp[0].isupper()
+                        and _i > 0
+                        and not _toks_raw[_i-1].rstrip().endswith(('.', '?', '!', ':'))):
+                    _lpn = normalizar(_lp)
+                    if _lpn not in STOPWORDS:
+                        nombres_propios_q.add(_lpn)
+        except Exception:
+            pass
+        _resto = [p for p in set(todas_palabras) if p not in nombres_propios_q]
+        palabras_clave = (sorted(nombres_propios_q, key=len, reverse=True)
+                          + sorted(_resto, key=len, reverse=True))
         
         if not palabras_clave:
             conn.close()
@@ -20727,7 +20746,10 @@ def buscar_rag(query, limit=5):
         # lo menciona decenas de veces (portada, prólogo, biografía).
         # Solo se ejecuta si A1+A2 fallaron; 1 query SQL por término (máx 2).
         if not docs_fase1:
-            terminos_contenido = [p for p in palabras_clave if len(p) >= 5][:2]
+            # FASE 31.2: nombres propios primero; umbral bajado a 2 menciones
+            _np_orden = [p for p in palabras_clave if p in nombres_propios_q and len(p) >= 4]
+            _otros_orden = [p for p in palabras_clave if p not in nombres_propios_q and len(p) >= 5]
+            terminos_contenido = (_np_orden + _otros_orden)[:3]
             for palabra in terminos_contenido:
                 try:
                     patron_like = f"%{palabra}%"
@@ -20748,8 +20770,8 @@ def buscar_rag(query, limit=5):
                     for row in c.fetchall():
                         src_c = row['source'] if DATABASE_URL else row[0]
                         cnt_c = row['cnt'] if DATABASE_URL else row[1]
-                        # Umbral: ≥3 menciones = el término es central en ese doc
-                        if src_c and int(cnt_c) >= 3 and src_c not in docs_fase1:
+                        # Umbral: ≥2 menciones = el término es central en ese doc
+                        if src_c and int(cnt_c) >= 2 and src_c not in docs_fase1:
                             docs_fase1.append(src_c)
                             logger.info(f"🎯 FASE 31 A3-CONTENIDO: '{palabra}' aparece "
                                         f"{cnt_c} veces en '{src_c}' → documento identificado")
@@ -21229,18 +21251,55 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         'rag_tematica': 'desconocida',   # 'relevante' | 'irrelevante' | 'desconocida'
     }
     
-    # 1. Historial del grupo (mensajes de usuarios)
+    # ═══════════════════════════════════════════════════════════════
+    # FASE 31.2: MOTORES EN PARALELO (pedido de Germán)
+    # Antes: historial → RAG en SECUENCIA (los tiempos se sumaban).
+    # Ahora: ambos motores se lanzan A LA VEZ; el tiempo total es el del
+    # motor más lento, no la suma. Con timeouts por motor y degradación
+    # automática al modo secuencial clásico si el pool fallara.
+    # ═══════════════════════════════════════════════════════════════
+    from concurrent.futures import ThreadPoolExecutor as _TPE_bu
+    _hist_res, _rag_res, _rag_err = [], None, None
+
+    def _motor_historial():
+        return buscar_en_historial(query, limit=limit_historial) if limit_historial > 0 else []
+
+    def _motor_rag():
+        return buscar_rag(query, limit=limit_rag)
+
     try:
-        historial = buscar_en_historial(query, limit=limit_historial)
-        if historial:
-            resultados['historial'] = historial
-            resultados['fuentes_usadas'].append(f"Historial ({len(historial)} msgs)")
-    except Exception as e:
-        logger.warning(f"Error buscando historial unificado: {e}")
+        with _TPE_bu(max_workers=2) as _pool_bu:
+            _f_h = _pool_bu.submit(_motor_historial)
+            _f_r = _pool_bu.submit(_motor_rag)
+            try:
+                _hist_res = _f_h.result(timeout=12) or []
+            except Exception as e:
+                logger.warning(f"Error buscando historial unificado: {e}")
+            try:
+                _rag_res = _f_r.result(timeout=25)
+            except Exception as e:
+                _rag_err = e
+    except Exception as _e_pool:
+        logger.warning(f"FASE 31.2 pool paralelo falló, modo secuencial: {_e_pool}")
+        try:
+            _hist_res = _motor_historial() or []
+        except Exception as e:
+            logger.warning(f"Error buscando historial unificado: {e}")
+        try:
+            _rag_res = _motor_rag()
+        except Exception as e:
+            _rag_err = e
+
+    # 1. Historial del grupo (mensajes de usuarios)
+    if _hist_res:
+        resultados['historial'] = _hist_res
+        resultados['fuentes_usadas'].append(f"Historial ({len(_hist_res)} msgs)")
     
     # 2. RAG (PDFs indexados + Excel indexado en BD)
     try:
-        chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
+        if _rag_err is not None:
+            raise _rag_err
+        chunks_rag, score_max = _rag_res if _rag_res is not None else ([], 0.0)
         resultados['rag_score_max'] = score_max
         
         # ═══════════════════════════════════════════════════════════════
@@ -27522,6 +27581,55 @@ RESPONDE SOLO EL JSON, sin bloques de código:
         if not query_mejorada or len(query_mejorada.strip()) < 5:
             query_mejorada = mensaje
         
+        # ═══════════════════════════════════════════════════════════════════
+        # FASE 31.2 — GUARDIA ANTI-CORRUPCIÓN DE NOMBRES PROPIOS (CRÍTICO)
+        # Bug real detectado: el LLM reescritor transformó "libro de Milei
+        # sobre la inflación" en una consulta sobre "Martín Vizcarra... en
+        # Chile" → el RAG buscó a la persona equivocada y toda la respuesta
+        # se corrompió. Regla determinística: la reescritura DEBE conservar
+        # TODOS los nombres propios del mensaje original y NO puede
+        # introducir nombres propios nuevos. Si viola cualquiera de las dos
+        # condiciones → se descarta y se usa el mensaje original tal cual.
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            import unicodedata as _ud_np
+            def _np_norm(t):
+                t = _ud_np.normalize('NFKD', t.lower())
+                return ''.join(c for c in t if not _ud_np.combining(c))
+            _COMUNES_CAP = {'el', 'la', 'los', 'las', 'un', 'una', 'de', 'en',
+                            'y', 'o', 'que', 'como', 'cuando', 'donde', 'por',
+                            'para', 'segun', 'sobre', 'chile', 'cofradia',
+                            'bot', 'telegram', 'hola', 'gracias'}
+            def _nombres_propios(texto):
+                # Palabras capitalizadas que NO inician oración → nombres propios
+                nombres = set()
+                tokens = texto.split()
+                for i, tk in enumerate(tokens):
+                    limpio = tk.strip('¿?¡!.,;:()"\'«»')
+                    if len(limpio) < 3 or not limpio[0].isupper():
+                        continue
+                    if i == 0 or tokens[i-1].rstrip().endswith(('.', '?', '!', ':')):
+                        continue  # inicio de oración: capital no confiable
+                    if _np_norm(limpio) in _COMUNES_CAP:
+                        continue
+                    nombres.add(_np_norm(limpio))
+                return nombres
+            
+            np_orig = _nombres_propios(mensaje)
+            np_mejor = _nombres_propios(query_mejorada)
+            q_mej_norm = _np_norm(query_mejorada)
+            
+            perdidos = {n for n in np_orig if n not in q_mej_norm}
+            inventados = np_mejor - np_orig
+            if perdidos or inventados:
+                logger.warning(
+                    f"🛡️ FASE 31.2 GUARDIA NOMBRES: reescritura descartada — "
+                    f"perdidos={perdidos or '∅'} inventados={inventados or '∅'} | "
+                    f"original='{mensaje[:60]}' | corrupta='{query_mejorada[:60]}'")
+                query_mejorada = mensaje
+        except Exception as _e_np:
+            logger.debug(f"Guardia nombres propios: {_e_np}")
+        
         comando = datos.get('comando')
         if comando and comando not in CATALOGO_COMANDOS_INTENCION:
             comando = None  # Ignorar comandos inventados
@@ -33191,6 +33299,8 @@ _TEMAS_CLIMA = {
     'lluvia':   {'grad': 'linear-gradient(160deg,#0f2027 0%,#203a43 55%,#2c5364 100%)', 'acc': '#4fc3f7'},
     'nieve':    {'grad': 'linear-gradient(160deg,#274060 0%,#5c7999 55%,#cfe8ef 100%)', 'acc': '#e0f7fa'},
     'tormenta': {'grad': 'linear-gradient(160deg,#0b0b2b 0%,#3a1c71 55%,#928dab 100%)', 'acc': '#c792ea'},
+    # FASE 31.2: cielo NOCTURNO (se aplica de noche sobre sol/nublado)
+    'noche':    {'grad': 'linear-gradient(160deg,#050814 0%,#0d1b3e 50%,#1b2a5e 100%)', 'acc': '#9db4ff'},
 }
 
 
@@ -33446,116 +33556,300 @@ def _icono_nocturno(codigo, emoji_dia):
     return emoji_dia  # lluvia, nieve, niebla, tormenta: mismo icono
 
 
+_HTTP_HEADERS_CLIMA = {
+    'User-Agent': 'CofradiaBot/1.0 (Telegram community bot; contacto: admin@cofradia)',
+    'Accept': 'application/json',
+}
+
+_METNO_SYMBOL_MAP = {
+    'clearsky': ('☀️', 'Despejado', 'sol'),
+    'fair': ('🌤️', 'Mayormente despejado', 'sol'),
+    'partlycloudy': ('⛅', 'Parcialmente nublado', 'nublado'),
+    'cloudy': ('☁️', 'Nublado', 'nublado'),
+    'fog': ('🌫️', 'Niebla', 'nublado'),
+    'lightrain': ('🌦️', 'Lluvia ligera', 'lluvia'),
+    'lightrainshowers': ('🌦️', 'Chubascos ligeros', 'lluvia'),
+    'rain': ('🌧️', 'Lluvia', 'lluvia'),
+    'rainshowers': ('🌧️', 'Chubascos', 'lluvia'),
+    'heavyrain': ('🌧️', 'Lluvia intensa', 'lluvia'),
+    'heavyrainshowers': ('🌧️', 'Chubascos intensos', 'lluvia'),
+    'sleet': ('🌨️', 'Aguanieve', 'nieve'),
+    'snow': ('❄️', 'Nieve', 'nieve'),
+    'lightsnow': ('🌨️', 'Nieve ligera', 'nieve'),
+    'heavysnow': ('❄️', 'Nieve intensa', 'nieve'),
+    'thunderstorm': ('⛈️', 'Tormenta eléctrica', 'tormenta'),
+}
+
+
+def _clima_fuente_openmeteo(lat, lon):
+    """FUENTE PRIMARIA de datos meteorológicos (Open-Meteo) con User-Agent
+    y 2 intentos. Devuelve estructura intermedia común o None.
+    Loggea el status HTTP para diagnóstico en Render."""
+    for intento in range(2):
+        try:
+            r = requests.get(
+                'https://api.open-meteo.com/v1/forecast',
+                params={
+                    'latitude': lat, 'longitude': lon,
+                    'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
+                             'wind_speed_10m_max,precipitation_probability_max,'
+                             'sunrise,sunset',
+                    'hourly': 'temperature_2m,relative_humidity_2m',
+                    'current': 'temperature_2m,relative_humidity_2m,'
+                               'wind_speed_10m,weather_code,apparent_temperature',
+                    'timezone': 'auto', 'forecast_days': 7,
+                }, headers=_HTTP_HEADERS_CLIMA, timeout=10)
+            if r.status_code == 200:
+                met = r.json()
+                daily = met.get('daily', {}) or {}
+                hourly = met.get('hourly', {}) or {}
+                cur = met.get('current', {}) or {}
+                if not daily.get('time'):
+                    logger.warning('Clima Open-Meteo: respuesta 200 sin daily.time')
+                    return None
+                codigos = daily.get('weather_code') or [3] * 7
+                infos = [_wmo_info(cd) for cd in codigos]
+                emoji_c, desc_c, tema_c = _wmo_info(cur.get('weather_code', 3))
+                logger.info('🌤️ Clima datos: Open-Meteo OK')
+                return {
+                    'fuente': 'Open-Meteo',
+                    'cur': {
+                        'temp': cur.get('temperature_2m', 0),
+                        'sensacion': cur.get('apparent_temperature',
+                                             cur.get('temperature_2m', 0)),
+                        'humedad': cur.get('relative_humidity_2m', 0),
+                        'viento': cur.get('wind_speed_10m', 0),
+                        'code': cur.get('weather_code', 3),
+                        'emoji': emoji_c, 'desc': desc_c, 'tema': tema_c,
+                        'time_local': cur.get('time') or '',
+                    },
+                    'fechas': daily.get('time', [])[:7],
+                    'tmin': daily.get('temperature_2m_min') or [0] * 7,
+                    'tmax': daily.get('temperature_2m_max') or [0] * 7,
+                    'viento_max': daily.get('wind_speed_10m_max') or [0] * 7,
+                    'prob_lluvia': daily.get('precipitation_probability_max') or [0] * 7,
+                    'infos_dia': infos,
+                    'sunrise0': (daily.get('sunrise') or [''])[0],
+                    'sunset0': (daily.get('sunset') or [''])[0],
+                    'h_temp': hourly.get('temperature_2m') or [],
+                    'h_hum': hourly.get('relative_humidity_2m') or [],
+                }
+            logger.warning(f'Clima Open-Meteo status={r.status_code} '
+                           f'(intento {intento+1}) body={r.text[:120]}')
+            if r.status_code in (429, 500, 502, 503):
+                import time as _t; _t.sleep(1.2)
+                continue
+            return None
+        except Exception as e:
+            logger.warning(f'Clima Open-Meteo intento {intento+1}: {e}')
+    return None
+
+
+def _clima_fuente_metno(lat, lon):
+    """FUENTE DE RESPALDO: met.no (Instituto Meteorológico de Noruega).
+    Gratuita, sin API key, altísima disponibilidad; exige User-Agent.
+    Serie horaria → se derivan mín/máx diarios y las 24 h por día.
+    Se usa SOLO si Open-Meteo falla (p.ej. límite por IP en Render)."""
+    try:
+        r = requests.get(
+            'https://api.met.no/weatherapi/locationforecast/2.0/compact',
+            params={'lat': round(lat, 4), 'lon': round(lon, 4)},
+            headers=_HTTP_HEADERS_CLIMA, timeout=10)
+        if r.status_code != 200:
+            logger.warning(f'Clima met.no status={r.status_code}')
+            return None
+        ts = ((r.json() or {}).get('properties') or {}).get('timeseries') or []
+        if not ts:
+            return None
+        # Offset horario aproximado por longitud (Chile ≈ UTC-4)
+        off_h = int(round(lon / 15.0))
+        from datetime import timedelta as _td
+        por_dia = {}
+        for punto in ts:
+            try:
+                t_utc = datetime.strptime(punto['time'][:19], '%Y-%m-%dT%H:%M:%S')
+                t_loc = t_utc + _td(hours=off_h)
+                det = ((punto.get('data') or {}).get('instant') or {}).get('details') or {}
+                n1 = ((punto.get('data') or {}).get('next_1_hours') or {})
+                n6 = ((punto.get('data') or {}).get('next_6_hours') or {})
+                sym = ((n1.get('summary') or n6.get('summary') or {})
+                       .get('symbol_code') or '')
+                precip = ((n1.get('details') or {}).get('precipitation_amount')
+                          or (n6.get('details') or {}).get('precipitation_amount') or 0)
+                clave = t_loc.strftime('%Y-%m-%d')
+                d = por_dia.setdefault(clave, {'temps': {}, 'hums': [], 'winds': [],
+                                               'precip': 0.0, 'syms': []})
+                temp = det.get('air_temperature')
+                if temp is not None:
+                    d['temps'][t_loc.hour] = temp
+                if det.get('relative_humidity') is not None:
+                    d['hums'].append(det['relative_humidity'])
+                if det.get('wind_speed') is not None:
+                    d['winds'].append(det['wind_speed'] * 3.6)
+                d['precip'] += float(precip or 0)
+                if sym:
+                    d['syms'].append(sym.split('_')[0])
+            except Exception:
+                continue
+        claves = sorted(por_dia.keys())[:7]
+        if len(claves) < 2:
+            return None
+        fechas, tmin, tmax, vmax, prob, infos = [], [], [], [], [], []
+        h_temp_total, h_hum_total = [], []
+        for k in claves:
+            d = por_dia[k]
+            vals = list(d['temps'].values())
+            if not vals:
+                continue
+            fechas.append(k)
+            tmin.append(min(vals)); tmax.append(max(vals))
+            vmax.append(max(d['winds']) if d['winds'] else 0)
+            p = d['precip']
+            prob.append(80 if p > 2 else (50 if p > 0.2 else 10))
+            sym = max(set(d['syms']), key=d['syms'].count) if d['syms'] else 'cloudy'
+            infos.append(_METNO_SYMBOL_MAP.get(sym, ('☁️', 'Nublado', 'nublado')))
+            # 24 horas con interpolación simple de huecos
+            horas = []
+            prev = None
+            for h in range(24):
+                v = d['temps'].get(h)
+                if v is None and prev is not None:
+                    # buscar siguiente conocido para interpolar
+                    sig = next((d['temps'][x] for x in range(h + 1, 24)
+                                if x in d['temps']), prev)
+                    v = (prev + sig) / 2
+                horas.append(round(v) if v is not None else None)
+                prev = v if v is not None else prev
+            h_temp_total.extend(horas)
+            h_hum_total.extend([round(sum(d['hums']) / len(d['hums']))
+                                if d['hums'] else None] * 24)
+        if not fechas:
+            return None
+        pr = ts[0]['data']['instant']['details']
+        sym0 = ''
+        try:
+            sym0 = (ts[0]['data'].get('next_1_hours', {})
+                    .get('summary', {}).get('symbol_code', '')).split('_')[0]
+        except Exception:
+            pass
+        emoji_c, desc_c, tema_c = _METNO_SYMBOL_MAP.get(sym0, ('☁️', 'Nublado', 'nublado'))
+        hora_loc = (datetime.utcnow() + _td(hours=off_h))
+        logger.info('🌤️ Clima datos: met.no (respaldo) OK')
+        return {
+            'fuente': 'met.no',
+            'cur': {
+                'temp': pr.get('air_temperature', 0),
+                'sensacion': pr.get('air_temperature', 0),
+                'humedad': pr.get('relative_humidity', 0),
+                'viento': (pr.get('wind_speed', 0) or 0) * 3.6,
+                'code': 0 if tema_c == 'sol' else (2 if tema_c == 'nublado' else 61),
+                'emoji': emoji_c, 'desc': desc_c, 'tema': tema_c,
+                'time_local': hora_loc.strftime('%Y-%m-%dT%H:%M'),
+            },
+            'fechas': fechas, 'tmin': tmin, 'tmax': tmax,
+            'viento_max': vmax, 'prob_lluvia': prob, 'infos_dia': infos,
+            'sunrise0': '', 'sunset0': '',
+            'h_temp': h_temp_total, 'h_hum': h_hum_total,
+            'hora_local_num': hora_loc.hour,
+        }
+    except Exception as e:
+        logger.warning(f'Clima met.no: {e}')
+        return None
+
+
 def _obtener_clima_ciudad(ciudad: str):
-    """FASE 31.1: Geocodifica (3 fuentes, país opcional al final) y obtiene
-    pronóstico 7 días + temperaturas POR HORA + calidad del aire + noche/día.
-    Retorna dict listo para render, o None SOLO si la localidad no existe."""
+    """FASE 31.2: Geocodifica (3 fuentes, país opcional) y obtiene el
+    pronóstico con CADENA DE RESPALDO de datos (Open-Meteo → met.no).
+    Retorna:
+      dict     → datos listos para render
+      'NOGEO'  → la localidad no existe en ninguna fuente
+      'NODATA' → localidad OK pero los servicios meteorológicos no
+                 respondieron (mensaje honesto al usuario, no engañoso)."""
     try:
         ciudad_norm, pais_iso = _clima_parsear_ciudad_pais(ciudad)
         geo = _clima_geocodificar(ciudad_norm, pais_iso)
         if not geo:
-            return None
+            return 'NOGEO'
         lat, lon, nombre, region, pais = geo
 
-        # ── Pronóstico: 7 días + horas + sol (para detectar noche) ──
-        r_met = requests.get(
-            'https://api.open-meteo.com/v1/forecast',
-            params={
-                'latitude': lat, 'longitude': lon,
-                'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
-                         'wind_speed_10m_max,precipitation_probability_max,'
-                         'sunrise,sunset',
-                'hourly': 'temperature_2m,relative_humidity_2m,weather_code',
-                'current': 'temperature_2m,relative_humidity_2m,'
-                           'wind_speed_10m,weather_code,apparent_temperature',
-                'timezone': 'auto', 'forecast_days': 7,
-            }, timeout=12)
-        if r_met.status_code != 200:
-            return None
-        met = r_met.json()
-        daily = met.get('daily', {}) or {}
-        hourly = met.get('hourly', {}) or {}
-        cur = met.get('current', {}) or {}
-        h_temp = hourly.get('temperature_2m') or []
-        h_hum = hourly.get('relative_humidity_2m') or []
+        met = _clima_fuente_openmeteo(lat, lon)
+        if not met:
+            met = _clima_fuente_metno(lat, lon)
+        if not met:
+            logger.error(f'Clima: SIN DATOS para {nombre} ({lat},{lon}) '
+                         f'— ambas fuentes fallaron')
+            return 'NODATA'
 
-        # ── Calidad del aire (US AQI) — best effort, nunca bloquea ──
+        # ── Calidad del aire (best-effort, 5s, jamás bloquea) ──
         aqi_val, aqi_cat = None, None
         try:
             r_aq = requests.get(
                 'https://air-quality-api.open-meteo.com/v1/air-quality',
                 params={'latitude': lat, 'longitude': lon,
                         'current': 'us_aqi', 'timezone': 'auto'},
-                timeout=8)
+                headers=_HTTP_HEADERS_CLIMA, timeout=5)
             if r_aq.status_code == 200:
                 aqi_raw = ((r_aq.json() or {}).get('current') or {}).get('us_aqi')
                 aqi_val, aqi_cat = _clima_aqi_categoria(aqi_raw)
         except Exception as _e_aq:
-            logger.debug(f"Clima AQI: {_e_aq}")
+            logger.debug(f'Clima AQI: {_e_aq}')
 
-        # ── ¿Es de noche AHORA en ese lugar? (sunrise/sunset del día 0) ──
+        # ── ¿Es de noche AHORA? ──
         es_noche = False
         try:
-            t_now = cur.get('time') or ''
-            sr = (daily.get('sunrise') or [''])[0]
-            ss = (daily.get('sunset') or [''])[0]
-            if t_now and sr and ss:
-                es_noche = not (sr <= t_now <= ss)  # ISO local: comparación lexicográfica válida
+            if met.get('sunrise0') and met.get('sunset0'):
+                t_now = met['cur'].get('time_local') or ''
+                es_noche = not (met['sunrise0'] <= t_now <= met['sunset0'])
+            elif 'hora_local_num' in met:  # respaldo met.no: ventana 07-20
+                es_noche = not (7 <= met['hora_local_num'] < 20)
         except Exception:
             pass
 
-        fechas = daily.get('time', [])
         dias = []
-        for i, fstr in enumerate(fechas[:7]):
+        h_temp, h_hum = met['h_temp'], met['h_hum']
+        for i, fstr in enumerate(met['fechas'][:7]):
             try:
                 fdt = datetime.strptime(fstr, '%Y-%m-%d')
                 nombre_dia = 'Hoy' if i == 0 else _DIAS_ES[fdt.weekday()]
                 fecha_fmt = f'{fdt.day} {_MESES_ES[fdt.month][:3]}'
             except Exception:
                 nombre_dia, fecha_fmt = fstr, fstr
-            bloque_h = h_hum[i * 24:(i + 1) * 24]
+            bloque_h = [x for x in h_hum[i * 24:(i + 1) * 24] if x is not None]
             humedad = round(sum(bloque_h) / len(bloque_h)) if bloque_h else None
             temps_horas = [round(x) if x is not None else None
                            for x in h_temp[i * 24:(i + 1) * 24]]
-            codigo_d = (daily.get('weather_code') or [3] * 7)[i]
-            emoji, desc, tema = _wmo_info(codigo_d)
+            emoji, desc, tema = met['infos_dia'][i] if i < len(met['infos_dia']) else ('☁️', 'Variable', 'nublado')
             dias.append({
                 'nombre': nombre_dia, 'fecha': fecha_fmt,
-                'tmin': round((daily.get('temperature_2m_min') or [0] * 7)[i]),
-                'tmax': round((daily.get('temperature_2m_max') or [0] * 7)[i]),
-                'viento': round((daily.get('wind_speed_10m_max') or [0] * 7)[i]),
-                'lluvia': (daily.get('precipitation_probability_max') or [0] * 7)[i],
+                'tmin': round(met['tmin'][i]), 'tmax': round(met['tmax'][i]),
+                'viento': round(met['viento_max'][i]),
+                'lluvia': met['prob_lluvia'][i],
                 'humedad': humedad if humedad is not None else '—',
                 'emoji': emoji, 'desc': desc, 'tema': tema,
                 'horas': temps_horas,
             })
+        if not dias:
+            return 'NODATA'
 
-        cod_hoy = cur.get('weather_code', 3)
-        emoji_hoy, desc_hoy, tema_hoy = _wmo_info(cod_hoy)
+        cur = met['cur']
+        emoji_hoy = cur['emoji']
         if es_noche:
-            emoji_hoy = _icono_nocturno(cod_hoy, emoji_hoy)
+            emoji_hoy = _icono_nocturno(cur.get('code', 3), emoji_hoy)
         return {
-            'ciudad': nombre,
-            'region': region,
-            'pais': pais,
+            'ciudad': nombre, 'region': region, 'pais': pais,
             'es_noche': es_noche,
             'aqi': aqi_val, 'aqi_cat': aqi_cat,
+            'fuente': met.get('fuente', 'Open-Meteo'),
             'actual': {
-                'temp': round(cur.get('temperature_2m', 0)),
-                'sensacion': round(cur.get('apparent_temperature',
-                                           cur.get('temperature_2m', 0))),
-                'humedad': round(cur.get('relative_humidity_2m', 0)),
-                'viento': round(cur.get('wind_speed_10m', 0)),
-                'emoji': emoji_hoy, 'desc': desc_hoy, 'tema': tema_hoy,
+                'temp': round(cur['temp']), 'sensacion': round(cur['sensacion']),
+                'humedad': round(cur['humedad']), 'viento': round(cur['viento']),
+                'emoji': emoji_hoy, 'desc': cur['desc'], 'tema': cur['tema'],
             },
             'dias': dias,
         }
-    except requests.Timeout:
-        logger.warning('Clima: timeout Open-Meteo')
-        return None
     except Exception as e:
-        logger.warning(f'Clima error: {e}')
-        return None
+        logger.warning(f'Clima error general: {e}')
+        return 'NODATA'
 
 
 _HTML_CLIMA_TEMPLATE = """<!DOCTYPE html>
@@ -33731,6 +34025,11 @@ def _generar_html_clima(d: dict) -> str:
     """FASE 31: Renderiza el dashboard HTML del clima con tema dinámico."""
     act = d['actual']
     tema = _TEMAS_CLIMA.get(act['tema'], _TEMAS_CLIMA['nublado'])
+    # FASE 31.2: de noche, el cielo del dashboard se oscurece (pedido de Germán:
+    # "de noche se muestre una Luna con el cielo oscuro"). Lluvia/tormenta ya
+    # tienen fondos oscuros propios y se conservan.
+    if d.get('es_noche') and act['tema'] in ('sol', 'nublado'):
+        tema = _TEMAS_CLIMA['noche']
     dias = d['dias']
 
     tarjetas = []
@@ -33791,7 +34090,7 @@ async def clima_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         datos = await asyncio.wait_for(
             loop.run_in_executor(None, _obtener_clima_ciudad, ciudad), timeout=35)
-        if not datos:
+        if datos == 'NOGEO' or datos is None:
             await msg_espera.edit_text(
                 f'❌ No encontré la localidad "{ciudad}".\n\n'
                 '💡 Prueba con: /clima Providencia · /clima Valparaíso · '
@@ -33799,6 +34098,13 @@ async def clima_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 '🌍 Si el nombre existe en varios países, agrega el país al '
                 'final: /clima santiago chile · /clima la reina chile · '
                 '/clima cordoba argentina')
+            return
+        if datos == 'NODATA':
+            await msg_espera.edit_text(
+                f'⚠️ Encontré "{ciudad.title()}", pero el servicio meteorológico '
+                'no respondió en este momento.\n\n'
+                '🔄 Reintenta en 1-2 minutos — el sistema usará automáticamente '
+                'una fuente de respaldo.')
             return
 
         act = datos['actual']
