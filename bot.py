@@ -77,6 +77,7 @@ TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
+logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.8 — RAG frase-en-contenido + A0 blindado (2026-07-03)")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -20947,15 +20948,27 @@ def buscar_rag(query, limit=5, original=None):
         # confiable (validada por humanos) y la más rápida (tabla diminuta).
         # ═══════════════════════════════════════════════════
         try:
-            _terms_a0 = [p for p in palabras_clave[:3] if len(p) >= 4]
+            # FASE 31.8 BLINDAJE A0:
+            # (a) Si la pregunta ORIGINAL trae un título entre comillas, la
+            #     evidencia explícita del usuario MANDA sobre lo aprendido →
+            #     A0 se salta y decide el matching por frases.
+            # (b) votos >= 2: un solo voto (posible auto-guardado erróneo de
+            #     versiones previas) ya NO puede dictar los documentos. El
+            #     veneno "inflación→feriados+Cardalda" queda inerte.
+            _tiene_comillas_a0 = any(_q in f"{original or ''}{query}"
+                                     for _q in ('"', '\u201c', '\u00ab'))
+            _terms_a0 = ([] if _tiene_comillas_a0
+                         else [p for p in palabras_clave[:3] if len(p) >= 4])
+            if _tiene_comillas_a0:
+                logger.info("🛡️ FASE 31.8: título entre comillas → A0 cede al matching por frases")
             for _t_a0 in _terms_a0:
                 if DATABASE_URL:
                     c.execute("""SELECT docs FROM rag_aprendizaje
-                                 WHERE votos > 0 AND terminos ILIKE %s
+                                 WHERE votos >= 2 AND terminos ILIKE %s
                                  ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
                 else:
                     c.execute("""SELECT docs FROM rag_aprendizaje
-                                 WHERE votos > 0 AND LOWER(terminos) LIKE ?
+                                 WHERE votos >= 2 AND LOWER(terminos) LIKE ?
                                  ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
                 _row_a0 = c.fetchone()
                 if _row_a0:
@@ -21008,7 +21021,15 @@ def buscar_rag(query, limit=5, original=None):
                              'fin', 'introduccion', 'principales', 'basico',
                              'basica', 'general', 'nueva', 'nuevo', 'web',
                              'pdf', 'chile', 'chileno', 'chilena', 'forma',
-                             'educada', 'facil', 'practica', 'practico'}
+                             'educada', 'facil', 'practica', 'practico',
+                             # FASE 31.8: verbos de petición y muletillas que
+                             # NO identifican ningún documento
+                             'dame', 'dime', 'quiero', 'necesito', 'muestrame',
+                             'entregame', 'indicame', 'ayudame', 'cuales',
+                             'sirve', 'sirven', 'favor', 'gracias', 'ahora',
+                             'hacer', 'saber', 'conocer', 'explica',
+                             'explicame', 'detalla', 'detallame', 'describe',
+                             'contenido', 'informacion', 'detalle', 'detalles'}
 
         def _frase_valida(fr):
             """Una frase solo cuenta si aporta ≥1 token con CONTENIDO real
@@ -21050,6 +21071,78 @@ def buscar_rag(query, limit=5, original=None):
                     break  # la frase más larga que calza manda; no diluir
         except Exception as _e_fr:
             logger.debug(f"match frase: {_e_fr}")
+
+        # ═══ FASE 31.8 MATCH 0.5 — FRASE EN CONTENIDO ═══
+        # Si la frase fuerte (título entre comillas o n-grama con contenido)
+        # NO calza con ningún NOMBRE de archivo (el PDF puede llamarse
+        # "milei_2023.pdf" o tener el nombre con tildes/guiones distintos),
+        # se busca la frase DENTRO del texto de los chunks: un libro menciona
+        # su propio título decenas de veces (portada, encabezados, prólogo).
+        # Usa las frases CRUDAS (con tildes) porque chunk_text las conserva.
+        if not docs_fase1:
+            try:
+                _frases_raw = []
+                # (a) comillas de la pregunta ORIGINAL (crudas, prioridad)
+                for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{10,80})["\u201d\u00bb\u2019\']', _texto_frases):
+                    _frases_raw.append(_m.strip().lower())
+                # (b) n-gramas crudos 6→4 de la ORIGINAL con contenido real
+                if original:
+                    _tor = [w.strip('¿?¡!.,;:()[]"\'\u00ab\u00bb\u201c\u201d\u2018\u2019')
+                            for w in original.lower().split()]
+                    _tor = [w for w in _tor if len(w) > 1]
+                    for _n in (6, 5, 4):
+                        for _i in range(len(_tor) - _n + 1):
+                            _ng_raw = ' '.join(_tor[_i:_i + _n])
+                            if len(_ng_raw) >= 14 and _frase_valida(normalizar(_ng_raw)):
+                                _frases_raw.append(_ng_raw)
+                _vistas_fc = set()
+                _intentos_fc = 0
+                try:
+                    if DATABASE_URL:
+                        c.execute("SET LOCAL statement_timeout = 4000")
+                except Exception:
+                    pass
+                for _fr_raw in _frases_raw:
+                    if _fr_raw in _vistas_fc or _intentos_fc >= 3:
+                        continue
+                    _vistas_fc.add(_fr_raw)
+                    _intentos_fc += 1
+                    try:
+                        if DATABASE_URL:
+                            c.execute("""SELECT source, COUNT(*) AS n FROM rag_chunks
+                                         WHERE chunk_text ILIKE %s AND source IS NOT NULL
+                                         GROUP BY source ORDER BY n DESC LIMIT 2""",
+                                      (f'%{_fr_raw}%',))
+                        else:
+                            c.execute("""SELECT source, COUNT(*) AS n FROM rag_chunks
+                                         WHERE LOWER(chunk_text) LIKE ? AND source IS NOT NULL
+                                         GROUP BY source ORDER BY n DESC LIMIT 2""",
+                                      (f'%{_fr_raw}%',))
+                        for _row_fc in (c.fetchall() or []):
+                            _src_fc = _row_fc['source'] if DATABASE_URL else _row_fc[0]
+                            if _src_fc and _src_fc not in docs_fase1:
+                                docs_fase1.append(_src_fc)
+                                logger.info(f"🎯 FASE 31.8 FRASE-CONTENIDO: "
+                                            f"«{_fr_raw[:50]}» → '{_src_fc}'")
+                    except Exception as _e_fc1:
+                        logger.debug(f"frase-contenido «{_fr_raw[:30]}»: {_e_fc1}")
+                        try:
+                            conn.rollback()  # FASE 31.4: jamás abortar la transacción
+                        except Exception:
+                            pass
+                    if docs_fase1:
+                        break  # la primera frase que identifica documento MANDA
+                try:
+                    if DATABASE_URL:
+                        c.execute("SET LOCAL statement_timeout = DEFAULT")
+                except Exception:
+                    pass
+            except Exception as _e_fc:
+                logger.debug(f"match frase-contenido: {_e_fc}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
         # MATCH 1: palabra clave en el nombre del doc — AHORA con LÍMITE DE
         # PALABRA (no substring: "fin" ya no matchea "FINanciera") y VETO de
