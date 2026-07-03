@@ -74,7 +74,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v31.1-catalina-natural-2026-07-03"
+TTS_VERSION_TAG = "v31.3-catalina-acentos-ingles-pausas-2026-07-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -330,6 +330,32 @@ def _texto_para_edge(texto: str) -> str:
     for orig, alias in [('Keynes', 'Keins'), ('Hayek', 'Jáyek'),
                         ('Friedman', 'Frídman')]:
         t = re.sub(r'\b' + orig + r'\b', alias, t)
+    # ═══ FASE 31.3 (1) ACENTOS: nombres con tilde que el motor entona mal.
+    # "Germán" en posición vocativa suena "Géerman"; el respelling "Jermán"
+    # fuerza el fonema /x/ y la sílaba tónica correcta (-mán). Solo AUDIO,
+    # el texto escrito no se toca. Lista corta y comprobada (lección F14).
+    for orig, alias in [('Germán', 'Jermán'), ('German', 'Jermán'),
+                        ('Ángel', 'Ánjel'), ('Sebastián', 'Sebastián')]:
+        t = re.sub(r'\b' + orig + r'\b', alias, t)
+    # ═══ FASE 31.3 (2) ANGLICISMOS: pronunciación inglesa natural vía
+    # respelling fonético español (edge-tts no soporta <lang> desde la lib).
+    _ANGLICISMOS = [
+        (r'\bdashboards\b', 'dáshbords'), (r'\bdashboard\b', 'dáshbord'),
+        (r'\branking\b', 'ránkin'), (r'\brankings\b', 'ránkins'),
+        (r'\bemail\b', 'iméil'), (r'\be-mail\b', 'iméil'),
+        (r'\bonline\b', 'onláin'), (r'\bsoftware\b', 'sóftwer'),
+        (r'\bhardware\b', 'járdwer'), (r'\bmarketing\b', 'márketin'),
+        (r'\bnetworking\b', 'netwórkin'), (r'\bstartups\b', 'stártaps'),
+        (r'\bstartup\b', 'stártap'), (r'\bfeedback\b', 'fídbak'),
+        (r'\bstreaming\b', 'strímin'), (r'\bcloud\b', 'cláud'),
+        (r'\blinks\b', 'lincs'), (r'\blink\b', 'linc'),
+        (r'\bWhatsApp\b', 'wátsap'), (r'\bExcel\b', 'éxel'),
+        (r'\bGoogle Drive\b', 'gúguel dráiv'), (r'\bGoogle\b', 'gúguel'),
+        (r'\bblockchain\b', 'blókchein'), (r'\bcoaching\b', 'cóuchin'),
+        (r'\bheadhunter\b', 'jedjánter'), (r'\bpartners?\b', 'pártner'),
+    ]
+    for patt_a, repl_a in _ANGLICISMOS:
+        t = re.sub(patt_a, repl_a, t, flags=re.IGNORECASE)
     # Montos y porcentajes → lectura natural
     t = re.sub(r'\$\s*([\d.,]+)',
                lambda m: m.group(1).replace('.', ' mil ') + ' pesos'
@@ -341,6 +367,13 @@ def _texto_para_edge(texto: str) -> str:
     t = t.replace(' · ', ', ').replace('·', ',').replace('—', ', ').replace(' - ', ', ')
     # Asegurar espacio tras signos (induce la pausa del motor)
     t = re.sub(r'([.!?;:,])(?=\S)', r'\1 ', t)
+    # ═══ FASE 31.3 (3) PAUSAS HUMANAS:
+    # · PUNTO / ! / ? → salto de línea = frontera de oración → pausa LARGA
+    #   (la respiración del hablante). · PUNTO Y COMA → coma (pausa SUAVE).
+    # · La COMA se deja tal cual: en la voz neuronal ya es la pausa corta
+    #   y relajada. Resultado: coma < punto, como habla una persona.
+    t = t.replace('; ', ', ')
+    t = re.sub(r'([.!?…])\s+', r'\1\n', t)
     t = re.sub(r'[ \t]{2,}', ' ', t).strip()
     return t
 

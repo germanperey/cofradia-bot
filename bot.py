@@ -984,22 +984,180 @@ def _crear_botones_feedback(funcion):
          InlineKeyboardButton("Mejorar", callback_data=f"fb_down_{funcion}")]
     ])
 
+def _fb_extraer_terminos(texto: str) -> str:
+    """FASE 31.3: términos clave de una pregunta para la memoria de
+    aprendizaje — nombres propios primero, luego palabras largas."""
+    import unicodedata as _ud_fb
+    def _n(t):
+        t = _ud_fb.normalize('NFKD', (t or '').lower())
+        return ''.join(ch for ch in t if not _ud_fb.combining(ch))
+    STOP_FB = {'sobre','libro','libros','acerca','trata','consiste','dice','habla',
+               'como','cual','cuales','donde','cuando','para','este','esta','tema'}
+    toks = (texto or '').split()
+    props, otros = [], []
+    for i, tk in enumerate(toks):
+        lp = tk.strip('¿?¡!.,;:()"\'«»')
+        ln = _n(lp)
+        if len(ln) < 4 or ln in STOP_FB:
+            continue
+        if lp[:1].isupper() and i > 0 and not toks[i-1].rstrip().endswith(('.', '?', '!', ':')):
+            props.append(ln)
+        else:
+            otros.append(ln)
+    vistos, orden = set(), []
+    for t in props + otros:
+        if t not in vistos:
+            vistos.add(t); orden.append(t)
+    return ' '.join(orden[:6])
+
+
+def _fb_guardar_aprendizaje(pregunta: str, docs: list, delta: int):
+    """Upsert en rag_aprendizaje: 'Útil' suma votos a la asociación
+    términos→documentos; 'Mejorar' los resta (las malas asociaciones se
+    desvanecen). Crea la tabla si no existe."""
+    terminos = _fb_extraer_terminos(pregunta)
+    if not terminos or not docs:
+        return
+    docs_str = '||'.join(docs[:5])
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("""CREATE TABLE IF NOT EXISTS rag_aprendizaje (
+                            id SERIAL PRIMARY KEY,
+                            terminos TEXT NOT NULL,
+                            docs TEXT NOT NULL,
+                            votos INTEGER DEFAULT 0,
+                            actualizado TIMESTAMP DEFAULT NOW())""")
+            c.execute("SELECT id, votos FROM rag_aprendizaje WHERE terminos=%s AND docs=%s",
+                      (terminos, docs_str))
+            row = c.fetchone()
+            if row:
+                c.execute("UPDATE rag_aprendizaje SET votos=votos+%s, actualizado=NOW() WHERE id=%s",
+                          (delta, row['id'] if isinstance(row, dict) else row[0]))
+            else:
+                c.execute("INSERT INTO rag_aprendizaje (terminos, docs, votos) VALUES (%s,%s,%s)",
+                          (terminos, docs_str, delta))
+        else:
+            c.execute("""CREATE TABLE IF NOT EXISTS rag_aprendizaje (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            terminos TEXT NOT NULL, docs TEXT NOT NULL,
+                            votos INTEGER DEFAULT 0,
+                            actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            c.execute("SELECT id FROM rag_aprendizaje WHERE terminos=? AND docs=?",
+                      (terminos, docs_str))
+            row = c.fetchone()
+            if row:
+                c.execute("UPDATE rag_aprendizaje SET votos=votos+? WHERE id=?", (delta, row[0]))
+            else:
+                c.execute("INSERT INTO rag_aprendizaje (terminos, docs, votos) VALUES (?,?,?)",
+                          (terminos, docs_str, delta))
+        conn.commit(); conn.close()
+        logger.info(f"🧠 FASE 31.3 aprendizaje {'+'if delta>0 else ''}{delta}: '{terminos}' → {docs_str[:80]}")
+    except Exception as e:
+        logger.warning(f"aprendizaje feedback: {e}")
+
+
 async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("Gracias por tu feedback!")
     parts = query.data.split('_', 2)
-    if len(parts) < 3: return
+    if len(parts) < 3:
+        await query.answer()
+        return
     feedback = 'positivo' if parts[1] == 'up' else 'negativo'
+    funcion = parts[2]
+    # Registro histórico (comportamiento previo, intacto)
     try:
         conn = get_db_connection()
         if conn and DATABASE_URL:
             c = conn.cursor()
             c.execute("INSERT INTO ia_feedback (user_id,message_id,funcion,feedback) VALUES (%s,%s,%s,%s)",
-                      (query.from_user.id, query.message.message_id if query.message else 0, parts[2], feedback))
+                      (query.from_user.id, query.message.message_id if query.message else 0, funcion, feedback))
             conn.commit(); conn.close()
     except Exception: pass
     try: await query.edit_message_reply_markup(reply_markup=None)
     except Exception: pass
+
+    meta = context.user_data.get('ultima_respuesta_meta') or {}
+
+    # ═══ "ÚTIL" → ENTRENAMIENTO: la asociación pregunta→documentos queda
+    #     en memoria con voto positivo; buscar_rag la usará primero (A0) ═══
+    if feedback == 'positivo':
+        await query.answer("✅ ¡Gracias! Aprendí de esta respuesta.")
+        if meta.get('docs'):
+            try:
+                await asyncio.to_thread(_fb_guardar_aprendizaje,
+                                        meta.get('pregunta', ''), meta['docs'], +1)
+            except Exception as e:
+                logger.debug(f"fb_up aprendizaje: {e}")
+        return
+
+    # ═══ "MEJORAR" → voto negativo + NUEVA RESPUESTA con criterios distintos ═══
+    await query.answer("🔄 Buscando con otros criterios...")
+    if meta.get('docs'):
+        try:
+            await asyncio.to_thread(_fb_guardar_aprendizaje,
+                                    meta.get('pregunta', ''), meta['docs'], -1)
+        except Exception:
+            pass
+    if funcion != 'chat_privado' or not meta.get('pregunta'):
+        try:
+            await query.message.reply_text(
+                "📝 Tomé nota. Reformula tu pregunta con más detalle "
+                "(autor, tema, fechas) y lo intento de nuevo.")
+        except Exception: pass
+        return
+    chat_id = query.message.chat_id
+    msg_rt = None
+    try:
+        msg_rt = await context.bot.send_message(chat_id, "🔄 Reintentando con criterios de búsqueda ampliados...")
+    except Exception: pass
+    try:
+        pregunta_fb = meta['pregunta']
+
+        def _regenerar():
+            # Criterios DISTINTOS: query expansion (sinónimos/variantes) y
+            # más chunks; excluimos el sesgo de la ronda anterior.
+            try:
+                chunks_fb, score_fb = buscar_rag_expandido(pregunta_fb, 20)
+            except Exception:
+                chunks_fb, score_fb = buscar_rag(pregunta_fb, limit=20)
+            ctx_fb = "\n\n".join(
+                f"[{(it[1] if len(it) > 1 else '?')}]\n{it[0][:700]}"
+                for it in (chunks_fb or [])[:8])
+            prompt_fb = (
+                "Eres el asistente de la Cofradía. El usuario marcó que tu respuesta "
+                "anterior NO fue satisfactoria. Genera una respuesta NUEVA y DISTINTA: "
+                "cambia el enfoque, sé más concreto, estructura mejor y NO repitas la anterior.\n\n"
+                f"PREGUNTA: {pregunta_fb}\n\n"
+                f"RESPUESTA ANTERIOR (insatisfactoria, NO repetir):\n{meta.get('respuesta','')[:900]}\n\n"
+                + (f"CONTEXTO DE LA BIBLIOTECA (usa SOLO lo relevante):\n{ctx_fb}\n\n" if ctx_fb else "")
+                + "Si la biblioteca no cubre el tema, dilo con honestidad y responde con tu "
+                  "conocimiento general, indicándolo. Responde en español, claro y estructurado.")
+            return llamar_groq(prompt_fb, max_tokens=900, temperature=0.5)
+
+        nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=45.0)
+        if msg_rt:
+            try: await msg_rt.delete()
+            except Exception: pass
+        if nueva and nueva.strip():
+            nueva_txt = nueva.strip()[:3900] + "\n\n─────────────────\n🔄 Respuesta regenerada con criterios ampliados"
+            await context.bot.send_message(
+                chat_id, nueva_txt,
+                reply_markup=_crear_botones_feedback('chat_privado'))
+            meta['respuesta'] = nueva.strip()[:1800]
+            context.user_data['ultima_respuesta_meta'] = meta
+        else:
+            await context.bot.send_message(
+                chat_id, "😕 No logré una mejor respuesta. Reformula la pregunta con más detalle.")
+    except asyncio.TimeoutError:
+        if msg_rt:
+            try: await msg_rt.edit_text("⏱️ El reintento tardó demasiado. Reformula tu pregunta.")
+            except Exception: pass
+    except Exception as e:
+        logger.warning(f"fb_down regeneración: {e}")
 
 # ======================================================================
 # ===  MEJORA 5: ANALISIS MULTI-MODAL (IMAGENES EN GRUPO)  ============
@@ -12590,7 +12748,16 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # FASE 9 (revertido): limit_rag=25 mantiene cobertura completa de respuestas
         # NO reducir — se prefiere respuesta exhaustiva. La velocidad se mejora por
         # otros lados (cache RAG, normalización SQL, paralelización TTS).
-        resultados_unificados = busqueda_unificada(pregunta_mejorada, limit_historial=10, limit_rag=25)
+        # FASE 31.3: en hilo + timeout (antes bloqueaba TODO el bot)
+        try:
+            resultados_unificados = await asyncio.wait_for(
+                asyncio.to_thread(busqueda_unificada, pregunta_mejorada, 10, 25),
+                timeout=15.0)
+        except Exception as _e_bu_m:
+            logger.warning(f"FASE 31.3 mención búsqueda timeout/err: {_e_bu_m}")
+            resultados_unificados = {'historial': [], 'rag': [], 'fuentes_usadas': [],
+                                     'rag_score_max': 0.0, 'rag_confianza': 'ninguna',
+                                     'rag_tematica': 'desconocida'}
         contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta_mejorada)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
         rag_conf = resultados_unificados.get('rag_confianza', 'ninguna')
@@ -20703,6 +20870,37 @@ def buscar_rag(query, limit=5):
         docs_fase1 = []    # sources encontrados por nombre
         chunks_fase1 = []  # (texto, score, source) con score alto
         
+        # ═══════════════════════════════════════════════════
+        # FASE 31.3 — PASO A0: MEMORIA DE APRENDIZAJE (botón "Útil")
+        # Si un usuario marcó "Útil" una respuesta, la asociación
+        # término→documentos quedó guardada en rag_aprendizaje. Antes de
+        # cualquier matching, consultamos esa memoria: es la señal más
+        # confiable (validada por humanos) y la más rápida (tabla diminuta).
+        # ═══════════════════════════════════════════════════
+        try:
+            _terms_a0 = [p for p in palabras_clave[:3] if len(p) >= 4]
+            for _t_a0 in _terms_a0:
+                if DATABASE_URL:
+                    c.execute("""SELECT docs FROM rag_aprendizaje
+                                 WHERE votos > 0 AND terminos ILIKE %s
+                                 ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
+                else:
+                    c.execute("""SELECT docs FROM rag_aprendizaje
+                                 WHERE votos > 0 AND LOWER(terminos) LIKE ?
+                                 ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
+                _row_a0 = c.fetchone()
+                if _row_a0:
+                    _docs_raw = (_row_a0['docs'] if DATABASE_URL else _row_a0[0]) or ''
+                    for _d in _docs_raw.split('||'):
+                        if _d and _d not in docs_fase1:
+                            docs_fase1.append(_d)
+                    if docs_fase1:
+                        logger.info(f"🧠 FASE 31.3 A0-APRENDIZAJE: '{_t_a0}' → "
+                                    f"{docs_fase1} (validado por usuarios)")
+                        break
+        except Exception as _e_a0:
+            logger.debug(f"A0 aprendizaje (tabla puede no existir aún): {_e_a0}")
+        
         try:
             c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
             todos_sources_db = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
@@ -20750,35 +20948,56 @@ def buscar_rag(query, limit=5):
             _np_orden = [p for p in palabras_clave if p in nombres_propios_q and len(p) >= 4]
             _otros_orden = [p for p in palabras_clave if p not in nombres_propios_q and len(p) >= 5]
             terminos_contenido = (_np_orden + _otros_orden)[:3]
+            # FASE 31.3 VELOCIDAD: el COUNT(*)+GROUP BY anterior escaneaba
+            # la tabla COMPLETA (decenas de miles de chunks) por cada término
+            # → minutos en Supabase. Ahora: (a) statement_timeout 4s como
+            # tope duro, (b) keywords primero (columna pequeña), (c) LIMIT 80
+            # que DETIENE el escaneo apenas encuentra coincidencias, y el
+            # conteo por documento se hace en Python sobre esa muestra.
+            from collections import Counter as _Cnt_a3
+            try:
+                if DATABASE_URL:
+                    c.execute("SET LOCAL statement_timeout = 4000")
+            except Exception:
+                pass
             for palabra in terminos_contenido:
                 try:
                     patron_like = f"%{palabra}%"
-                    if DATABASE_URL:
-                        c.execute(
-                            """SELECT source, COUNT(*) AS cnt FROM rag_chunks
-                               WHERE LOWER(chunk_text) LIKE %s AND source IS NOT NULL
-                               GROUP BY source ORDER BY cnt DESC LIMIT 2""",
-                            (patron_like,)
-                        )
-                    else:
-                        c.execute(
-                            """SELECT source, COUNT(*) AS cnt FROM rag_chunks
-                               WHERE LOWER(chunk_text) LIKE ? AND source IS NOT NULL
-                               GROUP BY source ORDER BY cnt DESC LIMIT 2""",
-                            (patron_like,)
-                        )
-                    for row in c.fetchall():
-                        src_c = row['source'] if DATABASE_URL else row[0]
-                        cnt_c = row['cnt'] if DATABASE_URL else row[1]
-                        # Umbral: ≥2 menciones = el término es central en ese doc
-                        if src_c and int(cnt_c) >= 2 and src_c not in docs_fase1:
+                    filas_a3 = []
+                    for col_a3 in ('keywords', 'chunk_text'):
+                        try:
+                            if DATABASE_URL:
+                                c.execute(
+                                    f"""SELECT source FROM rag_chunks
+                                        WHERE {col_a3} ILIKE %s AND source IS NOT NULL
+                                        LIMIT 80""", (patron_like,))
+                            else:
+                                c.execute(
+                                    f"""SELECT source FROM rag_chunks
+                                        WHERE LOWER({col_a3}) LIKE ? AND source IS NOT NULL
+                                        LIMIT 80""", (patron_like,))
+                            filas_a3 = [(r['source'] if DATABASE_URL else r[0])
+                                        for r in c.fetchall()]
+                        except Exception as _e_col:
+                            logger.debug(f"A3 col {col_a3}: {_e_col}")
+                            filas_a3 = []
+                        if filas_a3:
+                            break
+                    for src_c, cnt_c in _Cnt_a3(filas_a3).most_common(2):
+                        # Umbral: ≥2 menciones en la muestra = término central
+                        if src_c and cnt_c >= 2 and src_c not in docs_fase1:
                             docs_fase1.append(src_c)
                             logger.info(f"🎯 FASE 31 A3-CONTENIDO: '{palabra}' aparece "
-                                        f"{cnt_c} veces en '{src_c}' → documento identificado")
+                                        f"{cnt_c}+ veces en '{src_c}' → documento identificado")
                 except Exception as _e_a3:
                     logger.debug(f"A3 contenido '{palabra}' error: {_e_a3}")
                 if docs_fase1:
                     break  # con un documento identificado basta
+            try:
+                if DATABASE_URL:
+                    c.execute("SET LOCAL statement_timeout = DEFAULT")
+            except Exception:
+                pass
         
         # ═══════════════════════════════════════════════════
         # PASO B — pgvector RESTRINGIDO al/los documento(s) matcheado(s)
@@ -37129,7 +37348,15 @@ def main():
             
             async def _ejecutar_busqueda_con_timeout():
                 """Ejecuta las 3 búsquedas paralelas con timeout estricto de 10s total."""
-                with _TPE_priv(max_workers=3) as pool:
+                # FASE 31.3 — CAUSA RAÍZ DE LOS 3 MINUTOS: el "with pool:"
+                # al salir ejecutaba shutdown(wait=True), que BLOQUEABA el
+                # event loop completo hasta que terminara cualquier búsqueda
+                # colgada (aunque el timeout de 10s ya hubiera disparado).
+                # Ahora: pool sin context-manager y shutdown(wait=False) →
+                # los timeouts mandan de verdad; hilos rezagados mueren solos
+                # (el A3 además tiene statement_timeout de 4s en la BD).
+                pool = _TPE_priv(max_workers=3)
+                try:
                     fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
                     fut_tar_th = pool.submit(_buscar_tarjetas_priv, mensaje)
                     fut_ev_th = pool.submit(_buscar_eventos_priv)
@@ -37141,6 +37368,11 @@ def main():
                     
                     results = await asyncio.gather(fut_rag_aw, fut_tar_aw, fut_ev_aw, return_exceptions=True)
                     return results
+                finally:
+                    try:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        pool.shutdown(wait=False)
             
             # Defaults vacíos por si cualquier búsqueda falla
             resultados_busq = {'historial': [], 'rag': [], 'fuentes_usadas': [],
@@ -37423,6 +37655,25 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
                 # Mejora 4: Botones de feedback
+                # FASE 31.3: guardar metadatos para que "Útil" entrene la
+                # memoria de aprendizaje y "Mejorar" regenere con otros criterios
+                try:
+                    _docs_meta = []
+                    try:
+                        for _it in (resultados_busq.get('rag') or [])[:8]:
+                            _s = _it[1] if isinstance(_it, (list, tuple)) and len(_it) > 1 else ''
+                            if _s and _s not in _docs_meta:
+                                _docs_meta.append(_s)
+                    except Exception:
+                        pass
+                    context.user_data['ultima_respuesta_meta'] = {
+                        'pregunta': mensaje[:400],
+                        'query': (query_para_busqueda or mensaje)[:400],
+                        'docs': _docs_meta[:5],
+                        'respuesta': respuesta[:1800],
+                    }
+                except Exception as _e_meta:
+                    logger.debug(f"meta feedback: {_e_meta}")
                 try:
                     await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('chat_privado'))
                 except Exception:
