@@ -77,7 +77,7 @@ TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
-logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9b — Fallback web con URLs citadas + pronunciación EN/FR de Catalina (2026-07-03)")
+logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9c — Decimales con coma + rangos «entre X y Y» en audio (2026-07-03)")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -1012,6 +1012,18 @@ def _fb_extraer_terminos(texto: str) -> str:
     return ' '.join(orden[:6])
 
 
+def _decimales_a_coma(texto: str) -> str:
+    """FASE 31.9c (pedido de Germán): en las respuestas de texto, los números
+    decimales SIEMPRE con coma (1.5% → 1,5%), convención chilena. Razón: con
+    punto, Catalina pronunciaba "uno cinco por ciento" en vez de "uno coma
+    cinco por ciento". Solo convierte punto + 1-2 dígitos (decimal real);
+    NUNCA toca miles chilenos (1.500), IPs, versiones (3.11.9) ni dominios."""
+    try:
+        return re.sub(r'(?<![\d.])(\d+)\.(\d{1,2})(?![.\d])', r'\1,\2', texto)
+    except Exception:
+        return texto
+
+
 def _cortar_degeneracion(texto: str) -> str:
     """FASE 31.6: corta bucles de repetición del LLM (el caso 'Mihailo no,
     sino de otro autor...' repetido ∞). Detecta la primera frase que se
@@ -1191,6 +1203,7 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
 
         nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=75.0)  # FASE 31.7: 45→75s
         nueva = _cortar_degeneracion(nueva)  # FASE 31.6: mata el bucle "Mihailo..."
+        nueva = _decimales_a_coma(nueva)  # FASE 31.9c decimales con coma
         if msg_rt:
             try: await msg_rt.delete()
             except Exception: pass
@@ -38513,6 +38526,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             # FASE 30.1: envío final robusto (msg puede ser None si reply_text inicial falló)
             if respuesta:
                 respuesta = _cortar_degeneracion(respuesta)  # FASE 31.6 anti-bucle
+                respuesta = _decimales_a_coma(respuesta)  # FASE 31.9c decimales con coma
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
                 # FASE 31.9b: si la información vino de Internet, citar las

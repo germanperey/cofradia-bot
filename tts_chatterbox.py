@@ -443,12 +443,26 @@ def _texto_para_edge(texto: str) -> str:
         # preservar mayúscula inicial (nombres propios, inicios de frase)
         return (r[0].upper() + r[1:]) if w[0].isupper() else r
     t = re.sub(r"\b[A-Za-z][A-Za-z']{2,}\b", _fonetizar_palabra_31_9, t)
+    # ═══ FASE 31.9c RANGOS NUMÉRICOS (pedido de Germán): "1,5%–2,5%" se
+    # leía "uno cinco por ciento dos cinco por ciento". El guion entre dos
+    # cifras indica RANGO → se lee "entre 1,5 y 2,5 por ciento". Guardas:
+    # no se toca si hay más guiones encadenados (teléfonos, códigos).
+    t = re.sub(r'(?<![Ee]ntre\s)(?<![\d,\-–—])(\d+(?:,\d+)?)\s*%?\s*[\-–—]\s*(\d+(?:,\d+)?)\s*%(?![\-–—\d])',
+               r'entre \1 y \2 por ciento', t)
+    t = re.sub(r'(?<![Ee]ntre\s)(?<![\d,\-–—])(\d+(?:,\d+)?)\s*[\-–—]\s*(\d+(?:,\d+)?)(?![\-–—\d%])',
+               r'entre \1 y \2', t)
+    # y si el texto YA decía "entre X-Y", solo el guion se convierte en "y"
+    t = re.sub(r'([Ee]ntre\s+\d+(?:,\d+)?)\s*[\-–—]\s*(\d+(?:,\d+)?)',
+               r'\1 y \2', t)
     # Montos y porcentajes → lectura natural
     t = re.sub(r'\$\s*([\d.,]+)',
                lambda m: m.group(1).replace('.', ' mil ') + ' pesos'
                if m.group(1).count('.') == 1 and m.group(1).replace('.', '').isdigit()
                else m.group(1) + ' pesos', t)
     t = re.sub(r'(\d+),(\d+)\s*%', r'\1 coma \2 por ciento', t)
+    # FASE 31.9c: decimal con coma (1-2 dígitos) se DICE "coma" siempre,
+    # aunque el % haya quedado lejos por la regla de rangos de arriba
+    t = re.sub(r'(\d+),(\d{1,2})(?!\d)', r'\1 coma \2', t)
     t = re.sub(r'(\d+)\s*%', r'\1 por ciento', t)
     # ═══ FASE 31.5 (2) SÍMBOLOS con pronunciación inglesa REALISTA.
     # edge-tts ya NO acepta SSML <lang> (Microsoft lo bloqueó), así que la
