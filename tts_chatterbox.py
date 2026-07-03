@@ -48,6 +48,14 @@ PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "0.0"))
 _ssml_raw = os.getenv("GOOGLE_TTS_SSML", "true").strip().lower()
 USE_SSML = _ssml_raw not in ("false", "0", "no", "off", "n")
 
+# FASE 31.1: MOTOR PRINCIPAL = CATALINA (es-CL, femenina, acento chileno).
+# Requisito de Germán: la voz del bot debe ser la de Catalina, con entonación
+# natural. edge-tts (voz neuronal de Microsoft es-CL-CatalinaNeural) es
+# gratuita, no requiere API key y suena genuinamente chilena. Google Neural2
+# queda como RESPALDO si edge-tts fallara.
+# Para volver a Google sin tocar código: poner TTS_MOTOR=google en Render.
+TTS_MOTOR = os.getenv("TTS_MOTOR", "catalina").strip().lower()
+
 # LOG INMEDIATO al cargar el modulo: visible al iniciar bot
 print(f"━━━ [TTS_CHATTERBOX] CONFIG ━━━")
 print(f"  GOOGLE_TTS_KEY: {'CONFIGURADA' if GOOGLE_TTS_KEY else 'NO CONFIGURADA'}")
@@ -66,7 +74,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v31-voz-natural-2026-07-02"
+TTS_VERSION_TAG = "v31.1-catalina-natural-2026-07-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -296,13 +304,57 @@ def _llamar_google_tts(texto: str) -> Optional[bytes]:
     return None
 
 
+def _texto_para_edge(texto: str) -> str:
+    """FASE 31.1: Prepara el texto para que CATALINA lo lea con máxima
+    naturalidad. edge-tts no acepta SSML personalizado desde la librería,
+    así que la naturalidad se logra vía TEXTO: expansiones léxicas,
+    deletreo de siglas con espacios y puntuación que induce pausas.
+    NUNCA se deforman palabras en español correcto (lección de Fase 14)."""
+    t = texto
+    # Siglas → deletreo natural ("IPC" → "i pe cé" suena raro; "I P C" con
+    # espacios hace que la voz neuronal las diga letra a letra correctamente)
+    SIGLAS = ['IPSA', 'IMACEC', 'IPC', 'TPM', 'UTM', 'AFP', 'APV', 'TMC',
+              'CMF', 'INE', 'SII', 'RUT', 'MBA', 'CEO', 'CFO', 'CTO',
+              'RAG', 'API', 'LLM', 'PIB', 'ROI', 'ROE']
+    for sig in sorted(SIGLAS, key=len, reverse=True):
+        t = re.sub(r'\b' + sig + r'\b', ' '.join(sig), t)
+    # Expansiones léxicas
+    for patt, repl in [
+        (r'\bUF\b', 'unidad de fomento'), (r'\bCLP\b', 'pesos chilenos'),
+        (r'\bUSD\b', 'dólares'), (r'\bEUR\b', 'euros'),
+        (r'\bBCCh\b', 'Banco Central de Chile'), (r'\bPYMEs?\b', 'pymes'),
+        (r'\bIVA\b', 'iva'),
+    ]:
+        t = re.sub(patt, repl, t)
+    # Nombres extranjeros que la voz silabea mal (lista mínima)
+    for orig, alias in [('Keynes', 'Keins'), ('Hayek', 'Jáyek'),
+                        ('Friedman', 'Frídman')]:
+        t = re.sub(r'\b' + orig + r'\b', alias, t)
+    # Montos y porcentajes → lectura natural
+    t = re.sub(r'\$\s*([\d.,]+)',
+               lambda m: m.group(1).replace('.', ' mil ') + ' pesos'
+               if m.group(1).count('.') == 1 and m.group(1).replace('.', '').isdigit()
+               else m.group(1) + ' pesos', t)
+    t = re.sub(r'(\d+),(\d+)\s*%', r'\1 coma \2 por ciento', t)
+    t = re.sub(r'(\d+)\s*%', r'\1 por ciento', t)
+    # Separadores visuales → pausa hablada
+    t = t.replace(' · ', ', ').replace('·', ',').replace('—', ', ').replace(' - ', ', ')
+    # Asegurar espacio tras signos (induce la pausa del motor)
+    t = re.sub(r'([.!?;:,])(?=\S)', r'\1 ', t)
+    t = re.sub(r'[ \t]{2,}', ' ', t).strip()
+    return t
+
+
 async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
     try:
         import edge_tts
-        # FASE 31: rate más cercano a 0 = más natural; pitch neutro.
+        # FASE 31.1: prosodia CONVERSACIONAL de Catalina — rate levemente
+        # pausado (-5%) para dicción clara sin sonar lenta; pitch +2Hz da
+        # calidez; el texto llega pre-procesado por _texto_para_edge.
+        texto = _texto_para_edge(texto)
         communicate = edge_tts.Communicate(
             texto, "es-CL-CatalinaNeural",
-            rate="-6%", pitch="+0Hz", volume="+6%"
+            rate="-5%", pitch="+2Hz", volume="+10%"
         )
         buf = io.BytesIO()
         async for chunk in communicate.stream():
@@ -344,6 +396,35 @@ async def texto_a_voz(
             print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return f_cache.read_bytes()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # FASE 31.1 — ORDEN DE MOTORES INVERTIDO POR PEDIDO DE GERMÁN:
+    #   PRINCIPAL: edge-tts CATALINA (es-CL, femenina, acento chileno)
+    #   RESPALDO : Google Neural2 (solo si Catalina falla y hay key)
+    # TTS_MOTOR=google en Render restaura el orden anterior sin tocar código.
+    # ═══════════════════════════════════════════════════════════════════
+    if TTS_MOTOR != "google":
+        audio = await _edge_tts_fallback(texto_limpio)
+        if audio:
+            if USE_CACHE:
+                f_cache.write_bytes(audio)
+            print(f"🎤 [TTS RESULT] ✅ CATALINA (es-CL) → {len(audio):,} bytes generados")
+            print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return audio
+        print(f"🎤 [TTS RESULT] ⚠️ CATALINA FALLÓ → intentando Google TTS de respaldo")
+        logger.warning("⚠️ edge-tts Catalina falló — intentando Google TTS como respaldo")
+        if GOOGLE_TTS_KEY:
+            loop = asyncio.get_event_loop()
+            audio = await loop.run_in_executor(None, _llamar_google_tts, texto_limpio)
+            if audio:
+                if USE_CACHE:
+                    f_cache.write_bytes(audio)
+                print(f"🎤 [TTS RESULT] ✅ GOOGLE (respaldo) → {len(audio):,} bytes")
+                print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                return audio
+        print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return None
+
+    # TTS_MOTOR=google → comportamiento anterior (Google primario)
     if GOOGLE_TTS_KEY:
         loop  = asyncio.get_event_loop()
         audio = await loop.run_in_executor(None, _llamar_google_tts, texto_limpio)
@@ -354,14 +435,14 @@ async def texto_a_voz(
             print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return audio
         # Google TTS falló → fallback a edge-tts Catalina
-        print(f"🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina (sonará más robótica)")
+        print(f"🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina")
         logger.warning(f"⚠️ Google TTS falló — usando edge-tts Catalina como fallback")
         result = await _edge_tts_fallback(texto_limpio)
         print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return result
     else:
         print(f"⏭️ [TTS] Sin GOOGLE_TTS_KEY → usando edge-tts Catalina")
-        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada — usando Catalina como fallback")
+        logger.warning("⚠️ GOOGLE_TTS_KEY no configurada — usando Catalina")
         result = await _edge_tts_fallback(texto_limpio)
         print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return result

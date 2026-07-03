@@ -20720,6 +20720,44 @@ def buscar_rag(query, limit=5):
                         if src_orig in docs_fase1:
                             break
         
+        # MATCH 3 (FASE 31.1 — por CONTENIDO): si el nombre del archivo no
+        # contiene el término (p.ej. el libro de Milei se llama "El fin de
+        # la inflación.pdf" SIN el apellido), identificar el documento por
+        # FRECUENCIA del término dentro de sus chunks: un libro DE un autor
+        # lo menciona decenas de veces (portada, prólogo, biografía).
+        # Solo se ejecuta si A1+A2 fallaron; 1 query SQL por término (máx 2).
+        if not docs_fase1:
+            terminos_contenido = [p for p in palabras_clave if len(p) >= 5][:2]
+            for palabra in terminos_contenido:
+                try:
+                    patron_like = f"%{palabra}%"
+                    if DATABASE_URL:
+                        c.execute(
+                            """SELECT source, COUNT(*) AS cnt FROM rag_chunks
+                               WHERE LOWER(chunk_text) LIKE %s AND source IS NOT NULL
+                               GROUP BY source ORDER BY cnt DESC LIMIT 2""",
+                            (patron_like,)
+                        )
+                    else:
+                        c.execute(
+                            """SELECT source, COUNT(*) AS cnt FROM rag_chunks
+                               WHERE LOWER(chunk_text) LIKE ? AND source IS NOT NULL
+                               GROUP BY source ORDER BY cnt DESC LIMIT 2""",
+                            (patron_like,)
+                        )
+                    for row in c.fetchall():
+                        src_c = row['source'] if DATABASE_URL else row[0]
+                        cnt_c = row['cnt'] if DATABASE_URL else row[1]
+                        # Umbral: ≥3 menciones = el término es central en ese doc
+                        if src_c and int(cnt_c) >= 3 and src_c not in docs_fase1:
+                            docs_fase1.append(src_c)
+                            logger.info(f"🎯 FASE 31 A3-CONTENIDO: '{palabra}' aparece "
+                                        f"{cnt_c} veces en '{src_c}' → documento identificado")
+                except Exception as _e_a3:
+                    logger.debug(f"A3 contenido '{palabra}' error: {_e_a3}")
+                if docs_fase1:
+                    break  # con un documento identificado basta
+        
         # ═══════════════════════════════════════════════════
         # PASO B — pgvector RESTRINGIDO al/los documento(s) matcheado(s)
         # Ranking semántico DENTRO del libro: para "libro de Milei sobre
@@ -33164,33 +33202,270 @@ def _wmo_info(codigo):
         return ('🌡️', 'Variable', 'nublado')
 
 
-def _obtener_clima_ciudad(ciudad: str):
-    """FASE 31: Geocodifica la ciudad (preferencia Chile) y obtiene pronóstico
-    de 7 días desde Open-Meteo. Retorna dict listo para render, o None."""
-    try:
-        import urllib.parse as _up_cl
-        # ── 1. Geocoding (preferir resultados de Chile) ──────────────────
-        r_geo = requests.get(
-            'https://geocoding-api.open-meteo.com/v1/search',
-            params={'name': ciudad, 'count': 5, 'language': 'es', 'format': 'json'},
-            timeout=10)
-        if r_geo.status_code != 200:
-            return None
-        resultados = (r_geo.json() or {}).get('results') or []
-        if not resultados:
-            return None
-        lugar = next((x for x in resultados if x.get('country_code') == 'CL'),
-                     resultados[0])
-        lat, lon = lugar['latitude'], lugar['longitude']
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 31.1 — GEOCODING ROBUSTO DEL CLIMA
+# Problema reportado: "/clima santiago" y "/clima las condes" devolvían
+# "No encontré la localidad" porque dependía de UNA sola fuente externa
+# (Open-Meteo geocoding) sin fallback. Solución (estándar 3 fuentes):
+#   1) Diccionario LOCAL de ~90 comunas/ciudades chilenas (instantáneo,
+#      nunca falla, cubre el 95% de las consultas de la Cofradía).
+#   2) Open-Meteo geocoding (con filtro de país si el usuario lo indica).
+#   3) Nominatim/OpenStreetMap como respaldo.
+# NUEVO: país opcional al final → "/clima santiago chile", "/clima la reina chile".
+# ═══════════════════════════════════════════════════════════════════════════
+_CIUDADES_CHILE = {
+    # Gran Santiago (comunas)
+    'santiago': (-33.4489, -70.6693, 'Región Metropolitana'),
+    'las condes': (-33.4167, -70.5833, 'Región Metropolitana'),
+    'providencia': (-33.4314, -70.6093, 'Región Metropolitana'),
+    'vitacura': (-33.3900, -70.6000, 'Región Metropolitana'),
+    'lo barnechea': (-33.3500, -70.5180, 'Región Metropolitana'),
+    'la reina': (-33.4500, -70.5500, 'Región Metropolitana'),
+    'nunoa': (-33.4569, -70.5975, 'Región Metropolitana'),
+    'la florida': (-33.5500, -70.5700, 'Región Metropolitana'),
+    'penalolen': (-33.4800, -70.5400, 'Región Metropolitana'),
+    'macul': (-33.4900, -70.6000, 'Región Metropolitana'),
+    'san joaquin': (-33.4930, -70.6280, 'Región Metropolitana'),
+    'san miguel': (-33.5000, -70.6500, 'Región Metropolitana'),
+    'la cisterna': (-33.5300, -70.6600, 'Región Metropolitana'),
+    'el bosque': (-33.5600, -70.6750, 'Región Metropolitana'),
+    'la granja': (-33.5380, -70.6250, 'Región Metropolitana'),
+    'san ramon': (-33.5400, -70.6420, 'Región Metropolitana'),
+    'la pintana': (-33.5800, -70.6300, 'Región Metropolitana'),
+    'puente alto': (-33.6100, -70.5800, 'Región Metropolitana'),
+    'san bernardo': (-33.6000, -70.7000, 'Región Metropolitana'),
+    'maipu': (-33.5100, -70.7600, 'Región Metropolitana'),
+    'cerrillos': (-33.5000, -70.7100, 'Región Metropolitana'),
+    'estacion central': (-33.4600, -70.7000, 'Región Metropolitana'),
+    'pedro aguirre cerda': (-33.4850, -70.6750, 'Región Metropolitana'),
+    'lo espejo': (-33.5200, -70.6900, 'Región Metropolitana'),
+    'quinta normal': (-33.4400, -70.7000, 'Región Metropolitana'),
+    'lo prado': (-33.4440, -70.7250, 'Región Metropolitana'),
+    'pudahuel': (-33.4400, -70.7500, 'Región Metropolitana'),
+    'cerro navia': (-33.4230, -70.7350, 'Región Metropolitana'),
+    'renca': (-33.4000, -70.7200, 'Región Metropolitana'),
+    'quilicura': (-33.3600, -70.7300, 'Región Metropolitana'),
+    'huechuraba': (-33.3700, -70.6400, 'Región Metropolitana'),
+    'conchali': (-33.3800, -70.6800, 'Región Metropolitana'),
+    'independencia': (-33.4200, -70.6600, 'Región Metropolitana'),
+    'recoleta': (-33.4000, -70.6400, 'Región Metropolitana'),
+    'colina': (-33.2000, -70.6700, 'Región Metropolitana'),
+    'lampa': (-33.2860, -70.8760, 'Región Metropolitana'),
+    'padre hurtado': (-33.5730, -70.8090, 'Región Metropolitana'),
+    'penaflor': (-33.6060, -70.8760, 'Región Metropolitana'),
+    'talagante': (-33.6640, -70.9280, 'Región Metropolitana'),
+    'melipilla': (-33.6890, -71.2130, 'Región Metropolitana'),
+    'buin': (-33.7330, -70.7420, 'Región Metropolitana'),
+    'paine': (-33.8080, -70.7410, 'Región Metropolitana'),
+    # Norte
+    'arica': (-18.4783, -70.3126, 'Arica y Parinacota'),
+    'iquique': (-20.2141, -70.1524, 'Tarapacá'),
+    'antofagasta': (-23.6500, -70.4000, 'Antofagasta'),
+    'calama': (-22.4667, -68.9333, 'Antofagasta'),
+    'san pedro de atacama': (-22.9110, -68.2000, 'Antofagasta'),
+    'copiapo': (-27.3668, -70.3323, 'Atacama'),
+    'vallenar': (-28.5760, -70.7600, 'Atacama'),
+    'la serena': (-29.9027, -71.2519, 'Coquimbo'),
+    'coquimbo': (-29.9533, -71.3436, 'Coquimbo'),
+    'ovalle': (-30.6011, -71.1990, 'Coquimbo'),
+    # Centro
+    'valparaiso': (-33.0472, -71.6127, 'Valparaíso'),
+    'vina del mar': (-33.0246, -71.5518, 'Valparaíso'),
+    'concon': (-32.9200, -71.5100, 'Valparaíso'),
+    'quilpue': (-33.0470, -71.4420, 'Valparaíso'),
+    'villa alemana': (-33.0420, -71.3730, 'Valparaíso'),
+    'quillota': (-32.8800, -71.2470, 'Valparaíso'),
+    'san antonio': (-33.5930, -71.6210, 'Valparaíso'),
+    'los andes': (-32.8330, -70.5980, 'Valparaíso'),
+    'san felipe': (-32.7500, -70.7250, 'Valparaíso'),
+    'isla de pascua': (-27.1500, -109.4300, 'Valparaíso'),
+    'rapa nui': (-27.1500, -109.4300, 'Valparaíso'),
+    'rancagua': (-34.1708, -70.7444, 'O\'Higgins'),
+    'machali': (-34.1810, -70.6490, 'O\'Higgins'),
+    'san fernando': (-34.5850, -70.9890, 'O\'Higgins'),
+    'santa cruz': (-34.6390, -71.3650, 'O\'Higgins'),
+    'pichilemu': (-34.3930, -72.0000, 'O\'Higgins'),
+    'curico': (-34.9850, -71.2390, 'Maule'),
+    'talca': (-35.4264, -71.6554, 'Maule'),
+    'linares': (-35.8460, -71.5930, 'Maule'),
+    'constitucion': (-35.3330, -72.4160, 'Maule'),
+    'chillan': (-36.6067, -72.1034, 'Ñuble'),
+    # Sur
+    'concepcion': (-36.8270, -73.0503, 'Biobío'),
+    'talcahuano': (-36.7167, -73.1167, 'Biobío'),
+    'san pedro de la paz': (-36.8400, -73.1000, 'Biobío'),
+    'hualpen': (-36.7830, -73.0910, 'Biobío'),
+    'coronel': (-37.0330, -73.1580, 'Biobío'),
+    'lota': (-37.0890, -73.1580, 'Biobío'),
+    'los angeles': (-37.4707, -72.3517, 'Biobío'),
+    'temuco': (-38.7359, -72.5904, 'La Araucanía'),
+    'villarrica': (-39.2856, -72.2279, 'La Araucanía'),
+    'pucon': (-39.2708, -71.9772, 'La Araucanía'),
+    'valdivia': (-39.8142, -73.2459, 'Los Ríos'),
+    'osorno': (-40.5738, -73.1360, 'Los Lagos'),
+    'puerto varas': (-41.3195, -72.9854, 'Los Lagos'),
+    'frutillar': (-41.1260, -73.0630, 'Los Lagos'),
+    'puerto montt': (-41.4693, -72.9424, 'Los Lagos'),
+    'castro': (-42.4800, -73.7620, 'Los Lagos'),
+    'ancud': (-41.8710, -73.8280, 'Los Lagos'),
+    'chiloe': (-42.4800, -73.7620, 'Los Lagos'),
+    'coyhaique': (-45.5712, -72.0685, 'Aysén'),
+    'puerto aysen': (-45.4030, -72.6920, 'Aysén'),
+    'punta arenas': (-53.1638, -70.9171, 'Magallanes'),
+    'puerto natales': (-51.7290, -72.5060, 'Magallanes'),
+}
 
-        # ── 2. Pronóstico 7 días + condición actual ──────────────────────
+_PAISES_CLIMA = {
+    'chile': 'CL', 'argentina': 'AR', 'peru': 'PE', 'bolivia': 'BO',
+    'brasil': 'BR', 'colombia': 'CO', 'ecuador': 'EC', 'uruguay': 'UY',
+    'paraguay': 'PY', 'venezuela': 'VE', 'mexico': 'MX', 'espana': 'ES',
+    'usa': 'US', 'eeuu': 'US', 'estados unidos': 'US', 'canada': 'CA',
+    'francia': 'FR', 'italia': 'IT', 'alemania': 'DE', 'portugal': 'PT',
+    'inglaterra': 'GB', 'reino unido': 'GB', 'china': 'CN', 'japon': 'JP',
+    'australia': 'AU', 'nueva zelanda': 'NZ', 'panama': 'PA',
+    'costa rica': 'CR', 'cuba': 'CU', 'republica dominicana': 'DO',
+}
+
+
+def _clima_normalizar(texto: str) -> str:
+    """Minúsculas sin tildes para matching de ciudades/países."""
+    import unicodedata as _ud
+    t = _ud.normalize('NFKD', (texto or '').lower().strip())
+    t = ''.join(ch for ch in t if not _ud.combining(ch))
+    return ' '.join(t.replace('ñ', 'n').split())
+
+
+def _clima_parsear_ciudad_pais(entrada: str):
+    """FASE 31.1: Separa "<ciudad> [país]" — el país al FINAL es opcional.
+    Ej: "santiago chile" → ("santiago", "CL"); "la reina chile" → ("la reina","CL");
+    "santiago" → ("santiago", None). Soporta países de 2 palabras."""
+    norm = _clima_normalizar(entrada)
+    tokens = norm.split()
+    if len(tokens) >= 3:
+        dos = ' '.join(tokens[-2:])
+        if dos in _PAISES_CLIMA:
+            return ' '.join(tokens[:-2]), _PAISES_CLIMA[dos]
+    if len(tokens) >= 2 and tokens[-1] in _PAISES_CLIMA:
+        return ' '.join(tokens[:-1]), _PAISES_CLIMA[tokens[-1]]
+    return norm, None
+
+
+def _clima_geocodificar(ciudad_norm: str, pais_iso):
+    """Cadena de 3 fuentes → (lat, lon, nombre, region, pais) o None.
+    1) Diccionario local chileno (si el país es CL o no se indicó).
+    2) Open-Meteo geocoding (filtrando por país si corresponde).
+    3) Nominatim/OSM como último respaldo."""
+    # ── Fuente 1: diccionario local Chile ──
+    if pais_iso in (None, 'CL') and ciudad_norm in _CIUDADES_CHILE:
+        lat, lon, region = _CIUDADES_CHILE[ciudad_norm]
+        nombre = ciudad_norm.title()
+        logger.info(f"🌤️ Clima geocoding LOCAL: '{ciudad_norm}' → {lat},{lon}")
+        return lat, lon, nombre, region, 'Chile'
+
+    headers = {'User-Agent': 'CofradiaBot/1.0 (contacto: admin)'}
+    # ── Fuente 2: Open-Meteo geocoding (2 intentos) ──
+    for intento in range(2):
+        try:
+            r = requests.get(
+                'https://geocoding-api.open-meteo.com/v1/search',
+                params={'name': ciudad_norm, 'count': 10,
+                        'language': 'es', 'format': 'json'},
+                headers=headers, timeout=8)
+            if r.status_code == 200:
+                res = (r.json() or {}).get('results') or []
+                if res:
+                    if pais_iso:
+                        res_f = [x for x in res if x.get('country_code') == pais_iso]
+                        lugar = res_f[0] if res_f else None
+                    else:
+                        lugar = next((x for x in res
+                                      if x.get('country_code') == 'CL'), res[0])
+                    if lugar:
+                        logger.info(f"🌤️ Clima geocoding Open-Meteo: '{ciudad_norm}' "
+                                    f"→ {lugar.get('name')} ({lugar.get('country_code')})")
+                        return (lugar['latitude'], lugar['longitude'],
+                                lugar.get('name', ciudad_norm.title()),
+                                lugar.get('admin1', ''), lugar.get('country', ''))
+                break  # respondió OK pero sin resultados válidos → probar fuente 3
+        except Exception as _e_g1:
+            logger.debug(f"Geocoding Open-Meteo intento {intento+1}: {_e_g1}")
+    # ── Fuente 3: Nominatim (OpenStreetMap) ──
+    try:
+        q = ciudad_norm + (f", {pais_iso}" if pais_iso else '')
+        r2 = requests.get(
+            'https://nominatim.openstreetmap.org/search',
+            params={'q': q, 'format': 'json', 'limit': 5,
+                    'accept-language': 'es',
+                    **({'countrycodes': pais_iso.lower()} if pais_iso else {})},
+            headers=headers, timeout=8)
+        if r2.status_code == 200:
+            res2 = r2.json() or []
+            if not pais_iso:  # preferir Chile
+                res_cl = [x for x in res2 if ', chile' in (x.get('display_name','')).lower()]
+                res2 = res_cl or res2
+            if res2:
+                lug = res2[0]
+                partes = [p.strip() for p in (lug.get('display_name') or '').split(',')]
+                logger.info(f"🌤️ Clima geocoding Nominatim: '{ciudad_norm}' → {partes[0] if partes else '?'}")
+                return (float(lug['lat']), float(lug['lon']),
+                        partes[0] if partes else ciudad_norm.title(),
+                        partes[1] if len(partes) > 2 else '',
+                        partes[-1] if partes else '')
+    except Exception as _e_g2:
+        logger.debug(f"Geocoding Nominatim: {_e_g2}")
+    return None
+
+
+def _clima_aqi_categoria(aqi):
+    """Categoría en español del índice de calidad del aire (US AQI)."""
+    try:
+        v = int(aqi)
+    except Exception:
+        return None, None
+    if v <= 50:    return v, 'Buena 🟢'
+    if v <= 100:   return v, 'Moderada 🟡'
+    if v <= 150:   return v, 'Regular 🟠'
+    if v <= 200:   return v, 'Mala 🔴'
+    if v <= 300:   return v, 'Muy mala 🟣'
+    return v, 'Peligrosa 🟤'
+
+
+def _icono_nocturno(codigo, emoji_dia):
+    """FASE 31.1: De noche, ☀️→🌙 y parcial→nube nocturna; lluvia/nieve/tormenta
+    conservan su icono (la meteorología manda)."""
+    try:
+        c = int(codigo)
+    except Exception:
+        return emoji_dia
+    if c in (0, 1):
+        return '🌙'
+    if c == 2:
+        return '☁️🌙'
+    if c == 3:
+        return '☁️'
+    return emoji_dia  # lluvia, nieve, niebla, tormenta: mismo icono
+
+
+def _obtener_clima_ciudad(ciudad: str):
+    """FASE 31.1: Geocodifica (3 fuentes, país opcional al final) y obtiene
+    pronóstico 7 días + temperaturas POR HORA + calidad del aire + noche/día.
+    Retorna dict listo para render, o None SOLO si la localidad no existe."""
+    try:
+        ciudad_norm, pais_iso = _clima_parsear_ciudad_pais(ciudad)
+        geo = _clima_geocodificar(ciudad_norm, pais_iso)
+        if not geo:
+            return None
+        lat, lon, nombre, region, pais = geo
+
+        # ── Pronóstico: 7 días + horas + sol (para detectar noche) ──
         r_met = requests.get(
             'https://api.open-meteo.com/v1/forecast',
             params={
                 'latitude': lat, 'longitude': lon,
                 'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
-                         'wind_speed_10m_max,precipitation_probability_max',
-                'hourly': 'relative_humidity_2m',
+                         'wind_speed_10m_max,precipitation_probability_max,'
+                         'sunrise,sunset',
+                'hourly': 'temperature_2m,relative_humidity_2m,weather_code',
                 'current': 'temperature_2m,relative_humidity_2m,'
                            'wind_speed_10m,weather_code,apparent_temperature',
                 'timezone': 'auto', 'forecast_days': 7,
@@ -33198,9 +33473,36 @@ def _obtener_clima_ciudad(ciudad: str):
         if r_met.status_code != 200:
             return None
         met = r_met.json()
-        daily = met.get('daily', {})
-        hourly_hum = (met.get('hourly', {}) or {}).get('relative_humidity_2m') or []
+        daily = met.get('daily', {}) or {}
+        hourly = met.get('hourly', {}) or {}
         cur = met.get('current', {}) or {}
+        h_temp = hourly.get('temperature_2m') or []
+        h_hum = hourly.get('relative_humidity_2m') or []
+
+        # ── Calidad del aire (US AQI) — best effort, nunca bloquea ──
+        aqi_val, aqi_cat = None, None
+        try:
+            r_aq = requests.get(
+                'https://air-quality-api.open-meteo.com/v1/air-quality',
+                params={'latitude': lat, 'longitude': lon,
+                        'current': 'us_aqi', 'timezone': 'auto'},
+                timeout=8)
+            if r_aq.status_code == 200:
+                aqi_raw = ((r_aq.json() or {}).get('current') or {}).get('us_aqi')
+                aqi_val, aqi_cat = _clima_aqi_categoria(aqi_raw)
+        except Exception as _e_aq:
+            logger.debug(f"Clima AQI: {_e_aq}")
+
+        # ── ¿Es de noche AHORA en ese lugar? (sunrise/sunset del día 0) ──
+        es_noche = False
+        try:
+            t_now = cur.get('time') or ''
+            sr = (daily.get('sunrise') or [''])[0]
+            ss = (daily.get('sunset') or [''])[0]
+            if t_now and sr and ss:
+                es_noche = not (sr <= t_now <= ss)  # ISO local: comparación lexicográfica válida
+        except Exception:
+            pass
 
         fechas = daily.get('time', [])
         dias = []
@@ -33211,10 +33513,12 @@ def _obtener_clima_ciudad(ciudad: str):
                 fecha_fmt = f'{fdt.day} {_MESES_ES[fdt.month][:3]}'
             except Exception:
                 nombre_dia, fecha_fmt = fstr, fstr
-            # Humedad promedio del día (24 valores horarios por día)
-            bloque = hourly_hum[i * 24:(i + 1) * 24]
-            humedad = round(sum(bloque) / len(bloque)) if bloque else None
-            emoji, desc, tema = _wmo_info((daily.get('weather_code') or [3] * 7)[i])
+            bloque_h = h_hum[i * 24:(i + 1) * 24]
+            humedad = round(sum(bloque_h) / len(bloque_h)) if bloque_h else None
+            temps_horas = [round(x) if x is not None else None
+                           for x in h_temp[i * 24:(i + 1) * 24]]
+            codigo_d = (daily.get('weather_code') or [3] * 7)[i]
+            emoji, desc, tema = _wmo_info(codigo_d)
             dias.append({
                 'nombre': nombre_dia, 'fecha': fecha_fmt,
                 'tmin': round((daily.get('temperature_2m_min') or [0] * 7)[i]),
@@ -33223,13 +33527,19 @@ def _obtener_clima_ciudad(ciudad: str):
                 'lluvia': (daily.get('precipitation_probability_max') or [0] * 7)[i],
                 'humedad': humedad if humedad is not None else '—',
                 'emoji': emoji, 'desc': desc, 'tema': tema,
+                'horas': temps_horas,
             })
 
-        emoji_hoy, desc_hoy, tema_hoy = _wmo_info(cur.get('weather_code', 3))
+        cod_hoy = cur.get('weather_code', 3)
+        emoji_hoy, desc_hoy, tema_hoy = _wmo_info(cod_hoy)
+        if es_noche:
+            emoji_hoy = _icono_nocturno(cod_hoy, emoji_hoy)
         return {
-            'ciudad': lugar.get('name', ciudad),
-            'region': lugar.get('admin1', ''),
-            'pais': lugar.get('country', ''),
+            'ciudad': nombre,
+            'region': region,
+            'pais': pais,
+            'es_noche': es_noche,
+            'aqi': aqi_val, 'aqi_cat': aqi_cat,
             'actual': {
                 'temp': round(cur.get('temperature_2m', 0)),
                 'sensacion': round(cur.get('apparent_temperature',
@@ -33250,49 +33560,65 @@ def _obtener_clima_ciudad(ciudad: str):
 
 _HTML_CLIMA_TEMPLATE = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Pronóstico — __CIUDAD__</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif}
-body{min-height:100vh;background:__GRADIENTE__;background-attachment:fixed;color:#fff;padding:24px 16px 40px}
+html,body{width:100%;overflow-x:hidden}
+body{min-height:100vh;background:__GRADIENTE__;background-attachment:fixed;color:#fff;
+ padding:clamp(14px,3vw,24px) clamp(10px,3vw,16px) 40px}
 .wrap{max-width:1080px;margin:0 auto}
-header{text-align:center;margin-bottom:26px}
-header h1{font-size:2.1rem;font-weight:800;letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.35)}
-header .sub{opacity:.85;margin-top:4px;font-size:1rem}
-.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:34px;
- background:rgba(255,255,255,.10);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
- border:1px solid rgba(255,255,255,.22);border-radius:26px;padding:30px 34px;
- box-shadow:0 14px 40px rgba(0,0,0,.30);margin-bottom:26px}
-.hero .icono{font-size:6.5rem;line-height:1;animation:flotar 3.4s ease-in-out infinite;
- filter:drop-shadow(0 8px 16px rgba(0,0,0,.35))}
+header{text-align:center;margin-bottom:clamp(16px,3vw,26px)}
+header h1{font-size:clamp(1.4rem,4.5vw,2.1rem);font-weight:800;letter-spacing:.5px;
+ text-shadow:0 2px 12px rgba(0,0,0,.35)}
+header .sub{opacity:.85;margin-top:4px;font-size:clamp(.82rem,2.6vw,1rem)}
+.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
+ gap:clamp(14px,3vw,34px);background:rgba(255,255,255,.10);
+ backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+ border:1px solid rgba(255,255,255,.22);border-radius:26px;
+ padding:clamp(18px,3.5vw,30px) clamp(16px,4vw,34px);
+ box-shadow:0 14px 40px rgba(0,0,0,.30);margin-bottom:clamp(16px,3vw,26px)}
+.hero .icono{font-size:clamp(4rem,12vw,6.5rem);line-height:1;
+ animation:flotar 3.4s ease-in-out infinite;filter:drop-shadow(0 8px 16px rgba(0,0,0,.35))}
 @keyframes flotar{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
-.hero .temp{font-size:4.6rem;font-weight:800;line-height:1}
-.hero .desc{font-size:1.25rem;opacity:.92;margin-top:6px}
-.hero .mm{margin-top:8px;font-size:1.02rem;opacity:.85}
-.hero .datos{display:flex;gap:26px;flex-wrap:wrap}
-.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:14px 20px;text-align:center;min-width:110px}
-.dato .v{font-size:1.5rem;font-weight:700}
-.dato .l{font-size:.8rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.6px}
-h2.seccion{font-size:1.15rem;font-weight:700;opacity:.92;margin:6px 4px 14px;letter-spacing:.4px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:14px;margin-bottom:28px}
+.hero .temp{font-size:clamp(2.8rem,10vw,4.6rem);font-weight:800;line-height:1}
+.hero .desc{font-size:clamp(1rem,3vw,1.25rem);opacity:.92;margin-top:6px}
+.hero .mm{margin-top:8px;font-size:clamp(.85rem,2.6vw,1.02rem);opacity:.85}
+.hero .datos{display:flex;gap:clamp(10px,2vw,18px);flex-wrap:wrap;justify-content:center}
+.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:12px 16px;text-align:center;
+ min-width:clamp(88px,20vw,110px);flex:1 1 auto;max-width:150px}
+.dato .v{font-size:clamp(1.1rem,3.2vw,1.4rem);font-weight:700;white-space:nowrap}
+.dato .l{font-size:.72rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
+h2.seccion{font-size:clamp(1rem,3vw,1.15rem);font-weight:700;opacity:.92;
+ margin:6px 4px 14px;letter-spacing:.4px}
+.hint{font-size:.8rem;opacity:.7;margin:-8px 4px 12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(122px,1fr));gap:12px;margin-bottom:14px}
 .card{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
- border:1px solid rgba(255,255,255,.20);border-radius:20px;padding:16px 12px;text-align:center;
- transition:transform .25s,box-shadow .25s}
+ border:1px solid rgba(255,255,255,.20);border-radius:20px;padding:16px 10px;text-align:center;
+ transition:transform .25s,box-shadow .25s,outline-color .2s;cursor:pointer;user-select:none}
 .card:hover{transform:translateY(-6px);box-shadow:0 14px 30px rgba(0,0,0,.35)}
 .card.hoy{outline:2px solid __ACCENT__;background:rgba(255,255,255,.17)}
-.card .d{font-weight:700;font-size:.98rem}
-.card .f{font-size:.76rem;opacity:.75;margin-bottom:8px}
-.card .ic{font-size:2.6rem;margin:4px 0 6px;display:block}
-.card .tt{font-size:1.05rem;font-weight:700}
+.card.activa{outline:3px solid #fff;background:rgba(255,255,255,.22)}
+.card .d{font-weight:700;font-size:.95rem}
+.card .f{font-size:.74rem;opacity:.75;margin-bottom:8px}
+.card .ic{font-size:clamp(2rem,6vw,2.6rem);margin:4px 0 6px;display:block}
+.card .tt{font-size:1.02rem;font-weight:700}
 .card .tt .min{opacity:.65;font-weight:500}
-.card .cd{font-size:.74rem;opacity:.85;margin-top:7px;line-height:1.55}
-.panel{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.20);
- border-radius:22px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
-#grafico{width:100%;height:340px}
+.card .cd{font-size:.72rem;opacity:.85;margin-top:7px;line-height:1.55}
+.panel{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);
+ border:1px solid rgba(255,255,255,.20);border-radius:22px;padding:clamp(12px,2.5vw,20px);
+ box-shadow:0 10px 30px rgba(0,0,0,.25);margin-bottom:24px}
+#grafHoras{width:100%;height:clamp(240px,45vw,320px)}
+#grafico{width:100%;height:clamp(250px,48vw,340px)}
+#tituloHoras{font-size:clamp(.95rem,2.8vw,1.1rem);font-weight:700;margin-bottom:8px;
+ display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#tituloHoras .badge{background:rgba(0,0,0,.25);border-radius:10px;padding:3px 10px;
+ font-size:.78rem;font-weight:600}
 footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-height:1.7}
-@media(max-width:640px){.hero{gap:18px;padding:24px 18px}.hero .temp{font-size:3.6rem}
- .hero .icono{font-size:5rem}#grafico{height:280px}}
+@media(orientation:landscape) and (max-height:500px){
+ .hero{padding:14px 16px;gap:12px}.hero .icono{font-size:3.4rem}
+ .hero .temp{font-size:2.4rem}#grafHoras,#grafico{height:220px}}
 </style></head><body><div class="wrap">
 <header>
   <h1>🌎 Pronóstico del Tiempo</h1>
@@ -33310,19 +33636,65 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
     <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l">Humedad</div></div>
     <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l">km/h viento</div></div>
     <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l">Prob. lluvia</div></div>
+    <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l">Calidad aire · __AQI_CAT__</div></div>
   </div>
 </div>
 
 <h2 class="seccion">📅 Próximos 7 días</h2>
-<div class="grid">__TARJETAS__</div>
+<div class="hint">👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)</div>
+<div class="grid" id="gridDias">__TARJETAS__</div>
 
-<h2 class="seccion">📈 Evolución de temperaturas</h2>
+<div class="panel">
+  <div id="tituloHoras">🕐 Temperatura por hora <span class="badge" id="badgeDia">Hoy</span></div>
+  <div id="grafHoras"></div>
+</div>
+
+<h2 class="seccion">📈 Evolución de temperaturas (7 días)</h2>
 <div class="panel"><div id="grafico"></div></div>
 
 <footer>⚓ Cofradía de Networking — Servicio meteorológico del bot<br>
-Datos: modelos meteorológicos internacionales (Open-Meteo)</footer>
+Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI</footer>
 </div>
 <script>
+var DATA_HORAS=__DATA_HORAS__;   // [{n:'Hoy 3 Jul', t:[24 temps]}, ...]
+var EJE_H=Array.from({length:24},function(_,h){return (h<10?'0':'')+h+':00'});
+
+var chH=echarts.init(document.getElementById('grafHoras'));
+function pintarHoras(idx){
+  var d=DATA_HORAS[idx]||DATA_HORAS[0];
+  document.getElementById('badgeDia').textContent=d.n;
+  var temps=d.t;
+  var vmax=Math.max.apply(null,temps.filter(function(x){return x!==null}));
+  var vmin=Math.min.apply(null,temps.filter(function(x){return x!==null}));
+  chH.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis',formatter:function(p){var x=p[0];return x.axisValue+' → <b>'+x.data+'°C</b>'}},
+    grid:{left:'2%',right:'3%',bottom:'8%',top:'14%',containLabel:true},
+    xAxis:{type:'category',data:EJE_H,
+      axisLabel:{color:'#fff',fontSize:10,interval:2},
+      axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+    yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
+      splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
+    series:[{name:'Temp',type:'line',smooth:true,data:temps,symbolSize:6,
+      lineStyle:{width:3,color:'#ffd166'},itemStyle:{color:'#ffd166'},
+      areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
+        colorStops:[{offset:0,color:'rgba(255,209,102,.45)'},{offset:1,color:'rgba(255,209,102,0)'}]}},
+      markPoint:{data:[
+        {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
+        {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}]}
+    }]},true);
+}
+document.querySelectorAll('#gridDias .card').forEach(function(card,i){
+  card.addEventListener('click',function(){
+    document.querySelectorAll('#gridDias .card').forEach(function(c){c.classList.remove('activa')});
+    card.classList.add('activa');
+    pintarHoras(i);
+    document.getElementById('grafHoras').scrollIntoView({behavior:'smooth',block:'nearest'});
+  });
+});
+pintarHoras(0);
+document.querySelectorAll('#gridDias .card')[0].classList.add('activa');
+
 var ch=echarts.init(document.getElementById('grafico'));
 ch.setOption({
  backgroundColor:'transparent',
@@ -33345,7 +33717,13 @@ ch.setOption({
     colorStops:[{offset:0,color:'rgba(79,195,247,.40)'},{offset:1,color:'rgba(79,195,247,0)'}]}},
    label:{show:true,color:'#fff',formatter:'{c}°'}}
  ]});
-window.addEventListener('resize',function(){ch.resize()});
+
+// FASE 31.1: responsive TOTAL — resize + rotación de pantalla en móviles
+function reajustar(){try{ch.resize();chH.resize()}catch(e){}}
+window.addEventListener('resize',reajustar);
+window.addEventListener('orientationchange',function(){setTimeout(reajustar,220)});
+if(screen&&screen.orientation&&screen.orientation.addEventListener){
+  screen.orientation.addEventListener('change',function(){setTimeout(reajustar,220)});}
 </script></body></html>"""
 
 
@@ -33367,6 +33745,13 @@ def _generar_html_clima(d: dict) -> str:
             f'<br>🌧️ {dia["lluvia"]}%</div></div>')
 
     region_pais = ', '.join(x for x in [d.get('region', ''), d.get('pais', '')] if x)
+    # FASE 31.1: datos horarios por día (para el gráfico clickeable) + AQI
+    data_horas = [
+        {'n': f'{x["nombre"]} {x["fecha"]}', 't': x.get('horas') or []}
+        for x in dias
+    ]
+    aqi_val = d.get('aqi')
+    aqi_cat = d.get('aqi_cat') or ''
     html = _HTML_CLIMA_TEMPLATE
     reemplazos = {
         '__CIUDAD__': d['ciudad'],
@@ -33383,7 +33768,10 @@ def _generar_html_clima(d: dict) -> str:
         '__HUM_HOY__': str(act['humedad']),
         '__VIENTO_HOY__': str(act['viento']),
         '__LLUVIA_HOY__': str(dias[0]['lluvia']),
+        '__AQI_VAL__': str(aqi_val) if aqi_val is not None else '—',
+        '__AQI_CAT__': aqi_cat if aqi_cat else 's/d',
         '__TARJETAS__': ''.join(tarjetas),
+        '__DATA_HORAS__': json.dumps(data_horas, ensure_ascii=False),
         '__EJE_DIAS__': json.dumps([x['nombre'][:3] + ' ' + x['fecha'] for x in dias]),
         '__SERIE_MAX__': json.dumps([x['tmax'] for x in dias]),
         '__SERIE_MIN__': json.dumps([x['tmin'] for x in dias]),
@@ -33407,7 +33795,10 @@ async def clima_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg_espera.edit_text(
                 f'❌ No encontré la localidad "{ciudad}".\n\n'
                 '💡 Prueba con: /clima Providencia · /clima Valparaíso · '
-                '/clima Puerto Montt')
+                '/clima Puerto Montt\n'
+                '🌍 Si el nombre existe en varios países, agrega el país al '
+                'final: /clima santiago chile · /clima la reina chile · '
+                '/clima cordoba argentina')
             return
 
         act = datos['actual']
