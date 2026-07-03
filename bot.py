@@ -1167,7 +1167,7 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
                   "conocimiento general, indicándolo. Responde en español, claro y estructurado.")
             return llamar_groq(prompt_fb, max_tokens=900, temperature=0.5)
 
-        nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=45.0)
+        nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=75.0)  # FASE 31.7: 45→75s
         nueva = _cortar_degeneracion(nueva)  # FASE 31.6: mata el bucle "Mihailo..."
         if msg_rt:
             try: await msg_rt.delete()
@@ -20987,16 +20987,57 @@ def buscar_rag(query, limit=5):
             except Exception:
                 pass
         
-        # MATCH 1: substring exacto de cada palabra clave en sources normalizados
-        for palabra in palabras_clave:
-            if len(palabra) < 3:
-                continue
-            for src_norm, src_orig in sources_normalizados:
-                if src_orig in docs_fase1:
+        # ═══ FASE 31.7 MATCH 0 — FRASES (el fix del caso "El fin de la inflación") ═══
+        # ANTES: "lista" (de "Lista los puntos...") matcheaba por substring el
+        # doc "feriados...lista completa", y "fin" matcheaba "FINanciera" de
+        # van horne → pgvector se restringía a los libros EQUIVOCADOS con
+        # "confianza alta". AHORA: primero se buscan FRASES del query (título
+        # entre comillas o n-gramas de 3-6 palabras) dentro del nombre del
+        # doc. Una frase que calza es evidencia fortísima y EXCLUYENTE.
+        try:
+            _frases_q = []
+            # (a) texto entre comillas = título literal → máxima prioridad
+            for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{6,80})["\u201d\u00bb\u2019\']', query):
+                _frases_q.append(normalizar(_m))
+            # (b) n-gramas de 6→3 palabras del query normalizado
+            _tq = [w for w in query_norm.split() if len(w) > 1]
+            for _n in (6, 5, 4, 3):
+                for _i in range(len(_tq) - _n + 1):
+                    _frases_q.append(' '.join(_tq[_i:_i + _n]))
+            _vistos_f = set()
+            for _fr in _frases_q:
+                if len(_fr) < 8 or _fr in _vistos_f:
                     continue
-                if palabra in src_norm:
-                    docs_fase1.append(src_orig)
-                    logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
+                _vistos_f.add(_fr)
+                for src_norm, src_orig in sources_normalizados:
+                    if _fr in src_norm and src_orig not in docs_fase1:
+                        docs_fase1.append(src_orig)
+                        logger.info(f"🎯 FASE 31.7 MATCH-FRASE: '{_fr}' → '{src_orig}'")
+                if docs_fase1:
+                    break  # la frase más larga que calza manda; no diluir
+        except Exception as _e_fr:
+            logger.debug(f"match frase: {_e_fr}")
+
+        # MATCH 1: palabra clave en el nombre del doc — AHORA con LÍMITE DE
+        # PALABRA (no substring: "fin" ya no matchea "FINanciera") y VETO de
+        # términos genéricos que producían falsos positivos.
+        _GENERICAS_NOMBRE = {'lista', 'libro', 'libros', 'completa', 'completo',
+                             'guia', 'guía', 'manual', 'curso', 'texto', 'tema',
+                             'temas', 'punto', 'puntos', 'resumen', 'capitulo',
+                             'fin', 'introduccion', 'principales', 'basico',
+                             'basica', 'general', 'nueva', 'nuevo', 'web',
+                             'pdf', 'chile', 'chileno', 'chilena'}
+        if not docs_fase1:
+            for palabra in palabras_clave:
+                if len(palabra) < 4 or palabra in _GENERICAS_NOMBRE:
+                    continue
+                _patron_wb = re.compile(r'(?<![a-z0-9])' + re.escape(palabra) + r'(?![a-z0-9])')
+                for src_norm, src_orig in sources_normalizados:
+                    if src_orig in docs_fase1:
+                        continue
+                    if _patron_wb.search(src_norm):
+                        docs_fase1.append(src_orig)
+                        logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
         
         # MATCH 2 (fuzzy reactivo): solo si el exacto no encontró nada
         if not docs_fase1:
@@ -21860,6 +21901,79 @@ def formatear_contexto_unificado(resultados, query):
 # ══════════════════════════════════════════════════════════════════════════════
 # BÚSQUEDA MULTI-AGENTE PARALELA — 5 motores simultáneos
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════
+# FASE 31.7 — CRAWL4AI: páginas web → markdown LIMPIO (pedido de Germán)
+# Potencia el motor web: en vez de solo títulos+snippets de DuckDuckGo,
+# se descarga el CONTENIDO real de las mejores páginas convertido a
+# markdown sin menús/publicidad/scripts. Usa la estrategia HTTP pura de
+# crawl4ai (SIN navegador — Render worker no soporta Playwright/Chromium).
+# Si crawl4ai no está instalado, degrada elegante a requests+BeautifulSoup.
+# ═══════════════════════════════════════════════════════════════════
+def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> str:
+    """Devuelve el contenido de una URL como markdown limpio ('' si falla).
+    Seguro para llamar desde hilos del ThreadPoolExecutor."""
+    if not url or not url.startswith('http'):
+        return ''
+    # ── Intento 1: crawl4ai (markdown de calidad, filtra boilerplate) ──
+    try:
+        import asyncio as _aio_c4
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
+        from crawl4ai.async_crawler_strategy import AsyncHTTPCrawlerStrategy
+
+        async def _run():
+            strategy = AsyncHTTPCrawlerStrategy()
+            async with AsyncWebCrawler(crawler_strategy=strategy) as crawler:
+                r = await _aio_c4.wait_for(
+                    crawler.arun(url=url, config=CrawlerRunConfig(
+                        page_timeout=timeout * 1000, verbose=False)),
+                    timeout=timeout + 3)
+                md = getattr(getattr(r, 'markdown', None), 'raw_markdown', None)                     or (r.markdown if isinstance(getattr(r, 'markdown', None), str) else '')
+                return (md or '').strip()
+
+        _loop_c4 = _aio_c4.new_event_loop()
+        try:
+            md = _loop_c4.run_until_complete(_run())
+        finally:
+            _loop_c4.close()
+        if md and len(md) > 120:
+            logger.info(f"🕷️ FASE 31.7 CRAWL4AI: {url[:60]} → {len(md)} chars markdown")
+            return md[:max_chars]
+    except ImportError:
+        logger.debug("crawl4ai no instalado — usando fallback BeautifulSoup")
+    except Exception as _e_c4:
+        logger.debug(f"crawl4ai {url[:50]}: {_e_c4}")
+    # ── Fallback: requests + BeautifulSoup (pseudo-markdown) ──
+    try:
+        from bs4 import BeautifulSoup as _BS4f
+        r = requests.get(url, timeout=timeout, headers={
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/124.0.0.0 Safari/537.36'),
+            'Accept-Language': 'es-CL,es;q=0.9'})
+        if r.status_code != 200:
+            return ''
+        soup = _BS4f(r.text, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer',
+                         'aside', 'form', 'iframe', 'noscript']):
+            tag.decompose()
+        partes = []
+        for el in soup.find_all(['h1', 'h2', 'h3', 'p', 'li'])[:180]:
+            t = el.get_text(' ', strip=True)
+            if len(t) < 25:
+                continue
+            if el.name in ('h1', 'h2', 'h3'):
+                partes.append('#' * int(el.name[1]) + ' ' + t)
+            elif el.name == 'li':
+                partes.append('- ' + t)
+            else:
+                partes.append(t)
+        md = '\n\n'.join(partes).strip()
+        return md[:max_chars] if len(md) > 120 else ''
+    except Exception as _e_bs:
+        logger.debug(f"fallback BS4 {url[:50]}: {_e_bs}")
+        return ''
+
 
 def _scrape_ddg_sync(q: str, n: int = 5) -> list:
     """Scraping DuckDuckGo HTML sincrónico para uso en ThreadPoolExecutor."""
@@ -33000,6 +33114,19 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"[{i}] {r['titulo']}\n{r['snippet']}"
                 for i, r in enumerate(res[:5], 1)
             ])
+            # FASE 31.7 CRAWL4AI: sumar el CONTENIDO REAL de las 2 mejores
+            # páginas (markdown limpio) → el resumen deja de depender solo
+            # de snippets de 400 chars y entrega datos concretos.
+            try:
+                _mds = []
+                for _r in res[:2]:
+                    _md = _crawl4ai_markdown(_r.get('url', ''), max_chars=2200, timeout=9)
+                    if _md:
+                        _mds.append(f"── {_r['titulo'][:80]} ──\n{_md}")
+                if _mds:
+                    ctx += "\n\nCONTENIDO COMPLETO DE LAS PÁGINAS (markdown):\n" + "\n\n".join(_mds)
+            except Exception as _e_enr:
+                logger.debug(f"enriquecimiento crawl4ai: {_e_enr}")
             try:
                 rg = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -37653,7 +37780,7 @@ def main():
             loop = asyncio.get_running_loop()
             
             async def _ejecutar_busqueda_con_timeout():
-                """Ejecuta las 3 búsquedas paralelas con timeout estricto de 10s total."""
+                """Ejecuta las 3 búsquedas paralelas con timeout estricto (14s por motor)."""
                 # FASE 31.3 — CAUSA RAÍZ DE LOS 3 MINUTOS: el "with pool:"
                 # al salir ejecutaba shutdown(wait=True), que BLOQUEABA el
                 # event loop completo hasta que terminara cualquier búsqueda
@@ -37668,9 +37795,9 @@ def main():
                     fut_ev_th = pool.submit(_buscar_eventos_priv)
                     
                     # Wrap each in asyncio
-                    fut_rag_aw = loop.run_in_executor(None, fut_rag_th.result, 10)
-                    fut_tar_aw = loop.run_in_executor(None, fut_tar_th.result, 10)
-                    fut_ev_aw = loop.run_in_executor(None, fut_ev_th.result, 10)
+                    fut_rag_aw = loop.run_in_executor(None, fut_rag_th.result, 14)
+                    fut_tar_aw = loop.run_in_executor(None, fut_tar_th.result, 14)
+                    fut_ev_aw = loop.run_in_executor(None, fut_ev_th.result, 14)
                     
                     results = await asyncio.gather(fut_rag_aw, fut_tar_aw, fut_ev_aw, return_exceptions=True)
                     return results
@@ -37689,7 +37816,7 @@ def main():
             fnt_ev = []
             
             try:
-                resultados = await asyncio.wait_for(_ejecutar_busqueda_con_timeout(), timeout=12.0)
+                resultados = await asyncio.wait_for(_ejecutar_busqueda_con_timeout(), timeout=18.0)  # FASE 31.7: 12→18s
                 
                 # Resultado RAG
                 if not isinstance(resultados[0], Exception):
@@ -37979,6 +38106,23 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         'docs': _docs_meta[:5],
                         'respuesta': respuesta[:1800],
                     }
+                    # ═══ FASE 31.7 AUTO-APRENDIZAJE: si la respuesta usó RAG con
+                    # alta confianza (≥10 fragmentos, ≤3 documentos = búsqueda
+                    # enfocada), grabar la asociación pregunta→docs SIN esperar
+                    # el clic en "Útil". Así el bot NO OLVIDA lo que ya
+                    # respondió bien: la próxima pregunta sobre el mismo tema
+                    # entra por A0-APRENDIZAJE directo al documento correcto.
+                    try:
+                        _n_frag = len(resultados_busq.get('rag') or [])
+                        if _docs_meta and _n_frag >= 10 and len(_docs_meta) <= 3:
+                            import asyncio as _aio_al
+                            _aio_al.get_event_loop().run_in_executor(
+                                None, _fb_guardar_aprendizaje,
+                                mensaje[:400], _docs_meta[:5], 1)
+                            logger.info(f"🧠 FASE 31.7 AUTO-APRENDIZAJE: "
+                                        f"{_docs_meta[:3]} (+1 automático)")
+                    except Exception as _e_al:
+                        logger.debug(f"auto-aprendizaje: {_e_al}")
                 except Exception as _e_meta:
                     logger.debug(f"meta feedback: {_e_meta}")
                 try:

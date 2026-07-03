@@ -14,3 +14,4 @@ lxml
 PyPDF2
 edge-tts
 qrcode[pil]
+crawl4ai>=0.4.0
