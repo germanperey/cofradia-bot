@@ -20834,7 +20834,7 @@ def _fase6_fuzzy_match_simple(query_word, target_word, max_dist=2):
     return prev[n] <= max_dist
 
 
-def buscar_rag(query, limit=5):
+def buscar_rag(query, limit=5, original=None):
     """
     Búsqueda RAG en CASCADA:
     Fase 0 — pgvector + Gemini embeddings (búsqueda SEMÁNTICA REAL) ← NUEVO FASE 29
@@ -20850,7 +20850,11 @@ def buscar_rag(query, limit=5):
     try:
         # FASE 6: Cache lookup ANTES de cualquier query SQL — instant hit en queries repetidas
         import unicodedata as _uni_cache
-        _query_norm_cache = _uni_cache.normalize('NFKD', (query or '').lower().strip())
+        # FASE 31.7b: la clave de caché se computa sobre la pregunta ORIGINAL
+        # del usuario (si viaja). La reescrita del LLM cambia en cada corrida
+        # → claves distintas para la MISMA pregunta → el flip-flop de Germán.
+        _base_cache = original if (original and original.strip()) else query
+        _query_norm_cache = _uni_cache.normalize('NFKD', (_base_cache or '').lower().strip())
         _query_norm_cache = ''.join(ch for ch in _query_norm_cache if not _uni_cache.combining(ch))
         _query_norm_cache = ' '.join(_query_norm_cache.split()[:10])  # primeras 10 palabras
         if _query_norm_cache:
@@ -20994,19 +20998,48 @@ def buscar_rag(query, limit=5):
         # "confianza alta". AHORA: primero se buscan FRASES del query (título
         # entre comillas o n-gramas de 3-6 palabras) dentro del nombre del
         # doc. Una frase que calza es evidencia fortísima y EXCLUYENTE.
+        # FASE 31.7b: los términos genéricos se definen ANTES del MATCH 0
+        # porque también vetan FRASES compuestas solo de genéricos
+        # ("lista completa" venía en la reescrita del LLM y matcheaba el
+        # doc de feriados; "de forma educada" matcheó el libro de Cardalda).
+        _GENERICAS_NOMBRE = {'lista', 'libro', 'libros', 'completa', 'completo',
+                             'guia', 'guía', 'manual', 'curso', 'texto', 'tema',
+                             'temas', 'punto', 'puntos', 'resumen', 'capitulo',
+                             'fin', 'introduccion', 'principales', 'basico',
+                             'basica', 'general', 'nueva', 'nuevo', 'web',
+                             'pdf', 'chile', 'chileno', 'chilena', 'forma',
+                             'educada', 'facil', 'practica', 'practico'}
+
+        def _frase_valida(fr):
+            """Una frase solo cuenta si aporta ≥1 token con CONTENIDO real
+            (≥4 letras, ni stopword ni genérico). 'lista completa' → NO;
+            'el fin de la inflacion' → SÍ (inflacion)."""
+            for _t in fr.split():
+                if len(_t) >= 4 and _t not in STOPWORDS and _t not in _GENERICAS_NOMBRE:
+                    return True
+            return False
+
         try:
             _frases_q = []
-            # (a) texto entre comillas = título literal → máxima prioridad
-            for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{6,80})["\u201d\u00bb\u2019\']', query):
+            # (a) texto entre comillas = título literal → máxima prioridad.
+            # FASE 31.7b: se lee de la pregunta ORIGINAL del usuario (la
+            # reescrita del LLM ELIMINA las comillas → el título nunca
+            # llegaba a este matching).
+            _texto_frases = f"{original or ''} {query}"
+            for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{6,80})["\u201d\u00bb\u2019\']', _texto_frases):
                 _frases_q.append(normalizar(_m))
-            # (b) n-gramas de 6→3 palabras del query normalizado
-            _tq = [w for w in query_norm.split() if len(w) > 1]
-            for _n in (6, 5, 4, 3):
-                for _i in range(len(_tq) - _n + 1):
-                    _frases_q.append(' '.join(_tq[_i:_i + _n]))
+            # (b) n-gramas de 6→3 palabras de la ORIGINAL primero, luego la reescrita
+            _orig_norm = normalizar(original) if original else ''
+            for _fuente_ng in (_orig_norm, query_norm):
+                if not _fuente_ng:
+                    continue
+                _tq = [w for w in _fuente_ng.split() if len(w) > 1]
+                for _n in (6, 5, 4, 3):
+                    for _i in range(len(_tq) - _n + 1):
+                        _frases_q.append(' '.join(_tq[_i:_i + _n]))
             _vistos_f = set()
             for _fr in _frases_q:
-                if len(_fr) < 8 or _fr in _vistos_f:
+                if len(_fr) < 8 or _fr in _vistos_f or not _frase_valida(_fr):
                     continue
                 _vistos_f.add(_fr)
                 for src_norm, src_orig in sources_normalizados:
@@ -21021,14 +21054,13 @@ def buscar_rag(query, limit=5):
         # MATCH 1: palabra clave en el nombre del doc — AHORA con LÍMITE DE
         # PALABRA (no substring: "fin" ya no matchea "FINanciera") y VETO de
         # términos genéricos que producían falsos positivos.
-        _GENERICAS_NOMBRE = {'lista', 'libro', 'libros', 'completa', 'completo',
-                             'guia', 'guía', 'manual', 'curso', 'texto', 'tema',
-                             'temas', 'punto', 'puntos', 'resumen', 'capitulo',
-                             'fin', 'introduccion', 'principales', 'basico',
-                             'basica', 'general', 'nueva', 'nuevo', 'web',
-                             'pdf', 'chile', 'chileno', 'chilena'}
         if not docs_fase1:
-            for palabra in palabras_clave:
+            _palabras_m1 = list(palabras_clave)
+            if original:  # FASE 31.7b: sumar términos de la pregunta original
+                for _w in (normalizar(original)).split():
+                    if len(_w) >= 4 and _w not in STOPWORDS and _w not in _palabras_m1:
+                        _palabras_m1.append(_w)
+            for palabra in _palabras_m1:
                 if len(palabra) < 4 or palabra in _GENERICAS_NOMBRE:
                     continue
                 _patron_wb = re.compile(r'(?<![a-z0-9])' + re.escape(palabra) + r'(?![a-z0-9])')
@@ -21606,7 +21638,7 @@ NO agregues texto ni explicacion, SOLO los numeros."""
         return chunks_con_score[:top_k]
 
 
-def busqueda_unificada(query, limit_historial=10, limit_rag=25):
+def busqueda_unificada(query, limit_historial=10, limit_rag=25, original=None):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Incluye verificación de relevancia temática: si los docs no tratan el tema
     consultado, marca rag_confianza='irrelevante' para que el LLM use su conocimiento.
@@ -21634,7 +21666,7 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25):
         return buscar_en_historial(query, limit=limit_historial) if limit_historial > 0 else []
 
     def _motor_rag():
-        return buscar_rag(query, limit=limit_rag)
+        return buscar_rag(query, limit=limit_rag, original=original)
 
     try:
         with _TPE_bu(max_workers=2) as _pool_bu:
@@ -21921,14 +21953,28 @@ def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> st
         from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
         from crawl4ai.async_crawler_strategy import AsyncHTTPCrawlerStrategy
 
+        # FASE 31.7b: filtro de PODA — elimina menús, navegación, footers y
+        # publicidad del markdown (verificado con crawl4ai 0.9.0)
+        _cfg_kwargs = {'page_timeout': timeout * 1000, 'verbose': False}
+        try:
+            from crawl4ai.content_filter_strategy import PruningContentFilter
+            from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+            _cfg_kwargs['markdown_generator'] = DefaultMarkdownGenerator(
+                content_filter=PruningContentFilter(threshold=0.45))
+        except Exception:
+            pass
+
         async def _run():
             strategy = AsyncHTTPCrawlerStrategy()
             async with AsyncWebCrawler(crawler_strategy=strategy) as crawler:
                 r = await _aio_c4.wait_for(
-                    crawler.arun(url=url, config=CrawlerRunConfig(
-                        page_timeout=timeout * 1000, verbose=False)),
+                    crawler.arun(url=url, config=CrawlerRunConfig(**_cfg_kwargs)),
                     timeout=timeout + 3)
-                md = getattr(getattr(r, 'markdown', None), 'raw_markdown', None)                     or (r.markdown if isinstance(getattr(r, 'markdown', None), str) else '')
+                _mdo = getattr(r, 'markdown', None)
+                # Preferir fit_markdown (contenido podado) → raw → string plano
+                md = (getattr(_mdo, 'fit_markdown', None)
+                      or getattr(_mdo, 'raw_markdown', None)
+                      or (_mdo if isinstance(_mdo, str) else ''))
                 return (md or '').strip()
 
         _loop_c4 = _aio_c4.new_event_loop()
@@ -21937,6 +21983,20 @@ def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> st
         finally:
             _loop_c4.close()
         if md and len(md) > 120:
+            # FASE 31.7b: post-limpieza — fuera banners/sesión/líneas solo-link
+            _limpias = []
+            for _ln in md.split('\n'):
+                _s = _ln.strip()
+                if any(_b in _s for _b in ('Skip to content', 'You signed',
+                                           'Reload](', 'Toggle navigation',
+                                           'Sign in](', 'cookies', 'Cookies')):
+                    continue
+                # línea que es SOLO un link sin texto útil
+                if _s.startswith('[') and _s.endswith(')') and _s.count('](') == 1 \
+                        and len(_s.split('](')[0]) <= 4:
+                    continue
+                _limpias.append(_ln)
+            md = '\n'.join(_limpias).strip()
             logger.info(f"🕷️ FASE 31.7 CRAWL4AI: {url[:60]} → {len(md)} chars markdown")
             return md[:max_chars]
     except ImportError:
@@ -37790,7 +37850,8 @@ def main():
                 # (el A3 además tiene statement_timeout de 4s en la BD).
                 pool = _TPE_priv(max_workers=3)
                 try:
-                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
+                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40,
+                                             mensaje)  # FASE 31.7b: la pregunta ORIGINAL viaja junto a la reescrita
                     fut_tar_th = pool.submit(_buscar_tarjetas_priv, mensaje)
                     fut_ev_th = pool.submit(_buscar_eventos_priv)
                     
@@ -38114,7 +38175,19 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                     # entra por A0-APRENDIZAJE directo al documento correcto.
                     try:
                         _n_frag = len(resultados_busq.get('rag') or [])
-                        if _docs_meta and _n_frag >= 10 and len(_docs_meta) <= 3:
+                        # FASE 31.7b GUARDIA ANTI-VENENO: si la propia respuesta
+                        # declara que los docs NO contenían la información, esa
+                        # asociación pregunta→docs es BASURA y grabarla con +1
+                        # envenenaría A0 para siempre (feriados+Cardalda para
+                        # "inflación"). Solo se aprende de respuestas AFIRMATIVAS.
+                        _r_low = (respuesta or '').lower()
+                        _es_negativa = any(_neg in _r_low for _neg in (
+                            'no contienen informaci', 'no se encuentra en la biblioteca',
+                            'no mencionan', 'no aborda el tema', 'no abordan',
+                            'no hay informaci', 'no tengo informaci',
+                            'no puedo proporcionar', 'corresponden exclusivamente'))
+                        if (_docs_meta and _n_frag >= 10 and len(_docs_meta) <= 3
+                                and not _es_negativa):
                             import asyncio as _aio_al
                             _aio_al.get_event_loop().run_in_executor(
                                 None, _fb_guardar_aprendizaje,
