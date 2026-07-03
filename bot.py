@@ -1011,6 +1011,30 @@ def _fb_extraer_terminos(texto: str) -> str:
     return ' '.join(orden[:6])
 
 
+def _cortar_degeneracion(texto: str) -> str:
+    """FASE 31.6: corta bucles de repetición del LLM (el caso 'Mihailo no,
+    sino de otro autor...' repetido ∞). Detecta la primera frase que se
+    repite >=3 veces y trunca ahí, devolviendo un texto limpio."""
+    if not texto:
+        return texto
+    import re as _re_d
+    frases = _re_d.split(r'(?<=[.!?])\s+', texto)
+    vistas = {}
+    corte = None
+    for i, fr in enumerate(frases):
+        clave = _re_d.sub(r'\s+', ' ', fr.strip().lower())[:60]
+        if len(clave) < 15:
+            continue
+        vistas[clave] = vistas.get(clave, 0) + 1
+        if vistas[clave] >= 3:
+            corte = i
+            break
+    if corte is not None:
+        limpio = ' '.join(frases[:corte]).strip()
+        return limpio if len(limpio) > 40 else texto[:600]
+    return texto
+
+
 def _fb_guardar_aprendizaje(pregunta: str, docs: list, delta: int):
     """Upsert en rag_aprendizaje: 'Útil' suma votos a la asociación
     términos→documentos; 'Mejorar' los resta (las malas asociaciones se
@@ -1144,6 +1168,7 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
             return llamar_groq(prompt_fb, max_tokens=900, temperature=0.5)
 
         nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=45.0)
+        nueva = _cortar_degeneracion(nueva)  # FASE 31.6: mata el bucle "Mihailo..."
         if msg_rt:
             try: await msg_rt.delete()
             except Exception: pass
@@ -1162,6 +1187,20 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
             if _docs_regen:
                 meta['docs'] = _docs_regen[:5]
             context.user_data['ultima_respuesta_meta'] = meta
+            # FASE 31.6: sembrar la caché RAG con el resultado BUENO de la
+            # regeneración → si el usuario repite la pregunta, buscar_rag hará
+            # cache HIT de la versión acertada en vez de reintentar y fallar.
+            try:
+                import unicodedata as _uni_seed
+                _qn = _uni_seed.normalize('NFKD', (pregunta_fb or '').lower().strip())
+                _qn = ''.join(ch for ch in _qn if not _uni_seed.combining(ch))
+                _qn = ' '.join(_qn.split()[:10])
+                if _qn and _docs_regen:
+                    _res_seed = [(f"[{d}] contenido relevante confirmado por feedback", d)
+                                 for d in _docs_regen[:5]]
+                    _fase6_cache_set(_qn, _res_seed, 75.0)
+            except Exception:
+                pass
             # FASE 31.4: AUDIO de la respuesta regenerada (pedido de Germán)
             try:
                 audio_fb = await asyncio.wait_for(
@@ -2645,7 +2684,9 @@ Tu personalidad:
             }
         ],
         "max_tokens": max_tokens,
-        "temperature": temperature
+        "temperature": temperature,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3
     }
     
     for intento in range(reintentos):
@@ -21163,8 +21204,8 @@ def buscar_rag(query, limit=5):
                         if len(resultados_pgvec) >= 3 and max_sim >= 0.65:
                             logger.info(f"🎯 FASE 29 pgvector HIT: {len(resultados_pgvec)} resultados, sim_max={max_sim:.3f}")
                             conn.close()
-                            if _query_norm_cache:
-                                _fase6_cache_set(_query_norm_cache, (resultados_pgvec, max_sim))
+                            if _query_norm_cache and len(resultados_pgvec) >= 2 and max_sim >= 0.55:
+                                _fase6_cache_set(_query_norm_cache, resultados_pgvec, max_sim)
                             return resultados_pgvec, max_sim
                         elif resultados_pgvec:
                             logger.info(f"FASE 29 pgvector PARCIAL: {len(resultados_pgvec)} resultados (sim_max={max_sim:.3f}), complementando con keywords...")
@@ -21408,9 +21449,16 @@ def buscar_rag(query, limit=5):
                 except Exception as _e_exp:
                     logger.debug(f"FASE 6 expansion fallo (no crítico): {_e_exp}")
         
-        # FASE 6: Guardar en caché LRU
-        if _query_norm_cache and len(resultados) > 0:
+        # FASE 31.6 ANTI-ENVENENAMIENTO: solo cachear respuestas CON sustancia.
+        # Un resultado vacío o de score bajo NO se cachea → la próxima vez que
+        # el usuario repita la pregunta, el bot REINTENTA de verdad en lugar de
+        # servir un fracaso guardado. Esta era la causa del flip-flop: bien con
+        # "Mejorar", mal al repetir (se servía el vacío cacheado).
+        if _query_norm_cache and len(resultados) >= 2 and score_maximo >= 40:
             _fase6_cache_set(_query_norm_cache, resultados, score_maximo)
+        elif _query_norm_cache:
+            # Purga cualquier entrada envenenada previa de esta misma query
+            _FASE6_CACHE.pop(_query_norm_cache, None)
         
         return resultados, score_maximo
         
@@ -27715,7 +27763,8 @@ def llamar_groq_rapido(prompt: str, max_tokens: int = 300, temperature: float = 
             {"role": "user", "content": prompt}
         ],
         "max_tokens": max_tokens,
-        "temperature": temperature
+        "temperature": temperature,
+        "frequency_penalty": 0.4
     }
     
     try:
@@ -33874,7 +33923,7 @@ def _clima_fuente_openmeteo(lat, lon):
                     'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
                              'wind_speed_10m_max,precipitation_probability_max,'
                              'sunrise,sunset',
-                    'hourly': 'temperature_2m,relative_humidity_2m',
+                    'hourly': 'temperature_2m,relative_humidity_2m,weather_code',
                     'current': 'temperature_2m,relative_humidity_2m,'
                                'wind_speed_10m,weather_code,apparent_temperature',
                     'timezone': 'auto', 'forecast_days': 7,
@@ -33913,6 +33962,10 @@ def _clima_fuente_openmeteo(lat, lon):
                     'sunset0': (daily.get('sunset') or [''])[0],
                     'h_temp': hourly.get('temperature_2m') or [],
                     'h_hum': hourly.get('relative_humidity_2m') or [],
+                    'h_code': hourly.get('weather_code') or [],
+                    'h_time': hourly.get('time') or [],
+                    'sunrise_arr': daily.get('sunrise') or [],
+                    'sunset_arr': daily.get('sunset') or [],
                 }
             logger.warning(f'Clima Open-Meteo status={r.status_code} '
                            f'(intento {intento+1}) body={r.text[:120]}')
@@ -34087,6 +34140,7 @@ def _obtener_clima_ciudad(ciudad: str):
 
         dias = []
         h_temp, h_hum = met['h_temp'], met['h_hum']
+        h_code = met.get('h_code') or []
         for i, fstr in enumerate(met['fechas'][:7]):
             try:
                 fdt = datetime.strptime(fstr, '%Y-%m-%d')
@@ -34098,6 +34152,9 @@ def _obtener_clima_ciudad(ciudad: str):
             humedad = round(sum(bloque_h) / len(bloque_h)) if bloque_h else None
             temps_horas = [round(x) if x is not None else None
                            for x in h_temp[i * 24:(i + 1) * 24]]
+            # FASE 31.6: código WMO por hora → icono de clima sobre el gráfico
+            codes_horas = [int(x) if x is not None else 3
+                           for x in h_code[i * 24:(i + 1) * 24]] if h_code else []
             emoji, desc, tema = met['infos_dia'][i] if i < len(met['infos_dia']) else ('☁️', 'Variable', 'nublado')
             dias.append({
                 'nombre': nombre_dia, 'fecha': fecha_fmt,
@@ -34106,7 +34163,7 @@ def _obtener_clima_ciudad(ciudad: str):
                 'lluvia': met['prob_lluvia'][i],
                 'humedad': humedad if humedad is not None else '—',
                 'emoji': emoji, 'desc': desc, 'tema': tema,
-                'horas': temps_horas,
+                'horas': temps_horas, 'codes': codes_horas,
             })
         if not dias:
             return 'NODATA'
@@ -34115,10 +34172,33 @@ def _obtener_clima_ciudad(ciudad: str):
         emoji_hoy = cur['emoji']
         if es_noche:
             emoji_hoy = _icono_nocturno(cur.get('code', 3), emoji_hoy)
+
+        # FASE 31.6: crepúsculo (amanecer) y ocaso (atardecer) legibles "HH:MM"
+        def _hhmm(iso):
+            try:
+                return iso.split('T')[1][:5] if iso and 'T' in iso else '—'
+            except Exception:
+                return '—'
+        crepusculo = _hhmm(met.get('sunrise0', ''))
+        ocaso = _hhmm(met.get('sunset0', ''))
+        # Índice de la hora ACTUAL dentro de las 24h de "Hoy" (línea vertical)
+        hora_actual_idx = -1
+        try:
+            _tl = cur.get('time_local') or met.get('cur', {}).get('time_local') or ''
+            if 'T' in _tl:
+                hora_actual_idx = int(_tl.split('T')[1][:2])
+            else:
+                from datetime import datetime as _dtnow
+                hora_actual_idx = _dtnow.now().hour
+        except Exception:
+            hora_actual_idx = -1
+
         return {
             'ciudad': nombre, 'region': region, 'pais': pais,
             'es_noche': es_noche,
             'aqi': aqi_val, 'aqi_cat': aqi_cat,
+            'crepusculo': crepusculo, 'ocaso': ocaso,
+            'hora_actual_idx': hora_actual_idx,
             'fuente': met.get('fuente', 'Open-Meteo'),
             'actual': {
                 'temp': round(cur['temp']), 'sensacion': round(cur['sensacion']),
@@ -34193,10 +34273,19 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
 @media(orientation:landscape) and (max-height:500px){
  .hero{padding:14px 16px;gap:12px}.hero .icono{font-size:3.4rem}
  .hero .temp{font-size:2.4rem}#grafHoras,#grafico{height:220px}}
+<style>
+#btnLang{position:fixed;top:12px;right:12px;z-index:99;cursor:pointer;
+ background:rgba(255,255,255,.16);backdrop-filter:blur(10px);
+ -webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.35);
+ color:#fff;font-weight:700;font-size:.85rem;padding:8px 14px;border-radius:20px;
+ box-shadow:0 4px 14px rgba(0,0,0,.28);transition:transform .15s,background .2s}
+#btnLang:hover{background:rgba(255,255,255,.28);transform:scale(1.05)}
+#btnLang:active{transform:scale(.96)}
 </style></head><body><div class="wrap">
+<button id="btnLang" onclick="toggleIdioma()">🇬🇧 English</button>
 <header>
-  <h1>🌎 Pronóstico del Tiempo</h1>
-  <div class="sub">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado: __ACTUALIZADO__ (hora Chile)</div>
+  <h1 data-i18n="Pronóstico del Tiempo">🌎 Pronóstico del Tiempo</h1>
+  <div class="sub"><span data-i18n="__CIUDAD__ __REGION_PAIS__ · Actualizado:">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado:</span> __ACTUALIZADO__ <span data-i18n="(hora Chile)">(hora Chile)</span></div>
 </header>
 
 <div class="hero">
@@ -34204,39 +34293,104 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
   <div>
     <div class="temp">__TEMP_HOY__°</div>
     <div class="desc">__DESC_HOY__</div>
-    <div class="mm">⬇️ Mín __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ Máx __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ Sensación __SENSACION__°</div>
+    <div class="mm">⬇️ <span data-i18n="Mín">Mín</span> __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ <span data-i18n="Máx">Máx</span> __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ <span data-i18n="Sensación">Sensación</span> __SENSACION__°</div>
   </div>
   <div class="datos">
-    <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l">Humedad</div></div>
-    <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l">km/h viento</div></div>
-    <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l">Prob. lluvia</div></div>
-    <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l">Calidad aire · __AQI_CAT__</div></div>
+    <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l" data-i18n="Humedad">Humedad</div></div>
+    <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l" data-i18n="km/h viento">km/h viento</div></div>
+    <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l" data-i18n="Prob. lluvia">Prob. lluvia</div></div>
+    <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l"><span data-i18n="Calidad aire">Calidad aire</span> · <span data-i18n-cat>__AQI_CAT__</span></div></div>
   </div>
 </div>
 
-<h2 class="seccion">📅 Próximos 7 días</h2>
-<div class="hint">👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)</div>
+<h2 class="seccion" data-i18n="📅 Próximos 7 días">📅 Próximos 7 días</h2>
+<div class="hint" data-i18n="👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)">👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)</div>
 <div class="grid" id="gridDias">__TARJETAS__</div>
 
 <div class="panel">
-  <div id="tituloHoras">🕐 Temperatura por hora <span class="badge" id="badgeDia">Hoy</span></div>
+  <div id="tituloHoras"><span data-i18n="🕐 Temperatura por hora">🕐 Temperatura por hora</span> <span class="badge" id="badgeDia">Hoy</span></div>
   <div id="grafHoras"></div>
 </div>
 
-<h2 class="seccion">📈 Evolución de temperaturas (7 días)</h2>
+<h2 class="seccion" data-i18n="📈 Evolución de temperaturas (7 días)">📈 Evolución de temperaturas (7 días)</h2>
 <div class="panel"><div id="grafico"></div></div>
 
-<footer>⚓ Cofradía de Networking — Servicio meteorológico del bot<br>
-Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI</footer>
+<footer><span data-i18n="⚓ Cofradía de Networking — Servicio meteorológico del bot">⚓ Cofradía de Networking — Servicio meteorológico del bot</span><br>
+<span data-i18n="Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI">Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI</span></footer>
 </div>
 <script>
+// ═══ FASE 31.6: TRADUCTOR ES↔EN del dashboard (cliente, instantáneo) ═══
+var I18N={
+ "Pronóstico del Tiempo":"Weather Forecast",
+ "__CIUDAD__ __REGION_PAIS__ · Actualizado:":"📍 __CIUDAD__ __REGION_PAIS__ · Updated:",
+ "(hora Chile)":"(Chile time)",
+ "Humedad":"Humidity","km/h viento":"km/h wind","Prob. lluvia":"Rain prob.",
+ "Calidad aire":"Air quality","Sensación":"Feels like","Mín":"Min","Máx":"Max",
+ "📅 Próximos 7 días":"📅 Next 7 days",
+ "👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)":"👆 Tap any day to see its hour-by-hour temperatures (00:00 – 23:00)",
+ "🕐 Temperatura por hora":"🕐 Hourly temperature",
+ "📈 Evolución de temperaturas (7 días)":"📈 Temperature trend (7 days)",
+ "⚓ Cofradía de Networking — Servicio meteorológico del bot":"⚓ Cofradía de Networking — Bot weather service",
+ "Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI":"Data: international weather models (Open-Meteo) · Air quality: US AQI"
+};
+// Días de la semana y palabra "Hoy"
+var I18N_DIAS={"Hoy":"Today","Lunes":"Monday","Martes":"Tuesday","Miércoles":"Wednesday",
+ "Jueves":"Thursday","Viernes":"Friday","Sábado":"Saturday","Domingo":"Sunday"};
+// Descripciones de clima (WMO) y categorías AQI
+var I18N_DESC={
+ "Despejado":"Clear","Mayormente despejado":"Mostly clear","Parcialmente nublado":"Partly cloudy",
+ "Nublado":"Cloudy","Niebla":"Fog","Niebla con escarcha":"Rime fog","Llovizna ligera":"Light drizzle",
+ "Llovizna moderada":"Moderate drizzle","Llovizna intensa":"Dense drizzle","Llovizna helada":"Freezing drizzle",
+ "Llovizna helada intensa":"Dense freezing drizzle","Lluvia ligera":"Light rain","Lluvia moderada":"Moderate rain",
+ "Lluvia intensa":"Heavy rain","Lluvia helada":"Freezing rain","Lluvia helada intensa":"Heavy freezing rain",
+ "Nieve ligera":"Light snow","Nieve moderada":"Moderate snow","Nieve intensa":"Heavy snow","Granos de nieve":"Snow grains",
+ "Chubascos ligeros":"Light showers","Chubascos moderados":"Moderate showers","Chubascos violentos":"Violent showers",
+ "Chubascos de nieve":"Snow showers","Chubascos de nieve fuertes":"Heavy snow showers","Tormenta eléctrica":"Thunderstorm",
+ "Tormenta con granizo":"Thunderstorm w/ hail","Tormenta con granizo fuerte":"Severe thunderstorm w/ hail","Variable":"Variable",
+ "Buena":"Good","Moderada":"Moderate","Dañina grupos sensibles":"Unhealthy (sensitive)","Dañina":"Unhealthy",
+ "Muy dañina":"Very unhealthy","Peligrosa":"Hazardous"};
+var _idiomaEN=false;
+function _trad(txt,dic){var s=(txt||'').trim();return (dic[s]!==undefined)?dic[s]:txt;}
+function toggleIdioma(){
+ _idiomaEN=!_idiomaEN;
+ // 1) Textos con data-i18n
+ document.querySelectorAll('[data-i18n]').forEach(function(el){
+   var orig=el.getAttribute('data-i18n');
+   el.textContent=_idiomaEN?_trad(orig,I18N):orig;
+ });
+ // 2) Categoría AQI
+ document.querySelectorAll('[data-i18n-cat]').forEach(function(el){
+   if(!el.getAttribute('data-orig'))el.setAttribute('data-orig',el.textContent);
+   var o=el.getAttribute('data-orig');
+   el.textContent=_idiomaEN?_trad(o,I18N_DESC):o;
+ });
+ // 3) Tarjetas de días: nombre de día + descripción del clima
+ document.querySelectorAll('#gridDias .card').forEach(function(card){
+   var dn=card.querySelector('.d'), cd=card.querySelector('.cd');
+   if(dn){if(!dn.getAttribute('data-orig'))dn.setAttribute('data-orig',dn.textContent);
+     var od=dn.getAttribute('data-orig');dn.textContent=_idiomaEN?_trad(od,I18N_DIAS):od;}
+   if(cd){var descEl=cd.childNodes[0];
+     if(descEl){if(!cd.getAttribute('data-origdesc'))cd.setAttribute('data-origdesc',descEl.textContent);
+       var odesc=cd.getAttribute('data-origdesc');descEl.textContent=_idiomaEN?_trad(odesc,I18N_DESC):odesc;}}
+ });
+ // 4) Badge del gráfico horario: re-pintar el día activo respeta el idioma
+ try{var act=document.querySelector('#gridDias .card.activa');
+   var idx=0,cards=document.querySelectorAll('#gridDias .card');
+   for(var k=0;k<cards.length;k++){if(cards[k]===act){idx=k;break;}}
+   pintarHoras(idx);}catch(e){}
+ // 5) Botón
+ document.getElementById('btnLang').textContent=_idiomaEN?'🇪🇸 Español':'🇬🇧 English';
+}
 var DATA_HORAS=__DATA_HORAS__;   // [{n:'Hoy 3 Jul', t:[24 temps]}, ...]
 var EJE_H=Array.from({length:24},function(_,h){return (h<10?'0':'')+h+':00'});
 
 var chH=echarts.init(document.getElementById('grafHoras'));
 function pintarHoras(idx){
   var d=DATA_HORAS[idx]||DATA_HORAS[0];
-  document.getElementById('badgeDia').textContent=d.n;
+  var _bn=d.n;
+  if(typeof _idiomaEN!=='undefined' && _idiomaEN){
+    var _p=_bn.split(' ');_p[0]=_trad(_p[0],I18N_DIAS);_bn=_p.join(' ');}
+  document.getElementById('badgeDia').textContent=_bn;
   var temps=d.t;
   var vmax=Math.max.apply(null,temps.filter(function(x){return x!==null}));
   var vmin=Math.min.apply(null,temps.filter(function(x){return x!==null}));
@@ -37694,6 +37848,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             # FASE 30.1: envío final robusto (msg puede ser None si reply_text inicial falló)
             if respuesta:
+                respuesta = _cortar_degeneracion(respuesta)  # FASE 31.6 anti-bucle
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
                 respuesta_completa = respuesta + footer
