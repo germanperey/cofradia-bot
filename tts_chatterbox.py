@@ -74,7 +74,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v31.5-catalina-respiracion-sintactica-idiomas-2026-07-03"
+TTS_VERSION_TAG = "v31.6-catalina-pausa-titulos-2026-07-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -311,6 +311,29 @@ def _texto_para_edge(texto: str) -> str:
     deletreo de siglas con espacios y puntuación que induce pausas.
     NUNCA se deforman palabras en español correcto (lección de Fase 14)."""
     t = texto
+    # ═══ FASE 31.6: PAUSA entre TÍTULO / SUBTÍTULO / PÁRRAFO.
+    # Antes Catalina leía "Contenido del libro El libro se divide..." de
+    # corrido (título pegado al párrafo). Ahora: toda línea corta que no
+    # termine en signo de puntuación se considera encabezado y recibe un
+    # punto → el motor de pausas hace el silencio de fin de oración.
+    # Además, encabezados markdown (**, ##) también se cierran con punto.
+    _lineas_t = []
+    for _ln in t.split('\n'):
+        _ln_s = _ln.strip()
+        if _ln_s:
+            # quitar marcadores markdown de encabezado para no leerlos
+            _ln_limpio = _ln_s.lstrip('#').strip()
+            _sin_md = _ln_limpio.replace('**', '').replace('__', '')
+            # ¿es encabezado? línea corta (<10 palabras) sin puntuación final
+            _es_titulo = (len(_sin_md.split()) <= 9
+                          and not _sin_md.endswith(('.', ':', '!', '?', ',', ';')))
+            if _es_titulo:
+                _lineas_t.append(_sin_md + '.')
+            else:
+                _lineas_t.append(_ln_s)
+        else:
+            _lineas_t.append('')
+    t = '\n'.join(_lineas_t)
     # Siglas → deletreo natural ("IPC" → "i pe cé" suena raro; "I P C" con
     # espacios hace que la voz neuronal las diga letra a letra correctamente)
     SIGLAS = ['IPSA', 'IMACEC', 'IPC', 'TPM', 'UTM', 'AFP', 'APV', 'TMC',
@@ -373,6 +396,53 @@ def _texto_para_edge(texto: str) -> str:
     ]
     for patt_a, repl_a in _ANGLICISMOS:
         t = re.sub(patt_a, repl_a, t, flags=re.IGNORECASE)
+    # ═══ FASE 31.9-TTS: PRONUNCIACIÓN INGLESA/FRANCESA NATURAL ═══
+    # Problema reportado: Catalina lee palabras inglesas con fonética
+    # española ("Love Me Tender" → "lobe me tendér", efecto "Jane de
+    # Tarzán"). Solución en 3 capas, SOLO para el audio:
+    #   1) Diccionario de 321 palabras derivado del CMU Pronouncing
+    #      Dictionary (Carnegie Mellon, estándar académico de pronunciación
+    #      inglesa) convertido a respelling español con la sílaba tónica
+    #      marcada. 2) Mini-diccionario francés curado. 3) Detector
+    #      heurístico + reglas grafema→fonema para palabras inglesas fuera
+    #      del diccionario. REGLA DE ORO: una palabra española JAMÁS se
+    #      toca (exige señal inequívoca de que NO es español).
+    _PRON_EN = {"actor": "ákter", "actress": "áktres", "afternoon": "afternún", "air": "er", "album": "álbem", "albums": "álbems", "alone": "elóun", "always": "ólueis", "amazing": "eméisin", "american": "emériken", "anchor": "ánker", "answer": "ánser", "april": "éiprel", "aren't": "árent", "army": "ármi", "august": "óguest", "baby": "béibi", "baseball": "béisból", "basketball": "básketbol", "bass": "bas", "beautiful": "bíutefel", "birthday": "bérsdei", "blue": "blu", "boat": "bóut", "book": "buk", "books": "buks", "boxing": "báksin", "boy": "boi", "break": "bréik", "breakfast": "brékfest", "british": "brítich", "business": "bísnis", "can't": "kant", "captain": "kápten", "car": "kar", "channel": "chánel", "children": "chíldren", "christmas": "krísmes", "city": "síti", "code": "kóud", "coffee": "kófi", "college": "káliy", "company": "kémpeni", "computer": "kempíuter", "concert": "kánsert", "content": "kántent", "could": "kud", "country": "kéntri", "crew": "kru", "cruel": "krúel", "dance": "dans", "dancing": "dánsin", "data": "dáte", "day": "dei", "december": "disémber", "deep": "dip", "device": "diváis", "didn't": "dídent", "different": "díferent", "dinner": "díner", "director": "dirékter", "doesn't": "désent", "don't": "dóunt", "drums": "drams", "earth": "ars", "eight": "eit", "english": "ínlich", "evening": "ívnin", "false": "fols", "fame": "féim", "family": "fámeli", "famous": "féimes", "february": "fébrueri", "fire": "faíer", "first": "farst", "five": "fáiv", "fleet": "flit", "flight": "fláit", "follow": "fálou", "follower": "fálouer", "following": "fálouin", "food": "fud", "football": "fútbol", "force": "fors", "forever": "feréver", "four": "for", "free": "fri", "friday": "fráidei", "friend": "frend", "friends": "frends", "full": "ful", "game": "guéim", "games": "guéims", "girl": "garl", "good": "gud", "goodbye": "gudbái", "government": "gévernment", "great": "gréit", "growth": "gróus", "guitar": "guitár", "halloween": "jaleúin", "happy": "jápi", "harbor": "járber", "health": "jels", "heart": "jart", "heartbreak": "jártbreik", "heavy": "jévi", "hello": "jelóu", "high": "jai", "history": "jísteri", "hits": "jits", "home": "jóum", "hotel": "joutél", "hound": "jáund", "house": "jáus", "how": "jau", "important": "impórtent", "impossible": "impásebel", "internet": "ínternet", "isn't": "ísent", "jailhouse": "yéiljaus", "january": "yániueri", "job": "yab", "july": "yulái", "june": "yun", "king": "kin", "kingdom": "kíndem", "leader": "líder", "leadership": "líderchip", "learn": "larn", "legend": "léyend", "life": "láif", "light": "láit", "like": "láik", "likes": "láiks", "live": "liv", "living": "lívin", "long": "lon", "love": "lav", "low": "lou", "lunch": "lanch", "management": "mániyment", "manager": "mániyer", "market": "márkit", "may": "mei", "medicine": "médesen", "minds": "máinds", "mobile": "móubel", "monday": "méndei", "money": "méni", "moon": "mun", "morning": "mórnin", "movie": "múvi", "movies": "múvis", "much": "mach", "music": "míusik", "name": "néim", "navy": "néivi", "network": "nétuerk", "never": "néver", "new": "nu", "night": "náit", "nine": "náin", "november": "nouvémber", "ocean": "óuchen", "october": "aktóuber", "office": "ófes", "officer": "ófiser", "old": "óuld", "one": "uen", "page": "péiy", "party": "párti", "people": "pípel", "phone": "fóun", "piano": "piáne", "plane": "pléin", "play": "pléi", "player": "pleíer", "playing": "pléin", "please": "plis", "possible": "pásebel", "post": "póust", "posts": "póusts", "power": "paúer", "president": "président", "price": "práis", "project": "práyekt", "question": "kúechen", "race": "réis", "rain": "réin", "read": "red", "record": "rékerd", "records": "rékerds", "report": "ripórt", "research": "ríserch", "review": "rivíu", "right": "ráit", "road": "róud", "rock": "rak", "roll": "róul", "running": "rénin", "sailor": "séiler", "saturday": "sátidei", "school": "skul", "science": "saíens", "screen": "skrin", "second": "sékend", "september": "septémber", "server": "sérver", "seven": "séven", "share": "cher", "ship": "chip", "ships": "chips", "shoes": "chus", "short": "chort", "should": "chud", "show": "chóu", "shows": "chóus", "singing": "sínin", "single": "sínguel", "six": "siks", "sky": "skái", "slow": "slóu", "small": "smol", "snow": "snóu", "song": "son", "songs": "sons", "sorry": "sári", "sound": "sáund", "spanish": "spánich", "special": "spéchel", "spring": "spérin", "stage": "stéiy", "state": "stéit", "states": "stéits", "stock": "stak", "story": "stóri", "street": "strit", "strong": "stron", "student": "stúdent", "suede": "suéid", "summer": "sémer", "sun": "san", "sunday": "séndi", "suspicious": "sespíches", "system": "sístem", "teacher": "tícher", "team": "tim", "tender": "ténder", "tennis": "ténis", "thank": "zank", "thanks": "zanks", "thanksgiving": "zanksguívin", "that": "dat", "the": "da", "theater": "zíeiter", "their": "der", "them": "dem", "there": "der", "these": "dis", "they": "dei", "third": "zard", "this": "dis", "those": "dóus", "three": "sri", "thursday": "zérsdei", "time": "táim", "today": "tedéi", "together": "tegéder", "tomorrow": "temárou", "tonight": "tenáit", "tour": "tur", "train": "tréin", "travel": "trável", "true": "tru", "tuesday": "túsdei", "two": "tu", "united": "iunáitid", "university": "iunevérseti", "value": "váliu", "very": "véri", "video": "vídiou", "videos": "vídious", "voice": "vóis", "walking": "úokin", "was": "uas", "wasn't": "úesent", "water": "úoter", "way": "uei", "web": "ueb", "website": "úebsait", "wednesday": "úensdei", "weekend": "úikind", "welcome": "úelkem", "were": "uer", "what": "uet", "when": "uin", "where": "uer", "which": "úich", "who": "ju", "why": "uai", "will": "uil", "wind": "úind", "winner": "úiner", "winter": "úinter", "woman": "úumen", "women": "úimen", "won't": "uóunt", "wonderful": "úenderfel", "word": "úerd", "words": "úerds", "work": "úerk", "world": "úerld", "would": "ud", "write": "ráit", "wrong": "ron", "yesterday": "íesterdei", "you": "iu", "young": "ien", "your": "iur", "yours": "íurs"}
+    _PRON_FR = {
+        "croissant": "cruasán", "baguette": "baguét", "champagne": "champán",
+        "déjà": "deyá", "vu": "vú", "cliché": "cliché", "élite": "elít",
+        "gourmet": "gurmét", "buffet": "bufét", "ballet": "balét",
+        "cabernet": "cabernét", "sauvignon": "soviñón", "monsieur": "mesié",
+        "madame": "madám", "merci": "mersí", "bonjour": "bonyúr",
+        "voilà": "gualá", "toilette": "tualét", "amateur": "amatér",
+        "chauffeur": "chofér", "entrepreneur": "antreprenér",
+        "tour": "tur", "force": "fors", "avant": "aván", "garde": "gard",
+        "beaucoup": "bocú", "papier": "papié", "atelier": "atelié",
+        "soirée": "suaré", "première": "premiér", "menu": "menú",
+    }
+    def _fonetizar_palabra_31_9(m):
+        w = m.group(0)
+        wl = w.lower()
+        # capa 1 y 2: diccionarios (CMU inglés + francés curado)
+        r = _PRON_EN.get(wl) or _PRON_FR.get(wl)
+        if r is None:
+            # capa 3: heurística SOLO con señal inequívoca de palabra inglesa
+            if not re.search(r"th|sh|ck|gh|oo|ee|wh|ough|[qwk]|'", wl):
+                return w                       # sin señal → se deja intacta
+            if re.search(r"[áéíóúñü]", wl):
+                return w                       # ya es español / ya procesada
+            r = wl
+            for pa, re_ in [(r"ough", "of"), (r"ght", "t"), (r"th", "z"),
+                            (r"sh", "ch"), (r"ck", "k"), (r"wh", "u"),
+                            (r"oo", "u"), (r"ee", "i"), (r"ea", "i"),
+                            (r"^h(?=[aeiou])", "j"), (r"w", "u"),
+                            (r"ing\b", "in"), (r"y\b", "i")]:
+                r = re.sub(pa, re_, r)
+            if r == wl:
+                return w
+        # preservar mayúscula inicial (nombres propios, inicios de frase)
+        return (r[0].upper() + r[1:]) if w[0].isupper() else r
+    t = re.sub(r"\b[A-Za-z][A-Za-z']{2,}\b", _fonetizar_palabra_31_9, t)
     # Montos y porcentajes → lectura natural
     t = re.sub(r'\$\s*([\d.,]+)',
                lambda m: m.group(1).replace('.', ' mil ') + ' pesos'

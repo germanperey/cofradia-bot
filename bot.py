@@ -77,7 +77,7 @@ TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
-logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9 — Fallback web automático + respaldo Útil→markdown + referencias de archivos (2026-07-03)")
+logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9b — Fallback web con URLs citadas + pronunciación EN/FR de Catalina (2026-07-03)")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -38261,7 +38261,13 @@ def main():
             # (DuckDuckGo + Trafilatura → markdown limpio) para que el
             # usuario SIEMPRE reciba una respuesta completa y correcta.
             _web_meta_39 = None
-            if total_rag == 0 and not resultados_busq.get('historial'):
+            # FASE 31.9b: basta con que el RAG esté vacío. Antes se exigía
+            # también historial vacío, pero el historial del grupo casi
+            # siempre devuelve algún mensaje (aunque sea ruido) y eso
+            # bloqueaba el fallback (caso real: "discos de Elvis Presley"
+            # respondió con conocimiento propio en vez de buscar en la web).
+            # El historial disponible se mantiene igual en el contexto.
+            if total_rag == 0:
                 try:
                     try:
                         await msg.edit_text("🌐 No está en mi base de conocimientos — "
@@ -38509,6 +38515,11 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 respuesta = _cortar_degeneracion(respuesta)  # FASE 31.6 anti-bucle
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
+                # FASE 31.9b: si la información vino de Internet, citar las
+                # URLs exactas al pie (credibilidad y verificabilidad)
+                if _web_meta_39 and _web_meta_39.get('urls'):
+                    footer += "\n" + "\n".join(
+                        f"🔗 {u}" for u in _web_meta_39['urls'][:3])
                 respuesta_completa = respuesta + footer
                 if msg:
                     try: await msg.delete()
