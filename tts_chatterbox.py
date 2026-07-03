@@ -74,7 +74,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v31.3-catalina-acentos-ingles-pausas-2026-07-03"
+TTS_VERSION_TAG = "v31.4-catalina-simbolos-respiracion-2026-07-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -363,6 +363,22 @@ def _texto_para_edge(texto: str) -> str:
                else m.group(1) + ' pesos', t)
     t = re.sub(r'(\d+),(\d+)\s*%', r'\1 coma \2 por ciento', t)
     t = re.sub(r'(\d+)\s*%', r'\1 por ciento', t)
+    # ═══ FASE 31.4 (2) SÍMBOLOS: nombre correcto y pronunciación natural.
+    # "/" se llama SLASH (respelling 'slásh' fuerza la fonética inglesa).
+    t = re.sub(r'(\d+)\s*/\s*(\d+)', r'\1 \2', t)          # 24/7 → "24 7"
+    t = re.sub(r'\by/o\b', 'y o', t, flags=re.IGNORECASE)     # y/o → "y o"
+    t = re.sub(r'/(?=[A-Za-zÁ-Úá-ú])', ' slásh ', t)            # /economia → "slásh economia"
+    t = re.sub(r'\s*/\s*', ' slásh ', t)                       # "/" suelto
+    t = t.replace('@', ' arroba ')
+    t = re.sub(r'#(?=\w)', ' jáshtag ', t).replace('#', ' jáshtag ')
+    t = t.replace('&', ' y ').replace('+', ' más ').replace('=', ' igual a ')
+    t = re.sub(r'\bvs\.?\b', 'versus', t, flags=re.IGNORECASE)
+    # Dominios y correos: el punto se DICE ("cofradia.cl" → "cofradia punto cl")
+    # y así no lo captura la regla de pausa de fin de oración.
+    t = re.sub(r'(?<=[a-záéíóúñ0-9])\.(?=(?:cl|com|net|org|ai|io|es|app|dev)\b)',
+               ' punto ', t, flags=re.IGNORECASE)
+    t = t.replace('→', ', ').replace('←', ', ').replace('≈', ' aproximadamente ')
+    t = re.sub(r'_(?=\w)', ' ', t).replace('_', ' ')            # buscar_profesional → "buscar profesional"
     # Separadores visuales → pausa hablada
     t = t.replace(' · ', ', ').replace('·', ',').replace('—', ', ').replace(' - ', ', ')
     # Asegurar espacio tras signos (induce la pausa del motor)
@@ -374,6 +390,32 @@ def _texto_para_edge(texto: str) -> str:
     #   y relajada. Resultado: coma < punto, como habla una persona.
     t = t.replace('; ', ', ')
     t = re.sub(r'([.!?…])\s+', r'\1\n', t)
+    # ═══ FASE 31.4 (1) RESPIRACIÓN: si un tramo corre >12 palabras sin
+    # puntuación, se inserta una coma en el conector natural más cercano
+    # (y, o, que, para, pero, como, donde, cuando, porque, con, sin) — o a
+    # las 16 palabras como tope. Así Catalina respira como una persona y
+    # no llega "sin aire" al final de la frase.
+    _CONECTORES = {'y', 'o', 'que', 'para', 'pero', 'como', 'donde',
+                   'cuando', 'porque', 'con', 'sin', 'aunque', 'mientras',
+                   'según', 'sobre', 'entre', 'incluyendo', 'durante',
+                   'mediante', 'además', 'también', 'luego', 'desde', 'hasta'}
+    _lineas_out = []
+    for _linea in t.split('\n'):
+        _toks = _linea.split(' ')
+        _out, _cont = [], 0
+        for _tk in _toks:
+            if _cont >= 7 and _tk.lower() in _CONECTORES:
+                if _out and not _out[-1].endswith((',', '.', ':', ';', '?', '!')):
+                    _out[-1] = _out[-1] + ','
+                _cont = 0
+            elif _cont >= 11:
+                if _out and not _out[-1].endswith((',', '.', ':', ';', '?', '!')):
+                    _out[-1] = _out[-1] + ','
+                _cont = 0
+            _out.append(_tk)
+            _cont = 0 if _tk.endswith((',', '.', ':', ';', '?', '!')) else _cont + 1
+        _lineas_out.append(' '.join(_out))
+    t = '\n'.join(_lineas_out)
     t = re.sub(r'[ \t]{2,}', ' ', t).strip()
     return t
 

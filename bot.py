@@ -1143,12 +1143,25 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
             try: await msg_rt.delete()
             except Exception: pass
         if nueva and nueva.strip():
-            nueva_txt = nueva.strip()[:3900] + "\n\n─────────────────\n🔄 Respuesta regenerada con criterios ampliados"
+            # FASE 31.4: sin asteriscos markdown (se veían crudos en Telegram)
+            nueva_limpia = nueva.strip().replace('**', '').replace('*', '').replace('__', '')
+            nueva_txt = nueva_limpia[:3900] + "\n\n─────────────────\n🔄 Respuesta regenerada con criterios ampliados"
             await context.bot.send_message(
                 chat_id, nueva_txt,
                 reply_markup=_crear_botones_feedback('chat_privado'))
-            meta['respuesta'] = nueva.strip()[:1800]
+            meta['respuesta'] = nueva_limpia[:1800]
             context.user_data['ultima_respuesta_meta'] = meta
+            # FASE 31.4: AUDIO de la respuesta regenerada (pedido de Germán)
+            try:
+                audio_fb = await asyncio.wait_for(
+                    generar_audio_tts(nueva_limpia[:1500], f"/tmp/fb_{chat_id}.mp3"),
+                    timeout=15.0)
+                if audio_fb and os.path.exists(audio_fb):
+                    with open(audio_fb, 'rb') as af_fb:
+                        await context.bot.send_voice(chat_id, voice=af_fb)
+                    os.remove(audio_fb)
+            except Exception as _e_afb:
+                logger.debug(f"TTS regeneración: {_e_afb}")
         else:
             await context.bot.send_message(
                 chat_id, "😕 No logré una mejor respuesta. Reformula la pregunta con más detalle.")
@@ -20900,6 +20913,14 @@ def buscar_rag(query, limit=5):
                         break
         except Exception as _e_a0:
             logger.debug(f"A0 aprendizaje (tabla puede no existir aún): {_e_a0}")
+            # FASE 31.4 CRÍTICO: en PostgreSQL una consulta fallida ABORTA la
+            # transacción y TODAS las consultas siguientes de buscar_rag
+            # (nombres, A3, ¡pgvector!) morirían en cascada → "libro no está
+            # en la biblioteca" aunque sí esté. Rollback inmediato lo sana.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         
         try:
             c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
@@ -20909,6 +20930,10 @@ def buscar_rag(query, limit=5):
         except Exception as _e_load:
             logger.warning(f"Error cargando sources: {_e_load}")
             sources_normalizados = []
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         
         # MATCH 1: substring exacto de cada palabra clave en sources normalizados
         for palabra in palabras_clave:
@@ -20964,7 +20989,13 @@ def buscar_rag(query, limit=5):
                 try:
                     patron_like = f"%{palabra}%"
                     filas_a3 = []
-                    for col_a3 in ('keywords', 'chunk_text'):
+                    # FASE 31.4: metadata::text agregado (título/autor suelen
+                    # vivir ahí); rollback por intento para que una columna
+                    # inexistente jamás aborte la transacción de las demás.
+                    _cols_a3 = (('keywords', 'metadata::text', 'chunk_text')
+                                if DATABASE_URL else
+                                ('keywords', 'metadata', 'chunk_text'))
+                    for col_a3 in _cols_a3:
                         try:
                             if DATABASE_URL:
                                 c.execute(
@@ -20979,8 +21010,12 @@ def buscar_rag(query, limit=5):
                             filas_a3 = [(r['source'] if DATABASE_URL else r[0])
                                         for r in c.fetchall()]
                         except Exception as _e_col:
-                            logger.debug(f"A3 col {col_a3}: {_e_col}")
+                            logger.warning(f"A3 col {col_a3}: {_e_col}")
                             filas_a3 = []
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
                         if filas_a3:
                             break
                     for src_c, cnt_c in _Cnt_a3(filas_a3).most_common(2):
@@ -20993,11 +21028,26 @@ def buscar_rag(query, limit=5):
                     logger.debug(f"A3 contenido '{palabra}' error: {_e_a3}")
                 if docs_fase1:
                     break  # con un documento identificado basta
+            if not docs_fase1 and terminos_contenido:
+                # FASE 31.4 DIAGNÓSTICO: si ni nombre ni contenido matchean,
+                # loggear los títulos más parecidos → el LOG dirá de una vez
+                # si el libro está indexado o no (y con qué nombre).
+                try:
+                    _frag = terminos_contenido[0][:4]
+                    _parecidos = [orig for nrm, orig in sources_normalizados
+                                  if _frag in nrm][:3]
+                    logger.warning(
+                        f"📚 FASE 31.4 SIN MATCH para {terminos_contenido} en "
+                        f"{len(sources_normalizados)} docs. "
+                        f"Títulos con '{_frag}': {_parecidos or 'NINGUNO'}")
+                except Exception:
+                    pass
             try:
                 if DATABASE_URL:
                     c.execute("SET LOCAL statement_timeout = DEFAULT")
             except Exception:
                 pass
+
         
         # ═══════════════════════════════════════════════════
         # PASO B — pgvector RESTRINGIDO al/los documento(s) matcheado(s)
