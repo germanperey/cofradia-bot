@@ -14,4 +14,4 @@ lxml
 PyPDF2
 edge-tts
 qrcode[pil]
-crawl4ai==0.9.0
+trafilatura==2.1.0

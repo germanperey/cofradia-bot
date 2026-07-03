@@ -21935,12 +21935,20 @@ def formatear_contexto_unificado(resultados, query):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════
-# FASE 31.7 — CRAWL4AI: páginas web → markdown LIMPIO (pedido de Germán)
+# FASE 31.7c — WEB → MARKDOWN LIMPIO (pedido de Germán)
 # Potencia el motor web: en vez de solo títulos+snippets de DuckDuckGo,
-# se descarga el CONTENIDO real de las mejores páginas convertido a
-# markdown sin menús/publicidad/scripts. Usa la estrategia HTTP pura de
-# crawl4ai (SIN navegador — Render worker no soporta Playwright/Chromium).
-# Si crawl4ai no está instalado, degrada elegante a requests+BeautifulSoup.
+# se descarga el CONTENIDO real de las mejores páginas como markdown
+# sin menús/publicidad/scripts.
+# MOTORES en cascada:
+#   1) crawl4ai — solo si está instalado (INCOMPATIBLE hoy: sus versiones
+#      con modo HTTP exigen httpx>=0.27 y python-telegram-bot 20.7 exige
+#      httpx~=0.25.2 → ResolutionImpossible en Render). Queda el intento
+#      por si en el futuro se actualiza PTB.
+#   2) TRAFILATURA — motor PRIMARIO real: librería de referencia para
+#      extracción de contenido web (la usan los pipelines de LLM), sin
+#      conflicto de dependencias. Verificada: 19.858 chars de contenido
+#      puro en la prueba, CERO navegación residual.
+#   3) requests + BeautifulSoup — respaldo final (pseudo-markdown).
 # ═══════════════════════════════════════════════════════════════════
 def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> str:
     """Devuelve el contenido de una URL como markdown limpio ('' si falla).
@@ -22000,9 +22008,31 @@ def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> st
             logger.info(f"🕷️ FASE 31.7 CRAWL4AI: {url[:60]} → {len(md)} chars markdown")
             return md[:max_chars]
     except ImportError:
-        logger.debug("crawl4ai no instalado — usando fallback BeautifulSoup")
+        logger.debug("crawl4ai no instalado — probando trafilatura")
     except Exception as _e_c4:
         logger.debug(f"crawl4ai {url[:50]}: {_e_c4}")
+    # ── Motor 2 (PRIMARIO real): TRAFILATURA — FASE 31.7c ──
+    # Descarga con requests (UA Chrome, evita bloqueos del fetcher nativo)
+    # y extrae SOLO el contenido principal como markdown.
+    try:
+        import trafilatura as _traf
+        _r_t = requests.get(url, timeout=timeout, headers={
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/124.0.0.0 Safari/537.36'),
+            'Accept-Language': 'es-CL,es;q=0.9'})
+        if _r_t.status_code == 200 and _r_t.text:
+            md_t = _traf.extract(_r_t.text, output_format='markdown',
+                                 include_links=False, include_tables=True,
+                                 url=url)
+            if md_t and len(md_t) > 120:
+                logger.info(f"🕷️ FASE 31.7c TRAFILATURA: {url[:60]} → "
+                            f"{len(md_t)} chars markdown limpio")
+                return md_t.strip()[:max_chars]
+    except ImportError:
+        logger.debug("trafilatura no instalada — usando fallback BeautifulSoup")
+    except Exception as _e_tf:
+        logger.debug(f"trafilatura {url[:50]}: {_e_tf}")
     # ── Fallback: requests + BeautifulSoup (pseudo-markdown) ──
     try:
         from bs4 import BeautifulSoup as _BS4f
