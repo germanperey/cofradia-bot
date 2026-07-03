@@ -8347,6 +8347,36 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                     ],
                     "tip": "Se abre embebida en Telegram (chat privado) para mejor experiencia.",
                 },
+                {
+                    "name": "/finanzas [consulta]",
+                    "desc": "Asesoría financiera basada en la biblioteca",
+                    "keywords": "finanzas asesoria consejo inversion ahorro deuda credito libros biblioteca educacion financiera",
+                    "definicion": "Asistente de educación financiera GRATUITO que responde tus consultas apoyándose en la biblioteca de más de 280 libros de finanzas, inversión y economía indexados en el sistema. Cita los conceptos de las obras cuando corresponde.",
+                    "ejemplos": [
+                        ("/finanzas cómo empezar a invertir", "Consejos de inversión inicial basados en la biblioteca"),
+                        ("/finanzas cómo salir de deudas", "Estrategias de desendeudamiento"),
+                        ("/finanzas qué es el interés compuesto", "Explicación con fundamento bibliográfico"),
+                        ("/finanzas fondo de emergencia", "Cuánto ahorrar y dónde mantenerlo"),
+                        ("/finanzas APV conviene", "Análisis del Ahorro Previsional Voluntario"),
+                    ],
+                    "bot_response": "<b>💰 Asistente Financiero · Cofradía</b>\n━━━━━━━━━━━━━━━━━━━━\n\nBasado en la biblioteca de la Cofradía:\n\nEl interés compuesto es el crecimiento exponencial que se produce cuando los intereses generados se reinvierten y a su vez generan nuevos intereses...\n\n<em>📚 Fuentes: biblioteca financiera de la Cofradía</em>",
+                    "tip": "Es gratuito e ilimitado. Para indicadores en vivo usa /indicadores; para simulaciones, /calculadora.",
+                },
+                {
+                    "name": "/clima [ciudad]",
+                    "desc": "Pronóstico del tiempo a 7 días",
+                    "keywords": "clima tiempo pronostico temperatura lluvia viento ciudad meteorologia semana",
+                    "definicion": "Pronóstico meteorológico de 7 días para cualquier ciudad de Chile o del mundo: temperaturas máxima y mínima, probabilidad de lluvia, viento y condiciones generales por día. Si no indicas ciudad, usa Santiago por defecto.",
+                    "ejemplos": [
+                        ("/clima", "Pronóstico de Santiago (7 días)"),
+                        ("/clima Valparaíso", "Pronóstico para Valparaíso"),
+                        ("/clima Punta Arenas", "Clima en el extremo sur"),
+                        ("/clima Madrid", "También funciona con ciudades del extranjero"),
+                        ("/clima Concepción", "Planificar la semana en el Biobío"),
+                    ],
+                    "bot_response": "<b>🌤️ Pronóstico · Santiago</b>\n━━━━━━━━━━━━━━━━━━━━\n\n<b>Hoy:</b> ☀️ Despejado · 8°/24°C\n<b>Mañana:</b> 🌤️ Parcial · 9°/25°C\n<b>Jueves:</b> ☁️ Nublado · 10°/21°C\n<b>Viernes:</b> 🌧️ Lluvia 70% · 8°/15°C\n\n<em>Fuente: servicio meteorológico · Actualizado hace minutos</em>",
+                    "tip": "Ideal antes de agendar eventos presenciales de la Cofradía o viajes de trabajo.",
+                },
             ],
         },
         # ═══ COINS ═══
@@ -8610,6 +8640,31 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                         ("/cobros_admin", "Ver panel de cobros"),
                     ],
                     "tip": "Revisa el pronóstico mensual cada lunes para anticipar problemas de cash flow.",
+                },
+                {
+                    "name": "/renovar [modo]",
+                    "desc": "Renovación silenciosa de suscripciones (exclusivo admin)",
+                    "keywords": "renovar renovacion suscripcion extender dias silenciosa vencimiento usuarios",
+                    "definicion": "Renueva suscripciones SIN COSTO y SIN notificar al usuario (silencioso). Acepta usuario individual (ID o @username), lote 'vence_pronto' (los que vencen en 30 días) o 'todos' los activos. IMPORTANTE: este comando está OCULTO del menú de usuarios; si un usuario lo escribe (tras recibir el aviso automático de vencimiento a 30/15/7/3/1 días), verá los planes de pago con los datos de transferencia — nunca tu panel de renovación.",
+                    "ejemplos": [
+                        ("/renovar 123456789 90", "Renovar 1 usuario por 90 días (silencioso)"),
+                        ("/renovar @jperez 180", "Renovar por username por 180 días"),
+                        ("/renovar vence_pronto 90", "Renovar a todos los que vencen en 30 días"),
+                        ("/renovar todos 365", "Renovar a TODOS los activos por 1 año"),
+                        ("/renovar", "Ver ayuda de modos disponibles"),
+                    ],
+                    "tip": "También disponible con el botón 🔄 Renovar del Panel de Control. El usuario renovado no recibe ninguna notificación.",
+                },
+                {
+                    "name": "/activar [código]",
+                    "desc": "Activar código de días (comando oculto a usuarios)",
+                    "keywords": "activar codigo dias canjear activacion regalo",
+                    "definicion": "Canjea un código de activación generado con /generar_codigo y suma los días correspondientes a la cuenta. Los usuarios pueden usarlo pero NO lo ven en su menú /ayuda: solo lo conocen cuando tú les entregas un código directamente (regalos, promociones, compensaciones).",
+                    "ejemplos": [
+                        ("/activar COF-A1B2C3", "Canjear un código de 30 días"),
+                        ("/generar_codigo", "Primero: generar el código a entregar"),
+                    ],
+                    "tip": "Flujo típico: /generar_codigo → envías el código al usuario por privado → él escribe /activar CÓDIGO.",
                 },
                 {
                     "name": "/pipeline todos",
@@ -9274,8 +9329,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - Iniciar/registrar en el bot
 /registrarse - Registro manual
 /mi_cuenta - Ver estado de tu cuenta
-/renovar - Renovar suscripción
-/activar [código] - Activar código de acceso
 
 🔍 BÚSQUEDA
 /buscar [texto] - Buscar en historial
@@ -9306,27 +9359,27 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /recomendar @user [texto] - Recomendar cofrade
 /mis_recomendaciones - Ver recomendaciones
 
-🆔 IDENTIDAD VISIBLE (FASE 23)
+🆔 IDENTIDAD VISIBLE
 /quien - Identifica al usuario (responde a un mensaje, o usa @username/ID)
 /identidad - Alias de /quien
 /cofrades - Lista TODOS los miembros con identidad oficial
 /miembros - Alias de /cofrades
 
-💼 CRM CONVERSACIONAL (FASE 25)
+💼 CRM CONVERSACIONAL
 /oportunidad título | cliente | monto | fecha - Crear oportunidad
 /oportunidades [mias|todas] - Listar tus oportunidades
 /op_actualizar [id] [etapa] - Mover de etapa
 /op_nota [id] [texto] - Agregar nota
 /pipeline - Vista de tu pipeline
 
-📋 TAREAS Y PROYECTOS (FASE 25)
+📋 TAREAS Y PROYECTOS
 /tarea_crear título | @usuario | prioridad | fecha - Crear tarea
 /mis_tareas - Tus tareas pendientes
 /tareas_asignadas - Tareas que asignaste a otros
 /tarea_completar [id] - Marcar completada
 /tarea_progreso [id] - Marcar en progreso
 
-📅 CALENDARIO COMPARTIDO (FASE 25)
+📅 CALENDARIO COMPARTIDO
 /disponibilidad @usuario [fecha] - Ver disponibilidad (semáforo)
 /agendar @usuario fecha hora dur título - Agendar reunión
 /mi_calendario - Tus próximos 14 días
@@ -9356,7 +9409,6 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 ESTADÍSTICAS
 /graficos - Gráficos de actividad y KPIs
 /estadisticas - Estadísticas generales
-/reporte_ejecutivo - Reporte ejecutivo HTML (admin)
 /top_usuarios - Ranking de participación
 /top10 - Top 10 Cofrades del mes con puntos 🏆
 /mi_perfil - Tu perfil, coins y trust score
@@ -9510,15 +9562,20 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /set_precio [srv] [pesos] [coins] - Editar precios
 /dar_coins [user_id] [cant] - Regalar coins
 
-🆔 ADMIN IDENTIDAD (FASE 23)
+🆔 ADMIN IDENTIDAD
 /verificar - Marca usuario como identidad verificada (responder a mensaje, o /verificar @user, /verificar 123456)
 
-🔄 ADMIN RENOVACIÓN SILENCIOSA (FASE 23)
+🔄 ADMIN RENOVACIÓN SILENCIOSA
 /renovar 123456 90 - Renueva 1 usuario por 90 días (silencioso, no notifica)
 /renovar @username 180 - Renueva por username
 /renovar vence_pronto 90 - Renueva a TODOS los que vencen en 30 días
 /renovar todos 365 - Renueva a TODOS los activos
 (También disponible desde Panel de Control con botón 🔄 Renovar)
+ℹ️ Si un USUARIO escribe /renovar (tras el aviso automático de
+vencimiento a 30/15/7/3/1 días), ve los PLANES DE PAGO con datos
+de transferencia. Ambos comandos están OCULTOS del /ayuda de usuarios.
+/activar [código] - Activar código de días (los usuarios lo usan
+solo cuando tú les entregas un código con /generar_codigo)
 /cobros_admin - Panel de cobros
 /pagos_pendientes - Ver pagos pendientes
 /vencimientos - Suscripciones por vencer
@@ -9779,19 +9836,36 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_chat_privado
-async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /renovar - Renovar suscripción (SOLO EN PRIVADO)"""
+async def _renovar_mostrar_planes_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31: Flujo de renovación para USUARIOS (no-admin).
+    
+    Se invoca cuando un usuario escribe /renovar — típicamente porque recibió
+    el aviso automático de vencimiento (30/15/7/3/1 días antes). Muestra los
+    planes con botones; el callback plan_{dias} (ya registrado) entrega los
+    datos de transferencia y activa el flujo de comprobante con Gemini Vision.
+    
+    NOTA: este comando está OCULTO del menú /ayuda por estrategia comercial;
+    el usuario solo lo conoce a través del aviso de vencimiento.
+    """
+    dias_rest = obtener_dias_restantes(update.effective_user.id)
     precios = obtener_precios()
     keyboard = [
         [InlineKeyboardButton(f"💎 {nombre} ({dias}d) - {formato_clp(precio)}", callback_data=f"plan_{dias}")]
         for dias, precio, nombre in precios
     ]
     
-    await update.message.reply_text("""
-💳 **RENOVAR SUSCRIPCIÓN**
-
-Selecciona tu plan:
-""", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    encabezado = "💳 <b>RENOVAR SUSCRIPCIÓN</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    if dias_rest <= 0:
+        encabezado += "⚠️ Tu suscripción se encuentra <b>vencida</b>.\n\n"
+    elif dias_rest <= 30:
+        encabezado += f"⏳ Tu suscripción vence en <b>{dias_rest} día{'s' if dias_rest != 1 else ''}</b>.\n\n"
+    encabezado += "Selecciona el plan que deseas renovar:"
+    
+    await update.message.reply_text(
+        encabezado,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
 
 
 @solo_chat_privado
@@ -13252,7 +13326,10 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       /renovar vence_pronto 90       → renueva a los que vencen en próximos 30d, por 90d
     """
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ Solo el administrador principal puede renovar suscripciones.")
+        # FASE 31: Los usuarios que escriben /renovar (típicamente tras recibir
+        # el aviso automático de vencimiento) ven los PLANES DE PAGO, no un rechazo.
+        # El comando permanece OCULTO del menú /ayuda de usuarios.
+        await _renovar_mostrar_planes_usuario(update, context)
         return
     
     if not context.args:
@@ -20557,65 +20634,22 @@ def buscar_rag(query, limit=5):
         c = conn.cursor()
         
         # ═══════════════════════════════════════════════════════════════════
-        # FASE 29 — FASE 0: BÚSQUEDA SEMÁNTICA REAL CON pgvector + Gemini
-        # Solo si: (1) PostgreSQL, (2) pgvector instalado, (3) hay embeddings
-        # Si encuentra ≥ 3 resultados con similitud ≥ 0.65, usa esos y termina.
-        # Si encuentra menos o de baja calidad, cae a fases 1-2 (keywords).
-        # ═══════════════════════════════════════════════════════════════════
-        if DATABASE_URL and query and len(query.strip()) > 2:
-            try:
-                # Generar embedding de la query
-                query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
-                if query_emb:
-                    pgvec_query = embedding_to_pgvector(query_emb)
-                    # Búsqueda por similitud coseno (operador <=> de pgvector)
-                    # Threshold: solo resultados con similitud > 0.55 (1 - 0.45 = 0.55)
-                    c.execute(
-                        """SELECT chunk_text, source, 
-                                  1 - (embedding <=> %s::vector) AS similitud
-                           FROM rag_chunks 
-                           WHERE embedding IS NOT NULL
-                           ORDER BY embedding <=> %s::vector 
-                           LIMIT %s""",
-                        (pgvec_query, pgvec_query, limit * 2)
-                    )
-                    rows_pgvec = c.fetchall()
-                    
-                    if rows_pgvec:
-                        # Filtrar por threshold de similitud mínima 0.55
-                        resultados_pgvec = []
-                        max_sim = 0.0
-                        for row in rows_pgvec:
-                            chunk_text = row['chunk_text'] if DATABASE_URL else row[0]
-                            source = row['source'] if DATABASE_URL else row[1]
-                            sim = float(row['similitud'] if DATABASE_URL else row[2])
-                            if sim >= 0.55:
-                                resultados_pgvec.append((chunk_text, source))
-                                if sim > max_sim:
-                                    max_sim = sim
-                            if len(resultados_pgvec) >= limit:
-                                break
-                        
-                        if len(resultados_pgvec) >= 3 and max_sim >= 0.65:
-                            # Resultados de alta calidad: usar SOLO pgvector
-                            logger.info(f"🎯 FASE 29 pgvector HIT: {len(resultados_pgvec)} resultados, sim_max={max_sim:.3f}")
-                            conn.close()
-                            # Cachear y devolver
-                            if _query_norm_cache:
-                                _fase6_cache_set(_query_norm_cache, (resultados_pgvec, max_sim))
-                            return resultados_pgvec, max_sim
-                        elif resultados_pgvec:
-                            # Resultados parciales: continuar con keywords pero guardar como complemento
-                            logger.info(f"FASE 29 pgvector PARCIAL: {len(resultados_pgvec)} resultados (sim_max={max_sim:.3f}), complementando con keywords...")
-                            # Continuar con las fases 1-2 (keywords) más abajo
-                else:
-                    logger.debug("FASE 29: no se pudo generar embedding de la query, usando keywords")
-            except Exception as _e_pgvec:
-                # Si pgvector falla (no instalado, sin embeddings, etc.) caer a keywords
-                logger.debug(f"FASE 29 pgvector falló (cayendo a keywords): {_e_pgvec}")
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # FASE 1 + 2 (ORIGINALES): Búsqueda por keywords (fallback robusto)
+        # FASE 31 (FIX CRÍTICO "CASO MILEI") — REORDEN DE PRECEDENCIA:
+        #
+        # ANTES: pgvector GLOBAL corría PRIMERO. Una pregunta como
+        # "de qué trata el libro de Milei sobre la inflación" traía chunks
+        # genéricos sobre inflación de OTROS documentos (sim ≥ 0.65) y
+        # retornaba SIN llegar nunca al match por nombre de documento.
+        # Resultado: el bot divagaba con fragmentos del libro equivocado.
+        #
+        # AHORA (orden correcto de un RAG profesional):
+        #   PASO A — Match por NOMBRE DE DOCUMENTO (in-memory, <5ms).
+        #   PASO B — Si hay documento(s): pgvector RESTRINGIDO a esos
+        #            documentos → ranking semántico DENTRO del libro
+        #            (los chunks sobre "inflación" del libro de Milei
+        #            quedan primeros). Fallback: chunks en orden.
+        #   PASO C — Solo si NO hay match de nombre: pgvector GLOBAL
+        #            (comportamiento FASE 29 original).
         # ═══════════════════════════════════════════════════════════════════
         import unicodedata
         def normalizar(texto):
@@ -20628,6 +20662,7 @@ def buscar_rag(query, limit=5):
                     'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre',
                     'trata', 'libro', 'libros', 'sobre', 'acerca', 'habla', 'dice',
                     'cuéntame', 'cuentame', 'cual', 'cuál', 'qué', 'que',
+                    'respecto', 'segun', 'según', 'autor', 'escribio', 'escribió',
                     'a', 'y', 'o', 'e', 'u', 'the', 'of', 'and', 'to', 'in'}
         
         query_norm = normalizar(query)
@@ -20642,97 +20677,161 @@ def buscar_rag(query, limit=5):
             return [], 0.0
         
         # ═══════════════════════════════════════════════════
-        # FASE 1: BÚSQUEDA POR NOMBRE DE DOCUMENTO
-        # Si alguna palabra clave aparece en el SOURCE (nombre del archivo),
-        # traer TODOS los chunks de ese documento — máxima prioridad
+        # PASO A — MATCH POR NOMBRE DE DOCUMENTO (antes que pgvector)
+        # FIX FASE 9: normalización bidireccional de tildes en Python
+        # (resuelve "inflacion"↔"inflación" en nombres de archivo).
         # ═══════════════════════════════════════════════════
-        docs_fase1 = []    # sources encontrados en fase 1
+        docs_fase1 = []    # sources encontrados por nombre
         chunks_fase1 = []  # (texto, score, source) con score alto
         
-        # ═══════════════════════════════════════════════════════════════
-        # FIX FASE 9 CRÍTICO: NORMALIZACIÓN BIDIRECCIONAL (tildes)
-        # ANTES: SQL `LOWER(source) LIKE '%inflacion%'` NO matcheaba
-        # source "El fin de la inflación.pdf" porque BD conserva la tilde.
-        # SOLUCION: pre-cargar TODOS los sources, normalizar EN PYTHON, y
-        # comparar en memoria — instantáneo (todos los sources caben en RAM).
-        # Esto resuelve el caso real del libro de Milei (inflación con tilde).
-        # ═══════════════════════════════════════════════════════════════
         try:
-            if DATABASE_URL:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
-            else:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
             todos_sources_db = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
-            # Pre-normalizar TODOS los sources (sin tildes, lowercase): lista de tuples (norm, original)
             sources_normalizados = [(normalizar(s), s) for s in todos_sources_db if s]
             logger.info(f"🔎 RAG: {len(sources_normalizados)} sources cargados para matching normalizado")
         except Exception as _e_load:
             logger.warning(f"Error cargando sources: {_e_load}")
             sources_normalizados = []
         
-        # MATCH 1: Búsqueda exacta de cada palabra clave en sources NORMALIZADOS
+        # MATCH 1: substring exacto de cada palabra clave en sources normalizados
         for palabra in palabras_clave:
             if len(palabra) < 3:
                 continue
             for src_norm, src_orig in sources_normalizados:
                 if src_orig in docs_fase1:
                     continue
-                # Match substring NORMALIZADO (sin tildes, lowercase) — resuelve "inflacion"↔"inflación"
                 if palabra in src_norm:
                     docs_fase1.append(src_orig)
                     logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
         
-        # FASE 6 OPTIMIZADA: Fuzzy fallback REACTIVO — solo si Fase 1 exact no encontró NADA
-        # y la palabra es de longitud razonable (>= 5 letras, candidata a nombre propio)
+        # MATCH 2 (fuzzy reactivo): solo si el exacto no encontró nada
         if not docs_fase1:
             palabras_largas_fuzzy = [p for p in palabras_clave if len(p) >= 5][:3]
-            if palabras_largas_fuzzy:
-                try:
-                    if DATABASE_URL:
-                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
-                    else:
-                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
-                    todos_sources = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
-                    
-                    for palabra in palabras_largas_fuzzy:
-                        for src in todos_sources:
-                            if src in docs_fase1:
-                                continue
-                            src_norm = normalizar(src)
-                            for token_src in src_norm.split():
-                                if len(token_src) >= 5 and _fase6_fuzzy_match_simple(palabra, token_src, max_dist=2):
-                                    docs_fase1.append(src)
-                                    logger.info(f"🎯 FASE 6 FUZZY: '{palabra}' ≈ '{token_src}' → '{src}'")
-                                    break
-                            if src in docs_fase1:
+            if palabras_largas_fuzzy and sources_normalizados:
+                for palabra in palabras_largas_fuzzy:
+                    for src_norm, src_orig in sources_normalizados[:200]:
+                        if src_orig in docs_fase1:
+                            continue
+                        for token_src in src_norm.split():
+                            if len(token_src) >= 5 and _fase6_fuzzy_match_simple(palabra, token_src, max_dist=2):
+                                docs_fase1.append(src_orig)
+                                logger.info(f"🎯 FASE 6 FUZZY: '{palabra}' ≈ '{token_src}' → '{src_orig}'")
                                 break
-                except Exception as _e_fuzzy:
-                    logger.debug(f"FASE 6 fuzzy fallo (no crítico): {_e_fuzzy}")
+                        if src_orig in docs_fase1:
+                            break
         
+        # ═══════════════════════════════════════════════════
+        # PASO B — pgvector RESTRINGIDO al/los documento(s) matcheado(s)
+        # Ranking semántico DENTRO del libro: para "libro de Milei sobre
+        # inflación" ordena primero los pasajes del libro que hablan de
+        # inflación. Si pgvector no está disponible → fallback: chunks
+        # del documento en orden natural (comportamiento previo).
+        # ═══════════════════════════════════════════════════
         if docs_fase1:
-            # Traer TODOS los chunks de los documentos encontrados en fase 1
-            for src in docs_fase1[:3]:  # Máximo 3 documentos en fase 1
+            docs_foco = docs_fase1[:3]  # máximo 3 documentos
+            pgvec_in_doc_ok = False
+            
+            if DATABASE_URL:
                 try:
-                    if DATABASE_URL:
-                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
-                                 (src,))
-                    else:
-                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
-                                 (src,))
-                    filas_doc = c.fetchall()
-                    
-                    for fila in filas_doc:
+                    query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
+                    if query_emb:
+                        pgvec_query = embedding_to_pgvector(query_emb)
+                        c.execute(
+                            """SELECT chunk_text, source,
+                                      1 - (embedding <=> %s::vector) AS similitud
+                               FROM rag_chunks
+                               WHERE source = ANY(%s) AND embedding IS NOT NULL
+                               ORDER BY embedding <=> %s::vector
+                               LIMIT %s""",
+                            (pgvec_query, docs_foco, pgvec_query, max(limit, 12))
+                        )
+                        rows_doc = c.fetchall()
+                        for row in rows_doc:
+                            texto = row['chunk_text'] or ''
+                            source = row['source'] or ''
+                            sim = float(row['similitud'] or 0.0)
+                            # Score ≥ 50 garantiza tratamiento Fase 1 (auto-relevante)
+                            # + componente semántico para ordenar por afinidad al query
+                            chunks_fase1.append((texto, 50.0 + sim * 10.0, source))
+                        if len(chunks_fase1) >= 2:
+                            pgvec_in_doc_ok = True
+                            logger.info(
+                                f"🎯 FASE 31 pgvector-EN-DOC: {len(chunks_fase1)} chunks "
+                                f"rankeados semánticamente dentro de {docs_foco}"
+                            )
+                except Exception as _e_pgdoc:
+                    logger.debug(f"FASE 31 pgvector-en-doc falló (fallback a orden natural): {_e_pgdoc}")
+            
+            if not pgvec_in_doc_ok:
+                # Fallback: traer TODOS los chunks del documento en orden natural
+                chunks_fase1 = []
+                for src in docs_foco:
+                    try:
                         if DATABASE_URL:
-                            texto = fila['chunk_text'] or ''
-                            source = fila['source'] or ''
+                            c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
+                                     (src,))
                         else:
-                            texto, _, source = fila[0] or '', fila[1] or '', fila[2] or ''
+                            c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
+                                     (src,))
+                        filas_doc = c.fetchall()
+                        for fila in filas_doc:
+                            if DATABASE_URL:
+                                texto = fila['chunk_text'] or ''
+                                source = fila['source'] or ''
+                            else:
+                                texto, _, source = fila[0] or '', fila[1] or '', fila[2] or ''
+                            score = 50.0 + len(texto) / 100
+                            chunks_fase1.append((texto, score, source))
+                    except Exception as e:
+                        logger.debug(f"Error trayendo chunks de '{src}': {e}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO C — pgvector GLOBAL (FASE 29 original) — SOLO si no hubo
+        # match por nombre de documento. Evita que temas genéricos ahoguen
+        # a documentos específicamente mencionados por el usuario.
+        # ═══════════════════════════════════════════════════════════════════
+        if not docs_fase1 and DATABASE_URL and query and len(query.strip()) > 2:
+            try:
+                query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
+                if query_emb:
+                    pgvec_query = embedding_to_pgvector(query_emb)
+                    c.execute(
+                        """SELECT chunk_text, source, 
+                                  1 - (embedding <=> %s::vector) AS similitud
+                           FROM rag_chunks 
+                           WHERE embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector 
+                           LIMIT %s""",
+                        (pgvec_query, pgvec_query, limit * 2)
+                    )
+                    rows_pgvec = c.fetchall()
+                    
+                    if rows_pgvec:
+                        resultados_pgvec = []
+                        max_sim = 0.0
+                        for row in rows_pgvec:
+                            chunk_text = row['chunk_text'] if DATABASE_URL else row[0]
+                            source = row['source'] if DATABASE_URL else row[1]
+                            sim = float(row['similitud'] if DATABASE_URL else row[2])
+                            if sim >= 0.55:
+                                resultados_pgvec.append((chunk_text, source))
+                                if sim > max_sim:
+                                    max_sim = sim
+                            if len(resultados_pgvec) >= limit:
+                                break
                         
-                        # Score altísimo para documentos de fase 1 — garantiza que sean top
-                        score = 50.0 + len(texto) / 100
-                        chunks_fase1.append((texto, score, source))
-                except Exception as e:
-                    logger.debug(f"Error trayendo chunks de '{src}': {e}")
+                        if len(resultados_pgvec) >= 3 and max_sim >= 0.65:
+                            logger.info(f"🎯 FASE 29 pgvector HIT: {len(resultados_pgvec)} resultados, sim_max={max_sim:.3f}")
+                            conn.close()
+                            if _query_norm_cache:
+                                _fase6_cache_set(_query_norm_cache, (resultados_pgvec, max_sim))
+                            return resultados_pgvec, max_sim
+                        elif resultados_pgvec:
+                            logger.info(f"FASE 29 pgvector PARCIAL: {len(resultados_pgvec)} resultados (sim_max={max_sim:.3f}), complementando con keywords...")
+                else:
+                    logger.debug("FASE 29: no se pudo generar embedding de la query, usando keywords")
+            except Exception as _e_pgvec:
+                logger.debug(f"FASE 29 pgvector falló (cayendo a keywords): {_e_pgvec}")
         
         # ═══════════════════════════════════════════════════
         # FASE 2: BÚSQUEDA SEMÁNTICA GENERAL BALANCEADA
@@ -22321,22 +22420,53 @@ _FASE5_FRASES_DOMINGO = [
     "⚓ Después del descanso, el viento siempre vuelve a las velas.",
 ]
 
-# Curiosidades histórico-navales y económicas para el mensaje de mediodía
+# Curiosidades para el mensaje de mediodía.
+# FASE 31: ampliado de 14 → 34 y diversificado (naval, economía, ciencia,
+# historia universal, tecnología, psicología, liderazgo, biografías) para
+# reflejar la amplitud de la biblioteca de 280+ libros. Cuando el RAG está
+# disponible, enviar_curiosidad_mediodia PREFIERE extraer un dato real de un
+# libro; esta lista es el fallback siempre-funcional.
 _FASE5_CURIOSIDADES = [
+    # -- Naval / historico chileno --
     "🌊 SABÍAS QUE... la Armada de Chile es la 4ta más antigua de América (1817), fundada por Manuel Blanco Encalada.",
-    "⚓ DATO HISTÓRICO: el combate naval de Iquique (21 mayo 1879) inspiró la frase \"al abordaje, muchachos\" de Arturo Prat.",
-    "💰 CURIOSIDAD ECONÓMICA: Chile produce el 27% del cobre mundial, lo que lo hace el mayor productor del planeta.",
-    "📊 SABÍAS QUE... la UF (Unidad de Fomento) fue creada en 1967 para proteger el ahorro de la inflación.",
+    "⚓ DATO HISTÓRICO: el combate naval de Iquique (21 mayo 1879) inmortalizó el heroísmo de Arturo Prat.",
     "🚢 DATO CURIOSO: el Buque Escuela Esmeralda recorre más de 60.000 millas náuticas en cada crucero anual de instrucción.",
-    "💵 ECONOMÍA: el peso chileno se introdujo en 1975, reemplazando al escudo. Antes existió el peso antiguo (hasta 1959).",
     "⛵ NAVAL: Bernardo O'Higgins ordenó la creación de la Primera Escuadra Nacional el 9 de octubre de 1818.",
-    "📈 FINANZAS: el IPSA (Índice de Precios Selectivo de Acciones) reúne las 30 empresas más líquidas de la Bolsa de Santiago.",
-    "🌎 SABÍAS QUE... Chile tiene la costa continental más larga de Sudamérica: 4.270 km de Arica a Magallanes.",
-    "🪙 HISTORIA MONETARIA: el primer billete chileno se emitió en 1840 por el Banco de Arcos y Cía.",
     "⚓ NAVAL: el escudo de la Armada incluye un cóndor, símbolo del territorio nacional, posado sobre un ancla.",
-    "💼 EMPRENDIMIENTO: en Chile hay más de 1,2 millones de PYMEs que generan el 65% del empleo formal.",
-    "📊 SABÍAS QUE... los fondos de AFP en Chile administran cerca de USD 170.000 millones, ~50% del PIB.",
     "🌊 DATO CURIOSO: el hundimiento de la Esmeralda en 1879 marcó el inicio del heroísmo naval chileno.",
+    # -- Economia / finanzas --
+    "💰 CURIOSIDAD ECONÓMICA: Chile produce cerca del 27% del cobre mundial, siendo el mayor productor del planeta.",
+    "📊 SABÍAS QUE... la UF (Unidad de Fomento) fue creada en 1967 para proteger el ahorro de la inflación.",
+    "💵 ECONOMÍA: el peso chileno se introdujo en 1975, reemplazando al escudo.",
+    "📈 FINANZAS: el IPSA reúne las 30 empresas más líquidas de la Bolsa de Santiago.",
+    "🪙 HISTORIA MONETARIA: el primer billete chileno se emitió en 1840 por el Banco de Arcos y Cía.",
+    "💼 EMPRENDIMIENTO: en Chile hay más de 1,2 millones de PYMEs que generan cerca del 65% del empleo formal.",
+    "📊 SABÍAS QUE... los fondos de AFP en Chile administran cerca de USD 170.000 millones, ~50% del PIB.",
+    "🧠 FINANZAS CONDUCTUALES: el \"sesgo de aversión a la pérdida\" hace que perder $100 duela más que la alegría de ganar $100.",
+    "💡 INVERSIÓN: la \"regla del 72\" estima en cuántos años se duplica una inversión: 72 dividido por la tasa anual de retorno.",
+    "📉 DATO: la inflación del 10% anual reduce a la mitad el poder de compra del dinero en poco más de 7 años.",
+    # -- Ciencia / naturaleza --
+    "🔬 CIENCIA: el cuerpo humano tiene cerca de 37 billones de células, cada una con instrucciones para cooperar con las demás.",
+    "🌌 ASTRONOMÍA: la luz del Sol tarda unos 8 minutos y 20 segundos en llegar a la Tierra.",
+    "🧬 BIOLOGÍA: compartimos cerca del 60% de nuestros genes con un plátano — la vida usa un lenguaje químico común.",
+    "🌎 GEOGRAFÍA: Chile tiene la costa continental más larga de Sudamérica: unos 4.270 km de Arica a Magallanes.",
+    "🧊 NATURALEZA: la Antártica chilena concentra reservas de agua dulce equivalentes a décadas de consumo mundial.",
+    # -- Historia universal --
+    "🏛️ HISTORIA: la Biblioteca de Alejandría buscó reunir TODO el conocimiento humano; su pérdida retrasó siglos a la ciencia.",
+    "📜 HISTORIA: la imprenta de Gutenberg (1440) democratizó el saber y encendió el Renacimiento europeo.",
+    "🗺️ HISTORIA: Magallanes zarpó con 5 naves en 1519; solo una completó la primera vuelta al mundo tres años después.",
+    "⚔️ ESTRATEGIA: \"El arte de la guerra\" de Sun Tzu, escrito hace 2.500 años, sigue enseñándose en escuelas de negocios.",
+    # -- Tecnologia / innovacion --
+    "💻 TECNOLOGÍA: el primer \"bug\" informático (1947) fue literalmente una polilla atrapada en un relé de computadora.",
+    "🚀 INNOVACIÓN: Internet nació como ARPANET en 1969 con solo 4 computadoras conectadas.",
+    "🤖 IA: el término \"inteligencia artificial\" se acuñó en la conferencia de Dartmouth en 1956.",
+    "📱 DATO: hoy un smartphone tiene más poder de cómputo que toda la NASA cuando llevó al hombre a la Luna.",
+    # -- Liderazgo / psicologia / habitos --
+    "🎯 HÁBITOS: se estima que cerca del 40% de nuestras acciones diarias son hábitos, no decisiones conscientes.",
+    "🧠 PSICOLOGÍA: la \"regla de las 10.000 horas\" popularizó la idea de que la maestría exige práctica deliberada sostenida.",
+    "👥 LIDERAZGO: los grandes líderes escuchan más de lo que hablan — la empatía precede a la influencia.",
+    "⏳ PRODUCTIVIDAD: el \"principio de Pareto\" sugiere que el 80% de los resultados proviene del 20% de los esfuerzos.",
+    "🌱 CRECIMIENTO: la \"mentalidad de crecimiento\" de Carol Dweck muestra que el talento se cultiva, no solo se hereda.",
 ]
 
 # Tips económicos rotativos para el insight de tarde
@@ -22406,22 +22536,121 @@ async def enviar_saludo_matutino(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ FASE 5 saludo matutino error: {e}")
 
 
+def _curiosidad_desde_rag_sync():
+    """FASE 31: Destila un dato curioso REAL a partir de un libro aleatorio de
+    la biblioteca (rag_chunks). Devuelve un string listo para publicar o None
+    si algo falla (para que el llamador use el fallback estático).
+
+    Es SÍNCRONA a propósito: se ejecuta dentro de run_in_executor con timeout,
+    porque hace I/O de BD + llamada LLM que no deben bloquear el event loop.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        # 1. Elegir un libro (source) aleatorio que tenga chunks sustanciosos
+        if DATABASE_URL:
+            c.execute("""
+                SELECT source, chunk_text
+                FROM rag_chunks
+                WHERE LENGTH(chunk_text) > 400
+                ORDER BY RANDOM()
+                LIMIT 1
+            """)
+        else:
+            c.execute("""
+                SELECT source, chunk_text
+                FROM rag_chunks
+                WHERE LENGTH(chunk_text) > 400
+                ORDER BY RANDOM()
+                LIMIT 1
+            """)
+        fila = c.fetchone()
+        conn.close()
+        if not fila:
+            return None
+        source = fila['source'] if DATABASE_URL else fila[0]
+        chunk = fila['chunk_text'] if DATABASE_URL else fila[1]
+        if not chunk or len(chunk) < 200:
+            return None
+
+        # 2. Limpiar el nombre del libro para citarlo (quita prefijo "PDF:" y extensión)
+        libro = str(source or "").replace("PDF:", "").replace(".pdf", "").strip()
+        if not libro:
+            libro = "la biblioteca de la Cofradía"
+
+        # 3. Pedir a Groq que DESTILE un dato curioso fiel al fragmento
+        prompt = (
+            "Eres un divulgador experto. A partir del SIGUIENTE FRAGMENTO de un "
+            "libro, redacta UN (1) dato curioso, interesante y verídico en "
+            "español, de máximo 45 palabras, apto para un grupo profesional.\n\n"
+            "REGLAS ESTRICTAS:\n"
+            "- Básate SOLO en la información del fragmento. NO inventes cifras, "
+            "fechas ni nombres que no estén.\n"
+            "- Si el fragmento no contiene ningún dato interesante y concreto, "
+            "responde EXACTAMENTE: SIN_DATO\n"
+            "- No uses comillas ni cites textualmente; parafrasea con tus palabras.\n"
+            "- Empieza directamente con el dato (sin '¿Sabías que...' ni preámbulos).\n\n"
+            f"FRAGMENTO:\n{chunk[:1500]}"
+        )
+        respuesta = llamar_groq(prompt, max_tokens=120, temperature=0.3)
+        if not respuesta:
+            return None
+        respuesta = respuesta.strip().strip('"').strip()
+        # Validaciones anti-alucinación / anti-basura
+        if "SIN_DATO" in respuesta.upper() or len(respuesta) < 25:
+            return None
+        if len(respuesta) > 400:  # demasiado largo = probablemente divagó
+            respuesta = respuesta[:400].rsplit(" ", 1)[0] + "…"
+
+        return f"📚 SABÍAS QUE... {respuesta}\n\n🔎 Fuente: «{libro}» (biblioteca de la Cofradía)"
+    except Exception as e:
+        logger.debug(f"_curiosidad_desde_rag_sync fallo: {e}")
+        return None
+
+
 async def enviar_curiosidad_mediodia(context: ContextTypes.DEFAULT_TYPE):
-    """FASE 5 — Curiosidad de mediodía (13:00) con dato histórico-naval o económico.
-    Rotación: 14 curiosidades distintas, secuencial por día del año (no aleatoria)."""
+    """FASE 5 + 31 — Curiosidad de mediodía (13:00).
+    Días PARES (del año): intenta destilar un dato REAL de un libro aleatorio
+    de la biblioteca de 280+ libros (con timeout y fallback).
+    Días IMPARES o si el RAG falla: usa la lista estática ampliada (34 datos),
+    rotando de forma determinística por día del año."""
     if not COFRADIA_GROUP_ID:
         return
     try:
         ahora_cl = _ahora_chile()
-        # Rotacion deterministica por dia del año
-        idx = (ahora_cl.timetuple().tm_yday) % len(_FASE5_CURIOSIDADES)
-        curiosidad = _FASE5_CURIOSIDADES[idx]
+        yday = ahora_cl.timetuple().tm_yday
+        curiosidad = None
+
+        # Días pares → intentar biblioteca RAG (fuente de variedad casi infinita)
+        if yday % 2 == 0:
+            try:
+                loop = asyncio.get_event_loop()
+                curiosidad = await asyncio.wait_for(
+                    loop.run_in_executor(None, _curiosidad_desde_rag_sync),
+                    timeout=15.0
+                )
+                if curiosidad:
+                    logger.info("🍽️ FASE 31 curiosidad mediodia: dato extraído de biblioteca RAG")
+            except asyncio.TimeoutError:
+                logger.warning("🍽️ Curiosidad RAG timeout (15s), usando lista estática")
+                curiosidad = None
+            except Exception as _e_rag:
+                logger.debug(f"Curiosidad RAG error: {_e_rag}")
+                curiosidad = None
+
+        # Fallback (días impares o si RAG falló): lista estática ampliada
+        if not curiosidad:
+            idx = yday % len(_FASE5_CURIOSIDADES)
+            curiosidad = _FASE5_CURIOSIDADES[idx]
+            logger.info(f"🍽️ FASE 5 curiosidad mediodia (lista estática idx={idx})")
+
         msg = f"🔔 PAUSA DE MEDIODÍA — DATO INTERESANTE\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         msg += f"{curiosidad}\n\n"
         msg += f"💬 ¿Conoces algún otro dato curioso? ¡Compártelo en el grupo!"
         await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
-        logger.info(f"🍽️ FASE 5 curiosidad mediodia enviada (idx={idx})")
     except Exception as e:
         logger.error(f"❌ FASE 5 curiosidad mediodia error: {e}")
 
@@ -22447,6 +22676,111 @@ async def enviar_insight_tarde(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🌇 FASE 5 insight tarde enviado (idx={idx})")
     except Exception as e:
         logger.error(f"❌ FASE 5 insight tarde error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 31 — AVISOS AUTOMÁTICOS DE VENCIMIENTO DE SUSCRIPCIÓN
+# Requisito de Germán: los usuarios NO ven /renovar en el menú; solo lo
+# conocen cuando el bot les envía el aviso previo al vencimiento, repetido
+# en varias ocasiones a medida que se acerca la fecha (30/15/7/3/1 días).
+# El manual HTML ya prometía estos avisos ("30, 15 y 7 días antes") —
+# esta función los hace realidad.
+# ═══════════════════════════════════════════════════════════════════════════
+_AVISOS_VENCIMIENTO_DIAS = (30, 15, 7, 3, 1)
+
+async def avisos_vencimiento_diario(context: ContextTypes.DEFAULT_TYPE):
+    """Job diario 10:30 Chile: DM privado a cada usuario cuya suscripción
+    vence exactamente en 30, 15, 7, 3 o 1 día(s). Urgencia creciente.
+    Excluye al OWNER y suscripciones perpetuas (>= 2099). Al finalizar,
+    envía un resumen al OWNER si hubo avisos."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("❌ Avisos vencimiento: sin conexión a BD")
+            return
+        c = conn.cursor()
+        c.execute(
+            "SELECT user_id, first_name, fecha_expiracion FROM suscripciones "
+            "WHERE fecha_expiracion IS NOT NULL"
+        )
+        filas = c.fetchall()
+        conn.close()
+        
+        ahora = datetime.now()
+        enviados = []
+        for fila in filas:
+            try:
+                uid = fila['user_id'] if DATABASE_URL else fila[0]
+                nombre = (fila['first_name'] if DATABASE_URL else fila[1]) or 'Cofrade'
+                fexp = fila['fecha_expiracion'] if DATABASE_URL else fila[2]
+                if uid == OWNER_ID or not fexp:
+                    continue
+                if isinstance(fexp, str):
+                    try:
+                        fexp = datetime.strptime(fexp[:19], "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        continue
+                if fexp.year >= 2099:
+                    continue  # suscripción perpetua/ilimitada
+                dias = (fexp.date() - ahora.date()).days
+                if dias not in _AVISOS_VENCIMIENTO_DIAS:
+                    continue
+                
+                fecha_str = fexp.strftime('%d/%m/%Y')
+                if dias == 30:
+                    titulo = "🔔 Aviso de renovación"
+                    cuerpo = (f"tu suscripción a Cofradía Premium vence en 30 días "
+                              f"(el {fecha_str}). Tienes tiempo de sobra, pero te lo "
+                              f"anticipamos para que lo agendes con calma.")
+                elif dias == 15:
+                    titulo = "🔔 Recordatorio de renovación"
+                    cuerpo = (f"quedan 15 días para el vencimiento de tu suscripción "
+                              f"(el {fecha_str}). Renovar toma menos de 2 minutos.")
+                elif dias == 7:
+                    titulo = "⚠️ Tu suscripción vence en 1 semana"
+                    cuerpo = (f"tu acceso a Cofradía Premium vence el {fecha_str} "
+                              f"(en 7 días). Te recomendamos renovar ahora para no "
+                              f"perder tus beneficios, historial y tarjeta profesional.")
+                elif dias == 3:
+                    titulo = "🚨 Vencimiento en 3 días"
+                    cuerpo = (f"tu suscripción vence el {fecha_str}. Si no renuevas, "
+                              f"perderás acceso a los servicios premium de la Cofradía.")
+                else:  # 1 día
+                    titulo = "🚨 ÚLTIMO AVISO — vence mañana"
+                    cuerpo = (f"tu suscripción vence MAÑANA ({fecha_str}). Renueva hoy "
+                              f"para mantener tu acceso sin interrupciones.")
+                
+                mensaje = (
+                    f"{titulo}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Hola {nombre}, {cuerpo}\n\n"
+                    f"👉 Escribe /renovar aquí mismo para ver los planes y "
+                    f"renovar con transferencia (recibirás confirmación al instante "
+                    f"tras validar tu comprobante).\n"
+                    f"👉 /mi_cuenta para revisar el estado de tu suscripción.\n\n"
+                    f"⚓ Cofradía Premium"
+                )
+                await context.bot.send_message(chat_id=uid, text=mensaje)
+                enviados.append((nombre, uid, dias))
+                logger.info(f"🔔 Aviso vencimiento enviado a {nombre} ({uid}): {dias} días")
+            except Exception as _e_dm:
+                # Usuario bloqueó al bot o chat inexistente — continuar con el resto
+                logger.debug(f"Aviso vencimiento no entregado a {uid}: {_e_dm}")
+        
+        if enviados:
+            try:
+                resumen = "🔔 <b>Avisos de vencimiento enviados hoy</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                for nombre, uid, dias in enviados[:30]:
+                    resumen += f"• {nombre} (ID {uid}) — vence en {dias} día(s)\n"
+                if len(enviados) > 30:
+                    resumen += f"… y {len(enviados) - 30} más.\n"
+                resumen += f"\nTotal: {len(enviados)} aviso(s)."
+                await context.bot.send_message(chat_id=OWNER_ID, text=resumen, parse_mode='HTML')
+            except Exception:
+                pass
+        logger.info(f"🔔 Job avisos_vencimiento completado: {len(enviados)} enviados")
+    except Exception as e:
+        logger.error(f"❌ Error en avisos_vencimiento_diario: {e}")
 
 
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
@@ -36194,9 +36528,22 @@ def main():
                     pass
                 docs_str_chat = "\n".join(f'  • "{n}"' for n in nombres_docs_exactos_chat[:5]) if nombres_docs_exactos_chat else ""
                 
+                # FASE 31: si el hit fue por NOMBRE DE DOCUMENTO (score ≥ 45), el usuario
+                # preguntó por ese documento/libro ESPECÍFICO → foco absoluto en él.
+                regla_foco = ""
+                if rag_score >= 45.0 and nombres_docs_exactos_chat:
+                    doc_foco_str = '", "'.join(nombres_docs_exactos_chat[:2])
+                    regla_foco = (
+                        f"0. **DOCUMENTO FOCO**: el usuario pregunta específicamente por el documento "
+                        f"\"{doc_foco_str}\". Responde EXCLUSIVAMENTE con los fragmentos de ESE documento. "
+                        f"Empieza identificándolo por su nombre. IGNORA cualquier otra fuente, persona "
+                        f"homónima de la comunidad o conocimiento externo sobre el mismo tema.\n"
+                    )
+                
                 instruccion = (
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
                     f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
+                    f"{regla_foco}"
                     f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
                     f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
                     f"2. SINTETIZA los fragmentos en respuesta clara y fluida (150-300 palabras máximo).\n"
@@ -36233,9 +36580,32 @@ def main():
                     "4. SIEMPRE termina sugiriendo un comando útil (/cofrades, /buscar_ia, /economia, etc.) "
                     "o pidiendo al usuario que use /capturar_conocimiento para que la información quede disponible."
                 )
+                # FASE 31 ANTI-HOMÓNIMOS: si la pregunta es sobre un LIBRO/DOCUMENTO/AUTOR
+                # que NO está en la biblioteca, (a) NO inyectar el directorio de tarjetas
+                # (evita confundir con miembros de apellido igual al autor, ej. "Milei"),
+                # (b) instruir respuesta explícita de "ese libro no está en la biblioteca".
+                try:
+                    import re as _re_lib31
+                    _es_pregunta_libro = bool(_re_lib31.search(
+                        r'\b(libro|libros|documento|documentos|pdf|autor|autora|obra|texto|'
+                        r'biblioteca|capitulo|capítulo|escribio|escribió|publicó|publico|lei|leí)\b',
+                        (mensaje or '').lower()
+                    ))
+                except Exception:
+                    _es_pregunta_libro = False
+                if _es_pregunta_libro:
+                    contexto_tarjetas = ""   # bloquear directorio → cero homónimos
+                    instruccion += (
+                        "\n5. PREGUNTA SOBRE LIBRO/DOCUMENTO: ese material NO está indexado en la "
+                        "biblioteca de la Cofradía. Dilo explícitamente: 'Ese libro/documento no se "
+                        "encuentra en la biblioteca de la Cofradía'. PROHIBIDO mencionar o confundir "
+                        "con miembros de la comunidad que tengan apellido similar al autor consultado. "
+                        "Puedes agregar 1-2 líneas de conocimiento general sobre el autor/obra si es "
+                        "verificable, y sugerir /rag_status para ver los documentos disponibles."
+                    )
                 ctx_rag = ""
                 fuentes_str_final = "Conocimiento propio + transparencia"
-                logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
+                logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica}, pregunta_libro={_es_pregunta_libro})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
             prompt = f"""Eres el asistente experto de la Cofradía Premium, comunidad profesional chilena.
@@ -36459,6 +36829,21 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 name='fase5_insight_tarde'
             )
         logger.info("🌇 FASE 5: insight tarde programado para las 17:30 Chile (lun-vie)")
+        
+        # FASE 31: Avisos automáticos de vencimiento (30/15/7/3/1 días antes, 10:30 Chile)
+        if chile_tz:
+            job_queue.run_daily(
+                avisos_vencimiento_diario,
+                time=dt_time(hour=10, minute=30, second=0, tzinfo=chile_tz),
+                name='avisos_vencimiento'
+            )
+        else:
+            job_queue.run_daily(
+                avisos_vencimiento_diario,
+                time=dt_time(hour=14, minute=30, second=0),  # ~10:30 Chile si UTC
+                name='avisos_vencimiento'
+            )
+        logger.info("🔔 FASE 31: avisos de vencimiento programados para las 10:30 Chile (30/15/7/3/1 días)")
         
         # Resumen nocturno a las 20:00 hora Chile
         if chile_tz:

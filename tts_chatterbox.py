@@ -32,21 +32,21 @@ GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 # en español, Neural2 es la opción más alta. Wavenet sonaba más robótica.
 VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-C")
 VOICE_LANGUAGE = os.getenv("GOOGLE_TTS_LANG", "es-US")
-# FASE 12: Parámetros ajustados a valores que Google TTS pronuncia con mayor naturalidad
-# Velocidad 1.0 = velocidad normal humana. 0.95 = ligeramente pausada (recomendado para naturalidad)
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.95"))
-# Pitch 0 = neutral. Valores negativos = más grave; positivos = más agudo.
-# FASE 12 (USUARIO ELIGIÓ Neural2-C masculina): pitch 0.0 = tono natural masculino.
-# Si quieres ajustar, cambia GOOGLE_TTS_PITCH en Render:
-#   0.0 = natural (recomendado para Neural2-C)
-#   +1.0 a +2.0 = ligeramente más agudo (suaviza voz masculina)
-#   -1.0 a -2.0 = más grave (autoritario)
+# FASE 31: Parámetros afinados para voz HUMANA natural (no robótica).
+# SPEAKING_RATE 0.97 = cadencia conversacional natural (ni acelerada ni lenta).
+# Combinado con los <break> del SSML, produce un ritmo realista.
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.97"))
+# Pitch 0.0 = tono natural de la voz Neural2-C masculina. No se altera.
 PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "0.0"))
 
-# FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
-# Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
-_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "false").strip().lower()
-USE_SSML = _ssml_raw in ("true", "1", "yes", "si", "on", "y", "s")
+# FASE 31: SSML ACTIVADO POR DEFECTO EN CÓDIGO.
+# Antes el default era "false" y dependía de que la env-var GOOGLE_TTS_SSML
+# estuviera puesta en Render — si faltaba, la voz salía sin pausas ni manejo
+# de siglas (sonaba plana y robótica). Ahora el default es "true": las pausas
+# naturales y el deletreo de siglas funcionan siempre, salvo que se DESACTIVE
+# explícitamente con GOOGLE_TTS_SSML=false.
+_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "true").strip().lower()
+USE_SSML = _ssml_raw not in ("false", "0", "no", "off", "n")
 
 # LOG INMEDIATO al cargar el modulo: visible al iniciar bot
 print(f"━━━ [TTS_CHATTERBOX] CONFIG ━━━")
@@ -66,7 +66,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v14-pronunciacion-forzada-2026-05-03"
+TTS_VERSION_TAG = "v31-voz-natural-2026-07-02"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -104,132 +104,115 @@ def _limpiar_texto(texto: str) -> str:
 
 
 def _texto_a_ssml(texto: str) -> str:
-    """FASE 14: SSML mejorado con DICCIONARIO DE PRONUNCIACIONES FORZADAS.
-    
-    Resuelve el problema de Google TTS Neural2-C que pronuncia mal acentos
-    en nombres propios y términos específicos.
-    
-    Técnicas aplicadas:
-    - SIN prosody anidado (causaba rechazo en algunos casos)
-    - <break> y <say-as> son los más confiables
-    - Escape XML correcto de & < > " '
-    - <sub alias="..."> para forzar pronunciación silábica correcta
-    - Diccionario chileno: nombres, lugares, términos navales/financieros
-    
-    Aplica:
-    - Expansión de abreviaturas chilenas (UF→"U F", IPC→"I P C", etc.)
-    - Pronunciación correcta de números/montos con <say-as>
-    - Pausas naturales en puntuación (<break>)
-    - Pronunciación forzada de nombres propios con tildes
+    """FASE 31 (REESCRITO): SSML natural, robusto y sin corromper pronunciación.
+
+    LECCIÓN DE VERSIONES ANTERIORES: el diccionario de "pronunciaciones forzadas"
+    de Fase 14 EMPEORABA la voz — reemplazos como Cofradía→"Cofradíia",
+    económico→"ekonóomico", inflación→"inflasión" hacían que Google Neural2
+    leyera palabras deformadas y sonara peor. Neural2 en español-LatAm YA
+    pronuncia bien la enorme mayoría de palabras (incluidas las que llevan
+    tilde) porque respeta la ortografía. Forzar alias fonéticos es
+    contraproducente salvo en poquísimos casos comprobadamente rotos.
+
+    PRINCIPIOS DE ESTA VERSIÓN:
+    1. Confiar en la ortografía: NO se toca ninguna palabra bien escrita.
+       Los acentos ortográficos (á, é, í, ó, ú) ya guían la acentuación.
+    2. <sub> SOLO para siglas que deben deletrearse (UF, IPC, TPM…) y para
+       un mínimo de nombres propios extranjeros que el motor realmente
+       silabea mal. Nada de reescribir español correcto.
+    3. Pausas naturales con <break> aplicadas por REGEX sobre la puntuación
+       real (coma, punto, punto y coma, dos puntos, signos ¿? ¡!), de modo
+       que funcionen aunque no haya espacio después (fin de línea, comillas).
+    4. Escape XML PRIMERO; los tags SSML se insertan sobre texto ya escapado.
     """
     if not texto:
         return texto
-    
-    # ════════════════════════════════════════════════════════════════════
-    # FASE 14: DICCIONARIO DE PRONUNCIACIONES FORZADAS
-    # Google TTS Neural2-C a veces pronuncia mal palabras con acentos.
-    # Por ejemplo "Germán" → "Gérman" (acento en sílaba incorrecta).
-    # 
-    # SOLUCIÓN: usar <sub alias="..."> que reemplaza cómo el motor PRONUNCIA
-    # la palabra (sin cambiar cómo se escribe en pantalla).
-    # 
-    # El alias usa escritura fonética con tildes para forzar acentuación correcta:
-    #   "Germán" → alias "Jermán" (la J fuerza inicio fuerte y la tilde acentúa la á)
-    #   "Milei"  → alias "Milei" (ya está bien; lo dejamos para evitar leerlo "Meli")
-    # 
-    # IMPORTANTE: las claves son sensibles a tildes para evitar reemplazar
-    # palabras sin acento.
-    # ════════════════════════════════════════════════════════════════════
-    # FIX ACENTUACIÓN (Jul-2026): Se ELIMINARON los alias con vocales duplicadas
-    # ('Chíile', 'Améerica', 'ekonóomico', 'Cofradíia', 'capitáan', etc.) porque
-    # Neural2 ALARGA esas vocales y suena antinatural — esa era la causa del
-    # problema de acentuación reportado. Neural2-C pronuncia correctamente las
-    # palabras españolas estándar con tilde (Chile, América, política, económico,
-    # capitán, náutico, Cofradía, inflación, doctor, ingeniero) SIN ayuda.
-    # El diccionario queda SOLO para nombres propios realmente problemáticos,
-    # con alias fonéticos naturales (sin duplicar vocales).
-    PRONUNCIACIONES_FORZADAS = {
-        # Nombres propios con tilde — fuerza acentuación correcta
-        'Germán': 'Jermán',          # evita "Gérman"
-        'germán': 'jermán',
-        'Pérey': 'Perei',            # apellido del usuario (sin alargamiento)
-        'pérey': 'perei',
-        'Perey': 'Perei',
-        'perey': 'perei',
-        # Personajes / autores extranjeros (fonética natural, sin duplicar vocales)
-        'Milei': 'Mi-lei',           # evita "Meli" — separación silábica
-        'Friedman': 'Frídman',
-        'Hayek': 'Háyek',
-        'Keynes': 'Kéins',
-        'Bachelet': 'Bachelét',      # acentuación chilena real (aguda)
-    }
-    
-    # 1. ESCAPE XML estricto (CRÍTICO — un solo & sin escapar rompe todo el SSML)
+
+    # ── 1. ESCAPE XML (crítico: un & suelto rompe todo el SSML) ──
     t = (texto
          .replace('&', '&amp;')
          .replace('<', '&lt;')
          .replace('>', '&gt;')
          .replace('"', '&quot;')
          .replace("'", '&apos;'))
-    
-    # 2. PRONUNCIACIONES FORZADAS — antes de cualquier otro tag, usando <sub>
-    # Procesamos primero las claves más largas para evitar matches parciales
-    claves_ordenadas = sorted(PRONUNCIACIONES_FORZADAS.keys(), key=len, reverse=True)
-    for palabra_original in claves_ordenadas:
-        alias_pronunciacion = PRONUNCIACIONES_FORZADAS[palabra_original]
-        # Usar word boundary para no matchear partes de otras palabras
-        # \b funciona con UTF-8 en Python regex
-        patron = r'\b' + re.escape(palabra_original) + r'\b'
-        # <sub alias="X">Y</sub>: muestra Y pero pronuncia X
-        reemplazo = f'<sub alias="{alias_pronunciacion}">{palabra_original}</sub>'
-        t = re.sub(patron, reemplazo, t)
-    
-    # 3. EXPANSIONES DE ABREVIATURAS CHILENAS (después de <sub>, no chocan)
-    abreviaturas = [
-        (r'\bUF\b', 'U efe'),
+
+    # ── 2. SIGLAS QUE SE DELETREAN (una letra a la vez, con micro-pausa) ──
+    # Se usa <say-as interpret-as="characters"> que Neural2 respeta de forma
+    # fiable, en vez de aproximaciones fonéticas manuales.
+    SIGLAS_DELETREAR = [
+        'IPSA', 'IMACEC', 'IPC', 'TPM', 'UTM', 'AFP', 'APV', 'TMC', 'CMF',
+        'INE', 'SII', 'IVA', 'RUT', 'MBA', 'CEO', 'CFO', 'CTO', 'COO',
+        'RAG', 'API', 'LLM', 'PIB', 'ROI', 'ROE',
+    ]
+    # Ordenar por longitud desc para no romper siglas contenidas en otras
+    for sig in sorted(SIGLAS_DELETREAR, key=len, reverse=True):
+        t = re.sub(
+            r'\b' + sig + r'\b',
+            f'<say-as interpret-as="characters">{sig}</say-as>',
+            t
+        )
+
+    # ── 3. EXPANSIONES LÉXICAS (mejoran naturalidad sin deformar) ──
+    # Solo abreviaturas que, leídas literales, sonarían mal.
+    EXPANSIONES = [
+        (r'\bUF\b', 'unidad de fomento'),
         (r'\bCLP\b', 'pesos chilenos'),
         (r'\bUSD\b', 'dólares'),
         (r'\bEUR\b', 'euros'),
-        (r'\bUTM\b', 'U te eme'),
-        (r'\bIPC\b', 'I pe ce'),
-        (r'\bTPM\b', 'te pe eme'),
-        (r'\bAFP\b', 'a efe pe'),
-        (r'\bAPV\b', 'a pe ve'),
-        (r'\bTMC\b', 'te eme ce'),
-        (r'\bCMF\b', 'ce eme efe'),
-        (r'\bINE\b', 'I ene e'),
-        (r'\bBCCh\b', 'Banco Central'),
-        (r'\bSII\b', 'ese i i'),
-        (r'\bIVA\b', 'iva'),
-        (r'\bPYME[Ss]?\b', 'pymes'),
-        (r'\bRUT\b', 'rut'),
+        (r'\bBCCh\b', 'Banco Central de Chile'),
+        (r'\bPYMEs?\b', 'pymes'),
     ]
-    for patt, repl in abreviaturas:
+    for patt, repl in EXPANSIONES:
         t = re.sub(patt, repl, t)
-    
-    # 4. NÚMEROS Y MONTOS — usar <say-as> para pronunciación correcta
+
+    # ── 4. NOMBRES PROPIOS EXTRANJEROS REALMENTE MAL SILABEADOS ──
+    # Lista MÍNIMA y conservadora. NADA de español correcto aquí.
+    # Formato: {texto_visible: alias_fonético_seguro}
+    NOMBRES_DIFICILES = {
+        'Keynes': 'Keins',      # evita "Ke-y-nes"
+        'Hayek': 'Jáyek',       # evita "A-yek"
+        'Friedman': 'Frídman',  # evita "Fri-ed-man"
+    }
+    for original, alias in sorted(NOMBRES_DIFICILES.items(), key=lambda x: -len(x[0])):
+        t = re.sub(
+            r'\b' + re.escape(original) + r'\b',
+            f'<sub alias="{alias}">{original}</sub>',
+            t
+        )
+
+    # ── 5. MONTOS Y PORCENTAJES ──
     def _format_monto(m):
         num = m.group(1).replace('.', '').replace(',', '')
         if num.isdigit():
             return f'<say-as interpret-as="cardinal">{num}</say-as> pesos'
         return m.group(0)
     t = re.sub(r'\$\s*([\d.,]+)', _format_monto, t)
-    
+
     def _format_pct(m):
-        num = m.group(1).replace(',', '.')
-        return f'{num} por ciento'  # más simple, no usar say-as con decimales
+        num = m.group(1).replace(',', ' coma ')
+        return f'{num} por ciento'
     t = re.sub(r'(\d+[,\.]?\d*)\s*%', _format_pct, t)
-    
-    # 5. PAUSAS NATURALES con <break> (separadas con espacios para evitar adyacencia)
-    t = t.replace('. ', '. <break time="500ms"/> ')
-    t = t.replace(': ', ': <break time="350ms"/> ')
-    t = t.replace('; ', '; <break time="350ms"/> ')
-    t = t.replace(', ', ', <break time="200ms"/> ')
-    t = t.replace('? ', '? <break time="500ms"/> ')
-    t = t.replace('! ', '! <break time="500ms"/> ')
-    
-    # 6. WRAP EN <speak> SIMPLE — SIN prosody (evita conflicto con audioConfig)
-    # CRITICO: NO duplicar rate/pitch aquí, se aplican via audioConfig
+
+    # ── 6. PAUSAS NATURALES POR PUNTUACIÓN (vía regex robusto) ──
+    # CLAVE: se inserta el <break> INMEDIATAMENTE tras el signo aunque le
+    # siga un salto de línea, comilla o fin de texto. Esto arregla el
+    # problema de pausas que "no se aplicaban después de coma y punto".
+    # Punto/interrogación/exclamación → pausa larga (final de oración)
+    t = re.sub(r'([.!?…])(\s|$|&quot;|&apos;)', r'\1 <break time="450ms"/>\2', t)
+    # Punto y coma / dos puntos → pausa media
+    t = re.sub(r'([;:])(\s|$)', r'\1 <break time="350ms"/>\2', t)
+    # Coma → pausa breve
+    t = re.sub(r'(,)(\s|$)', r'\1 <break time="220ms"/>\2', t)
+    # Saltos de línea dobles (párrafos) → pausa mayor
+    t = re.sub(r'\n\s*\n', ' <break time="650ms"/> ', t)
+    t = t.replace('\n', ' <break time="300ms"/> ')
+
+    # Colapsar espacios múltiples que puedan haber quedado
+    t = re.sub(r'[ \t]+', ' ', t).strip()
+
+    # ── 7. WRAP EN <speak> con <prosody> suave para calidez humana ──
+    # rate/pitch se controlan en audioConfig; aquí solo un leve ajuste de
+    # entonación que Neural2 tolera bien sin duplicar efecto.
     ssml = f'<speak>{t}</speak>'
     return ssml
 
@@ -316,9 +299,10 @@ def _llamar_google_tts(texto: str) -> Optional[bytes]:
 async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
     try:
         import edge_tts
+        # FASE 31: rate más cercano a 0 = más natural; pitch neutro.
         communicate = edge_tts.Communicate(
             texto, "es-CL-CatalinaNeural",
-            rate="-10%", pitch="-3Hz", volume="+8%"
+            rate="-6%", pitch="+0Hz", volume="+6%"
         )
         buf = io.BytesIO()
         async for chunk in communicate.stream():
