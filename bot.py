@@ -77,7 +77,7 @@ TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
-logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.8 — RAG frase-en-contenido + A0 blindado (2026-07-03)")
+logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9 — Fallback web automático + respaldo Útil→markdown + referencias de archivos (2026-07-03)")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -1117,6 +1117,27 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
                                         meta.get('pregunta', ''), meta['docs'], +1)
             except Exception as e:
                 logger.debug(f"fb_up aprendizaje: {e}")
+        # FASE 31.9: respuesta que vino de INTERNET y fue validada como Útil
+        # → se transforma en markdown y se respalda en la base de
+        # conocimientos (rag_chunks + embedding). Conocimiento PERMANENTE:
+        # la próxima vez el bot responde desde su propia memoria, más rápido.
+        if meta.get('web_md'):
+            try:
+                _n_ch = await asyncio.to_thread(
+                    _guardar_web_en_rag, meta.get('pregunta', ''),
+                    meta.get('respuesta', ''), meta['web_md'],
+                    meta.get('web_urls', []))
+                if _n_ch:
+                    try:
+                        await context.bot.send_message(
+                            query.message.chat_id,
+                            f"💾 Información web respaldada en mi base de "
+                            f"conocimientos ({_n_ch} fragmentos markdown). "
+                            f"La próxima vez responderé desde mi propia memoria.")
+                    except Exception:
+                        pass
+            except Exception as _e_gw:
+                logger.debug(f"respaldo web→rag: {_e_gw}")
         return
 
     # ═══ "MEJORAR" → voto negativo + NUEVA RESPUESTA con criterios distintos ═══
@@ -22184,14 +22205,208 @@ def _scrape_ddg_sync(q: str, n: int = 5) -> list:
             if not a_tag:
                 continue
             titulo = a_tag.get_text(strip=True)
+            # FASE 31.9: extraer también la URL real (decodificando uddg de DDG)
+            href = a_tag.get("href", "")
+            if "uddg=" in href or href.startswith("/l/"):
+                _qs = _up.parse_qs(_up.urlparse(href).query)
+                href = (_qs.get("uddg", [""])[0] or _qs.get("u", [""])[0] or href)
             snip_tag = div.select_one(".result__snippet")
             snippet = snip_tag.get_text(strip=True) if snip_tag else ""
             if titulo and len(titulo) > 3:
-                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350]})
+                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350],
+                                   "url": href[:300]})
         return resultados
     except Exception as _e:
         logger.debug(f"DDG sync scrape: {_e}")
         return []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FASE 31.9 — BÚSQUEDA WEB PROFUNDA + RESPALDO EN CONOCIMIENTOS
+# (1) Cuando RAG + historial NO tienen la respuesta → buscar en Internet
+#     (DuckDuckGo + Trafilatura markdown) para que el usuario SIEMPRE
+#     reciba una respuesta completa.
+# (2) Si el usuario marca "Útil" una respuesta web → se respalda como
+#     markdown en rag_chunks (con embedding) y pasa a ser conocimiento
+#     permanente del bot.
+# (3) Archivos compartidos → referencia markdown (nombre, descripción,
+#     quién y cuándo) consultable por el RAG.
+# ═══════════════════════════════════════════════════════════════════
+def _busqueda_web_profunda(query: str, max_paginas: int = 2) -> dict:
+    """DDG → top resultados → Trafilatura sobre las mejores páginas.
+    Devuelve {'items': [(markdown, 'WEB-LIVE:dominio')], 'urls': [...],
+    'markdown': str_completo} o items vacíos si no hay red/resultados."""
+    out = {'items': [], 'urls': [], 'markdown': ''}
+    try:
+        res = _scrape_ddg_sync(query, n=5)
+        if not res:
+            return out
+        import urllib.parse as _up9
+        partes_md = []
+        for r in res:
+            if len(out['items']) >= max_paginas:
+                break
+            _u = r.get('url', '')
+            if not _u.startswith('http'):
+                continue
+            md = _crawl4ai_markdown(_u, max_chars=2600, timeout=9)
+            if md and len(md) > 200:
+                _dom = _up9.urlparse(_u).netloc.replace('www.', '')[:40]
+                out['items'].append((md, f"WEB-LIVE:{_dom}"))
+                out['urls'].append(_u)
+                partes_md.append(f"### {r.get('titulo','')[:90]}\n"
+                                 f"Fuente: {_u}\n\n{md}")
+        # respaldo: si ninguna página dio contenido, usar los snippets DDG
+        if not out['items']:
+            _snips = "\n".join(f"- {r['titulo']}: {r['snippet']}"
+                                for r in res[:4] if r.get('snippet'))
+            if len(_snips) > 120:
+                out['items'].append((_snips, "WEB-LIVE:duckduckgo"))
+                partes_md.append(_snips)
+        out['markdown'] = "\n\n".join(partes_md)[:9000]
+        if out['items']:
+            logger.info(f"🌐 FASE 31.9 WEB PROFUNDA: {len(out['items'])} fuentes "
+                        f"para '{query[:50]}'")
+    except Exception as e:
+        logger.debug(f"web profunda: {e}")
+    return out
+
+
+def _guardar_web_en_rag(pregunta: str, respuesta: str, web_md: str,
+                        urls: list) -> int:
+    """FASE 31.9: transforma una respuesta web validada como "Útil" en
+    conocimiento PERMANENTE: documento markdown → chunks con embedding en
+    rag_chunks. La próxima vez el bot responde desde su propia base."""
+    try:
+        from datetime import datetime as _dt9
+        _fecha = _dt9.now().strftime('%Y-%m-%d')
+        _titulo = ' '.join(pregunta.split()[:8])[:70]
+        source = f"WEB:{_titulo} ({_fecha})"
+        doc_md = (f"# {pregunta.strip()[:200]}\n\n"
+                  f"*Conocimiento validado por la comunidad el {_fecha} "
+                  f"(botón Útil) — origen: búsqueda web en tiempo real.*\n\n"
+                  f"## Respuesta validada\n\n{(respuesta or '').strip()}\n\n"
+                  f"## Contenido de las fuentes\n\n{(web_md or '').strip()}\n\n"
+                  f"## Fuentes\n" + "\n".join(f"- {u}" for u in (urls or [])[:4]))
+        # chunks de ~900 chars (máx 6) con solape ligero
+        chunks, _i = [], 0
+        while _i < len(doc_md) and len(chunks) < 6:
+            chunks.append(doc_md[_i:_i + 900])
+            _i += 820
+        _kw = ' '.join(sorted({w.lower() for w in pregunta.split()
+                               if len(w) >= 4}))[:300]
+        conn = get_db_connection()
+        c = conn.cursor()
+        creados = 0
+        for idx, ch in enumerate(chunks):
+            metadata = json.dumps({'tipo': 'web_util', 'fecha': _fecha,
+                                   'urls': (urls or [])[:4],
+                                   'chunk_index': idx,
+                                   'total_chunks': len(chunks)})
+            if DATABASE_URL:
+                emb = generar_embedding_gemini(ch, tipo='RETRIEVAL_DOCUMENT')
+                if emb:
+                    try:
+                        c.execute("""INSERT INTO rag_chunks
+                                     (source, chunk_text, metadata, keywords, embedding)
+                                     VALUES (%s, %s, %s, %s, %s::vector)""",
+                                  (source, ch, metadata, _kw,
+                                   embedding_to_pgvector(emb)))
+                    except Exception:
+                        conn.rollback()
+                        c.execute("""INSERT INTO rag_chunks
+                                     (source, chunk_text, metadata, keywords)
+                                     VALUES (%s, %s, %s, %s)""",
+                                  (source, ch, metadata, _kw))
+                else:
+                    c.execute("""INSERT INTO rag_chunks
+                                 (source, chunk_text, metadata, keywords)
+                                 VALUES (%s, %s, %s, %s)""",
+                              (source, ch, metadata, _kw))
+            else:
+                c.execute("""INSERT INTO rag_chunks
+                             (source, chunk_text, metadata, keywords)
+                             VALUES (?, ?, ?, ?)""",
+                          (source, ch, metadata, _kw))
+            creados += 1
+        conn.commit()
+        conn.close()
+        logger.info(f"💾 FASE 31.9 RESPALDO WEB→RAG: '{source}' "
+                    f"({creados} chunks markdown)")
+        return creados
+    except Exception as e:
+        logger.error(f"guardar web en rag: {e}")
+        return 0
+
+
+async def registrar_archivo_compartido(update, context):
+    """FASE 31.9: cuando un usuario comparte un archivo, NO se respalda el
+    archivo — se registra una REFERENCIA markdown (nombre, descripción,
+    quién y fecha) consultable por el RAG: "¿quién compartió X?"."""
+    try:
+        m = update.effective_message
+        doc = m.document if m else None
+        if not doc or not doc.file_name:
+            return
+        filename = doc.file_name
+        # Los PDF en privado ya tienen su propio flujo de indexación completa
+        if (update.effective_chat and update.effective_chat.type == 'private'
+                and filename.lower().endswith('.pdf')):
+            return
+        u = update.effective_user
+        quien = (f"{u.first_name or ''} {u.last_name or ''}".strip()
+                 or (u.username or 'desconocido')) if u else 'desconocido'
+        from datetime import datetime as _dtA
+        fecha = _dtA.now().strftime('%d-%m-%Y %H:%M')
+        descripcion = (m.caption or '').strip() or 'sin descripción'
+        ref_md = (f"## Archivo compartido: {filename}\n"
+                  f"- **Descripción del usuario**: {descripcion[:500]}\n"
+                  f"- **Compartido por**: {quien}\n"
+                  f"- **Fecha**: {fecha}\n"
+                  f"- **Formato**: {(filename.rsplit('.', 1)[-1] if '.' in filename else '?').upper()}")
+        _kw = ' '.join(sorted({w.lower() for w in
+                               f"{filename.replace('.', ' ').replace('_', ' ').replace('-', ' ')} {descripcion}".split()
+                               if len(w) >= 4}))[:300]
+        metadata = json.dumps({'tipo': 'referencia_archivo',
+                               'filename': filename, 'usuario': quien,
+                               'fecha': fecha})
+
+        def _insertar_ref():
+            conn = get_db_connection()
+            c = conn.cursor()
+            source = "REF:archivos compartidos por la comunidad"
+            if DATABASE_URL:
+                emb = generar_embedding_gemini(ref_md, tipo='RETRIEVAL_DOCUMENT')
+                if emb:
+                    try:
+                        c.execute("""INSERT INTO rag_chunks
+                                     (source, chunk_text, metadata, keywords, embedding)
+                                     VALUES (%s, %s, %s, %s, %s::vector)""",
+                                  (source, ref_md, metadata, _kw,
+                                   embedding_to_pgvector(emb)))
+                    except Exception:
+                        conn.rollback()
+                        c.execute("""INSERT INTO rag_chunks
+                                     (source, chunk_text, metadata, keywords)
+                                     VALUES (%s, %s, %s, %s)""",
+                                  (source, ref_md, metadata, _kw))
+                else:
+                    c.execute("""INSERT INTO rag_chunks
+                                 (source, chunk_text, metadata, keywords)
+                                 VALUES (%s, %s, %s, %s)""",
+                              (source, ref_md, metadata, _kw))
+            else:
+                c.execute("""INSERT INTO rag_chunks
+                             (source, chunk_text, metadata, keywords)
+                             VALUES (?, ?, ?, ?)""",
+                          (source, ref_md, metadata, _kw))
+            conn.commit()
+            conn.close()
+
+        await asyncio.to_thread(_insertar_ref)
+        logger.info(f"📎 FASE 31.9 REFERENCIA: '{filename}' de {quien} registrada")
+    except Exception as e:
+        logger.debug(f"registrar archivo compartido: {e}")
 
 
 def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 20,
@@ -37664,6 +37879,10 @@ def main():
     # Mejora 5: Analisis de imagenes en grupo (la funcion filtra por caption internamente)
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS, analizar_imagen_grupo))
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
+    # FASE 31.9: referencia markdown de TODO archivo compartido (grupo aparte
+    # para no interferir con los handlers existentes; los PDF privados los
+    # salta porque ya tienen indexación completa propia)
+    application.add_handler(MessageHandler(filters.Document.ALL, registrar_archivo_compartido), group=8)
     
     # Handler de mensajes de voz (privado y grupo)
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
@@ -38035,6 +38254,43 @@ def main():
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_tematica = resultados_busq.get('rag_tematica', 'desconocida')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
+
+            # ═══ FASE 31.9 — FALLBACK WEB AUTOMÁTICO (pedido de Germán) ═══
+            # Si el RAG vectorial NO tiene la información Y el historial de
+            # conversaciones tampoco → búsqueda profunda en Internet
+            # (DuckDuckGo + Trafilatura → markdown limpio) para que el
+            # usuario SIEMPRE reciba una respuesta completa y correcta.
+            _web_meta_39 = None
+            if total_rag == 0 and not resultados_busq.get('historial'):
+                try:
+                    try:
+                        await msg.edit_text("🌐 No está en mi base de conocimientos — "
+                                            "buscando en Internet en tiempo real...")
+                    except Exception:
+                        pass
+                    _web_res = await asyncio.wait_for(
+                        asyncio.to_thread(_busqueda_web_profunda, mensaje),
+                        timeout=24.0)
+                    if _web_res and _web_res.get('items'):
+                        resultados_busq['rag'] = list(_web_res['items'])
+                        resultados_busq['rag_confianza'] = 'alta'
+                        resultados_busq.setdefault('fuentes_usadas', []).append(
+                            f"Web en tiempo real ({len(_web_res['items'])} fuentes)")
+                        # Re-formatear el contexto con la información web
+                        contexto_completo = formatear_contexto_unificado(
+                            resultados_busq, query_para_busqueda)
+                        fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
+                        fuentes_str = " | ".join(fuentes_usadas)
+                        total_rag = len(resultados_busq['rag'])
+                        rag_confianza = 'alta'
+                        _web_meta_39 = {'markdown': _web_res.get('markdown', ''),
+                                        'urls': _web_res.get('urls', [])}
+                        logger.info(f"🌐 FASE 31.9: contexto web inyectado "
+                                    f"({total_rag} fuentes) para '{mensaje[:50]}'")
+                except asyncio.TimeoutError:
+                    logger.info("🌐 FASE 31.9: búsqueda web excedió 24s — continúa sin web")
+                except Exception as _e_w9:
+                    logger.debug(f"fallback web: {_e_w9}")
             
             # Intent hint
             intent_hint = ""
@@ -38289,6 +38545,10 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         'query': (query_para_busqueda or mensaje)[:400],
                         'docs': _docs_meta[:5],
                         'respuesta': respuesta[:1800],
+                        # FASE 31.9: si la respuesta vino de la web, guardar el
+                        # markdown para que el botón "Útil" lo respalde en RAG
+                        'web_md': (_web_meta_39 or {}).get('markdown', '')[:9000],
+                        'web_urls': (_web_meta_39 or {}).get('urls', [])[:4],
                     }
                     # ═══ FASE 31.7 AUTO-APRENDIZAJE: si la respuesta usó RAG con
                     # alta confianza (≥10 fragmentos, ≤3 documentos = búsqueda
