@@ -74,7 +74,7 @@ USE_CACHE = os.getenv("TTS_USE_CACHE", "true").lower() == "true"
 # FASE 12: VERSION_TAG — invalida automaticamente caches antiguos
 # Cada vez que se cambia este valor, el _cache_key generara hashes nuevos
 # y los audios viejos (Wavenet, sin SSML, etc) NO se reusan.
-TTS_VERSION_TAG = "v31.4-catalina-simbolos-respiracion-2026-07-03"
+TTS_VERSION_TAG = "v31.5-catalina-respiracion-sintactica-idiomas-2026-07-03"
 
 # FASE 12: AUTO-PURGAR caches antiguos al iniciar (los del sistema viejo)
 # Esto FUERZA que la primera vez genere audio nuevo con Neural2 + SSML
@@ -339,20 +339,37 @@ def _texto_para_edge(texto: str) -> str:
         t = re.sub(r'\b' + orig + r'\b', alias, t)
     # ═══ FASE 31.3 (2) ANGLICISMOS: pronunciación inglesa natural vía
     # respelling fonético español (edge-tts no soporta <lang> desde la lib).
+    # FASE 31.5: 'sh'→'ch' (la sh inglesa se leía como 's'); +francés,
+    # portugués y alemán para nombres/términos frecuentes. Sin tildes que
+    # alarguen de más. EN=inglés · FR=francés · PT=portugués · DE=alemán.
     _ANGLICISMOS = [
-        (r'\bdashboards\b', 'dáshbords'), (r'\bdashboard\b', 'dáshbord'),
+        # ── Inglés (tecnología/negocios) ──
+        (r'\bdashboards\b', 'dáchbords'), (r'\bdashboard\b', 'dáchbord'),
         (r'\branking\b', 'ránkin'), (r'\brankings\b', 'ránkins'),
-        (r'\bemail\b', 'iméil'), (r'\be-mail\b', 'iméil'),
-        (r'\bonline\b', 'onláin'), (r'\bsoftware\b', 'sóftwer'),
+        (r'\bemail\b', 'imeil'), (r'\be-mail\b', 'imeil'),
+        (r'\bonline\b', 'onlain'), (r'\bsoftware\b', 'sóftwer'),
         (r'\bhardware\b', 'járdwer'), (r'\bmarketing\b', 'márketin'),
-        (r'\bnetworking\b', 'netwórkin'), (r'\bstartups\b', 'stártaps'),
+        (r'\bnetworking\b', 'nétwerkin'), (r'\bstartups\b', 'stártaps'),
         (r'\bstartup\b', 'stártap'), (r'\bfeedback\b', 'fídbak'),
-        (r'\bstreaming\b', 'strímin'), (r'\bcloud\b', 'cláud'),
+        (r'\bstreaming\b', 'strímin'), (r'\bcloud\b', 'claud'),
         (r'\blinks\b', 'lincs'), (r'\blink\b', 'linc'),
-        (r'\bWhatsApp\b', 'wátsap'), (r'\bExcel\b', 'éxel'),
-        (r'\bGoogle Drive\b', 'gúguel dráiv'), (r'\bGoogle\b', 'gúguel'),
+        (r'\bWhatsApp\b', 'guátsap'), (r'\bExcel\b', ' excél'),
+        (r'\bGoogle Drive\b', 'gúgol draiv'), (r'\bGoogle\b', 'gúgol'),
         (r'\bblockchain\b', 'blókchein'), (r'\bcoaching\b', 'cóuchin'),
-        (r'\bheadhunter\b', 'jedjánter'), (r'\bpartners?\b', 'pártner'),
+        (r'\bheadhunter\b', 'jédjanter'), (r'\bpartners?\b', 'pártner'),
+        (r'\bmeeting\b', 'mítin'), (r'\bmeetings\b', 'mítins'),
+        (r'\bpassword\b', 'pásword'), (r'\bmanager\b', 'mánayer'),
+        (r'\bbusiness\b', 'bísnes'), (r'\bhashtag\b', 'jáctag'),
+        (r'\bshocks\b', 'chocs'), (r'\bshock\b', 'choc'),
+        (r'\bpodcast\b', 'pódcast'), (r'\bwebinar\b', 'güébinar'),
+        (r'\bcowork\b', 'cówork'), (r'\bshowroom\b', 'chórum'),
+        # ── Francés ──
+        (r'\brendez-vous\b', 'randevú'), (r'\bboutique\b', 'butík'),
+        (r'\bchef\b', 'chef'), (r'\bbureau\b', 'buró'),
+        # ── Portugués ──
+        (r'\bobrigado\b', 'obrigádu'), (r'\bsaudade\b', 'saudádye'),
+        # ── Alemán ──
+        (r'\bGesundheit\b', 'gezúndjait'), (r'\bKindergarten\b', 'kíndergarten'),
     ]
     for patt_a, repl_a in _ANGLICISMOS:
         t = re.sub(patt_a, repl_a, t, flags=re.IGNORECASE)
@@ -363,16 +380,20 @@ def _texto_para_edge(texto: str) -> str:
                else m.group(1) + ' pesos', t)
     t = re.sub(r'(\d+),(\d+)\s*%', r'\1 coma \2 por ciento', t)
     t = re.sub(r'(\d+)\s*%', r'\1 por ciento', t)
-    # ═══ FASE 31.4 (2) SÍMBOLOS: nombre correcto y pronunciación natural.
-    # "/" se llama SLASH (respelling 'slásh' fuerza la fonética inglesa).
+    # ═══ FASE 31.5 (2) SÍMBOLOS con pronunciación inglesa REALISTA.
+    # edge-tts ya NO acepta SSML <lang> (Microsoft lo bloqueó), así que la
+    # única vía es el respelling fonético. Clave aprendida: la 'sh' inglesa
+    # NO existe en español (Catalina la lee como 's' → "sláas"). Se aproxima
+    # con 'ch' (la ch española /tʃ/ es lo más cercano a /ʃ/), y se EVITAN
+    # las tildes que alargan la vocal. "/" (slash) → "slach".
     t = re.sub(r'(\d+)\s*/\s*(\d+)', r'\1 \2', t)          # 24/7 → "24 7"
     t = re.sub(r'\by/o\b', 'y o', t, flags=re.IGNORECASE)     # y/o → "y o"
-    t = re.sub(r'/(?=[A-Za-zÁ-Úá-ú])', ' slásh ', t)            # /economia → "slásh economia"
-    t = re.sub(r'\s*/\s*', ' slásh ', t)                       # "/" suelto
+    t = re.sub(r'/(?=[A-Za-zÁ-Úá-ú])', ' slach ', t)            # /economia → "slach economia"
+    t = re.sub(r'\s*/\s*', ' slach ', t)                       # "/" suelto
     t = t.replace('@', ' arroba ')
-    t = re.sub(r'#(?=\w)', ' jáshtag ', t).replace('#', ' jáshtag ')
+    t = re.sub(r'#(?=\w)', ' jactag ', t).replace('#', ' jactag ')  # hashtag ≈ "jáctag"
     t = t.replace('&', ' y ').replace('+', ' más ').replace('=', ' igual a ')
-    t = re.sub(r'\bvs\.?\b', 'versus', t, flags=re.IGNORECASE)
+    t = re.sub(r'\bvs\.?\b', 'vérsus', t, flags=re.IGNORECASE)
     # Dominios y correos: el punto se DICE ("cofradia.cl" → "cofradia punto cl")
     # y así no lo captura la regla de pausa de fin de oración.
     t = re.sub(r'(?<=[a-záéíóúñ0-9])\.(?=(?:cl|com|net|org|ai|io|es|app|dev)\b)',
@@ -390,30 +411,41 @@ def _texto_para_edge(texto: str) -> str:
     #   y relajada. Resultado: coma < punto, como habla una persona.
     t = t.replace('; ', ', ')
     t = re.sub(r'([.!?…])\s+', r'\1\n', t)
-    # ═══ FASE 31.4 (1) RESPIRACIÓN: si un tramo corre >12 palabras sin
-    # puntuación, se inserta una coma en el conector natural más cercano
-    # (y, o, que, para, pero, como, donde, cuando, porque, con, sin) — o a
-    # las 16 palabras como tope. Así Catalina respira como una persona y
-    # no llega "sin aire" al final de la frase.
-    _CONECTORES = {'y', 'o', 'que', 'para', 'pero', 'como', 'donde',
-                   'cuando', 'porque', 'con', 'sin', 'aunque', 'mientras',
-                   'según', 'sobre', 'entre', 'incluyendo', 'durante',
-                   'mediante', 'además', 'también', 'luego', 'desde', 'hasta'}
+    # ═══ FASE 31.5 RESPIRACIÓN NATURAL (basada en fonética del habla)
+    # La investigación (breath groups, Fuchs/Trouvain) muestra que NO se
+    # respira "cada N palabras": se respira en FRONTERAS SINTÁCTICAS, en
+    # grupos de aliento de ~2-4 segundos. A ~3 sílabas/seg del habla, un
+    # grupo cómodo es ~7-12 sílabas. Por eso:
+    #   1) SOLO se considera insertar una micro-pausa ante CONECTORES de
+    #      cláusula (donde la gramática permite respirar sin cortar la idea).
+    #   2) Se usa un presupuesto de SÍLABAS (≈tiempo), no de palabras, y solo
+    #      se dispara si ya pasaron ≥9 sílabas Y quedan ≥6 por delante — así
+    #      nunca corta el impulso de una frase corta ni deja una coma huérfana.
+    _CONECTORES_CLAUSULA = {'y', 'pero', 'aunque', 'porque', 'pues', 'mientras',
+                            'cuando', 'donde', 'que', 'para', 'porqué', 'sino',
+                            'aún', 'además', 'también', 'entonces', 'luego',
+                            'sin embargo', 'no obstante', 'es decir'}
+    def _silabas_aprox(palabra):
+        # Conteo de sílabas por grupos vocálicos (aprox. suficiente para timing)
+        import re as _re2
+        v = _re2.findall(r'[aeiouáéíóúü]+', palabra.lower())
+        return max(1, len(v))
     _lineas_out = []
     for _linea in t.split('\n'):
         _toks = _linea.split(' ')
-        _out, _cont = [], 0
-        for _tk in _toks:
-            if _cont >= 7 and _tk.lower() in _CONECTORES:
-                if _out and not _out[-1].endswith((',', '.', ':', ';', '?', '!')):
-                    _out[-1] = _out[-1] + ','
-                _cont = 0
-            elif _cont >= 11:
-                if _out and not _out[-1].endswith((',', '.', ':', ';', '?', '!')):
-                    _out[-1] = _out[-1] + ','
-                _cont = 0
+        # sílabas restantes acumuladas desde cada posición (para mirar adelante)
+        _sil = [_silabas_aprox(w) for w in _toks]
+        _out, _budget = [], 0
+        for _idx, _tk in enumerate(_toks):
+            _tkl = _tk.lower().strip('.,;:¿?¡!')
+            _ya_punt = _out and _out[-1].endswith((',', '.', ':', ';', '?', '!'))
+            _sil_delante = sum(_sil[_idx:])
+            if (_budget >= 9 and _tkl in _CONECTORES_CLAUSULA
+                    and _sil_delante >= 6 and not _ya_punt):
+                _out[-1] = _out[-1] + ','   # micro-pausa: respira aquí
+                _budget = 0
             _out.append(_tk)
-            _cont = 0 if _tk.endswith((',', '.', ':', ';', '?', '!')) else _cont + 1
+            _budget = 0 if _tk.endswith((',', '.', ':', ';', '?', '!')) else _budget + _sil[_idx]
         _lineas_out.append(' '.join(_out))
     t = '\n'.join(_lineas_out)
     t = re.sub(r'[ \t]{2,}', ' ', t).strip()

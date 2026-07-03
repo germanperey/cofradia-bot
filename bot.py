@@ -1117,6 +1117,7 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         pregunta_fb = meta['pregunta']
 
+        _docs_regen = []  # FASE 31.5: docs de la respuesta BUENA (para aprender de ELLA)
         def _regenerar():
             # Criterios DISTINTOS: query expansion (sinónimos/variantes) y
             # más chunks; excluimos el sesgo de la ronda anterior.
@@ -1124,6 +1125,10 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
                 chunks_fb, score_fb = buscar_rag_expandido(pregunta_fb, 20)
             except Exception:
                 chunks_fb, score_fb = buscar_rag(pregunta_fb, limit=20)
+            for _it in (chunks_fb or [])[:8]:
+                _s = _it[1] if isinstance(_it, (list, tuple)) and len(_it) > 1 else ''
+                if _s and _s not in _docs_regen:
+                    _docs_regen.append(_s)
             ctx_fb = "\n\n".join(
                 f"[{(it[1] if len(it) > 1 else '?')}]\n{it[0][:700]}"
                 for it in (chunks_fb or [])[:8])
@@ -1150,11 +1155,17 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
                 chat_id, nueva_txt,
                 reply_markup=_crear_botones_feedback('chat_privado'))
             meta['respuesta'] = nueva_limpia[:1800]
+            # FASE 31.5 FIX MEMORIA: los docs correctos son los de ESTA
+            # respuesta (la buena). Antes se conservaban los de la respuesta
+            # mala → "Útil" entrenaba con la asociación equivocada y la
+            # siguiente vez volvía a fallar. Ahora aprende de la acertada.
+            if _docs_regen:
+                meta['docs'] = _docs_regen[:5]
             context.user_data['ultima_respuesta_meta'] = meta
             # FASE 31.4: AUDIO de la respuesta regenerada (pedido de Germán)
             try:
                 audio_fb = await asyncio.wait_for(
-                    generar_audio_tts(nueva_limpia[:1500], f"/tmp/fb_{chat_id}.mp3"),
+                    generar_audio_tts(nueva_limpia[:3000], f"/tmp/fb_{chat_id}.mp3"),
                     timeout=15.0)
                 if audio_fb and os.path.exists(audio_fb):
                     with open(audio_fb, 'rb') as af_fb:
@@ -12889,7 +12900,7 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             # Ahora: enviar texto → lanzar TTS en background → enviar botones inmediatamente
             async def _tts_paralelo():
                 try:
-                    audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
+                    audio_path = await generar_audio_tts(respuesta_limpia[:3000], f"/tmp/mencion_{update.effective_user.id}.mp3")
                     if audio_path and os.path.exists(audio_path):
                         with open(audio_path, 'rb') as af:
                             await update.message.reply_voice(voice=af)
@@ -37693,7 +37704,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 # Enviar tambien como audio (TTS) — async no bloqueante
                 try:
                     audio_priv = await asyncio.wait_for(
-                        generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3"),
+                        generar_audio_tts(respuesta[:3000], f"/tmp/priv_{update.effective_user.id}.mp3"),
                         timeout=15.0
                     )
                     if audio_priv and os.path.exists(audio_priv):
