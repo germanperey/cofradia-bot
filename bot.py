@@ -34090,6 +34090,34 @@ def _clima_fuente_metno(lat, lon):
         return None
 
 
+def _icono_hora_clima(code, hora, sr_h=7, ss_h=20):
+    """FASE 31.6: emoji para el gráfico horario según código WMO y si es
+    de día o de noche (amanecer/ocaso reales del día). Grafica cuándo
+    empieza/termina la lluvia, cuándo anochece, etc."""
+    try:
+        c = int(code)
+    except Exception:
+        c = 3
+    noche = hora < sr_h or hora >= ss_h
+    if c >= 95:
+        return '⛈️'
+    if c in (71, 73, 75, 77, 85, 86):
+        return '❄️'
+    if c in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
+        return '🌧️'
+    if c in (45, 48):
+        return '🌫️'
+    if noche:
+        return '🌙' if c <= 1 else '☁️'
+    if c == 0:
+        return '☀️'
+    if c == 1:
+        return '🌤️'
+    if c == 2:
+        return '⛅'
+    return '☁️'
+
+
 def _obtener_clima_ciudad(ciudad: str):
     """FASE 31.2: Geocodifica (3 fuentes, país opcional) y obtiene el
     pronóstico con CADENA DE RESPALDO de datos (Open-Meteo → met.no).
@@ -34155,6 +34183,21 @@ def _obtener_clima_ciudad(ciudad: str):
             # FASE 31.6: código WMO por hora → icono de clima sobre el gráfico
             codes_horas = [int(x) if x is not None else 3
                            for x in h_code[i * 24:(i + 1) * 24]] if h_code else []
+            # Amanecer/ocaso DEL DÍA (para pintar luna de noche); fallback 07-20
+            def _hint(arr, idx, defecto):
+                try:
+                    v = (arr or [])[idx]
+                    return int(v.split('T')[1][:2]) if v and 'T' in v else defecto
+                except Exception:
+                    return defecto
+            sr_h = _hint(met.get('sunrise_arr'), i, 7)
+            ss_h = _hint(met.get('sunset_arr'), i, 20)
+            if codes_horas:
+                iconos_horas = [_icono_hora_clima(codes_horas[h] if h < len(codes_horas) else 3,
+                                                  h, sr_h, ss_h) for h in range(24)]
+            else:  # respaldo met.no sin códigos horarios: día/noche con código diario
+                cod_dia = 0 if (met['infos_dia'][i][2] if i < len(met['infos_dia']) else 'nublado') == 'sol' else 3
+                iconos_horas = [_icono_hora_clima(cod_dia, h, sr_h, ss_h) for h in range(24)]
             emoji, desc, tema = met['infos_dia'][i] if i < len(met['infos_dia']) else ('☁️', 'Variable', 'nublado')
             dias.append({
                 'nombre': nombre_dia, 'fecha': fecha_fmt,
@@ -34164,6 +34207,7 @@ def _obtener_clima_ciudad(ciudad: str):
                 'humedad': humedad if humedad is not None else '—',
                 'emoji': emoji, 'desc': desc, 'tema': tema,
                 'horas': temps_horas, 'codes': codes_horas,
+                'iconos': iconos_horas,
             })
         if not dias:
             return 'NODATA'
@@ -34239,9 +34283,10 @@ header .sub{opacity:.85;margin-top:4px;font-size:clamp(.82rem,2.6vw,1rem)}
 .hero .temp{font-size:clamp(2.8rem,10vw,4.6rem);font-weight:800;line-height:1}
 .hero .desc{font-size:clamp(1rem,3vw,1.25rem);opacity:.92;margin-top:6px}
 .hero .mm{margin-top:8px;font-size:clamp(.85rem,2.6vw,1.02rem);opacity:.85}
-.hero .datos{display:flex;gap:clamp(10px,2vw,18px);flex-wrap:wrap;justify-content:center}
-.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:12px 16px;text-align:center;
- min-width:clamp(88px,20vw,110px);flex:1 1 auto;max-width:150px}
+.hero .datos{display:grid;gap:clamp(8px,1.6vw,14px);width:100%;
+ grid-template-columns:repeat(auto-fit,minmax(clamp(96px,15vw,132px),1fr))}
+.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:12px 10px;text-align:center;
+ display:flex;flex-direction:column;justify-content:center;min-height:74px}
 .dato .v{font-size:clamp(1.1rem,3.2vw,1.4rem);font-weight:700;white-space:nowrap}
 .dato .l{font-size:.72rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
 h2.seccion{font-size:clamp(1rem,3vw,1.15rem);font-weight:700;opacity:.92;
@@ -34273,16 +34318,22 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
 @media(orientation:landscape) and (max-height:500px){
  .hero{padding:14px 16px;gap:12px}.hero .icono{font-size:3.4rem}
  .hero .temp{font-size:2.4rem}#grafHoras,#grafico{height:220px}}
-<style>
-#btnLang{position:fixed;top:12px;right:12px;z-index:99;cursor:pointer;
- background:rgba(255,255,255,.16);backdrop-filter:blur(10px);
- -webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.35);
- color:#fff;font-weight:700;font-size:.85rem;padding:8px 14px;border-radius:20px;
- box-shadow:0 4px 14px rgba(0,0,0,.28);transition:transform .15s,background .2s}
-#btnLang:hover{background:rgba(255,255,255,.28);transform:scale(1.05)}
-#btnLang:active{transform:scale(.96)}
+/* ═══ FASE 31.6: botón de idioma premium (glassmorphism, fijo arriba-derecha) ═══ */
+#btnLang{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;
+ z-index:999;cursor:pointer;display:inline-flex;align-items:center;gap:7px;
+ background:linear-gradient(135deg,rgba(255,255,255,.22),rgba(255,255,255,.08));
+ backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+ border:1px solid rgba(255,255,255,.45);color:#fff;font-weight:800;
+ font-size:.88rem;letter-spacing:.3px;padding:9px 18px;border-radius:999px;
+ box-shadow:0 6px 20px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.35);
+ transition:transform .18s ease,box-shadow .2s ease,background .25s;
+ font-family:inherit;text-shadow:0 1px 3px rgba(0,0,0,.3)}
+#btnLang:hover{background:linear-gradient(135deg,rgba(255,255,255,.34),rgba(255,255,255,.14));
+ transform:translateY(-2px) scale(1.04);box-shadow:0 10px 26px rgba(0,0,0,.42)}
+#btnLang:active{transform:scale(.95)}
+#btnLang .flag{font-size:1.05rem;line-height:1}
 </style></head><body><div class="wrap">
-<button id="btnLang" onclick="toggleIdioma()">🇬🇧 English</button>
+<button id="btnLang" onclick="toggleIdioma()"><span class="flag">🇬🇧</span><span id="btnLangTxt">English</span></button>
 <header>
   <h1 data-i18n="Pronóstico del Tiempo">🌎 Pronóstico del Tiempo</h1>
   <div class="sub"><span data-i18n="__CIUDAD__ __REGION_PAIS__ · Actualizado:">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado:</span> __ACTUALIZADO__ <span data-i18n="(hora Chile)">(hora Chile)</span></div>
@@ -34292,7 +34343,7 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
   <div class="icono">__ICONO_HOY__</div>
   <div>
     <div class="temp">__TEMP_HOY__°</div>
-    <div class="desc">__DESC_HOY__</div>
+    <div class="desc" data-i18n-desc>__DESC_HOY__</div>
     <div class="mm">⬇️ <span data-i18n="Mín">Mín</span> __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ <span data-i18n="Máx">Máx</span> __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ <span data-i18n="Sensación">Sensación</span> __SENSACION__°</div>
   </div>
   <div class="datos">
@@ -34300,6 +34351,8 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
     <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l" data-i18n="km/h viento">km/h viento</div></div>
     <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l" data-i18n="Prob. lluvia">Prob. lluvia</div></div>
     <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l"><span data-i18n="Calidad aire">Calidad aire</span> · <span data-i18n-cat>__AQI_CAT__</span></div></div>
+    <div class="dato"><div class="v">🌅 __CREPUSCULO__</div><div class="l" data-i18n="Amanecer">Amanecer</div></div>
+    <div class="dato"><div class="v">🌇 __OCASO__</div><div class="l" data-i18n="Ocaso">Ocaso</div></div>
   </div>
 </div>
 
@@ -34326,6 +34379,7 @@ var I18N={
  "(hora Chile)":"(Chile time)",
  "Humedad":"Humidity","km/h viento":"km/h wind","Prob. lluvia":"Rain prob.",
  "Calidad aire":"Air quality","Sensación":"Feels like","Mín":"Min","Máx":"Max",
+ "Amanecer":"Sunrise","Ocaso":"Sunset",
  "📅 Próximos 7 días":"📅 Next 7 days",
  "👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)":"👆 Tap any day to see its hour-by-hour temperatures (00:00 – 23:00)",
  "🕐 Temperatura por hora":"🕐 Hourly temperature",
@@ -34358,11 +34412,20 @@ function toggleIdioma(){
    var orig=el.getAttribute('data-i18n');
    el.textContent=_idiomaEN?_trad(orig,I18N):orig;
  });
- // 2) Categoría AQI
- document.querySelectorAll('[data-i18n-cat]').forEach(function(el){
+ // 2) Descripción del clima actual (hero) — dinámica, vía I18N_DESC
+ document.querySelectorAll('[data-i18n-desc]').forEach(function(el){
    if(!el.getAttribute('data-orig'))el.setAttribute('data-orig',el.textContent);
    var o=el.getAttribute('data-orig');
    el.textContent=_idiomaEN?_trad(o,I18N_DESC):o;
+ });
+ // 2b) Categoría AQI — puede traer emoji al final → traducción por PREFIJO
+ document.querySelectorAll('[data-i18n-cat]').forEach(function(el){
+   if(!el.getAttribute('data-orig'))el.setAttribute('data-orig',el.textContent);
+   var o=el.getAttribute('data-orig');
+   if(_idiomaEN){var t=o;
+     for(var k in I18N_DESC){if(o.indexOf(k)===0){t=I18N_DESC[k]+o.slice(k.length);break;}}
+     el.textContent=t;
+   }else{el.textContent=o;}
  });
  // 3) Tarjetas de días: nombre de día + descripción del clima
  document.querySelectorAll('#gridDias .card').forEach(function(card){
@@ -34379,9 +34442,12 @@ function toggleIdioma(){
    for(var k=0;k<cards.length;k++){if(cards[k]===act){idx=k;break;}}
    pintarHoras(idx);}catch(e){}
  // 5) Botón
- document.getElementById('btnLang').textContent=_idiomaEN?'🇪🇸 Español':'🇬🇧 English';
+ document.getElementById('btnLang').innerHTML=_idiomaEN
+   ?'<span class="flag">🇪🇸</span><span id="btnLangTxt">Español</span>'
+   :'<span class="flag">🇬🇧</span><span id="btnLangTxt">English</span>';
 }
-var DATA_HORAS=__DATA_HORAS__;   // [{n:'Hoy 3 Jul', t:[24 temps]}, ...]
+var DATA_HORAS=__DATA_HORAS__;   // [{n:'Hoy 3 Jul', t:[24 temps], ic:[24 iconos]}, ...]
+var HORA_IDX=__HORA_IDX__;       // hora actual (índice 0-23) para la línea 📍
 var EJE_H=Array.from({length:24},function(_,h){return (h<10?'0':'')+h+':00'});
 
 var chH=echarts.init(document.getElementById('grafHoras'));
@@ -34394,22 +34460,43 @@ function pintarHoras(idx){
   var temps=d.t;
   var vmax=Math.max.apply(null,temps.filter(function(x){return x!==null}));
   var vmin=Math.min.apply(null,temps.filter(function(x){return x!==null}));
+  // FASE 31.6: iconos de clima por hora (fila superior) — ☀️⛅🌧️🌙❄️…
+  var iconos=(d.ic&&d.ic.length===24)?d.ic:EJE_H.map(function(){return ''});
+  // Marcadores de HORA ACTUAL (solo en "Hoy"): línea punteada + 📍
+  var esHoy=(idx===0)&&HORA_IDX>=0&&HORA_IDX<24;
+  var mlData=[
+    {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
+    {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}];
+  if(esHoy&&temps[HORA_IDX]!==null){
+    mlData.push({coord:[HORA_IDX,temps[HORA_IDX]],
+      symbol:'pin',symbolSize:44,itemStyle:{color:'#e63946'},
+      label:{formatter:'📍',fontSize:15,color:'#fff'}});}
   chH.setOption({
     backgroundColor:'transparent',
-    tooltip:{trigger:'axis',formatter:function(p){var x=p[0];return x.axisValue+' → <b>'+x.data+'°C</b>'}},
-    grid:{left:'2%',right:'3%',bottom:'8%',top:'14%',containLabel:true},
-    xAxis:{type:'category',data:EJE_H,
-      axisLabel:{color:'#fff',fontSize:10,interval:2},
-      axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+    tooltip:{trigger:'axis',formatter:function(p){var x=p[0];
+      var ic=iconos[x.dataIndex]||'';return ic+' '+x.axisValue+' → <b>'+x.data+'°C</b>'}},
+    grid:{left:'2%',right:'3%',bottom:'8%',top:'20%',containLabel:true},
+    xAxis:[
+      {type:'category',data:EJE_H,
+        axisLabel:{color:'#fff',fontSize:10,interval:2},
+        axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+      {type:'category',position:'top',data:iconos,
+        axisLabel:{fontSize:13,interval:1,margin:6},
+        axisLine:{show:false},axisTick:{show:false}}
+    ],
     yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
       splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
     series:[{name:'Temp',type:'line',smooth:true,data:temps,symbolSize:6,
+      xAxisIndex:0,
       lineStyle:{width:3,color:'#ffd166'},itemStyle:{color:'#ffd166'},
       areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
         colorStops:[{offset:0,color:'rgba(255,209,102,.45)'},{offset:1,color:'rgba(255,209,102,0)'}]}},
-      markPoint:{data:[
-        {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
-        {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}]}
+      markPoint:{data:mlData},
+      markLine:esHoy?{symbol:'none',silent:true,
+        lineStyle:{type:'dashed',width:2,color:'#e63946'},
+        label:{formatter:_idiomaEN?'Now':'Ahora',color:'#fff',fontWeight:'bold',
+          backgroundColor:'rgba(230,57,70,.85)',padding:[3,8],borderRadius:8},
+        data:[{xAxis:HORA_IDX}]}:undefined
     }]},true);
 }
 document.querySelectorAll('#gridDias .card').forEach(function(card,i){
@@ -34480,7 +34567,8 @@ def _generar_html_clima(d: dict) -> str:
     region_pais = ', '.join(x for x in [d.get('region', ''), d.get('pais', '')] if x)
     # FASE 31.1: datos horarios por día (para el gráfico clickeable) + AQI
     data_horas = [
-        {'n': f'{x["nombre"]} {x["fecha"]}', 't': x.get('horas') or []}
+        {'n': f'{x["nombre"]} {x["fecha"]}', 't': x.get('horas') or [],
+         'ic': x.get('iconos') or []}
         for x in dias
     ]
     aqi_val = d.get('aqi')
@@ -34503,8 +34591,11 @@ def _generar_html_clima(d: dict) -> str:
         '__LLUVIA_HOY__': str(dias[0]['lluvia']),
         '__AQI_VAL__': str(aqi_val) if aqi_val is not None else '—',
         '__AQI_CAT__': aqi_cat if aqi_cat else 's/d',
+        '__CREPUSCULO__': d.get('crepusculo', '—'),
+        '__OCASO__': d.get('ocaso', '—'),
         '__TARJETAS__': ''.join(tarjetas),
         '__DATA_HORAS__': json.dumps(data_horas, ensure_ascii=False),
+        '__HORA_IDX__': str(d.get('hora_actual_idx', -1)),
         '__EJE_DIAS__': json.dumps([x['nombre'][:3] + ' ' + x['fecha'] for x in dias]),
         '__SERIE_MAX__': json.dumps([x['tmax'] for x in dias]),
         '__SERIE_MIN__': json.dumps([x['tmin'] for x in dias]),
