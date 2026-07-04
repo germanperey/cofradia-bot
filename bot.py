@@ -22245,41 +22245,134 @@ def _scrape_ddg_sync(q: str, n: int = 5) -> list:
 # (3) Archivos compartidos → referencia markdown (nombre, descripción,
 #     quién y cuándo) consultable por el RAG.
 # ═══════════════════════════════════════════════════════════════════
-def _busqueda_web_profunda(query: str, max_paginas: int = 2) -> dict:
-    """DDG → top resultados → Trafilatura sobre las mejores páginas.
+def _consulta_requiere_web(pregunta: str) -> bool:
+    """FASE 31.10 (URGENTE Germán): detecta si la consulta del usuario
+    necesita información EN TIEMPO REAL de Internet (eventos en curso,
+    resultados, noticias, precios, o el usuario pide explícitamente buscar
+    en la web). El conocimiento interno del LLM llega hasta 2024 y NO puede
+    responder esto sin conectarse."""
+    try:
+        import re as _re10b
+        p = (pregunta or '').lower()
+        anio_actual = _ahora_chile().year
+        # a) Menciona el año actual o uno futuro → evento en curso
+        for m in _re10b.findall(r'\b(20\d{2})\b', p):
+            if int(m) >= anio_actual:
+                return True
+        # b) Señales léxicas de actualidad / petición explícita de web
+        _CLAVES = (
+            'hoy', 'ayer', 'ahora mismo', 'esta semana', 'este mes',
+            'este año', 'este ano', 'éste año', 'actual', 'reciente',
+            'última hora', 'ultima hora', 'últimas noticias', 'ultimas noticias',
+            'noticias de', 'en vivo', 'en curso', 'resultados de', 'resultado del',
+            'marcador', 'clasificad', 'clasificaron', 'avanzaron', 'avanzó', 'avanzo',
+            'eliminad', 'quién ganó', 'quien gano', 'quién va ganando', 'quien va ganando',
+            'precio del', 'precio de', 'cuánto vale', 'cuanto vale', 'cuánto cuesta',
+            'cuanto cuesta', 'valor del dólar', 'valor del dolar', 'cotización',
+            'cotizacion', 'tipo de cambio', 'busca en internet', 'buscar en internet',
+            'busca en google', 'buscar en google', 'busca en la web', 'consulta en internet',
+            'consultar en internet', 'información actualizada', 'informacion actualizada',
+        )
+        return any(k in p for k in _CLAVES)
+    except Exception:
+        return False
+
+
+def _generar_queries_busqueda(pregunta: str) -> list:
+    """FASE 31.10 (pedido de Germán): construye AUTOMÁTICAMENTE variantes de
+    búsqueda optimizadas (PROMPTS) a partir de la consulta natural del
+    usuario, para que el LOOP de búsqueda web sea eficiente y completo:
+      1) keywords + año actual (si la consulta es de tiempo real)
+      2) keywords puros (sin ruido conversacional ni stopwords)
+      3) consulta limpia original (respaldo)
+    Devuelve hasta 3 variantes ordenadas de mayor a menor precisión."""
+    import re as _re10
+    p = (pregunta or '').strip()
+    # 1. Quitar ruido conversacional dirigido al bot
+    _RUIDO = (r'\b(bot|hola|por favor|porfavor|debes|deberías|deberias|dime|dame|'
+              r'cuéntame|cuentame|quisiera saber|quiero saber|me puedes|puedes|'
+              r'podrías|podrias|necesito que|ayúdame con|ayudame con|'
+              r'busca(?:r)? en (?:internet|google|la web)|'
+              r'consulta(?:r)? en (?:internet|google|la web)|'
+              r'esfuérzate|esfuerzate|la información está disponible|'
+              r'la informacion esta disponible)\b')
+    limpio = _re10.sub(_RUIDO, ' ', p, flags=_re10.IGNORECASE)
+    limpio = _re10.sub(r'[¿?¡!"\']', ' ', limpio)
+    limpio = _re10.sub(r'\s+', ' ', limpio).strip()
+    # 2. Keywords: quitar stopwords que ensucian los buscadores
+    _STOP = {'cuales', 'cuáles', 'cual', 'cuál', 'son', 'los', 'las', 'que',
+             'qué', 'del', 'de', 'la', 'el', 'en', 'a', 'y', 'o', 'u', 'un',
+             'una', 'este', 'esta', 'éste', 'ésta', 'han', 'ha', 'se', 'al',
+             'para', 'por', 'con', 'como', 'cómo', 'es', 'fue', 'su', 'sus',
+             'lo', 'le', 'les', 'ya', 'más', 'mas', 'año', 'ano'}
+    palabras = [w for w in limpio.split() if w.lower() not in _STOP]
+    kw = ' '.join(palabras)[:90].strip()
+    ahora = _ahora_chile()
+    variantes = []
+    if kw:
+        if _consulta_requiere_web(p) and str(ahora.year) not in kw:
+            variantes.append(f"{kw} {ahora.year}")
+        variantes.append(kw)
+    if limpio and limpio[:90].lower() not in [v.lower() for v in variantes]:
+        variantes.append(limpio[:90])
+    if not variantes:
+        variantes = [p[:90] or 'noticias Chile']
+    # Deduplicar conservando el orden de precisión
+    vistos, salida = set(), []
+    for v in variantes:
+        if v.lower() not in vistos:
+            vistos.add(v.lower())
+            salida.append(v)
+    return salida[:3]
+
+
+def _busqueda_web_profunda(query: str, max_paginas: int = 3) -> dict:
+    """FASE 31.10 (pedido de Germán): motor web con PROMPTS y LOOPS
+    automáticos construidos desde la consulta del usuario.
+      LOOP 1: variantes de búsqueda (de mayor a menor precisión) →
+      LOOP 2: resultados DDG de cada variante → Trafilatura (markdown
+      limpio), exigiendo DOMINIOS DISTINTOS para diversidad de fuentes,
+      hasta reunir max_paginas fuentes con contenido real.
+    Respaldo: snippets DDG si ninguna página entrega contenido.
     Devuelve {'items': [(markdown, 'WEB-LIVE:dominio')], 'urls': [...],
     'markdown': str_completo} o items vacíos si no hay red/resultados."""
     out = {'items': [], 'urls': [], 'markdown': ''}
     try:
-        res = _scrape_ddg_sync(query, n=5)
-        if not res:
-            return out
         import urllib.parse as _up9
-        partes_md = []
-        for r in res:
+        variantes = _generar_queries_busqueda(query)
+        partes_md, res_todos, dominios_vistos = [], [], set()
+        for _var in variantes:                      # ── LOOP de variantes ──
             if len(out['items']) >= max_paginas:
-                break
-            _u = r.get('url', '')
-            if not _u.startswith('http'):
-                continue
-            md = _crawl4ai_markdown(_u, max_chars=2600, timeout=9)
-            if md and len(md) > 200:
+                break                               # objetivo cumplido
+            res = _scrape_ddg_sync(_var, n=5) or []
+            res_todos.extend(res)
+            for r in res:                           # ── LOOP de resultados ──
+                if len(out['items']) >= max_paginas:
+                    break
+                _u = r.get('url', '')
+                if not _u.startswith('http') or _u in out['urls']:
+                    continue
                 _dom = _up9.urlparse(_u).netloc.replace('www.', '')[:40]
-                out['items'].append((md, f"WEB-LIVE:{_dom}"))
-                out['urls'].append(_u)
-                partes_md.append(f"### {r.get('titulo','')[:90]}\n"
-                                 f"Fuente: {_u}\n\n{md}")
+                if _dom in dominios_vistos:
+                    continue                        # diversidad de fuentes
+                md = _crawl4ai_markdown(_u, max_chars=2600, timeout=9)
+                if md and len(md) > 200:
+                    dominios_vistos.add(_dom)
+                    out['items'].append((md, f"WEB-LIVE:{_dom}"))
+                    out['urls'].append(_u)
+                    partes_md.append(f"### {r.get('titulo','')[:90]}\n"
+                                     f"Fuente: {_u}\n\n{md}")
         # respaldo: si ninguna página dio contenido, usar los snippets DDG
         if not out['items']:
             _snips = "\n".join(f"- {r['titulo']}: {r['snippet']}"
-                                for r in res[:4] if r.get('snippet'))
+                                for r in res_todos[:6] if r.get('snippet'))
             if len(_snips) > 120:
                 out['items'].append((_snips, "WEB-LIVE:duckduckgo"))
                 partes_md.append(_snips)
         out['markdown'] = "\n\n".join(partes_md)[:9000]
         if out['items']:
-            logger.info(f"🌐 FASE 31.9 WEB PROFUNDA: {len(out['items'])} fuentes "
-                        f"para '{query[:50]}'")
+            logger.info(f"🌐 FASE 31.10 WEB: {len(out['items'])} fuentes con "
+                        f"{len(variantes)} variantes para '{query[:50]}'")
     except Exception as e:
         logger.debug(f"web profunda: {e}")
     return out
@@ -38384,25 +38477,49 @@ def main():
             # (DuckDuckGo + Trafilatura → markdown limpio) para que el
             # usuario SIEMPRE reciba una respuesta completa y correcta.
             _web_meta_39 = None
-            # FASE 31.9b: basta con que el RAG esté vacío. Antes se exigía
-            # también historial vacío, pero el historial del grupo casi
-            # siempre devuelve algún mensaje (aunque sea ruido) y eso
-            # bloqueaba el fallback (caso real: "discos de Elvis Presley"
-            # respondió con conocimiento propio en vez de buscar en la web).
-            # El historial disponible se mantiene igual en el contexto.
-            if total_rag == 0:
+            # ═══ FASE 31.10 (URGENTE Germán) — CAUSA RAÍZ del "no tengo
+            # acceso a internet": el fallback SOLO se disparaba con RAG == 0;
+            # bastaba UN fragmento irrelevante para que el bot respondiera
+            # desde su conocimiento 2024 (caso real: octavos del Mundial
+            # 2026). AHORA el bot busca en Internet cuando:
+            #   a) la consulta requiere información EN TIEMPO REAL
+            #      (detector _consulta_requiere_web), o
+            #   b) la base local NO tiene información RELEVANTE del tema.
+            _web_tiempo_real = False
+            try:
+                _web_tiempo_real = _consulta_requiere_web(mensaje)
+            except Exception:
+                pass
+            _docs_rel_pre = (
+                rag_tematica in ('relevante', 'posible') and
+                rag_confianza in ('alta', 'media') and
+                bool(resultados_busq.get('rag')))
+            if total_rag == 0 or _web_tiempo_real or not _docs_rel_pre:
                 try:
                     try:
-                        await msg.edit_text("🌐 No está en mi base de conocimientos — "
-                                            "buscando en Internet en tiempo real...")
+                        await msg.edit_text(
+                            "🌐 Tu consulta requiere datos actualizados — "
+                            "buscando en Internet en tiempo real..."
+                            if _web_tiempo_real else
+                            "🌐 No está en mi base de conocimientos — "
+                            "buscando en Internet en tiempo real...")
                     except Exception:
                         pass
                     _web_res = await asyncio.wait_for(
                         asyncio.to_thread(_busqueda_web_profunda, mensaje),
-                        timeout=24.0)
+                        timeout=30.0)  # FASE 31.10: 24→30s (3 fuentes con loop)
                     if _web_res and _web_res.get('items'):
-                        resultados_busq['rag'] = list(_web_res['items'])
+                        # Web PRIMERO (más fresca); se conservan hasta 6
+                        # fragmentos locales como contexto complementario
+                        resultados_busq['rag'] = (
+                            list(_web_res['items']) +
+                            list(resultados_busq.get('rag') or [])[:6])
                         resultados_busq['rag_confianza'] = 'alta'
+                        # FASE 31.10: sin esto, docs_son_relevantes seguía en
+                        # False y el LLM recibía el prompt MODO B ("no tengo
+                        # info") AUNQUE el contexto web ya estaba inyectado
+                        resultados_busq['rag_tematica'] = 'relevante'
+                        rag_tematica = 'relevante'
                         resultados_busq.setdefault('fuentes_usadas', []).append(
                             f"Web en tiempo real ({len(_web_res['items'])} fuentes)")
                         # Re-formatear el contexto con la información web
@@ -38414,10 +38531,11 @@ def main():
                         rag_confianza = 'alta'
                         _web_meta_39 = {'markdown': _web_res.get('markdown', ''),
                                         'urls': _web_res.get('urls', [])}
-                        logger.info(f"🌐 FASE 31.9: contexto web inyectado "
-                                    f"({total_rag} fuentes) para '{mensaje[:50]}'")
+                        logger.info(f"🌐 FASE 31.10: contexto web inyectado "
+                                    f"({total_rag} fuentes, tiempo_real={_web_tiempo_real}) "
+                                    f"para '{mensaje[:50]}'")
                 except asyncio.TimeoutError:
-                    logger.info("🌐 FASE 31.9: búsqueda web excedió 24s — continúa sin web")
+                    logger.info("🌐 FASE 31.10: búsqueda web excedió 30s — continúa sin web")
                 except Exception as _e_w9:
                     logger.debug(f"fallback web: {_e_w9}")
             
@@ -38462,6 +38580,21 @@ def main():
                 # FASE 31: si el hit fue por NOMBRE DE DOCUMENTO (score ≥ 45), el usuario
                 # preguntó por ese documento/libro ESPECÍFICO → foco absoluto en él.
                 regla_foco = ""
+                # ═══ FASE 31.10: si hay fuentes WEB-LIVE, el LLM debe saber
+                # la FECHA ACTUAL y que esos datos son más nuevos que su
+                # corte de entrenamiento — PROHIBIDO alegar falta de internet
+                regla_web = ""
+                if _web_meta_39:
+                    regla_web = (
+                        f"0-WEB. **FUENTES EN TIEMPO REAL** (fecha y hora actual: "
+                        f"{_ahora_chile().strftime('%d-%m-%Y %H:%M')} hora Chile): los fragmentos "
+                        f"marcados WEB-LIVE provienen de una búsqueda en Internet realizada HACE "
+                        f"SEGUNDOS. Son MÁS ACTUALIZADOS que tu conocimiento interno (corte 2024): "
+                        f"ante cualquier contradicción, PREVALECE la fuente web. PROHIBIDO decir que "
+                        f"no tienes acceso a internet o que tu información llega hasta 2024 — estás "
+                        f"respondiendo con datos en vivo. Menciona el dominio de la fuente al dar "
+                        f"datos clave (ej: 'según fifa.com...').\n"
+                    )
                 if rag_score >= 45.0 and nombres_docs_exactos_chat:
                     doc_foco_str = '", "'.join(nombres_docs_exactos_chat[:2])
                     regla_foco = (
@@ -38474,7 +38607,7 @@ def main():
                 instruccion = (
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
                     f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
-                    f"{regla_foco}"
+                    f"{regla_web}{regla_foco}"
                     f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
                     f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
                     f"2. SINTETIZA los fragmentos en respuesta clara y fluida (150-300 palabras máximo).\n"
