@@ -2727,7 +2727,10 @@ Tu personalidad:
     for intento in range(reintentos):
         try:
             # FASE 25: timeout reducido de 30s a 25s (con 2 reintentos = max 50s vs 90s antes)
-            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=25)
+            # FASE 31.11 (Germán): timeout=(connect, read) → si Groq está caído/
+            # inalcanzable, falla en 5s (antes 25s) y salta a Gemini más rápido.
+            # El presupuesto de LECTURA (25s) se mantiene: nunca trunca respuestas.
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=(5, 25))
             
             if response.status_code == 200:
                 data = response.json()
@@ -2740,7 +2743,7 @@ Tu personalidad:
             elif response.status_code == 429:
                 logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
                 import time
-                time.sleep(2 * (intento + 1))
+                time.sleep(1)  # FASE 31.11 (Germán): backoff 2s/4s → 1s para failover más rápido a Gemini
                 
             elif response.status_code >= 500:
                 logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
@@ -2786,7 +2789,7 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
                 "temperature": temperature,
             }
         }
-        r = requests.post(url, json=payload, timeout=30)
+        r = requests.post(url, json=payload, timeout=(5, 30))  # FASE 31.11: (connect,read) → failover rápido si Gemini cae
         if r.status_code == 200:
             texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
             if texto and texto.strip():
@@ -2833,7 +2836,7 @@ def llamar_glm5(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -
                 "max_tokens": max_tokens,
                 "temperature": temperature,
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=25)
+            r = requests.post(url, json=payload, headers=headers, timeout=(5, 25))  # FASE 31.11: (connect,read) → failover rápido
             if r.status_code == 200:
                 texto = r.json()["choices"][0]["message"]["content"]
                 if texto and texto.strip():
@@ -2905,7 +2908,7 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
                 "temperature": temperature,
                 "stream": False,
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            r = requests.post(url, json=payload, headers=headers, timeout=(5, 30))  # FASE 31.11: (connect,read) → failover rápido
             if r.status_code == 200:
                 data = r.json()
                 texto = data["choices"][0]["message"]["content"]
@@ -34541,6 +34544,45 @@ _METNO_SYMBOL_MAP = {
 }
 
 
+def _svg_lluvia_clima(size='1em'):
+    """FASE 31.11 (fix Germán): ícono SVG propio de lluvia para el DASHBOARD,
+    con las gotas en CELESTE CLARO (#8fd8ff) para que se vean nítidas sobre el
+    fondo — reemplaza el emoji 🌧️/🌦️/⛈️ cuyas gotas (color del sistema) se
+    veían demasiado oscuras. 'size' en 'em' hereda el tamaño del slot donde va
+    (misma escala que tenía el emoji). Solo se usa en el HTML del clima; los
+    mensajes de texto de Telegram siguen usando emoji."""
+    nube = '#eaf0f6'
+    gota = '#8fd8ff'
+    return (
+        f'<svg viewBox="0 0 64 64" width="{size}" height="{size}" '
+        f'style="vertical-align:-0.15em;display:inline-block" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="lluvia">'
+        f'<g fill="{nube}">'
+        f'<circle cx="24" cy="27" r="11"/>'
+        f'<circle cx="38" cy="23" r="13"/>'
+        f'<circle cx="46" cy="30" r="10"/>'
+        f'<rect x="18" y="29" width="30" height="12" rx="6"/>'
+        f'</g>'
+        f'<g stroke="{gota}" stroke-width="4.5" stroke-linecap="round">'
+        f'<line x1="25" y1="46" x2="22" y2="55"/>'
+        f'<line x1="34" y1="46" x2="31" y2="55"/>'
+        f'<line x1="43" y1="46" x2="40" y2="55"/>'
+        f'</g></svg>'
+    )
+
+
+def _icono_clima_dash(emoji, size='1em'):
+    """FASE 31.11 (fix Germán): en el dashboard, si el emoji es de LLUVIA lo
+    reemplaza por el SVG con gotas celeste-claro; cualquier otro icono (sol,
+    nube, luna, nieve, niebla, tormenta seca) se devuelve tal cual."""
+    try:
+        if emoji and any(r in emoji for r in ('🌧', '🌦', '⛈')):
+            return _svg_lluvia_clima(size)
+    except Exception:
+        pass
+    return emoji
+
+
 def _clima_fuente_openmeteo(lat, lon):
     """FUENTE PRIMARIA de datos meteorológicos (Open-Meteo) con User-Agent
     y 2 intentos. Devuelve estructura intermedia común o None.
@@ -34628,6 +34670,43 @@ def _es_noche_solar(lat, lon, dt_utc):
         return elev < -0.833  # bajo el horizonte (incluye refracción)
     except Exception:
         return False
+
+
+def _calcular_amanecer_ocaso(lat, lon, dt_utc, off_h):
+    """FASE 31.11 (fix Germán): amanecer/ocaso APROXIMADOS (astronomía, aprox.
+    NOAA) para cuando la fuente activa NO los entrega — p.ej. met.no, que sí da
+    temperaturas pero no la salida/puesta del sol → las tarjetas mostraban "—".
+    Devuelve (sunrise_iso, sunset_iso) en HORA LOCAL con formato
+    'YYYY-MM-DDTHH:MM' — el mismo de Open-Meteo, compatible con _hhmm() y con la
+    comparación de es_noche. Sin llamadas a APIs. Precisión ~±8 min (solo se usa
+    como respaldo; cuando Open-Meteo responde, se usan sus valores exactos)."""
+    try:
+        import math
+        from datetime import timedelta as _td
+        n = dt_utc.timetuple().tm_yday
+        decl = -23.44 * math.cos(math.radians(360.0 / 365.0 * (n + 10)))
+        lat_r, decl_r = math.radians(lat), math.radians(decl)
+        cos_h = ((math.sin(math.radians(-0.833)) -
+                  math.sin(lat_r) * math.sin(decl_r)) /
+                 (math.cos(lat_r) * math.cos(decl_r)))
+        if cos_h >= 1 or cos_h <= -1:
+            return '', ''            # noche/día polar → sin orto u ocaso definidos
+        H = math.degrees(math.acos(cos_h)) / 15.0     # semiarco diurno, en horas
+        conv = (-lon / 15.0) + off_h                   # hora solar → reloj local
+        sr = (12.0 - H + conv) % 24
+        ss = (12.0 + H + conv) % 24
+        fecha = (dt_utc + _td(hours=off_h)).strftime('%Y-%m-%d')
+
+        def _fmt(h):
+            hh = int(h) % 24
+            mm = int(round((h - int(h)) * 60))
+            if mm == 60:
+                hh, mm = (hh + 1) % 24, 0
+            return f'{fecha}T{hh:02d}:{mm:02d}'
+
+        return _fmt(sr), _fmt(ss)
+    except Exception:
+        return '', ''
 
 
 def _clima_horas_pasadas_hoy(lat, lon):
@@ -34769,6 +34848,11 @@ def _clima_fuente_metno(lat, lon):
             pass
         emoji_c, desc_c, tema_c = _METNO_SYMBOL_MAP.get(sym0, ('☁️', 'Nublado', 'nublado'))
         hora_loc = (datetime.utcnow() + _td(hours=off_h))
+        # FASE 31.11 (fix Germán): met.no no entrega salida/puesta de sol →
+        # las calculamos (astronomía) con el offset UTC real ya disponible,
+        # para que las tarjetas «Amanecer/Ocaso» dejen de mostrar "—".
+        _sr_iso, _ss_iso = _calcular_amanecer_ocaso(
+            lat, lon, datetime.utcnow(), off_h)
         logger.info('🌤️ Clima datos: met.no (respaldo) OK')
         return {
             'fuente': 'met.no',
@@ -34783,7 +34867,7 @@ def _clima_fuente_metno(lat, lon):
             },
             'fechas': fechas, 'tmin': tmin, 'tmax': tmax,
             'viento_max': vmax, 'prob_lluvia': prob, 'infos_dia': infos,
-            'sunrise0': '', 'sunset0': '',
+            'sunrise0': _sr_iso, 'sunset0': _ss_iso,
             'h_temp': h_temp_total, 'h_hum': h_hum_total,
             'hora_local_num': hora_loc.hour,
         }
@@ -35054,7 +35138,7 @@ footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-heigh
   <div class="datos">
     <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l" data-i18n="Humedad">Humedad</div></div>
     <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l" data-i18n="km/h viento">km/h viento</div></div>
-    <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l" data-i18n="Prob. lluvia">Prob. lluvia</div></div>
+    <div class="dato"><div class="v">__SVG_LLUVIA__ __LLUVIA_HOY__%</div><div class="l" data-i18n="Prob. lluvia">Prob. lluvia</div></div>
     <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l"><span data-i18n="Calidad aire">Calidad aire</span> · <span data-i18n-cat>__AQI_CAT__</span></div></div>
     <div class="dato"><div class="v">🌅 __CREPUSCULO__</div><div class="l" data-i18n="Amanecer">Amanecer</div></div>
     <div class="dato"><div class="v">🌇 __OCASO__</div><div class="l" data-i18n="Ocaso">Ocaso</div></div>
@@ -35299,10 +35383,10 @@ def _generar_html_clima(d: dict) -> str:
             f'<div class="card{" hoy" if i == 0 else ""}">'
             f'<div class="d">{dia["nombre"]}</div>'
             f'<div class="f">{dia["fecha"]}</div>'
-            f'<span class="ic">{dia["emoji"]}</span>'
+            f'<span class="ic">{_icono_clima_dash(dia["emoji"])}</span>'
             f'<div class="tt">{dia["tmax"]}° <span class="min">/ {dia["tmin"]}°</span></div>'
             f'<div class="cd">{dia["desc"]}<br>💨 {dia["viento"]} km/h · 💧 {dia["humedad"]}%'
-            f'<br>🌧️ {dia["lluvia"]}%</div></div>')
+            f'<br>{_svg_lluvia_clima("1em")} {dia["lluvia"]}%</div></div>')
 
     region_pais = ', '.join(x for x in [d.get('region', ''), d.get('pais', '')] if x)
     # FASE 31.1: datos horarios por día (para el gráfico clickeable) + AQI
@@ -35320,7 +35404,8 @@ def _generar_html_clima(d: dict) -> str:
         '__ACTUALIZADO__': _ahora_chile().strftime('%d-%m-%Y %H:%M'),
         '__GRADIENTE__': tema['grad'],
         '__ACCENT__': tema['acc'],
-        '__ICONO_HOY__': act['emoji'],
+        '__ICONO_HOY__': _icono_clima_dash(act['emoji']),
+        '__SVG_LLUVIA__': _svg_lluvia_clima('1em'),
         '__TEMP_HOY__': str(act['temp']),
         '__DESC_HOY__': act['desc'],
         '__TMIN_HOY__': str(dias[0]['tmin']),
