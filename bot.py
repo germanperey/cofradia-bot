@@ -35383,7 +35383,7 @@ def _generar_html_clima(d: dict) -> str:
             f'<div class="card{" hoy" if i == 0 else ""}">'
             f'<div class="d">{dia["nombre"]}</div>'
             f'<div class="f">{dia["fecha"]}</div>'
-            f'<span class="ic">{_icono_clima_dash(dia["emoji"])}</span>'
+            f'<span class="ic">{_icono_clima_dash(dia["emoji"], "1.35em")}</span>'
             f'<div class="tt">{dia["tmax"]}° <span class="min">/ {dia["tmin"]}°</span></div>'
             f'<div class="cd">{dia["desc"]}<br>💨 {dia["viento"]} km/h · 💧 {dia["humedad"]}%'
             f'<br>{_svg_lluvia_clima("1em")} {dia["lluvia"]}%</div></div>')
