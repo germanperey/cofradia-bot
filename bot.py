@@ -34516,6 +34516,61 @@ def _clima_fuente_openmeteo(lat, lon):
     return None
 
 
+def _es_noche_solar(lat, lon, dt_utc):
+    """FASE 31.8 (fix Germán): ¿es de noche en (lat,lon) a la hora dt_utc?
+    Cálculo astronómico real (elevación solar, aprox. NOAA) — reemplaza la
+    ventana fija 07-20 que marcaba "día" a las 20:30 en invierno chileno.
+    Válido para cualquier latitud/longitud y época del año, sin APIs."""
+    try:
+        import math
+        n = dt_utc.timetuple().tm_yday
+        frac_h = dt_utc.hour + dt_utc.minute / 60.0
+        decl = -23.44 * math.cos(math.radians(360.0 / 365.0 * (n + 10)))
+        h_solar = (frac_h + lon / 15.0) % 24
+        ang_h = 15.0 * (h_solar - 12.0)
+        elev = math.degrees(math.asin(
+            math.sin(math.radians(lat)) * math.sin(math.radians(decl)) +
+            math.cos(math.radians(lat)) * math.cos(math.radians(decl)) *
+            math.cos(math.radians(ang_h))))
+        return elev < -0.833  # bajo el horizonte (incluye refracción)
+    except Exception:
+        return False
+
+
+def _clima_horas_pasadas_hoy(lat, lon):
+    """FASE 31.8 (fix Germán): temperaturas horarias REALES de HOY (00:00 en
+    adelante) desde el Historical Forecast API de Open-Meteo — subdominio con
+    límite de peticiones INDEPENDIENTE del principal. Se usa solo cuando la
+    fuente activa es met.no (que no entrega horas pasadas → la curva salía
+    plana). Devuelve (fecha_local, {hora: temp}, offset_utc_seg)."""
+    try:
+        r = requests.get(
+            'https://historical-forecast-api.open-meteo.com/v1/forecast',
+            params={'latitude': lat, 'longitude': lon,
+                    'hourly': 'temperature_2m',
+                    'timezone': 'auto', 'past_days': 0, 'forecast_days': 1},
+            headers=_HTTP_HEADERS_CLIMA, timeout=8)
+        if r.status_code != 200:
+            logger.warning(f'Clima horas pasadas status={r.status_code}')
+            return None, {}, None
+        j = r.json() or {}
+        hh = j.get('hourly') or {}
+        tiempos, temps = hh.get('time') or [], hh.get('temperature_2m') or []
+        off = j.get('utc_offset_seconds')
+        mapa, fecha = {}, None
+        for t, v in zip(tiempos, temps):
+            if v is None or 'T' not in t:
+                continue
+            if fecha is None:
+                fecha = t.split('T')[0]
+            if t.split('T')[0] == fecha:
+                mapa[int(t.split('T')[1][:2])] = v
+        return fecha, mapa, off
+    except Exception as e:
+        logger.warning(f'Clima horas pasadas: {e}')
+        return None, {}, None
+
+
 def _clima_fuente_metno(lat, lon):
     """FUENTE DE RESPALDO: met.no (Instituto Meteorológico de Noruega).
     Gratuita, sin API key, altísima disponibilidad; exige User-Agent.
@@ -34532,8 +34587,13 @@ def _clima_fuente_metno(lat, lon):
         ts = ((r.json() or {}).get('properties') or {}).get('timeseries') or []
         if not ts:
             return None
-        # Offset horario aproximado por longitud (Chile ≈ UTC-4)
-        off_h = int(round(lon / 15.0))
+        # FASE 31.8 (fix Germán): offset UTC REAL de la zona horaria + horas
+        # pasadas de HOY desde Open-Meteo Historical (subdominio con límite
+        # independiente). Antes: off_h = round(lon/15) daba UTC-5 para Chile
+        # (real: UTC-4) → la hora local quedaba corrida 1 hora y el fondo
+        # nocturno no se activaba a tiempo.
+        fecha_hoy_om, horas_hoy_om, off_seg = _clima_horas_pasadas_hoy(lat, lon)
+        off_h = (off_seg / 3600.0) if off_seg is not None else round(lon / 15.0)
         from datetime import timedelta as _td
         por_dia = {}
         for punto in ts:
@@ -34565,6 +34625,14 @@ def _clima_fuente_metno(lat, lon):
         claves = sorted(por_dia.keys())[:7]
         if len(claves) < 2:
             return None
+        # FASE 31.8 (fix Germán): fusionar las horas pasadas REALES de hoy.
+        # met.no solo entrega desde la hora actual; sin esto la curva de
+        # "Hoy" salía incompleta. Los valores de met.no (más frescos) tienen
+        # prioridad; el histórico solo rellena las horas que faltan.
+        if fecha_hoy_om and fecha_hoy_om in por_dia:
+            _t_hoy = por_dia[fecha_hoy_om]['temps']
+            for _h, _v in (horas_hoy_om or {}).items():
+                _t_hoy.setdefault(_h, _v)
         fechas, tmin, tmax, vmax, prob, infos = [], [], [], [], [], []
         h_temp_total, h_hum_total = [], []
         for k in claves:
@@ -34579,15 +34647,12 @@ def _clima_fuente_metno(lat, lon):
             prob.append(80 if p > 2 else (50 if p > 0.2 else 10))
             sym = max(set(d['syms']), key=d['syms'].count) if d['syms'] else 'cloudy'
             infos.append(_METNO_SYMBOL_MAP.get(sym, ('☁️', 'Nublado', 'nublado')))
-            # 24 horas con interpolación simple de huecos.
-            # FASE 31.7 (fix Germán): met.no NO entrega las horas pasadas del
-            # día actual → la curva de "Hoy" salía CORTADA (partía en la hora
-            # actual) y los marcadores se amontonaban. Back-fill: las horas
-            # previas a la primera conocida se rellenan con ese primer valor,
-            # de modo que la curva siempre cubre 00:00–23:00 como con Open-Meteo.
+            # 24 horas con interpolación simple de huecos INTERIORES.
+            # FASE 31.8 (fix Germán): se ELIMINÓ el back-fill plano (mostraba
+            # una línea horizontal sin variaciones). Las horas pasadas de HOY
+            # ahora llegan con valores REALES vía _clima_horas_pasadas_hoy.
             horas = []
-            _hs_conocidas = sorted(d['temps'].keys())
-            prev = d['temps'][_hs_conocidas[0]] if _hs_conocidas else None
+            prev = None
             for h in range(24):
                 v = d['temps'].get(h)
                 if v is None and prev is not None:
@@ -34705,8 +34770,11 @@ def _obtener_clima_ciudad(ciudad: str):
             if met.get('sunrise0') and met.get('sunset0'):
                 t_now = met['cur'].get('time_local') or ''
                 es_noche = not (met['sunrise0'] <= t_now <= met['sunset0'])
-            elif 'hora_local_num' in met:  # respaldo met.no: ventana 07-20
-                es_noche = not (7 <= met['hora_local_num'] < 20)
+            else:
+                # FASE 31.8 (fix Germán): la ventana fija 07-20 marcaba "día"
+                # a las 20:30 en invierno. Ahora: elevación solar real según
+                # lat/lon y fecha — el fondo azul se activa con el ocaso.
+                es_noche = _es_noche_solar(lat, lon, datetime.utcnow())
         except Exception:
             pass
 
@@ -35014,13 +35082,15 @@ function pintarHoras(idx){
   var mlData=[
     {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
     {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}];
-  // FASE 31.7 (fix Germán): si la hora actual ES el punto de Máx o Mín,
-  // el pin 📍 caía ENCIMA del pin ⬆/⬇ y de la etiqueta "Ahora" → ilegible.
-  // En ese caso se omite el 📍 (el pin ⬆/⬇ ya marca ese punto exacto y la
-  // línea punteada "Ahora" sigue indicando la hora actual).
+  // FASE 31.7/31.8 (fix Germán): la etiqueta "Ahora" vive en el tope del
+  // gráfico. Si el pin 📍 cae en el punto de Máx/Mín o en el 20% SUPERIOR
+  // del rango, chocaba con la etiqueta y los pines ⬆/⬇ → ilegible. En esos
+  // casos se omite el 📍: la línea punteada roja + "Ahora" ya marcan la hora.
   var _chocaPin=esHoy&&temps[HORA_IDX]!==null&&(
     (temps[HORA_IDX]===vmax&&temps.indexOf(vmax)===HORA_IDX)||
-    (temps[HORA_IDX]===vmin&&temps.indexOf(vmin)===HORA_IDX));
+    (temps[HORA_IDX]===vmin&&temps.indexOf(vmin)===HORA_IDX)||
+    (vmax===vmin)||
+    ((vmax-vmin)>0&&((temps[HORA_IDX]-vmin)/(vmax-vmin))>0.8));
   if(esHoy&&temps[HORA_IDX]!==null&&!_chocaPin){
     mlData.push({coord:[HORA_IDX,temps[HORA_IDX]],
       symbol:'pin',symbolSize:44,itemStyle:{color:'#e63946'},
@@ -35072,6 +35142,9 @@ var I18N_DIAS_AB={"Hoy":"Today","Lun":"Mon","Mar":"Tue","Mié":"Wed",
 var I18N_MES_AB={"ene":"Jan","feb":"Feb","mar":"Mar","abr":"Apr","may":"May",
  "jun":"Jun","jul":"Jul","ago":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dic":"Dec"};
 var EJE_DIAS_ES=__EJE_DIAS__;
+// FASE 31.8 (pedido de Germán): icono del clima de cada día en el gráfico
+// de temperaturas Máx/Mín (se muestra sobre la etiqueta del día, eje X)
+var ICONOS_DIAS=__ICONOS_DIAS__;
 function _ejeDiasIdioma(){
   if(!_idiomaEN)return EJE_DIAS_ES;
   return EJE_DIAS_ES.map(function(s){var p=s.split(' ');
@@ -35088,7 +35161,9 @@ function pintarSemana(){
  legend:{data:[nMax,nMin],textStyle:{color:'#fff'}},
  grid:{left:'4%',right:'4%',bottom:'6%',top:'14%',containLabel:true},
  xAxis:{type:'category',data:_ejeDiasIdioma(),
-  axisLabel:{color:'#fff'},axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+  axisLabel:{color:'#fff',interval:0,lineHeight:17,
+   formatter:function(v,i){return (ICONOS_DIAS[i]||'')+'\\n'+v;}},
+  axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
  yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
   splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
  series:[
@@ -35169,6 +35244,7 @@ def _generar_html_clima(d: dict) -> str:
         '__DATA_HORAS__': json.dumps(data_horas, ensure_ascii=False),
         '__HORA_IDX__': str(d.get('hora_actual_idx', -1)),
         '__EJE_DIAS__': json.dumps([x['nombre'][:3] + ' ' + x['fecha'] for x in dias]),
+        '__ICONOS_DIAS__': json.dumps([x['emoji'] for x in dias], ensure_ascii=False),
         '__SERIE_MAX__': json.dumps([x['tmax'] for x in dias]),
         '__SERIE_MIN__': json.dumps([x['tmin'] for x in dias]),
     }
