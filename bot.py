@@ -34579,9 +34579,15 @@ def _clima_fuente_metno(lat, lon):
             prob.append(80 if p > 2 else (50 if p > 0.2 else 10))
             sym = max(set(d['syms']), key=d['syms'].count) if d['syms'] else 'cloudy'
             infos.append(_METNO_SYMBOL_MAP.get(sym, ('☁️', 'Nublado', 'nublado')))
-            # 24 horas con interpolación simple de huecos
+            # 24 horas con interpolación simple de huecos.
+            # FASE 31.7 (fix Germán): met.no NO entrega las horas pasadas del
+            # día actual → la curva de "Hoy" salía CORTADA (partía en la hora
+            # actual) y los marcadores se amontonaban. Back-fill: las horas
+            # previas a la primera conocida se rellenan con ese primer valor,
+            # de modo que la curva siempre cubre 00:00–23:00 como con Open-Meteo.
             horas = []
-            prev = None
+            _hs_conocidas = sorted(d['temps'].keys())
+            prev = d['temps'][_hs_conocidas[0]] if _hs_conocidas else None
             for h in range(24):
                 v = d['temps'].get(h)
                 if v is None and prev is not None:
@@ -34979,6 +34985,9 @@ function toggleIdioma(){
    var idx=0,cards=document.querySelectorAll('#gridDias .card');
    for(var k=0;k<cards.length;k++){if(cards[k]===act){idx=k;break;}}
    pintarHoras(idx);}catch(e){}
+ // 4b) FASE 31.7: gráfico "Evolución de temperaturas (7 días)" — traducir
+ // leyenda Máxima/Mínima y días del eje X (fix reportado por Germán)
+ try{pintarSemana();}catch(e){}
  // 5) Botón
  document.getElementById('btnLang').innerHTML=_idiomaEN
    ?'<span class="flag">🇪🇸</span><span id="btnLangTxt">Español</span>'
@@ -35005,7 +35014,14 @@ function pintarHoras(idx){
   var mlData=[
     {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
     {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}];
-  if(esHoy&&temps[HORA_IDX]!==null){
+  // FASE 31.7 (fix Germán): si la hora actual ES el punto de Máx o Mín,
+  // el pin 📍 caía ENCIMA del pin ⬆/⬇ y de la etiqueta "Ahora" → ilegible.
+  // En ese caso se omite el 📍 (el pin ⬆/⬇ ya marca ese punto exacto y la
+  // línea punteada "Ahora" sigue indicando la hora actual).
+  var _chocaPin=esHoy&&temps[HORA_IDX]!==null&&(
+    (temps[HORA_IDX]===vmax&&temps.indexOf(vmax)===HORA_IDX)||
+    (temps[HORA_IDX]===vmin&&temps.indexOf(vmin)===HORA_IDX));
+  if(esHoy&&temps[HORA_IDX]!==null&&!_chocaPin){
     mlData.push({coord:[HORA_IDX,temps[HORA_IDX]],
       symbol:'pin',symbolSize:44,itemStyle:{color:'#e63946'},
       label:{formatter:'📍',fontSize:15,color:'#fff'}});}
@@ -35048,28 +35064,47 @@ document.querySelectorAll('#gridDias .card').forEach(function(card,i){
 pintarHoras(0);
 document.querySelectorAll('#gridDias .card')[0].classList.add('activa');
 
+// FASE 31.7 (fix Germán): el gráfico de 7 días ahora se pinta con una
+// función sensible al idioma — al pulsar el toggle ES↔EN se traducen la
+// leyenda (Máxima/Mínima → Max/Min) y los días/meses del eje X.
+var I18N_DIAS_AB={"Hoy":"Today","Lun":"Mon","Mar":"Tue","Mié":"Wed",
+ "Jue":"Thu","Vie":"Fri","Sáb":"Sat","Dom":"Sun"};
+var I18N_MES_AB={"ene":"Jan","feb":"Feb","mar":"Mar","abr":"Apr","may":"May",
+ "jun":"Jun","jul":"Jul","ago":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dic":"Dec"};
+var EJE_DIAS_ES=__EJE_DIAS__;
+function _ejeDiasIdioma(){
+  if(!_idiomaEN)return EJE_DIAS_ES;
+  return EJE_DIAS_ES.map(function(s){var p=s.split(' ');
+    p[0]=I18N_DIAS_AB[p[0]]||p[0];
+    if(p.length>=3)p[2]=I18N_MES_AB[p[2]]||p[2];
+    return p.join(' ');});
+}
 var ch=echarts.init(document.getElementById('grafico'));
-ch.setOption({
+function pintarSemana(){
+ var nMax=_idiomaEN?'Max':'Máxima', nMin=_idiomaEN?'Min':'Mínima';
+ ch.setOption({
  backgroundColor:'transparent',
  tooltip:{trigger:'axis'},
- legend:{data:['Máxima','Mínima'],textStyle:{color:'#fff'}},
+ legend:{data:[nMax,nMin],textStyle:{color:'#fff'}},
  grid:{left:'4%',right:'4%',bottom:'6%',top:'14%',containLabel:true},
- xAxis:{type:'category',data:__EJE_DIAS__,
+ xAxis:{type:'category',data:_ejeDiasIdioma(),
   axisLabel:{color:'#fff'},axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
  yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
   splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
  series:[
-  {name:'Máxima',type:'line',smooth:true,data:__SERIE_MAX__,symbolSize:9,
+  {name:nMax,type:'line',smooth:true,data:__SERIE_MAX__,symbolSize:9,
    lineStyle:{width:4,color:'#ffb347'},itemStyle:{color:'#ffb347'},
    areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
     colorStops:[{offset:0,color:'rgba(255,179,71,.45)'},{offset:1,color:'rgba(255,179,71,0)'}]}},
    label:{show:true,color:'#fff',formatter:'{c}°'}},
-  {name:'Mínima',type:'line',smooth:true,data:__SERIE_MIN__,symbolSize:9,
+  {name:nMin,type:'line',smooth:true,data:__SERIE_MIN__,symbolSize:9,
    lineStyle:{width:4,color:'#4fc3f7'},itemStyle:{color:'#4fc3f7'},
    areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
     colorStops:[{offset:0,color:'rgba(79,195,247,.40)'},{offset:1,color:'rgba(79,195,247,0)'}]}},
    label:{show:true,color:'#fff',formatter:'{c}°'}}
- ]});
+ ]},true);
+}
+pintarSemana();
 
 // FASE 31.1: responsive TOTAL — resize + rotación de pantalla en móviles
 function reajustar(){try{ch.resize();chH.resize()}catch(e){}}
@@ -35083,12 +35118,11 @@ if(screen&&screen.orientation&&screen.orientation.addEventListener){
 def _generar_html_clima(d: dict) -> str:
     """FASE 31: Renderiza el dashboard HTML del clima con tema dinámico."""
     act = d['actual']
-    tema = _TEMAS_CLIMA.get(act['tema'], _TEMAS_CLIMA['nublado'])
-    # FASE 31.2: de noche, el cielo del dashboard se oscurece (pedido de Germán:
-    # "de noche se muestre una Luna con el cielo oscuro"). Lluvia/tormenta ya
-    # tienen fondos oscuros propios y se conservan.
-    if d.get('es_noche') and act['tema'] in ('sol', 'nublado'):
-        tema = _TEMAS_CLIMA['noche']
+    # FASE 31.7 (acuerdo con Germán): el fondo del dashboard depende SOLO del
+    # momento del día — DÍA = gradiente celeste-amarillo · NOCHE = azul
+    # oscuro. Queda descartado el gradiente GRIS del tema 'nublado' (se veía
+    # muy mal). El resto de _TEMAS_CLIMA se conserva por compatibilidad.
+    tema = _TEMAS_CLIMA['noche'] if d.get('es_noche') else _TEMAS_CLIMA['sol']
     dias = d['dias']
 
     tarjetas = []
