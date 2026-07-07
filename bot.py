@@ -164,6 +164,18 @@ def _cache_set(clave, valor):
 # Modelos actuales verificados (Mayo 2026): glm-4.5-air, glm-4.7-flash, glm-4.7
 GLM_API_KEY = os.environ.get('GLM_API_KEY', '')
 
+# FASE 31.12/31.13: OpenRouter — Una sola API key habilita 4 motores gratuitos:
+#   5° cascada: nex-agi/nex-n2-pro:free (MoE 397B/17B, Qwen3.5, ctx 262K)
+#   6° cascada: openai/gpt-oss-120b:free (Apache 2.0, ctx 131K)
+#   7° cascada: openrouter/free (router automático — inmune a retiros de modelos)
+#   /analizar_libro: nvidia/nemotron-3-super-120b-a12b:free (ctx 1M tokens)
+# Todos $0/$0 por token, PERO rate-limited por OpenRouter:
+#   - Sin créditos: ~50 req/día, 20 req/min (compartido entre modelos :free)
+#   - Con >= $10 USD en créditos: ~1000 req/día (créditos NO se consumen)
+# Los niveles 5-7 solo corren cuando Groq/Gemini/GLM/DeepSeek fallaron todos.
+# Registro: https://openrouter.ai → API Keys (sin tarjeta de crédito)
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
 # La variable DEEPSEEK_API_KEY ya está definida arriba en línea 74.
 # DeepSeek requiere SALDO recargado (no es free tier ilimitado).
@@ -2938,6 +2950,136 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
     
     logger.warning("DeepSeek: todos los modelos fallaron")
     return None
+
+
+def llamar_openrouter(prompt: str, modelo: str, max_tokens: int = 1024,
+                      temperature: float = 0.7, timeout_read: int = 40,
+                      razonamiento_bajo: bool = True, etiqueta: str = None) -> str:
+    """FASE 31.13: Llamador GENÉRICO OpenRouter (API OpenAI-compatible).
+
+    Un solo punto de acceso para TODOS los modelos gratuitos de OpenRouter.
+    Rate limits del tier free: ~50 req/día sin créditos (20 req/min);
+    ~1000 req/día con >= $10 USD en créditos (los créditos NO se consumen
+    con modelos :free, solo elevan el límite).
+
+    Modelos usados por el bot (todos $0/$0 por token):
+      - nex-agi/nex-n2-pro:free ............. 5° cascada (262K ctx, agéntico)
+      - openai/gpt-oss-120b:free ............ 6° cascada (131K ctx, Apache 2.0)
+      - openrouter/free ..................... 7° cascada (router automático:
+            OpenRouter elige el mejor modelo gratuito disponible; inmune a
+            que un modelo :free sea retirado del catálogo sin aviso)
+      - nvidia/nemotron-3-super-120b-a12b:free ... análisis de libros RAG
+            (contexto 1M tokens — comando /analizar_libro)
+
+    Endpoint: https://openrouter.ai/api/v1/chat/completions
+    Variable de entorno requerida: OPENROUTER_API_KEY
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+
+    tag = etiqueta or modelo
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        # Headers recomendados por OpenRouter (atribución de la app)
+        "HTTP-Referer": "https://cofradia-networking.cl",
+        "X-Title": "Cofradia de Networking Bot",
+    }
+    payload = {
+        "model": modelo,
+        "messages": [
+            {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena de oficiales de la Armada. Responde en español, profesional, cercano y directo. Sin asteriscos."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": min(max_tokens, 8000),
+        "temperature": temperature,
+        "stream": False,
+    }
+    if razonamiento_bajo:
+        # Modelos de razonamiento: limitar esfuerzo de "thinking" para
+        # reducir latencia (los modelos sin reasoning ignoran el parámetro)
+        payload["reasoning"] = {"effort": "low"}
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=(5, timeout_read))
+        if r.status_code == 200:
+            data = r.json()
+            texto = data.get("choices", [{}])[0].get("message", {}).get("content")
+            if texto and texto.strip():
+                logger.info(f"✅ Respuesta OpenRouter ({tag})")
+                return texto.strip()
+            logger.warning(f"OpenRouter {tag}: respuesta 200 pero sin contenido")
+        elif r.status_code == 429:
+            logger.warning(f"OpenRouter {tag}: rate limit free tier agotado (429)")
+        elif r.status_code in (401, 403):
+            logger.warning(f"OpenRouter {tag}: auth fallida (status {r.status_code}) - verificar OPENROUTER_API_KEY")
+        elif r.status_code == 404:
+            logger.warning(f"OpenRouter {tag}: modelo no disponible (404) — pudo ser retirado del tier gratuito")
+        elif r.status_code == 402:
+            logger.warning(f"OpenRouter {tag}: exige créditos (402)")
+        else:
+            logger.warning(f"OpenRouter {tag}: error {r.status_code}")
+    except requests.Timeout:
+        logger.warning(f"OpenRouter {tag}: timeout (>{timeout_read}s)")
+    except Exception as e:
+        logger.debug(f"Error OpenRouter {tag}: {e}")
+
+    return None
+
+
+def llamar_nexn2(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Nex-N2-Pro:free — QUINTO fallback LLM (FASE 31.12).
+
+    Modelo agéntico open-source (Apache 2.0) de Nex AGI sobre base Qwen3.5:
+    MoE 397B totales / 17B activos, contexto 262K, razonamiento adaptativo.
+    """
+    return llamar_openrouter(prompt, "nex-agi/nex-n2-pro:free",
+                             max_tokens=max_tokens, temperature=temperature,
+                             timeout_read=40, etiqueta="Nex-N2-Pro:free, 5° fallback")
+
+
+def llamar_gptoss(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """GPT-OSS 120B:free (OpenAI, Apache 2.0) — SEXTO fallback LLM (FASE 31.13).
+
+    Modelo abierto de OpenAI, 120B parámetros, contexto 131K. Rendimiento
+    comparable a o3-mini en benchmarks. Alternativa general sólida cuando
+    Nex-N2 no responde (rate limit propio del modelo o retiro del catálogo).
+    """
+    return llamar_openrouter(prompt, "openai/gpt-oss-120b:free",
+                             max_tokens=max_tokens, temperature=temperature,
+                             timeout_read=40, etiqueta="GPT-OSS-120B:free, 6° fallback")
+
+
+def llamar_openrouter_free(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """openrouter/free (router automático) — SÉPTIMO y ÚLTIMO fallback (FASE 31.13).
+
+    Meta-modelo de OpenRouter que selecciona automáticamente entre TODOS los
+    modelos gratuitos disponibles según el request. Es la red de seguridad
+    definitiva: los modelos :free desaparecen del catálogo sin aviso (pasó
+    con Qwen3 Coder y DeepSeek V4 Flash en jun-2026), pero este router
+    siempre rutea a lo que esté vivo. Si esto falla, no hay LLM disponible.
+    """
+    return llamar_openrouter(prompt, "openrouter/free",
+                             max_tokens=max_tokens, temperature=temperature,
+                             timeout_read=45, etiqueta="Router-Free, 7° fallback")
+
+
+def llamar_nemotron(prompt: str, max_tokens: int = 4000, temperature: float = 0.4) -> str:
+    """NVIDIA Nemotron 3 Super:free — Motor de ANÁLISIS DE LIBROS (FASE 31.13).
+
+    MoE híbrido Mamba-Transformer de 120B (12B activos) con contexto nativo
+    de 1 MILLÓN de tokens y procesamiento lineal de secuencias — diseñado
+    para razonamiento sobre documentos gigantes sin truncar.
+
+    NO forma parte de la cascada conversacional: es el motor dedicado del
+    comando /analizar_libro, que le envía libros COMPLETOS de la biblioteca
+    RAG (280+ obras en rag_chunks) de una sola pasada.
+    Timeout read 180s: procesar cientos de miles de tokens toma tiempo.
+    """
+    return llamar_openrouter(prompt, "nvidia/nemotron-3-super-120b-a12b:free",
+                             max_tokens=max_tokens, temperature=temperature,
+                             timeout_read=180, etiqueta="Nemotron-3-Super:free, análisis libros")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -12926,6 +13068,15 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
         if not respuesta:
             logger.warning(f"⚠️ GLM falló — fallback DeepSeek")
             respuesta = llamar_deepseek(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ DeepSeek falló — fallback Nex-N2-Pro:free (FASE 31.12)")
+            respuesta = llamar_nexn2(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ Nex-N2 falló — fallback GPT-OSS-120B:free (FASE 31.13)")
+            respuesta = llamar_gptoss(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ GPT-OSS falló — fallback router automático openrouter/free (FASE 31.13)")
+            respuesta = llamar_openrouter_free(prompt, max_tokens=1000, temperature=0.5)
         
         # FASE 19 FIX CRÍTICO: si los 4 LLMs fallan, intentar prompt SIMPLIFICADO
         # (suele superar rate-limits porque pesa menos)
@@ -12943,6 +13094,12 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     respuesta = llamar_glm5(prompt_minimo, max_tokens=500, temperature=0.6)
                 if not respuesta:
                     respuesta = llamar_deepseek(prompt_minimo, max_tokens=500, temperature=0.6)
+                if not respuesta:
+                    respuesta = llamar_nexn2(prompt_minimo, max_tokens=500, temperature=0.6)
+                # FASE 31.13: última red de seguridad — router automático de
+                # OpenRouter (elige cualquier modelo :free vivo en el catálogo)
+                if not respuesta:
+                    respuesta = llamar_openrouter_free(prompt_minimo, max_tokens=500, temperature=0.6)
             except Exception as _e_simple:
                 logger.warning(f"Intento simplificado falló: {_e_simple}")
         
@@ -18857,6 +19014,171 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 @requiere_suscripcion
+async def analizar_libro_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.13: Comando /analizar_libro — análisis PROFUNDO de un libro
+    COMPLETO de la biblioteca RAG usando NVIDIA Nemotron 3 Super (1M contexto).
+
+    A diferencia de /rag_consulta (que recupera ~30 chunks relevantes), este
+    comando envía TODOS los chunks del libro de una sola pasada al modelo,
+    aprovechando su ventana de 1 millón de tokens. Produce: resumen ejecutivo,
+    tesis central, estructura, ideas clave y aplicabilidad para la Cofradía.
+
+    Exclusivo del administrador: cada análisis consume 1 request grande del
+    tier gratuito de OpenRouter (~50/día sin créditos).
+    Uso: /analizar_libro [título o parte del título]
+    """
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador."); return
+
+    if not OPENROUTER_API_KEY:
+        await update.message.reply_text(
+            "⚠️ OPENROUTER_API_KEY no configurada.\n\n"
+            "Crea una cuenta gratis en openrouter.ai, genera una API key "
+            "y agrégala como variable de entorno en Render."
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /analizar_libro [título del libro]\n\n"
+            "Ejemplos:\n"
+            "  /analizar_libro Milei\n"
+            "  /analizar_libro arte de la guerra\n\n"
+            "Analiza el libro COMPLETO con IA de contexto 1M tokens "
+            "(NVIDIA Nemotron 3 Super). Usa /rag_status para ver los "
+            "libros indexados en la biblioteca."
+        )
+        return
+
+    titulo_buscado = ' '.join(context.args)
+    msg = await update.message.reply_text(f"📚 Buscando '{titulo_buscado}' en la biblioteca RAG...")
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await msg.edit_text("❌ Sin conexión a la base de datos.")
+            return
+        c = conn.cursor()
+
+        # 1. Localizar la fuente (source) que mejor coincide con el título
+        if DATABASE_URL:
+            c.execute("""SELECT source, COUNT(*) as total FROM rag_chunks
+                         WHERE source ILIKE %s
+                         GROUP BY source ORDER BY total DESC LIMIT 1""",
+                      (f'%{titulo_buscado}%',))
+        else:
+            c.execute("""SELECT source, COUNT(*) as total FROM rag_chunks
+                         WHERE source LIKE ?
+                         GROUP BY source ORDER BY total DESC LIMIT 1""",
+                      (f'%{titulo_buscado}%',))
+        fila = c.fetchone()
+
+        if not fila:
+            conn.close()
+            await msg.edit_text(
+                f"🔍 No encontré ningún libro que coincida con '{titulo_buscado}'.\n\n"
+                "💡 Usa /rag_status para ver los documentos indexados."
+            )
+            return
+
+        source = fila['source'] if DATABASE_URL else fila[0]
+        total_chunks = int(fila['total'] if DATABASE_URL else fila[1])
+
+        await msg.edit_text(
+            f"📖 Libro encontrado: {source.replace('PDF:', '')}\n"
+            f"📦 {total_chunks} fragmentos — cargando texto completo..."
+        )
+
+        # 2. Traer TODOS los chunks del libro en orden de indexación
+        if DATABASE_URL:
+            c.execute("""SELECT chunk_text FROM rag_chunks
+                         WHERE source = %s ORDER BY id""", (source,))
+        else:
+            c.execute("""SELECT chunk_text FROM rag_chunks
+                         WHERE source = ? ORDER BY id""", (source,))
+        filas = c.fetchall()
+        conn.close()
+
+        partes = []
+        for f in filas:
+            txt = f['chunk_text'] if DATABASE_URL else f[0]
+            if txt:
+                partes.append(txt)
+        texto_libro = '\n'.join(partes)
+
+        # Límite prudente: ~600K chars ≈ 150-200K tokens. Muy por debajo del
+        # 1M de contexto de Nemotron, pero suficiente para libros completos
+        # y conservador con la estabilidad del endpoint gratuito.
+        LIMITE_CHARS = 600_000
+        truncado = False
+        if len(texto_libro) > LIMITE_CHARS:
+            texto_libro = texto_libro[:LIMITE_CHARS]
+            truncado = True
+
+        await msg.edit_text(
+            f"🧠 Analizando '{source.replace('PDF:', '')}' con Nemotron 3 Super "
+            f"(1M contexto)...\n"
+            f"📊 {len(texto_libro):,} caracteres{' (truncado a 600K)' if truncado else ''} "
+            f"— esto puede tomar 1-3 minutos."
+        )
+
+        prompt_analisis = (
+            f"Analiza en profundidad el siguiente libro COMPLETO de la biblioteca "
+            f"de la Cofradía de Networking (comunidad profesional chilena de "
+            f"oficiales de la Armada).\n\n"
+            f"TÍTULO/FUENTE: {source.replace('PDF:', '')}\n\n"
+            f"Entrega tu análisis en español, SIN asteriscos ni Markdown, con "
+            f"esta estructura:\n"
+            f"1. RESUMEN EJECUTIVO (2-3 párrafos)\n"
+            f"2. TESIS CENTRAL del autor\n"
+            f"3. ESTRUCTURA Y TEMAS PRINCIPALES (por secciones o capítulos)\n"
+            f"4. IDEAS CLAVE Y CITAS RELEVANTES (5-8 ideas, parafraseadas)\n"
+            f"5. APLICABILIDAD PARA LA COFRADÍA (networking, liderazgo, "
+            f"desarrollo profesional de oficiales navales)\n"
+            f"6. VALORACIÓN CRÍTICA (fortalezas y debilidades de la obra)\n\n"
+            f"TEXTO COMPLETO DEL LIBRO:\n{texto_libro}"
+        )
+
+        # 3. Nemotron en thread aparte para no bloquear el event loop
+        #    (requests es síncrono y el análisis puede tomar minutos)
+        respuesta = await asyncio.to_thread(llamar_nemotron, prompt_analisis, 4000, 0.4)
+
+        # 4. Fallback: si Nemotron falla, intentar router automático con
+        #    versión reducida del libro (100K chars caben en cualquier modelo)
+        if not respuesta:
+            logger.warning("Nemotron falló en /analizar_libro — fallback router free con texto reducido")
+            await msg.edit_text("⚠️ Nemotron no respondió — reintentando con motor alternativo (texto reducido)...")
+            prompt_reducido = prompt_analisis[:100_000]
+            respuesta = await asyncio.to_thread(llamar_openrouter_free, prompt_reducido, 3000, 0.4)
+
+        await msg.delete()
+
+        if respuesta:
+            encabezado = (
+                f"📚 ANÁLISIS COMPLETO — {source.replace('PDF:', '')}\n"
+                f"🤖 Motor: Nemotron 3 Super (contexto 1M) via OpenRouter\n"
+                f"📦 Fragmentos analizados: {total_chunks}\n"
+                f"{'⚠️ Texto truncado a 600K caracteres' + chr(10) if truncado else ''}"
+                f"{'━' * 30}\n\n"
+            )
+            await enviar_mensaje_largo(update, encabezado + respuesta.replace('*', ''))
+        else:
+            await update.message.reply_text(
+                "❌ No fue posible completar el análisis.\n\n"
+                "Posibles causas: rate limit del tier gratuito de OpenRouter "
+                "agotado (~50 req/día sin créditos) o modelo temporalmente "
+                "saturado. Intenta más tarde o usa /rag_consulta para "
+                "consultas puntuales sobre el libro."
+            )
+
+    except Exception as e:
+        logger.error(f"Error en /analizar_libro: {e}")
+        try:
+            await msg.edit_text(f"❌ Error analizando el libro: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
 async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /rag_consulta - Consulta UNIFICADA al sistema de conocimiento con IA"""
     if not context.args:
@@ -33911,6 +34233,7 @@ SERVICIOS_PAGO_URLS = {
     'groq':       'https://console.groq.com/settings/billing',
     'gemini':     'https://aistudio.google.com/apikey',
     'glm':        'https://z.ai',
+    'openrouter': 'https://openrouter.ai/settings/keys',  # FASE 31.13
     'google_tts': 'https://console.cloud.google.com/billing',
     'rapidapi':   'https://rapidapi.com/developer/billing',
     'supabase':   'https://supabase.com/dashboard',
@@ -33945,7 +34268,7 @@ def consultar_saldos_apis() -> list:
                 'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
                 'saldo': f'${saldo:.2f} USD', 'deuda': 'Prepago — sin deuda',
                 'estado': estado, 'url': SERVICIOS_PAGO_URLS['deepseek'],
-                'nota': 'Único LLM pagado (último de la cascada)'})
+                'nota': 'Único LLM pagado (4° de la cascada)'})
         else:
             servicios.append({
                 'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
@@ -34002,6 +34325,27 @@ def consultar_saldos_apis() -> list:
             'url': SERVICIOS_PAGO_URLS['glm'], 'nota': '3° de la cascada'})
     except Exception as _e31:
         logger.debug(f'Saldos: GLM {_e31}')
+
+    # ── 4b. OpenRouter (GRATIS — niveles 5°-7° + análisis de libros) ─────
+    # FASE 31.13: Nex-N2-Pro (5°), GPT-OSS-120B (6°), router automático (7°)
+    # y Nemotron 3 Super 1M ctx (/analizar_libro). Todo con una sola API key.
+    try:
+        estado = '⚪ Sin configurar'
+        if OPENROUTER_API_KEY:
+            try:
+                r = requests.get('https://openrouter.ai/api/v1/key',
+                                 headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
+                                 timeout=8)
+                estado = '🟢 Operativo' if r.status_code == 200 else f'🟡 Respuesta {r.status_code}'
+            except Exception:
+                estado = '🔴 Sin respuesta'
+        servicios.append({
+            'nombre': 'OpenRouter (LLMs gratuitos)', 'emoji': '🛰️',
+            'saldo': 'Tier free (~50 req/día)', 'deuda': '$0',
+            'estado': estado, 'url': SERVICIOS_PAGO_URLS['openrouter'],
+            'nota': 'Nex-N2 (5°) + GPT-OSS (6°) + router auto (7°) + Nemotron 1M (/analizar_libro)'})
+    except Exception as _e31:
+        logger.debug(f'Saldos: OpenRouter {_e31}')
 
     # ── 5. Google Cloud TTS (voz del bot) ────────────────────────────────
     try:
@@ -38053,6 +38397,7 @@ def main():
     application.add_handler(CommandHandler("expertise", expertise_comando))
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
+    application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
     application.add_handler(CommandHandler("rag_reindexar_perfiles", rag_reindexar_perfiles_comando))  # FASE 30
