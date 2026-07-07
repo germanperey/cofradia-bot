@@ -3202,8 +3202,17 @@ def detectar_libro_en_pregunta(pregunta: str) -> str:
             continue
         coincidencias = [p for p in palabras if f' {p} ' in pregunta_norm or p in pregunta_norm.split()]
         n = len(coincidencias)
-        if n >= 2 or (n == 1 and len(palabras) == 1 and len(coincidencias[0]) >= 5):
+        # FASE 31.16: además del match multi-palabra, aceptar UNA palabra
+        # DISTINTIVA (>=5 letras, ej. 'milei', 'inflacion') aunque el título
+        # tenga más palabras — con score menor para que los matches múltiples
+        # sigan ganando. El gate previo (_PATRON_PREGUNTA_LIBRO) ya limita
+        # esto a preguntas que son genuinamente sobre libros.
+        match_multi = n >= 2 or (n == 1 and len(palabras) == 1 and len(coincidencias[0]) >= 5)
+        match_distintivo = (n == 1 and max((len(c) for c in coincidencias), default=0) >= 5)
+        if match_multi or match_distintivo:
             score = n * 10 + int(20 * n / len(palabras))  # cantidad + cobertura del título
+            if match_distintivo and not match_multi:
+                score = 5 + len(coincidencias[0])  # distintivo: score bajo (5-20)
             if score > mejor_score:
                 mejor_score, mejor_source = score, source
     return mejor_source
@@ -3286,6 +3295,31 @@ async def intentar_respuesta_libro(pregunta: str, user_name: str) -> str:
             f"TEXTO DEL LIBRO:\n{texto_libro}"
         )
         respuesta = await asyncio.to_thread(llamar_nemotron, prompt_libro, 1200, 0.5)
+        # ═══ FASE 31.16: GARANTÍA MULTI-MOTOR — si el libro está en la
+        # biblioteca, el usuario SIEMPRE recibe respuesta basada en su texto
+        # real, aunque OpenRouter/Nemotron falle (rate limit, key ausente):
+        #   2° intento: Gemini 2.0 Flash (contexto 1M, gratis) con 60K chars
+        #   3° intento: cascada completa de 7 LLMs con extracto de 12K chars
+        #               (cabe en el límite TPM del tier free de Groq)
+        if not respuesta:
+            logger.warning(f"📚 FASE 31.16: Nemotron falló para '{titulo_limpio}' — reintento Gemini 1M")
+            try:
+                prompt_gemini = prompt_libro.replace(texto_libro, texto_libro[:60_000])
+                respuesta = await asyncio.to_thread(llamar_gemini_texto, prompt_gemini, 1200, 0.5)
+            except Exception as _e_gem16:
+                logger.debug(f"FASE 31.16 Gemini libro: {_e_gem16}")
+        if not respuesta:
+            logger.warning(f"📚 FASE 31.16: Gemini falló para '{titulo_limpio}' — cascada con extracto 12K")
+            try:
+                prompt_cascada = prompt_libro.replace(texto_libro, texto_libro[:12_000])
+                respuesta = await asyncio.to_thread(ejecutar_cascada_llm, prompt_cascada, 1000, 0.5)
+            except Exception as _e_cas16:
+                logger.debug(f"FASE 31.16 cascada libro: {_e_cas16}")
+        if respuesta:
+            logger.info(f"📚 Respuesta de libro entregada desde biblioteca RAG: '{titulo_limpio}'")
+        else:
+            logger.warning(f"📚 FASE 31.16: TODOS los motores fallaron para '{titulo_limpio}' "
+                           f"— el flujo normal continuará (verificar conectividad LLM)")
         return respuesta
     except Exception as e:
         logger.debug(f"FASE 31.14: intentar_respuesta_libro falló: {e}")
@@ -39753,16 +39787,66 @@ def main():
                     _es_pregunta_libro = False
                 if _es_pregunta_libro:
                     contexto_tarjetas = ""   # bloquear directorio → cero homónimos
-                    instruccion += (
-                        "\n5. PREGUNTA SOBRE LIBRO/DOCUMENTO: ese material NO está indexado en la "
-                        "biblioteca de la Cofradía. Dilo explícitamente: 'Ese libro/documento no se "
-                        "encuentra en la biblioteca de la Cofradía'. PROHIBIDO mencionar o confundir "
-                        "con miembros de la comunidad que tengan apellido similar al autor consultado. "
-                        "Puedes agregar 1-2 líneas de conocimiento general sobre el autor/obra si es "
-                        "verificable, y sugerir /rag_status para ver los documentos disponibles."
-                    )
-                ctx_rag = ""
-                fuentes_str_final = "Conocimiento propio + transparencia"
+                    # ═══ FASE 31.16 (BUG REAL reportado por Germán con "Milei"):
+                    # antes se ASUMÍA que el libro no estaba en la biblioteca
+                    # cada vez que el RAG vectorial fallaba, y se instruía al
+                    # LLM a NEGAR su existencia. Ahora se VERIFICA contra el
+                    # catálogo REAL de títulos (detectar_libro_en_pregunta):
+                    #   → SÍ está: inyectar extracto real del libro como contexto
+                    #   → NO está: responder con web/conocimiento general, sin
+                    #     callejones sin salida ("reformula tu pregunta")
+                    _libro_cat_316 = None
+                    try:
+                        _libro_cat_316 = await asyncio.to_thread(detectar_libro_en_pregunta, mensaje)
+                    except Exception:
+                        _libro_cat_316 = None
+                    if _libro_cat_316:
+                        _titulo_316 = _libro_cat_316.replace('PDF:', '')
+                        _extracto_316 = ''
+                        try:
+                            _extracto_316 = await asyncio.to_thread(
+                                cargar_libro_para_analisis, _libro_cat_316, 12_000)
+                        except Exception:
+                            _extracto_316 = ''
+                        if _extracto_316:
+                            logger.info(f"📚 FASE 31.16: RAG vectorial falló pero el libro "
+                                        f"'{_titulo_316}' SÍ está — inyectando extracto real")
+                            instruccion += (
+                                f"\n5. LIBRO EN BIBLIOTECA (VERIFICADO): el libro \"{_titulo_316}\" "
+                                f"SÍ está indexado en la biblioteca de la Cofradía y abajo tienes un "
+                                f"EXTRACTO REAL de su texto. Responde la pregunta usando ESE extracto, "
+                                f"citando ideas CONCRETAS del libro. Identifícalo por su nombre. "
+                                f"PROHIBIDO decir que no está en la biblioteca. PROHIBIDO confundir "
+                                f"con miembros de la comunidad de apellido similar al autor."
+                            )
+                            ctx_rag = (f"EXTRACTO REAL DEL LIBRO \"{_titulo_316}\" "
+                                       f"(biblioteca de la Cofradía):\n{_extracto_316}")
+                            fuentes_str_final = f"Biblioteca RAG: {_titulo_316}"
+                        else:
+                            instruccion += (
+                                f"\n5. El libro \"{_titulo_316}\" figura en la biblioteca pero su "
+                                f"texto no pudo cargarse ahora. Responde con tu mejor conocimiento "
+                                f"general verificable sobre la obra, indicando que el análisis "
+                                f"completo está disponible con /rag_consulta."
+                            )
+                            ctx_rag = ""
+                            fuentes_str_final = "Conocimiento propio + transparencia"
+                    else:
+                        instruccion += (
+                            "\n5. PREGUNTA SOBRE LIBRO/DOCUMENTO: ese material NO figura en el "
+                            "catálogo de la biblioteca de la Cofradía (verificado contra los títulos "
+                            "reales). Dilo brevemente, PERO responde igual la pregunta con la MEJOR "
+                            "información disponible (fragmentos WEB-LIVE si existen, o tu conocimiento "
+                            "general verificable sobre el autor/obra). PROHIBIDO limitarte a decir que "
+                            "no está o pedir que reformulen: entrega SIEMPRE una respuesta sustantiva. "
+                            "PROHIBIDO mencionar o confundir con miembros de la comunidad que tengan "
+                            "apellido similar al autor consultado."
+                        )
+                        ctx_rag = ""
+                        fuentes_str_final = "Conocimiento propio + transparencia"
+                else:
+                    ctx_rag = ""
+                    fuentes_str_final = "Conocimiento propio + transparencia"
                 logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica}, pregunta_libro={_es_pregunta_libro})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
