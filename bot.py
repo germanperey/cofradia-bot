@@ -39885,10 +39885,17 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             # FASE 31.14: si la pregunta es sobre un LIBRO que SÍ está en la
             # biblioteca → análisis profundo con Nemotron (texto real, 120K chars).
-            # Reutiliza el detector anti-homónimos _es_pregunta_libro de FASE 31.
-            # Si el libro no está indexado o Nemotron falla, respuesta queda None
-            # y el flujo sigue con las capas normales (Groq → Gemini → ...).
-            if _es_pregunta_libro:
+            # Si el libro no está indexado o los motores fallan, respuesta queda
+            # None y el flujo sigue con las capas normales (Groq → Gemini → ...).
+            # FASE 31.16-FIX: el flag se calcula AQUÍ localmente (antes se
+            # reutilizaba _es_pregunta_libro, que solo existía en la rama MODO B
+            # → UnboundLocalError cuando el RAG encontraba docs relevantes).
+            _es_preg_libro_14 = False
+            try:
+                _es_preg_libro_14 = bool(_PATRON_PREGUNTA_LIBRO.search((mensaje or '').lower()))
+            except Exception:
+                _es_preg_libro_14 = False
+            if _es_preg_libro_14:
                 try:
                     if msg:
                         try: await msg.edit_text("📚 Verificando si el libro está en la biblioteca...")
