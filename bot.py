@@ -3082,6 +3082,671 @@ def llamar_nemotron(prompt: str, max_tokens: int = 4000, temperature: float = 0.
                              timeout_read=180, etiqueta="Nemotron-3-Super:free, análisis libros")
 
 
+def ejecutar_cascada_llm(prompt: str, max_tokens: int = 1000, temperature: float = 0.5,
+                         incluir_gemini: bool = True) -> str:
+    """FASE 31.14: Cascada SÍNCRONA de 7 LLMs — diseñada para correr dentro de
+    asyncio.to_thread() y NO bloquear el event loop del bot.
+
+    Antes, las llamadas requests.post() síncronas dentro de los handlers async
+    congelaban el bot completo mientras un LLM respondía (5-40s): los demás
+    usuarios quedaban en espera. Al mover toda la cadena a un thread aparte,
+    el event loop queda libre para atender otros mensajes en paralelo
+    (combinado con concurrent_updates(32) en el Application builder).
+
+    Orden: Groq → Gemini → GLM → DeepSeek → Nex-N2 → GPT-OSS → router free.
+    incluir_gemini=False replica el orden del "intento simplificado" FASE 25
+    (Groq → GLM → DeepSeek → ...), que omite Gemini.
+    """
+    respuesta = llamar_groq(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta and incluir_gemini:
+        logger.warning("⚠️ Cascada: Groq falló — fallback Gemini")
+        respuesta = llamar_gemini_texto(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta:
+        logger.warning("⚠️ Cascada: fallback GLM (Z.AI)")
+        respuesta = llamar_glm5(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta:
+        logger.warning("⚠️ Cascada: fallback DeepSeek")
+        respuesta = llamar_deepseek(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta:
+        logger.warning("⚠️ Cascada: fallback Nex-N2-Pro:free (FASE 31.12)")
+        respuesta = llamar_nexn2(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta:
+        logger.warning("⚠️ Cascada: fallback GPT-OSS-120B:free (FASE 31.13)")
+        respuesta = llamar_gptoss(prompt, max_tokens=max_tokens, temperature=temperature)
+    if not respuesta:
+        logger.warning("⚠️ Cascada: fallback router automático openrouter/free (FASE 31.13)")
+        respuesta = llamar_openrouter_free(prompt, max_tokens=max_tokens, temperature=temperature)
+    return respuesta
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.14: ANÁLISIS PROFUNDO DE LIBROS EN CONVERSACIÓN NATURAL
+# (texto y voz, sin comando) — motor Nemotron 3 Super, contexto 1M tokens
+# ════════════════════════════════════════════════════════════════════════
+
+# Patrón que indica que la pregunta trata sobre un libro/documento/autor
+# (alineado con el detector anti-homónimos FASE 31 del chat privado)
+_PATRON_PREGUNTA_LIBRO = re.compile(
+    r'\b(libro|libros|documento|documentos|pdf|autor|autora|obra|texto|'
+    r'biblioteca|capitulo|capítulo|escribio|escribió|publicó|publico|lei|leí|'
+    r'resumen|resume|resumir|analiza|analizar|analisis|análisis|trata|'
+    r'ensena|enseña|propone|plantea)\b'
+)
+
+# Caché de fuentes de la biblioteca (evita consultar la BD en cada mensaje)
+_LIBROS_RAG_CACHE = {'ts': None, 'fuentes': []}
+
+_STOPWORDS_TITULO = {
+    'los', 'las', 'del', 'por', 'con', 'una', 'uno', 'sus', 'mas', 'que',
+    'sin', 'the', 'and',
+    'para', 'como', 'sobre', 'entre', 'desde', 'hasta', 'este', 'esta',
+    'estos', 'estas', 'pero', 'porque', 'cuando', 'donde', 'libro',
+    'autor', 'edicion', 'tomo', 'volumen', 'parte', 'guia', 'manual',
+    'introduccion', 'tratado', 'curso', 'apuntes', 'version', 'completo',
+}
+
+
+def _normalizar_texto_libro(txt: str) -> str:
+    """Minúsculas sin acentos NI puntuación, para comparar títulos vs preguntas."""
+    import unicodedata
+    txt = (txt or '').lower()
+    txt = unicodedata.normalize('NFD', txt)
+    txt = ''.join(ch for ch in txt if unicodedata.category(ch) != 'Mn')
+    # Puntuación → espacio (evita que 'guerra?' o '¿libro' rompan el match)
+    return re.sub(r'[^a-z0-9ñ ]+', ' ', txt)
+
+
+def obtener_fuentes_libros() -> list:
+    """Lista de fuentes 'PDF:...' de rag_chunks, con caché de 1 hora."""
+    ahora = datetime.now()
+    if (_LIBROS_RAG_CACHE['ts'] and _LIBROS_RAG_CACHE['fuentes'] and
+            (ahora - _LIBROS_RAG_CACHE['ts']).total_seconds() < 3600):
+        return _LIBROS_RAG_CACHE['fuentes']
+    fuentes = []
+    try:
+        conn = get_db_connection()
+        if conn:
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%%'")
+                fuentes = [r['source'] for r in c.fetchall()]
+            else:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%'")
+                fuentes = [r[0] for r in c.fetchall()]
+            conn.close()
+            _LIBROS_RAG_CACHE['ts'] = ahora
+            _LIBROS_RAG_CACHE['fuentes'] = fuentes
+    except Exception as e:
+        logger.debug(f"FASE 31.14: error listando fuentes de libros: {e}")
+    return fuentes
+
+
+def detectar_libro_en_pregunta(pregunta: str) -> str:
+    """Detecta si la pregunta menciona un libro de la biblioteca RAG.
+
+    Compara las palabras significativas (>=4 letras, sin stopwords) de cada
+    título indexado contra la pregunta normalizada. Retorna el source del
+    mejor match o None. Umbral conservador para evitar falsos positivos:
+    se exigen >=2 palabras del título, o 1 sola si el título solo tiene una
+    palabra significativa de >=5 letras (ej. 'Milei').
+    """
+    pregunta_norm = ' ' + _normalizar_texto_libro(pregunta) + ' '
+    mejor_source, mejor_score = None, 0
+    for source in obtener_fuentes_libros():
+        titulo = source.replace('PDF:', '')
+        titulo = re.sub(r'\.(pdf|epub|txt|docx?)$', '', titulo, flags=re.IGNORECASE)
+        titulo_norm = _normalizar_texto_libro(re.sub(r'[_\-\.]+', ' ', titulo))
+        palabras = [p for p in titulo_norm.split()
+                    if len(p) >= 3 and p not in _STOPWORDS_TITULO]
+        if not palabras:
+            continue
+        coincidencias = [p for p in palabras if f' {p} ' in pregunta_norm or p in pregunta_norm.split()]
+        n = len(coincidencias)
+        if n >= 2 or (n == 1 and len(palabras) == 1 and len(coincidencias[0]) >= 5):
+            score = n * 10 + int(20 * n / len(palabras))  # cantidad + cobertura del título
+            if score > mejor_score:
+                mejor_score, mejor_source = score, source
+    return mejor_source
+
+
+def cargar_libro_para_analisis(source: str, limite_chars: int = 120_000) -> str:
+    """Concatena los chunks del libro (en orden) hasta limite_chars.
+
+    120K chars (~30K tokens) es suficiente para respuestas profundas en
+    conversación y cabe holgado en el contexto 1M de Nemotron, manteniendo
+    la latencia razonable para un chat (vs. los 600K de /analizar_libro).
+    """
+    texto = ''
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return ''
+        c = conn.cursor()
+        if DATABASE_URL:
+            c.execute("SELECT chunk_text FROM rag_chunks WHERE source = %s ORDER BY id", (source,))
+        else:
+            c.execute("SELECT chunk_text FROM rag_chunks WHERE source = ? ORDER BY id", (source,))
+        partes = []
+        total = 0
+        for f in c.fetchall():
+            t = (f['chunk_text'] if DATABASE_URL else f[0]) or ''
+            partes.append(t)
+            total += len(t)
+            if total >= limite_chars:
+                break
+        conn.close()
+        texto = '\n'.join(partes)[:limite_chars]
+    except Exception as e:
+        logger.debug(f"FASE 31.14: error cargando libro '{source}': {e}")
+    return texto
+
+
+async def intentar_respuesta_libro(pregunta: str, user_name: str) -> str:
+    """FASE 31.14: Si la pregunta conversacional (texto o voz transcrita) es
+    sobre un libro de la biblioteca, responde con ANÁLISIS PROFUNDO usando
+    Nemotron 3 Super (contexto extendido de 120K chars del libro real).
+
+    Retorna la respuesta, o None para que el flujo continúe con la cascada
+    normal (RAG estándar de ~30 chunks). Todo el trabajo pesado (BD + LLM)
+    corre en threads → no bloquea a los demás usuarios.
+    Consume 1 request del tier free de OpenRouter solo cuando hay match real.
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+    if not _PATRON_PREGUNTA_LIBRO.search((pregunta or '').lower()):
+        return None
+    try:
+        libro = await asyncio.to_thread(detectar_libro_en_pregunta, pregunta)
+        if not libro:
+            return None
+        texto_libro = await asyncio.to_thread(cargar_libro_para_analisis, libro, 120_000)
+        if not texto_libro or len(texto_libro) < 2000:
+            return None
+        titulo_limpio = libro.replace('PDF:', '')
+        logger.info(f"📚 FASE 31.14: pregunta sobre '{titulo_limpio}' — análisis profundo Nemotron")
+        prompt_libro = (
+            f"Eres el asistente IA de la Cofradía de Networking (comunidad "
+            f"profesional chilena de oficiales de la Armada). {user_name} te "
+            f"pregunta sobre un libro de la biblioteca y tienes acceso a su "
+            f"TEXTO REAL extendido (no solo fragmentos).\n\n"
+            f"LIBRO: {titulo_limpio}\n"
+            f"PREGUNTA DE {user_name}: \"{pregunta}\"\n\n"
+            f"REGLAS:\n"
+            f"1. Responde SOLO con base en el texto del libro provisto abajo. "
+            f"Cita ideas CONCRETAS del libro (conceptos, argumentos, ejemplos), "
+            f"nunca generalidades tipo 'el libro habla de eso'.\n"
+            f"2. Comienza dirigiéndote a {user_name} por su nombre, cordial y "
+            f"profesional.\n"
+            f"3. Máximo 3-4 párrafos, en español, SIN asteriscos ni Markdown.\n"
+            f"4. Si la pregunta pide resumen o análisis general: entrega tesis "
+            f"central, 3-4 ideas clave y una aplicación práctica para "
+            f"profesionales de la Cofradía.\n"
+            f"5. Al final sugiere: 'Para un análisis completo del libro, el "
+            f"administrador puede usar /analizar_libro'.\n\n"
+            f"TEXTO DEL LIBRO:\n{texto_libro}"
+        )
+        respuesta = await asyncio.to_thread(llamar_nemotron, prompt_libro, 1200, 0.5)
+        return respuesta
+    except Exception as e:
+        logger.debug(f"FASE 31.14: intentar_respuesta_libro falló: {e}")
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.15: AGENTE SÍSMICO Y DE EMERGENCIAS NATURALES (CHILE)
+# Monitor en tiempo real (cada 5 min) de sismos y alertas de tsunami.
+# Fuentes: USGS (primaria, mundial, con coordenadas + flag tsunami) →
+#          GAEL/CSN (fallback chileno). Ambas gratuitas, sin API key.
+# Al detectar un evento: mensaje de texto + audio TTS + informe HTML
+# didáctico con gráficos ECharts e información histórica vinculada.
+# ════════════════════════════════════════════════════════════════════════
+
+# Magnitud mínima para publicar alerta automática en el grupo (configurable)
+SISMO_MAGNITUD_MINIMA = float(os.environ.get('SISMO_MAGNITUD_MINIMA', '5.0'))
+# Intervalo del monitor en minutos
+SISMO_CHECK_INTERVALO_MIN = int(os.environ.get('SISMO_CHECK_INTERVALO_MIN', '5'))
+
+# Grandes terremotos históricos de Chile (para contexto comparativo en el HTML)
+_TERREMOTOS_HISTORICOS_CHILE = [
+    ('Valdivia 1960', 9.5, 'El mayor terremoto registrado en la historia mundial. Tsunami transpacífico.'),
+    ('Maule 2010 (27F)', 8.8, 'Afectó a 12 millones de personas. Tsunami devastó Constitución y Talcahuano.'),
+    ('Vallenar 1922', 8.5, 'Terremoto y tsunami en Atacama.'),
+    ('Illapel 2015', 8.4, 'Tsunami en Coquimbo. Evacuación costera masiva exitosa.'),
+    ('Iquique 2014', 8.2, 'Precedido por intensa secuencia de precursores.'),
+    ('Algarrobo 1985', 8.0, 'Grave daño en Valparaíso y San Antonio.'),
+]
+
+
+def _tz_chile():
+    """Timezone de Chile, autocontenida (zoneinfo → pytz → None)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo('America/Santiago')
+    except Exception:
+        try:
+            import pytz
+            return pytz.timezone('America/Santiago')
+        except Exception:
+            return None
+
+
+def _clasificar_sismo(mag: float) -> tuple:
+    """Clasificación chilena coloquial + emoji según magnitud."""
+    if mag >= 8.0:
+        return ('🔴', 'GRAN TERREMOTO')
+    if mag >= 7.0:
+        return ('🔴', 'TERREMOTO')
+    if mag >= 6.0:
+        return ('🟠', 'SISMO FUERTE')
+    if mag >= 5.0:
+        return ('🟡', 'SISMO MODERADO')
+    return ('🟢', 'TEMBLOR LEVE')
+
+
+def obtener_sismos_usgs(horas: int = 2, mag_min: float = 4.0) -> list:
+    """Sismos en Chile desde USGS FDSN (fuente primaria).
+
+    Bounding box Chile continental e insular: lat -56..-17, lon -76..-66.
+    Retorna lista de dicts normalizados:
+    {id, magnitud, lugar, ts_utc, lat, lon, prof_km, tsunami, fuente}
+    """
+    try:
+        desde = (datetime.utcnow() - timedelta(hours=horas)).strftime('%Y-%m-%dT%H:%M:%S')
+        url = ('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson'
+               f'&starttime={desde}&minlatitude=-56&maxlatitude=-17'
+               f'&minlongitude=-76&maxlongitude=-66&minmagnitude={mag_min}'
+               '&orderby=time&limit=30')
+        r = requests.get(url, timeout=(5, 15))
+        if r.status_code != 200:
+            logger.warning(f"Sismos USGS: status {r.status_code}")
+            return []
+        sismos = []
+        for f in r.json().get('features', []):
+            try:
+                p = f.get('properties', {})
+                g = f.get('geometry', {}).get('coordinates', [None, None, None])
+                sismos.append({
+                    'id': f.get('id') or f"usgs_{p.get('time')}",
+                    'magnitud': float(p.get('mag') or 0),
+                    'lugar': p.get('place') or 'Chile',
+                    'ts_utc': datetime.utcfromtimestamp((p.get('time') or 0) / 1000),
+                    'lat': g[1], 'lon': g[0],
+                    'prof_km': round(float(g[2]), 1) if g[2] is not None else None,
+                    'tsunami': int(p.get('tsunami') or 0),
+                    'fuente': 'USGS',
+                })
+            except Exception:
+                continue
+        return sismos
+    except Exception as e:
+        logger.warning(f"Sismos USGS error: {e}")
+        return []
+
+
+def obtener_sismos_gael(horas: int = 2, mag_min: float = 4.0) -> list:
+    """Sismos desde GAEL (espejo del CSN chileno) — fuente de respaldo.
+
+    GAEL no publica coordenadas ni ID: se deriva un ID estable de
+    fecha+referencia geográfica para la deduplicación.
+    """
+    try:
+        r = requests.get('https://api.gael.cloud/general/public/sismos', timeout=(5, 15))
+        if r.status_code != 200:
+            return []
+        sismos = []
+        limite = datetime.utcnow() - timedelta(hours=horas + 4)  # margen por TZ local del feed
+        for s in r.json():
+            try:
+                mag = float(str(s.get('Magnitud', '0')).replace(',', '.'))
+                if mag < mag_min:
+                    continue
+                fecha_str = s.get('Fecha', '')
+                ts = datetime.strptime(fecha_str, '%Y-%m-%d %H:%M:%S') if fecha_str else datetime.utcnow()
+                if ts < limite:
+                    continue
+                ref = s.get('RefGeografica', 'Chile')
+                import hashlib
+                sid = 'gael_' + hashlib.md5(f"{fecha_str}|{ref}".encode()).hexdigest()[:12]
+                prof = s.get('Profundidad')
+                sismos.append({
+                    'id': sid, 'magnitud': mag, 'lugar': ref, 'ts_utc': ts,
+                    'lat': None, 'lon': None,
+                    'prof_km': round(float(str(prof).replace(',', '.')), 1) if prof else None,
+                    'tsunami': 0, 'fuente': 'CSN/GAEL',
+                })
+            except Exception:
+                continue
+        return sismos
+    except Exception as e:
+        logger.warning(f"Sismos GAEL error: {e}")
+        return []
+
+
+def obtener_sismos_chile(horas: int = 2, mag_min: float = 4.0) -> list:
+    """Cadena de respaldo: USGS → GAEL/CSN."""
+    sismos = obtener_sismos_usgs(horas, mag_min)
+    if not sismos:
+        sismos = obtener_sismos_gael(horas, mag_min)
+    return sismos
+
+
+def _sismo_asegurar_tabla(c, es_pg: bool):
+    """Crea la tabla de deduplicación si no existe (lazy, autocontenida)."""
+    c.execute('''CREATE TABLE IF NOT EXISTS sismos_reportados (
+        sismo_id TEXT PRIMARY KEY,
+        magnitud REAL,
+        lugar TEXT,
+        fecha_reporte TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+
+def _sismo_ya_reportado(sismo_id: str) -> bool:
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        _sismo_asegurar_tabla(c, bool(DATABASE_URL))
+        if DATABASE_URL:
+            c.execute("SELECT 1 FROM sismos_reportados WHERE sismo_id = %s", (sismo_id,))
+        else:
+            c.execute("SELECT 1 FROM sismos_reportados WHERE sismo_id = ?", (sismo_id,))
+        existe = c.fetchone() is not None
+        conn.commit()
+        conn.close()
+        return existe
+    except Exception as e:
+        logger.debug(f"Sismo dedup check error: {e}")
+        return False
+
+
+def _sismo_marcar_reportado(sismo: dict):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        _sismo_asegurar_tabla(c, bool(DATABASE_URL))
+        if DATABASE_URL:
+            c.execute("""INSERT INTO sismos_reportados (sismo_id, magnitud, lugar)
+                         VALUES (%s, %s, %s) ON CONFLICT (sismo_id) DO NOTHING""",
+                      (sismo['id'], sismo['magnitud'], sismo['lugar'][:200]))
+        else:
+            c.execute("INSERT OR IGNORE INTO sismos_reportados (sismo_id, magnitud, lugar) VALUES (?, ?, ?)",
+                      (sismo['id'], sismo['magnitud'], sismo['lugar'][:200]))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Sismo dedup insert error: {e}")
+
+
+def _sismo_hora_chile(ts_utc: datetime) -> str:
+    """Convierte UTC → hora Chile legible."""
+    try:
+        tz = _tz_chile()
+        if tz:
+            from datetime import timezone as _tzmod
+            return ts_utc.replace(tzinfo=_tzmod.utc).astimezone(tz).strftime('%d-%m-%Y %H:%M')
+    except Exception:
+        pass
+    return ts_utc.strftime('%d-%m-%Y %H:%M UTC')
+
+
+def generar_html_sismo(sismo: dict, recientes: list) -> str:
+    """Genera informe HTML didáctico del evento sísmico con gráficos ECharts.
+
+    Incluye: ficha del evento, gauge de magnitud, comparación con los grandes
+    terremotos históricos de Chile, tabla de sismos recientes, mapa del
+    epicentro (si hay coordenadas), recomendaciones de seguridad y sección
+    educativa (Richter vs Mercalli, por qué la duración no se publica).
+    """
+    emoji, categoria = _clasificar_sismo(sismo['magnitud'])
+    hora_cl = _sismo_hora_chile(sismo['ts_utc'])
+    prof = f"{sismo['prof_km']} km" if sismo.get('prof_km') is not None else "No informada"
+    coords_txt = (f"{sismo['lat']:.3f}, {sismo['lon']:.3f}" if sismo.get('lat') is not None else "No disponible (fuente CSN)")
+    link_mapa = (f"https://www.google.com/maps?q={sismo['lat']},{sismo['lon']}"
+                 if sismo.get('lat') is not None else "https://www.sismologia.cl")
+
+    # Datos para gráfico comparativo histórico (evento actual resaltado)
+    hist_nombres = [h[0] for h in _TERREMOTOS_HISTORICOS_CHILE] + ['ESTE EVENTO']
+    hist_mags = [h[1] for h in _TERREMOTOS_HISTORICOS_CHILE] + [sismo['magnitud']]
+    hist_desc = ''.join(f"<li><b>{n} (M{m})</b>: {d}</li>" for n, m, d in _TERREMOTOS_HISTORICOS_CHILE)
+
+    filas_recientes = ''.join(
+        f"<tr><td>{_sismo_hora_chile(s['ts_utc'])}</td><td>{s['magnitud']:.1f}</td>"
+        f"<td>{(str(s.get('prof_km')) + ' km') if s.get('prof_km') is not None else '—'}</td>"
+        f"<td>{s['lugar']}</td></tr>"
+        for s in recientes[:12]
+    ) or "<tr><td colspan='4'>Sin otros sismos recientes</td></tr>"
+
+    alerta_tsunami = ""
+    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
+        alerta_tsunami = (
+            "<div class='tsunami'>🌊 <b>POSIBLE RIESGO DE TSUNAMI</b> — Si estás en zona "
+            "costera, aléjate de la playa hacia zonas altas y sigue las instrucciones "
+            "oficiales del <a href='https://www.snamchile.cl' style='color:#fff'>SHOA/SNAM</a> "
+            "y <a href='https://senapred.cl' style='color:#fff'>SENAPRED</a>.</div>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Informe Sísmico — Cofradía de Networking</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1421;color:#eaf0f6;margin:0;padding:20px}}
+  .card{{background:#16213a;border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:0 4px 14px rgba(0,0,0,.35)}}
+  h1{{color:#ffd166;margin:0 0 6px;font-size:1.5em}} h2{{color:#8fd8ff;font-size:1.15em;border-bottom:1px solid #2b3a5e;padding-bottom:6px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}
+  .kpi{{background:#1e2b4d;border-radius:10px;padding:14px;text-align:center}}
+  .kpi .v{{font-size:1.6em;font-weight:700;color:#ffd166}} .kpi .l{{font-size:.8em;color:#9fb3d1}}
+  table{{width:100%;border-collapse:collapse;font-size:.9em}} td,th{{padding:8px;border-bottom:1px solid #2b3a5e;text-align:left}}
+  th{{color:#8fd8ff}} .chart{{width:100%;height:320px}}
+  .tsunami{{background:#b3261e;padding:14px;border-radius:10px;margin:14px 0;font-size:1.05em}}
+  .rec{{background:#1e2b4d;border-left:4px solid #ffd166;padding:12px 16px;border-radius:8px;margin:8px 0}}
+  a{{color:#8fd8ff}} .foot{{text-align:center;color:#9fb3d1;font-size:.8em;margin-top:20px}}
+</style></head><body>
+<div class="card">
+  <h1>{emoji} {categoria} — Magnitud {sismo['magnitud']:.1f}</h1>
+  <div style="color:#9fb3d1">Informe generado por el Agente Sísmico de la Cofradía de Networking</div>
+  {alerta_tsunami}
+  <div class="grid" style="margin-top:14px">
+    <div class="kpi"><div class="v">{sismo['magnitud']:.1f}</div><div class="l">Magnitud (Richter/Mw)</div></div>
+    <div class="kpi"><div class="v">{prof}</div><div class="l">Profundidad del hipocentro</div></div>
+    <div class="kpi"><div class="v">{hora_cl}</div><div class="l">Hora de Chile</div></div>
+    <div class="kpi"><div class="v">{sismo['fuente']}</div><div class="l">Fuente oficial</div></div>
+  </div>
+  <p>📍 <b>Epicentro:</b> {sismo['lugar']}<br>
+     🧭 <b>Coordenadas:</b> {coords_txt} — <a href="{link_mapa}" target="_blank">Ver en el mapa</a></p>
+</div>
+
+<div class="card"><h2>📊 Intensidad del evento</h2><div id="gauge" class="chart"></div></div>
+
+<div class="card"><h2>🏛️ Comparación con los grandes terremotos de Chile</h2>
+  <div id="hist" class="chart"></div>
+  <p style="color:#9fb3d1;font-size:.85em">La escala de magnitud es logarítmica: cada punto adicional
+  libera ~32 veces más energía. Un M6.0 libera mil veces menos energía que el M9.5 de Valdivia 1960.</p>
+  <ul style="font-size:.9em">{hist_desc}</ul>
+</div>
+
+<div class="card"><h2>🕐 Sismos recientes en Chile</h2>
+  <table><tr><th>Hora (Chile)</th><th>Magnitud</th><th>Profundidad</th><th>Referencia</th></tr>
+  {filas_recientes}</table>
+</div>
+
+<div class="card"><h2>🎓 Sección educativa</h2>
+  <p><b>Richter vs Mercalli:</b> la <b>magnitud</b> (Richter/Momento) mide la energía liberada
+  en el hipocentro y es un valor único por evento. La <b>intensidad</b> (Mercalli) mide los
+  efectos percibidos en cada lugar y varía con la distancia y el tipo de suelo.</p>
+  <p><b>¿Por qué no se informa la duración?</b> La duración percibida del movimiento depende del
+  suelo, la distancia y la construcción, por lo que los organismos sismológicos (CSN, USGS) no la
+  publican como dato oficial; sí publican magnitud, profundidad y ubicación, que son objetivas.</p>
+  <p><b>Profundidad importa:</b> sismos superficiales (&lt;60 km) suelen percibirse con más fuerza
+  y, si son costeros y de gran magnitud, tienen mayor potencial tsunamigénico.</p>
+  <h2>✅ Recomendaciones de seguridad</h2>
+  <div class="rec">🧍 Durante el sismo: <b>agáchate, cúbrete y afírmate</b>. Aléjate de ventanas.</div>
+  <div class="rec">🌊 Si estás en la costa y el sismo te impide mantenerte en pie: <b>evacúa hacia
+  zonas altas sin esperar alarma oficial</b> (regla de oro chilena).</div>
+  <div class="rec">📱 Tras el evento: verifica gas y electricidad; usa mensajes en vez de llamadas;
+  infórmate solo por canales oficiales (SENAPRED, SHOA, CSN).</div>
+</div>
+
+<div class="foot">⚓ Cofradía de Networking — Agente Sísmico FASE 31.15 ·
+Fuentes: USGS · CSN/GAEL · Informe automático, verifica siempre canales oficiales</div>
+
+<script>
+  const gauge = echarts.init(document.getElementById('gauge'));
+  gauge.setOption({{series:[{{type:'gauge',min:0,max:10,splitNumber:10,
+    axisLine:{{lineStyle:{{width:18,color:[[0.5,'#2ecc71'],[0.6,'#f1c40f'],[0.7,'#e67e22'],[1,'#e74c3c']]}}}},
+    pointer:{{itemStyle:{{color:'#ffd166'}}}},axisLabel:{{color:'#9fb3d1',distance:22}},
+    detail:{{formatter:'M {sismo['magnitud']:.1f}',color:'#ffd166',fontSize:26}},
+    data:[{{value:{sismo['magnitud']:.1f}}}]}}]}});
+  const hist = echarts.init(document.getElementById('hist'));
+  hist.setOption({{grid:{{left:110,right:30,top:10,bottom:30}},
+    xAxis:{{type:'value',max:10,axisLabel:{{color:'#9fb3d1'}}}},
+    yAxis:{{type:'category',data:{hist_nombres!r},axisLabel:{{color:'#eaf0f6'}}}},
+    series:[{{type:'bar',data:{hist_mags!r},
+      itemStyle:{{color:p=>p.dataIndex==={len(hist_mags) - 1}?'#ffd166':'#3b6ea5'}},
+      label:{{show:true,position:'right',color:'#eaf0f6',formatter:'M{{c}}'}}}}]}});
+  window.addEventListener('resize',()=>{{gauge.resize();hist.resize();}});
+</script></body></html>"""
+
+    path = f"/tmp/informe_sismo_{sismo['id'].replace('/', '_')}.html"
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    return path
+
+
+def _sismo_texto_alerta(sismo: dict) -> str:
+    """Mensaje de texto para el grupo."""
+    emoji, categoria = _clasificar_sismo(sismo['magnitud'])
+    lineas = [
+        f"{emoji} {categoria} EN CHILE {emoji}",
+        "━" * 30, "",
+        f"📊 Magnitud: {sismo['magnitud']:.1f}",
+        f"📍 Epicentro: {sismo['lugar']}",
+        f"📏 Profundidad: {sismo['prof_km']} km" if sismo.get('prof_km') is not None else "📏 Profundidad: no informada",
+        f"🕐 Hora Chile: {_sismo_hora_chile(sismo['ts_utc'])}",
+        f"📡 Fuente: {sismo['fuente']}",
+    ]
+    if sismo.get('lat') is not None:
+        lineas.append(f"🧭 Coordenadas: {sismo['lat']:.3f}, {sismo['lon']:.3f}")
+    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
+        lineas += ["", "🌊 POSIBLE RIESGO DE TSUNAMI: si estás en la costa, aléjate hacia",
+                   "zonas altas y sigue instrucciones de SHOA/SNAM y SENAPRED."]
+    lineas += ["", "📄 Adjunto informe HTML con gráficos, comparación histórica",
+               "y recomendaciones de seguridad.",
+               "", "⚓ Agente Sísmico — Cofradía de Networking"]
+    return "\n".join(lineas)
+
+
+def _sismo_texto_voz(sismo: dict) -> str:
+    """Resumen breve para el audio TTS."""
+    _, categoria = _clasificar_sismo(sismo['magnitud'])
+    prof = f", a una profundidad de {sismo['prof_km']:.0f} kilómetros" if sismo.get('prof_km') is not None else ""
+    txt = (f"Atención cofrades. {categoria.capitalize()} en Chile. "
+           f"Se registró un sismo de magnitud {sismo['magnitud']:.1f}, "
+           f"con epicentro {sismo['lugar']}{prof}, "
+           f"a las {_sismo_hora_chile(sismo['ts_utc']).split(' ')[-1]} hora de Chile. ")
+    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
+        txt += ("Posible riesgo de tsunami: si estás en la costa, aléjate hacia zonas altas "
+                "y sigue las instrucciones oficiales. ")
+    txt += "Revisa el informe completo adjunto en el grupo."
+    return txt
+
+
+async def agente_monitor_sismos(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.15: Job cada 5 min — detecta y publica sismos nuevos >= umbral.
+
+    Por cada evento nuevo: (1) marca en BD para deduplicar, (2) mensaje de
+    texto al grupo, (3) audio TTS, (4) informe HTML adjunto. Cada paso con
+    try/except propio: un fallo parcial nunca bloquea la alerta principal.
+    """
+    if not COFRADIA_GROUP_ID:
+        return
+    try:
+        sismos = await asyncio.to_thread(obtener_sismos_chile, 2, SISMO_MAGNITUD_MINIMA)
+        if not sismos:
+            return
+        # Contexto de sismos menores recientes para el informe
+        recientes = await asyncio.to_thread(obtener_sismos_chile, 24, 4.0)
+
+        for sismo in sismos:
+            try:
+                if await asyncio.to_thread(_sismo_ya_reportado, sismo['id']):
+                    continue
+                # Marcar ANTES de publicar: evita doble alerta si el job se
+                # solapa (concurrent_updates) o el envío tarda
+                await asyncio.to_thread(_sismo_marcar_reportado, sismo)
+
+                logger.info(f"🌍 SISMO detectado M{sismo['magnitud']:.1f} — {sismo['lugar']}")
+
+                # 1) Texto
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID, text=_sismo_texto_alerta(sismo))
+
+                # 2) Audio TTS
+                try:
+                    audio_path = await generar_audio_tts(
+                        _sismo_texto_voz(sismo), f"/tmp/sismo_{sismo['id'][-8:]}.mp3")
+                    if audio_path and os.path.exists(audio_path):
+                        with open(audio_path, 'rb') as af:
+                            await context.bot.send_voice(chat_id=COFRADIA_GROUP_ID, voice=af)
+                        try:
+                            os.remove(audio_path)
+                        except Exception:
+                            pass
+                except Exception as _e_tts:
+                    logger.warning(f"Sismo TTS falló: {_e_tts}")
+
+                # 3) Informe HTML didáctico
+                try:
+                    html_path = await asyncio.to_thread(generar_html_sismo, sismo, recientes)
+                    with open(html_path, 'rb') as hf:
+                        await context.bot.send_document(
+                            chat_id=COFRADIA_GROUP_ID, document=hf,
+                            filename=f"Informe_Sismo_M{sismo['magnitud']:.1f}_Chile.html",
+                            caption="📊 Informe sísmico interactivo — ábrelo en tu navegador")
+                    try:
+                        os.remove(html_path)
+                    except Exception:
+                        pass
+                except Exception as _e_html:
+                    logger.warning(f"Sismo HTML falló: {_e_html}")
+
+            except Exception as _e_ev:
+                logger.warning(f"Error publicando sismo {sismo.get('id')}: {_e_ev}")
+    except Exception as e:
+        logger.debug(f"Agente monitor sismos error: {e}")
+
+
+async def sismos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.15: Comando /sismos — últimos sismos en Chile bajo demanda."""
+    msg = await update.message.reply_text("🌍 Consultando sismos recientes en Chile...")
+    try:
+        sismos = await asyncio.to_thread(obtener_sismos_chile, 24, 4.0)
+        if not sismos:
+            await msg.edit_text(
+                "✅ Sin sismos de magnitud 4.0 o superior en Chile en las últimas 24 horas.\n\n"
+                "🔔 El Agente Sísmico monitorea cada 5 minutos y alertará "
+                f"automáticamente eventos de magnitud {SISMO_MAGNITUD_MINIMA:.1f}+."
+            )
+            return
+        lineas = ["🌍 SISMOS EN CHILE — ÚLTIMAS 24 HORAS", "━" * 30, ""]
+        for s in sismos[:10]:
+            emoji, _ = _clasificar_sismo(s['magnitud'])
+            prof = f" · {s['prof_km']:.0f} km" if s.get('prof_km') is not None else ""
+            lineas.append(f"{emoji} M{s['magnitud']:.1f}{prof} — {s['lugar']}")
+            lineas.append(f"    🕐 {_sismo_hora_chile(s['ts_utc'])}")
+        lineas += ["", f"📡 Fuente: {sismos[0]['fuente']}",
+                   f"🔔 Alertas automáticas desde M{SISMO_MAGNITUD_MINIMA:.1f} "
+                   f"(texto + voz + informe HTML)",
+                   "", "⚓ Agente Sísmico — Cofradía de Networking"]
+        await msg.edit_text("\n".join(lineas))
+    except Exception as e:
+        logger.error(f"Error /sismos: {e}")
+        await msg.edit_text("❌ No pude consultar los sismos en este momento. Intenta más tarde.")
+
+
 # ════════════════════════════════════════════════════════════════════════
 # FASE 20: SISTEMA DE MONITOREO DE SALDO DEEPSEEK
 # ════════════════════════════════════════════════════════════════════════
@@ -4013,10 +4678,18 @@ Confianza RAG: {rag_conf}
 
 {user.first_name} pregunta (mensaje de voz): {texto_transcrito}"""
 
-        respuesta_texto = llamar_groq(prompt, max_tokens=1000, temperature=0.65)
-        
+        # FASE 31.14: (a) si el AUDIO pregunta por un libro de la biblioteca →
+        # análisis profundo con Nemotron sobre el texto real del libro;
+        # (b) cascada COMPLETA de 7 LLMs en thread aparte (antes: solo
+        # Groq→Gemini con llamadas síncronas que bloqueaban el event loop
+        # y dejaban a los demás usuarios esperando).
+        respuesta_texto = None
+        try:
+            respuesta_texto = await intentar_respuesta_libro(texto_transcrito, user.first_name)
+        except Exception as _e_lib14v:
+            logger.debug(f"FASE 31.14 voz: intento libro falló: {_e_lib14v}")
         if not respuesta_texto:
-            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=700, temperature=0.65)
+            respuesta_texto = await asyncio.to_thread(ejecutar_cascada_llm, prompt, 1000, 0.65)
         
         if not respuesta_texto:
             respuesta_texto = (f"Recibi tu mensaje: \"{texto_transcrito}\". "
@@ -13056,27 +13729,20 @@ PREGUNTA DE {user_name}: "{pregunta}"
 CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
-        # FASE 19: cascada de 4 LLMs con logs detallados para diagnóstico
-        # Orden: Groq (rápido) → Gemini (gratis) → GLM/Z.AI (gratis) → DeepSeek (5M tokens free)
-        respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
+        # FASE 19: cascada de LLMs — FASE 31.14: dos mejoras clave:
+        # (a) Si la pregunta es sobre un LIBRO de la biblioteca → análisis
+        #     PROFUNDO con Nemotron 3 Super sobre 120K chars del texto real
+        #     (antes: solo ~30 chunks recuperados por similitud).
+        # (b) La cascada completa de 7 LLMs corre en asyncio.to_thread →
+        #     NO bloquea el event loop: el bot atiende a varios usuarios
+        #     en paralelo mientras espera al LLM.
+        respuesta = None
+        try:
+            respuesta = await intentar_respuesta_libro(pregunta, user_name)
+        except Exception as _e_lib14:
+            logger.debug(f"FASE 31.14: intento libro (grupo) falló: {_e_lib14}")
         if not respuesta:
-            logger.warning(f"⚠️ Groq falló para '{user_name}' — fallback Gemini")
-            respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
-        if not respuesta:
-            logger.warning(f"⚠️ Gemini falló — fallback GLM (Z.AI)")
-            respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
-        if not respuesta:
-            logger.warning(f"⚠️ GLM falló — fallback DeepSeek")
-            respuesta = llamar_deepseek(prompt, max_tokens=1000, temperature=0.5)
-        if not respuesta:
-            logger.warning(f"⚠️ DeepSeek falló — fallback Nex-N2-Pro:free (FASE 31.12)")
-            respuesta = llamar_nexn2(prompt, max_tokens=1000, temperature=0.5)
-        if not respuesta:
-            logger.warning(f"⚠️ Nex-N2 falló — fallback GPT-OSS-120B:free (FASE 31.13)")
-            respuesta = llamar_gptoss(prompt, max_tokens=1000, temperature=0.5)
-        if not respuesta:
-            logger.warning(f"⚠️ GPT-OSS falló — fallback router automático openrouter/free (FASE 31.13)")
-            respuesta = llamar_openrouter_free(prompt, max_tokens=1000, temperature=0.5)
+            respuesta = await asyncio.to_thread(ejecutar_cascada_llm, prompt, 1000, 0.5)
         
         # FASE 19 FIX CRÍTICO: si los 4 LLMs fallan, intentar prompt SIMPLIFICADO
         # (suele superar rate-limits porque pesa menos)
@@ -13088,18 +13754,11 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     f"Responde brevemente en español (máximo 2 párrafos), profesional y cordial. "
                     f"Si conoces el tema, explícalo con tu conocimiento general. Sin asteriscos."
                 )
-                respuesta = llamar_groq(prompt_minimo, max_tokens=500, temperature=0.6)
                 # FASE 25: respetar orden — DeepSeek (pago) SIEMPRE al final
-                if not respuesta:
-                    respuesta = llamar_glm5(prompt_minimo, max_tokens=500, temperature=0.6)
-                if not respuesta:
-                    respuesta = llamar_deepseek(prompt_minimo, max_tokens=500, temperature=0.6)
-                if not respuesta:
-                    respuesta = llamar_nexn2(prompt_minimo, max_tokens=500, temperature=0.6)
-                # FASE 31.13: última red de seguridad — router automático de
-                # OpenRouter (elige cualquier modelo :free vivo en el catálogo)
-                if not respuesta:
-                    respuesta = llamar_openrouter_free(prompt_minimo, max_tokens=500, temperature=0.6)
+                # FASE 31.14: cascada completa (sin Gemini) en thread aparte
+                # para no bloquear el event loop
+                respuesta = await asyncio.to_thread(
+                    ejecutar_cascada_llm, prompt_minimo, 500, 0.6, False)
             except Exception as _e_simple:
                 logger.warning(f"Intento simplificado falló: {_e_simple}")
         
@@ -38277,7 +38936,11 @@ def main():
         else:
             logger.warning("⚠️ COFRADIA_GROUP_ID no configurado (grupo no verificado)")
     
-    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
+    # FASE 31.14: concurrent_updates(32) — PARALELISMO REAL. Sin esto, PTB 20.x
+    # procesa las actualizaciones EN SERIE: mientras el bot respondía a un
+    # usuario (5-40s de LLM), todos los demás esperaban en cola. Con 32 workers
+    # concurrentes, el bot atiende hasta 32 conversaciones simultáneas.
+    application = Application.builder().token(TOKEN_BOT).concurrent_updates(32).post_init(post_init).build()
     
     # ── DIAGNÓSTICO: registra CADA update recibido (no interfiere con handlers) ──
     async def _diag_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -38398,6 +39061,7 @@ def main():
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
+    application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
     application.add_handler(CommandHandler("rag_reindexar_perfiles", rag_reindexar_perfiles_comando))  # FASE 30
@@ -39135,16 +39799,33 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             # FASE 30: temperature reducida de 0.7 a 0.3 para minimizar delirios
             respuesta = None
             
+            # FASE 31.14: si la pregunta es sobre un LIBRO que SÍ está en la
+            # biblioteca → análisis profundo con Nemotron (texto real, 120K chars).
+            # Reutiliza el detector anti-homónimos _es_pregunta_libro de FASE 31.
+            # Si el libro no está indexado o Nemotron falla, respuesta queda None
+            # y el flujo sigue con las capas normales (Groq → Gemini → ...).
+            if _es_pregunta_libro:
+                try:
+                    if msg:
+                        try: await msg.edit_text("📚 Verificando si el libro está en la biblioteca...")
+                        except: pass
+                    respuesta = await intentar_respuesta_libro(mensaje, user_name)
+                except Exception as _e_lib14p:
+                    logger.debug(f"FASE 31.14 privado: intento libro falló: {_e_lib14p}")
+                    respuesta = None
+            
             # Capa 1: Groq (más rápido, ~3-5s típico)
-            try:
-                respuesta = await asyncio.wait_for(
-                    loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
-                    timeout=15.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
-            except Exception as _e_gr:
-                logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
+            # FASE 31.14: guard "if not respuesta" — no pisar el análisis de libro
+            if not respuesta:
+                try:
+                    respuesta = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
+                except Exception as _e_gr:
+                    logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
             
             # Capa 2: Gemini (rápido también)
             if not respuesta or len(respuesta.strip()) < 50:
@@ -40129,6 +40810,19 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("🤖 Agente: reporte ejecutivo auto lunes 8:30 Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar reporte ejecutivo auto: {e}")
+        
+        # FASE 31.15: AGENTE SÍSMICO — monitor en tiempo real cada 5 minutos
+        # (run_repeating no requiere timezone; first=90s deja arrancar al bot)
+        try:
+            job_queue.run_repeating(
+                agente_monitor_sismos,
+                interval=SISMO_CHECK_INTERVALO_MIN * 60,
+                first=90,
+                name='agente_monitor_sismos')
+            logger.info(f"🌍 Agente Sísmico: monitor cada {SISMO_CHECK_INTERVALO_MIN} min "
+                        f"(alerta desde M{SISMO_MAGNITUD_MINIMA:.1f}) — texto + voz + HTML")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente sísmico: {e}")
         
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
