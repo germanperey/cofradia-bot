@@ -176,6 +176,78 @@ GLM_API_KEY = os.environ.get('GLM_API_KEY', '')
 # Registro: https://openrouter.ai → API Keys (sin tarjeta de crédito)
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.17: CAPA DE MEMORIA + APRENDIZAJE POR USUARIO
+# Integración QUIRÚRGICA del servicio independiente memory_service.py
+# (Supabase free tier + pgvector). Diseño a prueba de fallos:
+#   - Si memory_service.py no está en el repo → import falla → bot idéntico
+#   - Si las tablas no existen aún en Supabase → helpers devuelven vacío
+#   - Si la BD se cae → timeout 4s en contexto, log fire-and-forget
+#   - Kill-switch sin tocar código: variable de entorno MEMORIA_ACTIVA=0
+# El bot JAMÁS se rompe ni se pone lento por la memoria.
+# ════════════════════════════════════════════════════════════════════════
+MEMORIA_ACTIVA = os.environ.get('MEMORIA_ACTIVA', '1') == '1'
+_memoria_svc = None
+try:
+    from memory_service import MemoryService as _MemSvc
+    _MEMORIA_OK = True
+except Exception:
+    _MEMORIA_OK = False
+
+
+def _memoria():
+    """Singleton lazy del servicio de memoria. None si no está disponible."""
+    global _memoria_svc
+    if not (_MEMORIA_OK and MEMORIA_ACTIVA and DATABASE_URL):
+        return None
+    if _memoria_svc is None:
+        try:
+            _memoria_svc = _MemSvc(db_url=DATABASE_URL,
+                                   gemini_api_key=os.environ.get('GEMINI_API_KEY', ''))
+        except Exception as _e:
+            logger.debug(f"FASE 31.17: memoria no inicializada: {_e}")
+            return None
+    return _memoria_svc
+
+
+async def memoria_contexto(user_id, texto: str) -> str:
+    """Bloque de memoria del usuario para inyectar al prompt ('' si no hay)."""
+    svc = _memoria()
+    if not svc:
+        return ""
+    try:
+        blk = await asyncio.wait_for(
+            asyncio.to_thread(svc.build_prompt_block, f"tg:{user_id}", texto or ""),
+            timeout=4.0)
+        return blk or ""
+    except Exception as _e:
+        logger.debug(f"FASE 31.17 memoria_contexto: {_e}")
+        return ""
+
+
+def _memoria_log_sync(user_id, texto_usuario: str, respuesta_bot: str, nombre: str):
+    svc = _memoria()
+    if not svc:
+        return
+    try:
+        uk = f"tg:{user_id}"
+        if texto_usuario:
+            svc.log_message(uk, "user", texto_usuario, "telegram", nombre)
+        if respuesta_bot:
+            svc.log_message(uk, "bot", respuesta_bot)
+    except Exception as _e:
+        logger.debug(f"FASE 31.17 memoria_log: {_e}")
+
+
+def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: str = None):
+    """Registro fire-and-forget: cero latencia agregada, cero riesgo."""
+    try:
+        asyncio.get_running_loop()
+        asyncio.create_task(asyncio.to_thread(
+            _memoria_log_sync, user_id, texto_usuario, respuesta_bot, nombre))
+    except Exception:
+        pass
+
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
 # La variable DEEPSEEK_API_KEY ya está definida arriba en línea 74.
 # DeepSeek requiere SALDO recargado (no es free tier ilimitado).
@@ -3782,6 +3854,55 @@ async def sismos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════════
+# FASE 31.17: JOBS PERIÓDICOS DE MEMORIA + APRENDIZAJE
+# ════════════════════════════════════════════════════════════════════════
+
+async def job_memoria_consolidar(context: ContextTypes.DEFAULT_TYPE):
+    """Diario: destila el perfil de los usuarios activos de las últimas 24h
+    usando la cascada gratuita de LLMs del propio bot (cero costo nuevo)."""
+    svc = _memoria()
+    if not svc:
+        return
+    try:
+        claves = await asyncio.to_thread(svc.active_user_keys, 24, 60)
+        n = 0
+        for uk in claves:
+            try:
+                ok = await asyncio.to_thread(
+                    svc.consolidate_profile, uk,
+                    lambda p: ejecutar_cascada_llm(p, 300, 0.3))
+                if ok:
+                    n += 1
+            except Exception:
+                continue
+        if claves:
+            logger.info(f"🧠 FASE 31.17: {n}/{len(claves)} perfiles consolidados")
+    except Exception as e:
+        logger.debug(f"job_memoria_consolidar: {e}")
+
+
+async def job_memoria_aprendizaje(context: ContextTypes.DEFAULT_TYPE):
+    """Semanal (domingo): mina FAQs → cola 'pending' (humano en el loop) y
+    envía al admin el reporte de mejora con las preguntas sin respuesta."""
+    svc = _memoria()
+    if not svc:
+        return
+    try:
+        n = await asyncio.to_thread(svc.suggest_kb_from_conversations, 3, 30)
+        rep = await asyncio.to_thread(svc.weekly_report)
+        if OWNER_ID:
+            texto = (f"🧠 MEMORIA — APRENDIZAJE SEMANAL\n{'━' * 30}\n\n"
+                     f"📥 {n} nuevas FAQs propuestas (estado: pendiente de TU aprobación).\n"
+                     f"Revisa y aprueba con:\n"
+                     f"  python memory_service.py pending\n"
+                     f"  python memory_service.py approve <id>\n"
+                     f"O en Supabase → Table Editor → v_kb_pending\n\n{rep}")
+            await context.bot.send_message(chat_id=OWNER_ID, text=texto[:4000])
+    except Exception as e:
+        logger.debug(f"job_memoria_aprendizaje: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════
 # FASE 20: SISTEMA DE MONITOREO DE SALDO DEEPSEEK
 # ════════════════════════════════════════════════════════════════════════
 
@@ -4712,6 +4833,15 @@ Confianza RAG: {rag_conf}
 
 {user.first_name} pregunta (mensaje de voz): {texto_transcrito}"""
 
+        # FASE 31.17: MEMORIA POR USUARIO también en audio (bloque vacío si
+        # el servicio no está disponible → prompt idéntico al actual)
+        try:
+            _mem_blk_317v = await memoria_contexto(user_id, texto_transcrito)
+            if _mem_blk_317v:
+                prompt += "\n\n" + _mem_blk_317v
+        except Exception:
+            pass
+
         # FASE 31.14: (a) si el AUDIO pregunta por un libro de la biblioteca →
         # análisis profundo con Nemotron sobre el texto real del libro;
         # (b) cascada COMPLETA de 7 LLMs en thread aparte (antes: solo
@@ -4755,6 +4885,7 @@ Confianza RAG: {rag_conf}
             # No es crítico - ya se envió la respuesta en texto
         
         # Registrar uso del servicio
+        memoria_registrar(user_id, texto_transcrito, respuesta_texto, user.first_name)  # FASE 31.17
         registrar_servicio_usado(user_id, 'voz')
         
         # Guardar mensaje en historial si es grupo
@@ -13763,6 +13894,15 @@ PREGUNTA DE {user_name}: "{pregunta}"
 CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
+        # FASE 31.17: MEMORIA POR USUARIO también en el grupo (misma garantía:
+        # bloque vacío = prompt idéntico al actual)
+        try:
+            _mem_blk_317g = await memoria_contexto(update.effective_user.id, pregunta)
+            if _mem_blk_317g:
+                prompt += "\n\n" + _mem_blk_317g
+        except Exception:
+            pass
+
         # FASE 19: cascada de LLMs — FASE 31.14: dos mejoras clave:
         # (a) Si la pregunta es sobre un LIBRO de la biblioteca → análisis
         #     PROFUNDO con Nemotron 3 Super sobre 120K chars del texto real
@@ -13845,6 +13985,8 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             
             # Mejora 4: Botones de feedback (instantáneo, no espera TTS)
             try:
+                memoria_registrar(update.effective_user.id, pregunta, respuesta_limpia,
+                                  update.effective_user.first_name)  # FASE 31.17
                 await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('mencion'))
             except Exception:
                 pass
@@ -39875,6 +40017,17 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             fuentes_str = fuentes_str_final
             
+            # FASE 31.17: MEMORIA POR USUARIO — inyecta perfil + recuerdos
+            # relevantes de ESTE usuario al prompt (personalización real).
+            # Si el servicio no está disponible, el bloque llega vacío y el
+            # prompt queda exactamente igual que antes.
+            try:
+                _mem_blk_317 = await memoria_contexto(user_id, mensaje)
+                if _mem_blk_317:
+                    prompt += "\n\n" + _mem_blk_317
+            except Exception:
+                pass
+            
             if msg:
                 try: await msg.edit_text("🧠 Generando respuesta...")
                 except: pass
@@ -40051,6 +40204,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         logger.debug(f"auto-aprendizaje: {_e_al}")
                 except Exception as _e_meta:
                     logger.debug(f"meta feedback: {_e_meta}")
+                memoria_registrar(user_id, mensaje, respuesta, user_name)  # FASE 31.17
                 try:
                     await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('chat_privado'))
                 except Exception:
@@ -40914,6 +41068,24 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                         f"(alerta desde M{SISMO_MAGNITUD_MINIMA:.1f}) — texto + voz + HTML")
         except Exception as e:
             logger.warning(f"No se pudo programar agente sísmico: {e}")
+        
+        # FASE 31.17: MEMORIA — consolidación diaria de perfiles (08:45 UTC ≈
+        # madrugada Chile) + aprendizaje semanal domingo (13:00 UTC ≈ 09-10 Chile).
+        # Solo se programan si el servicio de memoria está disponible.
+        try:
+            if _MEMORIA_OK and MEMORIA_ACTIVA:
+                job_queue.run_daily(job_memoria_consolidar,
+                    time=dt_time(hour=8, minute=45, second=0),
+                    name='memoria_consolidar')
+                job_queue.run_daily(job_memoria_aprendizaje,
+                    time=dt_time(hour=13, minute=0, second=0),
+                    days=(6,),
+                    name='memoria_aprendizaje')
+                logger.info("🧠 Memoria FASE 31.17: consolidación diaria + aprendizaje semanal programados")
+            else:
+                logger.info("🧠 Memoria FASE 31.17: servicio no disponible — jobs omitidos (bot opera normal)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar jobs de memoria: {e}")
         
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
