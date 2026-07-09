@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.42 · Pase VIP: la respuesta al slot no necesita 'Bot' · Área limpia"
+BOT_BUILD = "FASE 31.43 · Interceptor de slots group=-1: 'finanzas' a secas basta"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -5220,6 +5220,40 @@ async def _rutear_semantico_embeddings(texto: str):
 
 _SLOT_PENDIENTE = {}  # FASE 31.41: user_id → {'cmd','ts'} — pregunta de vuelta pendiente
 _SLOT_TTL = 180  # segundos de validez de la re-pregunta
+
+
+async def _slot_interceptar_texto(update, context):
+    """FASE 31.43: interceptor group=-1 — si el bot le hizo una re-pregunta
+    a este usuario, su siguiente texto ES la respuesta, en CUALQUIER chat y
+    sin necesidad de decir 'Bot' (el filtro Regex del handler de menciones
+    nunca dejaba pasar 'finanzas' a secas)."""
+    try:
+        if not update.message or not update.message.text:
+            return
+        _uid = update.effective_user.id
+        if _uid not in _SLOT_PENDIENTE:
+            return
+        _txt = update.message.text
+        if _txt.startswith('/'):
+            return  # comando explícito → sigue su curso; el slot espera
+        import time as _t43
+        _s = _SLOT_PENDIENTE.get(_uid) or {}
+        if _t43.time() - _s.get('ts', 0) > _SLOT_TTL:
+            del _SLOT_PENDIENTE[_uid]
+            return  # expirado → el mensaje sigue su flujo normal
+        _area = _limpiar_area_slot(_txt)
+        if not _area:
+            return
+        del _SLOT_PENDIENTE[_uid]
+        logger.info(f"🎯 FASE 31.43: slot interceptado → "
+                    f"/{_s.get('cmd', 'buscar_apoyo')} '{_area}'")
+        await ejecutar_comando_desde_intencion(
+            _s.get('cmd', 'buscar_apoyo'), _area, update, context)
+        raise ApplicationHandlerStop  # respuesta entregada: nadie más procesa
+    except ApplicationHandlerStop:
+        raise
+    except Exception as _e43:
+        logger.debug(f"FASE 31.43 interceptor: {_e43}")
 
 
 def _limpiar_area_slot(texto: str) -> str:
@@ -41502,6 +41536,9 @@ def main():
     # Interceptores de emergencia: prioridad máxima, funciona en grupo Y privado
     application.add_handler(MessageHandler(filters.LOCATION, _emer_interceptar_gps), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _emer_interceptar_texto), group=-1)
+    # FASE 31.43: respuestas a re-preguntas del bot (slot-filling) — corre
+    # antes que los filtros de mención; 'finanzas' a secas ya basta
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _slot_interceptar_texto), group=-1)
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
