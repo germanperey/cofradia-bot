@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.26 · Anti-Congelamiento (loop protegido + 24 hilos + latido) · Bus · Memoria"
+BOT_BUILD = "FASE 31.27 · Ranking último mes + Monetización empática ($↔Coins) · Anti-Congelamiento"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -4271,17 +4271,21 @@ def _mensaje_invitacion_coins(markdown: bool = False) -> str:
     (el texto renderizado conserva el comando cliqueable intacto).
     """
     txt = (
-        f"\n💰 ¿SABÍAS QUE PUEDES RENOVAR GRATIS?\n"
-        f"Participa en la comunidad y gana Cofradía Coins:\n"
+        f"\n🚀 PARTICIPA Y GANA COINS\n"
+        f"El valor de la suscripción tiene UN propósito: impulsar la "
+        f"participación activa de todos en la Red. Y participar tiene "
+        f"premio — puedes renovar GRATIS:\n\n"
+        f"💰 Así ganas Cofradía Coins:\n"
         f"  💬 Mensaje en grupo: +1   💡 Responder consulta: +10\n"
         f"  ⭐ Recomendar cofrade: +5   📅 Asistir a evento: +20\n"
-        f"  📇 Crear tarjeta: +15\n\n"
-        f"Canjéalos por:\n"
-        f"  🔄 Renovación de 30 días GRATIS → /canjear_renovacion "
+        f"  📇 Crear tu tarjeta: +15\n\n"
+        f"🎁 Canjéalos por:\n"
+        f"  🔄 30 días de suscripción GRATIS → /canjear_renovacion "
         f"({COINS_RENOVACION_30D} coins)\n"
-        f"  📊 Reportes premium sin costo: /generar_cv, /analisis_linkedin, "
-        f"/mentor, /entrevista\n\n"
-        f"👉 Revisa tu balance con /mis_coins ¡y a interactuar!"
+        f"  📊 Reportes premium sin costo: /generar_cv (25), "
+        f"/analisis_linkedin (30), /mentor (40), /entrevista (50)\n\n"
+        f"👉 Tu balance: /mis_coins — ¡cada interacción te acerca a tu "
+        f"próxima renovación gratis!"
     )
     return txt.replace('_', '\\_') if markdown else txt
 
@@ -4374,7 +4378,12 @@ _PRE_RUTEO_COMANDOS = [
         'quien participa mas', 'quien escribe mas', 'quien habla mas',
         'quien publica mas', 'ranking de participacion', 'ranking de usuarios',
         'ranking de mensajes', 'top de usuarios', 'usuarios con mas mensajes',
-        'los que mas escriben', 'los que mas aportan', 'mayor participacion'), None),
+        'los que mas escriben', 'los que mas aportan', 'mayor participacion',
+        # FASE 31.27 (caso real): "personas que más HAN PARTICIPADO el último mes"
+        'han participado', 'participado mas', 'mas participado',
+        'participaron mas', 'mas participaron', 'personas mas activas',
+        'personas mas participativas', 'mas participativos',
+        'mas activos del mes', 'mas activos este mes'), None),
     ('resumen_mes', (
         'resumen del mes', 'resumen mensual', 'actividad del mes',
         'como estuvo el mes', 'que paso este mes en el grupo'), None),
@@ -4691,6 +4700,9 @@ _PREGUNTAS_TIPO_SEED = {
         "gráficas de la comunidad",
     ],
     'top_usuarios': [
+        "¿quiénes son las personas que más han participado el último mes?",
+        "¿qué miembros participaron más este mes?",
+        "¿quiénes han sido los más participativos últimamente?",
         "¿quiénes son los usuarios que más participan?",
         "¿quién habla más en el grupo?",
         "ranking de participación de la cofradía",
@@ -12274,7 +12286,7 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 **MI CUENTA**
 
 {emoji} **Estado:** Activa - {estado}
-📅 **Días restantes:** {dias} días
+📅 **Días restantes:** {dias} días  💡 _¡Participa y gana Coins!_
 
 ⚠️ Tu suscripción está por vencer.
 💳 Usa /renovar para continuar disfrutando del bot.
@@ -12285,7 +12297,7 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 **MI CUENTA**
 
 {emoji} **Estado:** Activa - {estado}
-📅 **Días restantes:** {dias} días
+📅 **Días restantes:** {dias} días  💡 _¡Participa y gana Coins!_
 
 🚀 ¡Disfruta todos los servicios del bot!
 {_mensaje_invitacion_coins(markdown=True)}
@@ -12324,8 +12336,16 @@ async def _renovar_mostrar_planes_usuario(update: Update, context: ContextTypes.
         encabezado += "⚠️ Tu suscripción se encuentra <b>vencida</b>.\n\n"
     elif dias_rest <= 30:
         encabezado += f"⏳ Tu suscripción vence en <b>{dias_rest} día{'s' if dias_rest != 1 else ''}</b>.\n\n"
-    encabezado += "Selecciona el plan que deseas renovar:"
-    # FASE 31.18: invitación a renovar GRATIS con Cofradía Coins
+    encabezado += "Selecciona el plan que deseas renovar:\n"
+    # FASE 31.27: equivalencia en Coins junto al precio de cada plan
+    def _fmt_coins(n):
+        return f"{n:,}".replace(',', '.')
+    for _d, _p, _n in precios:
+        _coins_eq = int(round(COINS_RENOVACION_30D * _d / 30))
+        encabezado += (f"\n  💎 <b>{_n}</b> ({_d}d) — {formato_clp(_p)} "
+                       f"≈ <b>{_fmt_coins(_coins_eq)} Coins</b>")
+    encabezado += "\n"
+    # FASE 31.18/31.27: invitación a renovar GRATIS con Cofradía Coins
     encabezado += "\n" + _mensaje_invitacion_coins()
     
     await update.message.reply_text(
@@ -16345,7 +16365,7 @@ async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_
         # Suscripción
         dias = obtener_dias_restantes(uid)
         if dias > 0:
-            mensaje += f"\n⏰ Suscripción: {dias} días restantes"
+            mensaje += f"\n⏰ Suscripción: {dias} días restantes · 💡 ¡Participa y gana Coins!"
         
         await update.message.reply_text(mensaje)
     except Exception as e:
@@ -16982,7 +17002,7 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if dias >= 99999:
                 mensaje += f"\n⏰ Suscripción: ♾️ Sin límite (Owner)\n"
             else:
-                mensaje += f"\n⏰ Suscripción: ✅ Activa\n"
+                mensaje += f"\n⏰ Suscripción: ✅ Activa · 💡 ¡Participa y gana Coins!\n"
         
         # Cofradía Coins
         mensaje += f"\n🪙 COFRADÍA COINS\n"
