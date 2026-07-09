@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.33 · Link de Postulación separado · TOP instrumentado · Anti-Zombie"
+BOT_BUILD = "FASE 31.34 · Gracia de Deploy (409 del arranque ≠ zombie) · TOP instrumentado"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -43152,6 +43152,16 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         # Otros errores: loguear
         # FASE 31.31: diagnóstico claro del secuestro por doble instancia
         if 'Conflict' in str(error) and 'getUpdates' in str(error):
+            # FASE 31.34: PERÍODO DE GRACIA — durante los primeros 2 minutos
+            # tras el arranque, los 409 son el solapamiento NORMAL del deploy
+            # de Render (la instancia vieja muriendo mientras nace la nueva).
+            # Solo se considera zombie real si PERSISTE pasada la gracia.
+            _edad_proceso = (datetime.now() - _BOT_ARRANQUE).total_seconds()
+            if _edad_proceso < 120:
+                logger.warning(f"⏳ Solapamiento de deploy ({int(_edad_proceso)}s "
+                               f"de vida): 409 esperable el primer minuto — "
+                               f"la instancia anterior está terminando.")
+                return
             _ult409 = globals().get('_ULT_AVISO_409', 0)
             if tiempo_real.time() - _ult409 > 60:
                 globals()['_ULT_AVISO_409'] = tiempo_real.time()
