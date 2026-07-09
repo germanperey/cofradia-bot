@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.21 · Auto-Router v2 (10 dominios + args) · Memoria · Respaldo"
+BOT_BUILD = "FASE 31.25 · Bus Universal de Motores (ERPs plug-and-play) · Embeddings · Memoria"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -3802,7 +3802,9 @@ async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧠 <b>Memoria por usuario:</b> {mem_estado}\n"
             f"⚙️ <b>Cascada LLM:</b> 7 niveles · "
             f"<b>Concurrencia:</b> 32 usuarios simultáneos\n"
-            f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas",
+            f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas\n"
+            f"🧲 <b>Capa 1.7 (embeddings):</b> {'✅ activa' if (INTENCIONES_SEMANTICAS and DATABASE_URL) else '⚠️ off'} · entrena con /entrenar_intenciones\n"
+            f"🔌 <b>Motores acoplados:</b> {len(REGISTRO_MOTORES_BUSQUEDA)} · detalle con /motores",
             parse_mode='HTML')
     except Exception as e:
         await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
@@ -4364,53 +4366,66 @@ async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAU
 # ════════════════════════════════════════════════════════════════════════
 
 _PRE_RUTEO_COMANDOS = [
-    # (comando, patrones normalizados sin acentos, extraer_lugar: bool)
-    # extraer_lugar=True → captura la ciudad/comuna tras "en/de/para" y la
-    # pasa como argumento al comando (ej: "temperatura en Vitacura" → /clima Vitacura)
+    # (comando, patrones normalizados sin acentos, extractor: None|'lugar'|'especialidad')
     ('top_usuarios', (
         'mas participan', 'participan mas', 'usuarios mas activos',
         'miembros mas activos', 'cofrades mas activos', 'quienes participan',
         'quien participa mas', 'quien escribe mas', 'quien habla mas',
         'quien publica mas', 'ranking de participacion', 'ranking de usuarios',
         'ranking de mensajes', 'top de usuarios', 'usuarios con mas mensajes',
-        'los que mas escriben', 'los que mas aportan', 'mayor participacion'), False),
+        'los que mas escriben', 'los que mas aportan', 'mayor participacion'), None),
     ('resumen_mes', (
         'resumen del mes', 'resumen mensual', 'actividad del mes',
-        'como estuvo el mes', 'que paso este mes en el grupo'), False),
+        'como estuvo el mes', 'que paso este mes en el grupo'), None),
     ('estadisticas', (
         'estadisticas del grupo', 'estadisticas de la cofradia',
-        'estadisticas generales', 'metricas del grupo'), False),
+        'estadisticas generales', 'metricas del grupo'), None),
     ('dotacion', (
-        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual'), False),
+        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual'), None),
     ('sismos', (
         'ultimos sismos', 'sismos recientes', 'temblores recientes',
-        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo'), False),
+        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo'), None),
     ('indicadores', (
         'indicadores economicos', 'valor del dolar', 'precio del dolar',
         'cuanto esta el dolar', 'valor de la uf', 'cuanto esta la uf',
-        'valor del euro', 'valor de la utm'), False),
-    # FASE 31.20 (caso real: "¿temperatura actual en Vitacura?" → decía no
-    # tener acceso a datos en tiempo real... teniendo /clima [ciudad])
+        'valor del euro', 'valor de la utm'), None),
     ('clima', (
         'temperatura actual', 'temperatura en', 'temperatura de',
         'que temperatura hace', 'cual es la temperatura', 'clima en',
         'clima de', 'como esta el clima', 'como estara el clima',
         'pronostico del tiempo', 'pronostico para', 'pronostico en',
-        'hace frio en', 'hace calor en', 'va a llover', 'lloverá',
-        'va a hacer frio', 'va a hacer calor', 'el clima hoy'), True),
+        'hace frio en', 'hace calor en', 'va a llover', 'llovera',
+        'va a hacer frio', 'va a hacer calor', 'el clima hoy'), 'lugar'),
     ('economia', (
         'dashboard economico', 'situacion economica de chile',
-        'como esta la economia chilena', 'panorama economico'), False),
+        'como esta la economia chilena', 'panorama economico'), None),
     ('eventos', (
         'proximos eventos', 'que eventos hay', 'eventos de la cofradia',
-        'agenda de eventos', 'eventos programados'), False),
+        'agenda de eventos', 'eventos programados'), None),
     ('cumpleanos_mes', (
         'cumpleanos del mes', 'quien esta de cumpleanos',
-        'cumpleaneros del mes', 'cumpleanos de este mes'), False),
+        'cumpleaneros del mes', 'cumpleanos de este mes'), None),
+    # FASE 31.22→31.23: "¿quiénes son expertos en RRHH?" → busca en el Excel
+    # maestro "BD Grupo Laboral" de Google Drive (toda la Red Cofradía);
+    # las tarjetas de la BD quedan como fuente complementaria (PATRÓN 4 SQL
+    # y fallback dual-fuente dentro del propio comando)
+    ('buscar_profesional', (
+        'expertos en', 'experto en', 'expertas en', 'experta en',
+        'especialistas en', 'especialista en', 'quien sabe de',
+        'quienes saben de', 'profesionales de', 'profesionales en',
+        'alguien que sepa de', 'quien se dedica a', 'quienes se dedican a',
+        'busco un profesional', 'necesito un especialista',
+        'hay alguien experto', 'que cofrades saben de'), 'especialidad'),
 ]
 
 _RE_LUGAR_PR = re.compile(
     r'\b(?:en|de|para)\s+([A-Za-zÁÉÍÓÚÑÜáéíóúñü][A-Za-zÁÉÍÓÚÑÜáéíóúñü\s.\-]{1,28})')
+
+_RE_ESPECIALIDAD_PR = re.compile(
+    r'(?:expert[oa]s?\s+en|especialistas?\s+en|profesionales\s+(?:de|en)|'
+    r'sabe[n]?\s+de|se\s+dedica[n]?\s+a|sepa\s+de|saben\s+de)\s+'
+    r'([A-Za-zÁÉÍÓÚÑÜáéíóúñü][\w\sÁÉÍÓÚÑÜáéíóúñü.&\-]{2,40})',
+    re.IGNORECASE)
 
 
 def _extraer_lugar_pr(texto: str) -> str:
@@ -4420,7 +4435,6 @@ def _extraer_lugar_pr(texto: str) -> str:
         if not candidatos:
             return ''
         lugar = candidatos[-1].strip(' ?!¿¡.,;:')
-        # Podar frases de cola (cortesía/temporales) que no son parte del lugar
         lugar = re.sub(r'\s+(por favor|porfavor|ahora mismo|este momento|en este momento)\s*$',
                        '', lugar, flags=re.IGNORECASE)
         _cola = {'hoy', 'ahora', 'manana', 'mañana', 'actual', 'actualmente',
@@ -4429,7 +4443,6 @@ def _extraer_lugar_pr(texto: str) -> str:
         while palabras and palabras[-1].lower() in _cola:
             palabras.pop()
         lugar = ' '.join(palabras[:4]).strip()
-        # Descartar capturas genéricas que no son lugares
         if lugar.lower() in {'la', 'el', 'los', 'las', 'este', 'esta',
                              'grupo', 'chile', 'la cofradia', 'el grupo'}:
             return ''
@@ -4438,10 +4451,615 @@ def _extraer_lugar_pr(texto: str) -> str:
         return ''
 
 
+def _extraer_especialidad_pr(texto: str) -> str:
+    """FASE 31.22: extrae la especialidad ('expertos en X' → 'X')."""
+    try:
+        m = _RE_ESPECIALIDAD_PR.search(texto or '')
+        if not m:
+            return ''
+        esp = m.group(1).strip(' ?!¿¡.,;:')
+        # Podar colas que no son parte de la especialidad
+        esp = re.sub(r'\s+(de la cofrad[ií]a|de cofrad[ií]a|en la cofrad[ií]a|'
+                     r'del grupo|en el grupo|de la comunidad|por favor|'
+                     r'aqu[ií]|ac[aá])\s*$',
+                     '', esp, flags=re.IGNORECASE)
+        esp = ' '.join(esp.split()[:5]).strip()
+        return esp if len(esp) >= 3 else ''
+    except Exception:
+        return ''
+
+
+# FASE 31.23: comandos de SOLO LECTURA elegibles para el matcher semántico
+# (excluye acciones que crean/publican/modifican — cero riesgo de efectos
+# indeseados por un match difuso)
+_SEMANTICO_SOLO_LECTURA = {
+    'buscar_profesional', 'buscar_ia', 'empleo', 'eventos', 'anuncios',
+    'resumen', 'resumen_semanal', 'resumen_mes', 'estadisticas', 'graficos',
+    'top_usuarios', 'top10', 'sismos', 'indicadores', 'clima', 'economia',
+    'directorio', 'dotacion', 'cumpleanos_mes', 'finanzas', 'mi_dashboard',
+    'mis_coins', 'mi_perfil', 'mi_cuenta', 'mi_agenda', 'mis_tareas',
+    'consultas',
+}
+_STOPWORDS_SEM = {
+    'para', 'como', 'del', 'los', 'las', 'con', 'que', 'una', 'uno', 'unos',
+    'este', 'esta', 'estos', 'estas', 'por', 'mas', 'más', 'tus', 'sus',
+    'mis', 'the', 'and', 'con', 'sin', 'sobre', 'entre', 'hacia', 'desde',
+    'hay', 'son', 'muestra', 'muestrame', 'dame', 'dime', 'quiero', 'ver',
+    'cual', 'cuales', 'quien', 'quienes', 'donde', 'cuando', 'cuanto',
+    'cuanta', 'cuantos', 'cuantas', 'grupo', 'cofradia', 'bot',
+}
+_IDX_SEMANTICO = None
+
+
+def _normalizar_sem(s: str) -> str:
+    import unicodedata as _u
+    t = _u.normalize('NFKD', (s or '').lower())
+    return ''.join(ch for ch in t if not _u.combining(ch))
+
+
+def _construir_idx_semantico():
+    """Índice lazy: comando → (frase_nombre, tokens_nombre, tokens_desc)."""
+    global _IDX_SEMANTICO
+    if _IDX_SEMANTICO is not None:
+        return _IDX_SEMANTICO
+    idx = {}
+    catalogo = globals().get('CATALOGO_COMANDOS_INTENCION', {}) or {}
+    for cmd in _SEMANTICO_SOLO_LECTURA:
+        if cmd not in _MAPA_COMANDOS_EJECUTABLES:
+            continue
+        desc = _normalizar_sem(catalogo.get(cmd, ''))
+        frase_nombre = _normalizar_sem(cmd.replace('_', ' '))
+        toks_nombre = {t for t in frase_nombre.split()
+                       if len(t) >= 3 and t not in _STOPWORDS_SEM}
+        toks_desc = {t for t in desc.split()
+                     if len(t) >= 4 and t not in _STOPWORDS_SEM} - toks_nombre
+        idx[cmd] = (frase_nombre, toks_nombre, toks_desc)
+    _IDX_SEMANTICO = idx
+    return idx
+
+
+def _matchear_catalogo_semantico(texto_norm: str):
+    """FASE 31.23 — Capa 1.5: compara la pregunta contra el catálogo COMPLETO
+    de comandos de lectura y devuelve (comando, score, nombre_presente) del
+    mejor candidato si supera el umbral con ventaja clara. Determinístico."""
+    try:
+        idx = _construir_idx_semantico()
+        toks_preg = {t for t in texto_norm.split()
+                     if len(t) >= 3 and t not in _STOPWORDS_SEM}
+        if not toks_preg:
+            return None
+        puntajes = []
+        for cmd, (frase, tn, td) in idx.items():
+            score = 0
+            nombre_hit = False
+            if ' ' in frase and frase in texto_norm:
+                score += 4
+                nombre_hit = True
+            inter_n = toks_preg & tn
+            if inter_n:
+                score += 3 * len(inter_n)
+                nombre_hit = True
+            score += len(toks_preg & td)
+            if score:
+                puntajes.append((score, nombre_hit, cmd))
+        if not puntajes:
+            return None
+        puntajes.sort(reverse=True)
+        best_score, best_nombre, best_cmd = puntajes[0]
+        second = puntajes[1][0] if len(puntajes) > 1 else 0
+        umbral = 3 if best_nombre else 4
+        if best_score >= umbral and (best_score - second) >= 2:
+            return best_cmd
+    except Exception:
+        pass
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.24: CAPA 1.7 — INTENCIÓN POR EMBEDDINGS (preguntas-tipo)
+# Pedido de Germán: preguntas de ejemplo por comando para matching semántico.
+# Diseño profesional: tabla pgvector dedicada (NO contamina el RAG de
+# conocimiento), semillas curadas y variadas por comando, y APRENDIZAJE
+# AUTOMÁTICO: cada fraseo nuevo que el motor LLM resuelva bien se guarda
+# como ejemplo → el matcher mejora solo con el uso real de la comunidad.
+# Kill-switch: INTENCIONES_SEMANTICAS=0 en Render.
+# ════════════════════════════════════════════════════════════════════════
+INTENCIONES_SEMANTICAS = os.environ.get('INTENCIONES_SEMANTICAS', '1') == '1'
+_UMBRAL_INTENCION_EMB = float(os.environ.get('UMBRAL_INTENCION_EMB', '0.80'))
+_EMB_INTENCION_CACHE = {}
+
+_PREGUNTAS_TIPO_SEED = {
+    'buscar_profesional': [
+        "¿quiénes son expertos en recursos humanos?",
+        "necesito un abogado de la cofradía",
+        "¿hay algún contador en la red?",
+        "busco un especialista en logística",
+        "¿quién sabe de comercio exterior?",
+        "¿tenemos ingenieros navales en el grupo?",
+        "recomiéndame un profesional de marketing",
+        "¿algún cofrade trabaja en minería?",
+        "¿quiénes se dedican a la construcción?",
+        "dame el contacto de un experto en seguros",
+    ],
+    'directorio': [
+        "muéstrame el directorio profesional",
+        "¿dónde veo las tarjetas de los cofrades?",
+        "quiero ver el directorio de la cofradía",
+        "listado de profesionales del grupo",
+        "¿cómo busco en el directorio?",
+        "muéstrame las tarjetas profesionales",
+        "directorio de contactos de la red",
+        "¿qué profesionales están registrados?",
+        "ver perfiles profesionales de los miembros",
+        "acceder al directorio de socios",
+    ],
+    'empleo': [
+        "¿hay ofertas de trabajo disponibles?",
+        "busco empleo, ¿qué hay publicado?",
+        "¿qué oportunidades laborales existen?",
+        "muéstrame las vacantes de la cofradía",
+        "¿alguien está contratando?",
+        "ofertas de empleo para oficiales",
+        "¿hay pegas disponibles en el grupo?",
+        "oportunidades de trabajo publicadas",
+        "¿dónde veo los avisos de empleo?",
+        "necesito trabajo, ¿qué opciones hay?",
+    ],
+    'eventos': [
+        "¿qué eventos hay programados?",
+        "¿cuándo es la próxima reunión?",
+        "muéstrame la agenda de eventos",
+        "¿hay actividades esta semana?",
+        "próximos encuentros de la cofradía",
+        "¿qué asados o juntas vienen?",
+        "calendario de actividades del grupo",
+        "¿cuándo nos juntamos de nuevo?",
+        "eventos confirmados del mes",
+        "¿hay algún seminario pronto?",
+    ],
+    'anuncios': [
+        "¿qué anuncios hay publicados?",
+        "muéstrame los avisos del grupo",
+        "¿hay anuncios nuevos?",
+        "ver publicaciones y anuncios",
+        "¿qué se ha anunciado últimamente?",
+        "avisos importantes de la cofradía",
+        "¿hay comunicados recientes?",
+        "muéstrame el tablón de anuncios",
+        "anuncios vigentes de la comunidad",
+        "¿qué novedades se han publicado?",
+    ],
+    'resumen': [
+        "dame un resumen de la conversación",
+        "¿qué se ha hablado hoy en el grupo?",
+        "resume lo último del chat",
+        "¿de qué hablaron hoy?",
+        "ponme al día con la conversación",
+        "resumen de los mensajes de hoy",
+        "¿qué me perdí en el grupo?",
+        "resume la actividad de hoy",
+        "¿qué temas se tocaron hoy?",
+        "dame el resumen del día",
+    ],
+    'resumen_semanal': [
+        "dame el resumen semanal",
+        "¿qué pasó esta semana en el grupo?",
+        "resumen de la semana por favor",
+        "¿cómo estuvo la semana en la cofradía?",
+        "actividad de la última semana",
+        "¿qué se conversó esta semana?",
+        "ponme al día con la semana",
+        "informe semanal del grupo",
+        "resumen de los últimos 7 días",
+        "¿qué me perdí esta semana?",
+    ],
+    'resumen_mes': [
+        "muéstrame el resumen del mes",
+        "¿cómo estuvo el mes en el grupo?",
+        "resumen mensual de actividad",
+        "¿qué pasó este mes en la cofradía?",
+        "informe del mes por favor",
+        "actividad mensual del grupo",
+        "balance del mes de la comunidad",
+        "¿qué temas marcaron el mes?",
+        "resumen de los últimos 30 días",
+        "estadísticas y resumen del mes",
+    ],
+    'estadisticas': [
+        "muéstrame las estadísticas del grupo",
+        "¿cuántos mensajes se han enviado?",
+        "estadísticas generales de la cofradía",
+        "métricas de actividad del grupo",
+        "¿cómo van los números del grupo?",
+        "datos de participación general",
+        "estadísticas de uso del bot",
+        "¿cuántos usuarios registrados hay?",
+        "cifras de la comunidad",
+        "muéstrame las métricas generales",
+    ],
+    'graficos': [
+        "muéstrame los gráficos de actividad",
+        "quiero ver los gráficos del grupo",
+        "gráficos de participación por favor",
+        "visualización de la actividad",
+        "¿tienes gráficos de las estadísticas?",
+        "muéstrame las curvas de actividad",
+        "gráficos de mensajes por día",
+        "dashboard gráfico del grupo",
+        "quiero ver tendencias en gráficos",
+        "gráficas de la comunidad",
+    ],
+    'top_usuarios': [
+        "¿quiénes son los usuarios que más participan?",
+        "¿quién habla más en el grupo?",
+        "ranking de participación de la cofradía",
+        "los miembros más activos del grupo",
+        "¿quiénes escriben más mensajes?",
+        "top de usuarios más participativos",
+        "¿quién aporta más en la comunidad?",
+        "muéstrame el ranking de usuarios",
+        "¿quiénes son los cofrades más activos?",
+        "usuarios con mayor participación",
+    ],
+    'top10': [
+        "muéstrame el top 10 del mes",
+        "¿quiénes lideran la gamificación?",
+        "top 10 de cofrades con más puntos",
+        "ranking de puntos del mes actual",
+        "¿quién va ganando este mes?",
+        "los 10 mejores del mes",
+        "tabla de posiciones de la cofradía",
+        "¿cómo va el ranking mensual de puntos?",
+        "top diez de la comunidad",
+        "líderes del mes en puntos",
+    ],
+    'sismos': [
+        "¿ha temblado hoy?",
+        "¿hubo algún sismo recién?",
+        "últimos temblores en chile",
+        "¿registraron algún terremoto?",
+        "sismos recientes por favor",
+        "¿se sintió un temblor?",
+        "actividad sísmica de hoy",
+        "¿dónde fue el último sismo?",
+        "reporte de temblores recientes",
+        "¿de cuánto fue el temblor?",
+    ],
+    'indicadores': [
+        "¿cuánto está el dólar hoy?",
+        "valor de la uf actual",
+        "¿a cuánto está el euro?",
+        "indicadores económicos de hoy",
+        "¿cuál es el valor de la utm?",
+        "precio del dólar observado",
+        "¿cómo está el tipo de cambio?",
+        "dame los indicadores del día",
+        "valor del ipc y la uf",
+        "¿cuánto vale el dólar en pesos?",
+    ],
+    'clima': [
+        "¿cuál es la temperatura actual?",
+        "¿cómo está el clima en santiago?",
+        "pronóstico del tiempo para mañana",
+        "¿va a llover hoy?",
+        "¿qué temperatura hace en valparaíso?",
+        "clima para el fin de semana",
+        "¿hace frío en punta arenas?",
+        "pronóstico del tiempo en viña del mar",
+        "¿cómo estará el tiempo mañana?",
+        "temperatura y clima de hoy",
+    ],
+    'economia': [
+        "muéstrame el dashboard económico",
+        "¿cómo está la economía chilena?",
+        "panorama económico de chile",
+        "situación económica actual del país",
+        "análisis económico por favor",
+        "¿cómo van los mercados en chile?",
+        "informe económico completo",
+        "muéstrame los datos macroeconómicos",
+        "¿cómo está la inflación en chile?",
+        "estado de la economía nacional",
+    ],
+    'dotacion': [
+        "¿cuál es la dotación de la cofradía?",
+        "¿cuántos somos en el grupo?",
+        "¿cuántos miembros tiene la cofradía?",
+        "dotación actual de la comunidad",
+        "¿cuánta gente hay en el grupo?",
+        "número de integrantes de la red",
+        "¿cuántos cofrades somos?",
+        "total de miembros registrados",
+        "¿de cuántas personas es el grupo?",
+        "tamaño de la comunidad",
+    ],
+    'cumpleanos_mes': [
+        "¿quién está de cumpleaños este mes?",
+        "cumpleaños del mes por favor",
+        "¿qué cofrades cumplen años ahora?",
+        "muéstrame los cumpleañeros del mes",
+        "¿hay cumpleaños esta semana?",
+        "lista de cumpleaños del mes",
+        "¿quiénes celebran cumpleaños?",
+        "cumpleañeros de la cofradía",
+        "¿a quién saludamos este mes?",
+        "próximos cumpleaños del grupo",
+    ],
+    'finanzas': [
+        "dame consejos de finanzas personales",
+        "¿cómo ordeno mis finanzas?",
+        "tips financieros por favor",
+        "ayuda con mi presupuesto personal",
+        "¿cómo ahorro mejor mi sueldo?",
+        "consejos de inversión básicos",
+        "educación financiera para empezar",
+        "¿cómo manejo mis deudas?",
+        "recomendaciones de finanzas personales",
+        "quiero mejorar mis finanzas",
+    ],
+    'mi_dashboard': [
+        "muéstrame mi dashboard personal",
+        "quiero ver mi panel de control",
+        "mi dashboard por favor",
+        "¿cómo va mi actividad personal?",
+        "muéstrame mi resumen personal",
+        "mi panel de estadísticas",
+        "dashboard con mis datos",
+        "¿cómo voy yo en el grupo?",
+        "mi tablero personal",
+        "ver mi dashboard de cofrade",
+    ],
+    'mis_coins': [
+        "¿cuántos coins tengo?",
+        "muéstrame mi balance de coins",
+        "mis coins por favor",
+        "¿cuántas monedas he ganado?",
+        "saldo de mis cofradía coins",
+        "¿cómo van mis puntos coins?",
+        "balance de monedas acumuladas",
+        "¿cuántos coins me quedan?",
+        "revisar mis coins ganados",
+        "estado de mis coins",
+    ],
+    'mi_perfil': [
+        "muéstrame mi perfil",
+        "¿cómo está mi perfil de cofrade?",
+        "quiero ver mi perfil completo",
+        "mi perfil por favor",
+        "¿cuál es mi trust score?",
+        "datos de mi perfil personal",
+        "¿cuántos mensajes llevo?",
+        "ver mi información de miembro",
+        "mi ficha de usuario",
+        "¿cómo va mi reputación en el grupo?",
+    ],
+    'mi_cuenta': [
+        "¿cómo está mi cuenta?",
+        "¿cuántos días me quedan de suscripción?",
+        "estado de mi cuenta por favor",
+        "¿cuándo vence mi suscripción?",
+        "muéstrame mi cuenta",
+        "¿mi cuenta está activa?",
+        "días restantes de mi membresía",
+        "¿cuándo expira mi cuenta?",
+        "revisar el estado de mi suscripción",
+        "información de mi cuenta",
+    ],
+    'mi_agenda': [
+        "muéstrame mi agenda",
+        "¿qué tengo agendado?",
+        "mi agenda de networking",
+        "¿qué reuniones tengo pendientes?",
+        "ver mi agenda personal",
+        "mis citas y compromisos",
+        "¿qué tengo programado?",
+        "agenda de mis conexiones",
+        "mis próximas reuniones",
+        "revisar mi agenda",
+    ],
+    'mis_tareas': [
+        "muéstrame mis tareas pendientes",
+        "¿qué tareas tengo?",
+        "mis pendientes por favor",
+        "lista de mis tareas",
+        "¿qué me falta por hacer?",
+        "ver mis tareas de networking",
+        "tareas asignadas a mí",
+        "¿qué compromisos tengo pendientes?",
+        "mis to-do de la cofradía",
+        "revisar mis pendientes",
+    ],
+    'consultas': [
+        "¿qué consultas hay abiertas?",
+        "muéstrame las consultas del grupo",
+        "consultas pendientes de responder",
+        "¿alguien necesita ayuda con algo?",
+        "ver las consultas publicadas",
+        "¿qué preguntas ha hecho la comunidad?",
+        "consultas activas de los cofrades",
+        "¿hay consultas sin responder?",
+        "listado de consultas del grupo",
+        "preguntas abiertas de la comunidad",
+    ],
+    'buscar_ia': [
+        "busca en el historial del grupo sobre inversiones",
+        "¿qué se ha dicho sobre criptomonedas?",
+        "busca conversaciones sobre emprendimiento",
+        "¿qué se habló sobre el tema pensiones?",
+        "buscar en los mensajes antiguos sobre viajes",
+        "¿alguien mencionó algo de seguros?",
+        "busca en el historial menciones de startups",
+        "¿qué opiniones hubo sobre teletrabajo?",
+        "revisar qué se dijo sobre educación",
+        "buscar temas conversados sobre salud",
+    ],
+}
+
+
+def _intenciones_asegurar_tabla(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS intenciones_ejemplos (
+        id SERIAL PRIMARY KEY,
+        comando TEXT NOT NULL,
+        pregunta TEXT NOT NULL,
+        embedding vector(768),
+        origen TEXT DEFAULT 'seed',
+        creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (comando, pregunta)
+    )""")
+
+
+def _intencion_guardar_ejemplo_sync(comando: str, pregunta: str, origen: str = 'aprendido'):
+    """Guarda un ejemplo nuevo con su embedding (aprendizaje automático)."""
+    try:
+        if not (DATABASE_URL and comando in _SEMANTICO_SOLO_LECTURA):
+            return False
+        pregunta = (pregunta or '').strip()[:300]
+        if len(pregunta) < 8:
+            return False
+        emb = generar_embedding_gemini(pregunta, 'RETRIEVAL_QUERY')
+        if not emb:
+            return False
+        conn = get_db_connection()
+        c = conn.cursor()
+        _intenciones_asegurar_tabla(c)
+        c.execute("""INSERT INTO intenciones_ejemplos (comando, pregunta, embedding, origen)
+                     VALUES (%s, %s, %s::vector, %s)
+                     ON CONFLICT (comando, pregunta) DO NOTHING""",
+                  (comando, pregunta, embedding_to_pgvector(emb), origen))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.debug(f"intencion_guardar_ejemplo: {e}")
+        return False
+
+
+async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.24: /entrenar_intenciones (admin) — siembra las preguntas-tipo
+    curadas en la tabla pgvector. Idempotente: solo agrega las faltantes."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador.")
+        return
+    if not DATABASE_URL:
+        await update.message.reply_text("❌ Requiere PostgreSQL (Supabase).")
+        return
+    total = sum(len(v) for v in _PREGUNTAS_TIPO_SEED.values())
+    msg = await update.message.reply_text(
+        f"🧠 Entrenando intenciones: {total} preguntas-tipo de "
+        f"{len(_PREGUNTAS_TIPO_SEED)} comandos...\n⏳ (~1-2 min la primera vez)")
+
+    def _sembrar():
+        conn = get_db_connection()
+        c = conn.cursor()
+        _intenciones_asegurar_tabla(c)
+        c.execute("SELECT comando, pregunta FROM intenciones_ejemplos")
+        existentes = {(r['comando'], r['pregunta']) for r in c.fetchall()}
+        nuevas, errores = 0, 0
+        for cmd, preguntas in _PREGUNTAS_TIPO_SEED.items():
+            for p in preguntas:
+                if (cmd, p) in existentes:
+                    continue
+                emb = generar_embedding_gemini(p, 'RETRIEVAL_QUERY')
+                if not emb:
+                    errores += 1
+                    continue
+                try:
+                    c.execute("""INSERT INTO intenciones_ejemplos
+                                 (comando, pregunta, embedding, origen)
+                                 VALUES (%s, %s, %s::vector, 'seed')
+                                 ON CONFLICT (comando, pregunta) DO NOTHING""",
+                              (cmd, p, embedding_to_pgvector(emb)))
+                    nuevas += 1
+                except Exception:
+                    conn.rollback()
+                    errores += 1
+                time.sleep(0.05)  # respeto al rate limit del tier free
+        conn.commit()
+        c.execute("SELECT COUNT(*) AS n FROM intenciones_ejemplos")
+        total_bd = c.fetchone()['n']
+        conn.close()
+        return nuevas, errores, total_bd
+
+    try:
+        nuevas, errores, total_bd = await asyncio.to_thread(_sembrar)
+        await msg.edit_text(
+            f"✅ ENTRENAMIENTO COMPLETADO\n{'━' * 25}\n\n"
+            f"🌱 Nuevas sembradas: {nuevas}\n"
+            f"📚 Total en memoria de intenciones: {total_bd}\n"
+            + (f"⚠️ Con error (reintenta luego): {errores}\n" if errores else "")
+            + f"\n🧭 La Capa 1.7 ya compara cada pregunta de los usuarios "
+            f"contra estos ejemplos por similitud semántica, y APRENDE "
+            f"nuevos fraseos automáticamente con el uso.")
+    except Exception as e:
+        logger.error(f"entrenar_intenciones: {e}")
+        await msg.edit_text(f"❌ Error entrenando: {e}")
+
+
+async def _rutear_semantico_embeddings(texto: str):
+    """FASE 31.24 — Capa 1.7: matching por similitud de embeddings contra las
+    preguntas-tipo. Devuelve (comando, args) si supera el umbral; None si no.
+    Blindada: timeout 2.5s, caché, y jamás rompe el flujo."""
+    try:
+        if not (INTENCIONES_SEMANTICAS and DATABASE_URL and GEMINI_API_KEY):
+            return None
+        if not texto or len(texto) < 10:
+            return None
+        clave = texto.lower().strip()[:200]
+        if clave in _EMB_INTENCION_CACHE:
+            return _EMB_INTENCION_CACHE[clave]
+        emb = await asyncio.wait_for(
+            asyncio.to_thread(generar_embedding_gemini, texto, 'RETRIEVAL_QUERY'),
+            timeout=2.5)
+        if not emb:
+            return None
+
+        def _consultar():
+            conn = get_db_connection()
+            c = conn.cursor()
+            vec = embedding_to_pgvector(emb)
+            c.execute("""SELECT comando, pregunta,
+                                1 - (embedding <=> %s::vector) AS sim
+                         FROM intenciones_ejemplos
+                         WHERE embedding IS NOT NULL
+                         ORDER BY embedding <=> %s::vector LIMIT 3""", (vec, vec))
+            filas = c.fetchall()
+            conn.close()
+            return filas
+
+        filas = await asyncio.wait_for(asyncio.to_thread(_consultar), timeout=2.5)
+        resultado = None
+        if filas:
+            top = filas[0]
+            sim = float(top['sim'] or 0)
+            cmd = top['comando']
+            if sim >= _UMBRAL_INTENCION_EMB and cmd in _SEMANTICO_SOLO_LECTURA:
+                if cmd == 'clima':
+                    resultado = (cmd, _extraer_lugar_pr(texto))
+                elif cmd in ('buscar_profesional', 'directorio', 'buscar_ia', 'empleo'):
+                    _esp = _extraer_especialidad_pr(texto)
+                    if cmd == 'buscar_profesional' and not _esp:
+                        resultado = None
+                    else:
+                        resultado = (cmd, _esp)
+                else:
+                    resultado = (cmd, '')
+                if resultado:
+                    logger.info(f"🧲 FASE 31.24 (Capa 1.7): sim={sim:.2f} con "
+                                f"'{top['pregunta'][:40]}' → /{cmd}")
+        if len(_EMB_INTENCION_CACHE) > 400:
+            _EMB_INTENCION_CACHE.clear()
+        _EMB_INTENCION_CACHE[clave] = resultado
+        return resultado
+    except Exception as e:
+        logger.debug(f"Capa 1.7: {e}")
+        return None
+
+
 def _pre_rutear_comando(texto: str):
     """Devuelve (comando, args_str) si el texto calza inequívocamente; None si no.
 
-    FASE 31.20: ahora también extrae argumentos (ej: la ciudad para /clima).
+    FASE 31.20: extrae argumentos (ciudad para /clima).
+    FASE 31.22: extrae especialidades (área para /directorio).
     """
     try:
         if not texto or len(texto) < 8:
@@ -4450,10 +5068,30 @@ def _pre_rutear_comando(texto: str):
         t = _un19.normalize('NFKD', texto.lower())
         t = ''.join(ch for ch in t if not _un19.combining(ch))
         t = ' '.join(t.split())
-        for comando, patrones, extraer_lugar in _PRE_RUTEO_COMANDOS:
+        for comando, patrones, extractor in _PRE_RUTEO_COMANDOS:
             if any(p in t for p in patrones):
-                args = _extraer_lugar_pr(texto) if extraer_lugar else ''
+                if extractor == 'lugar':
+                    args = _extraer_lugar_pr(texto)
+                elif extractor == 'especialidad':
+                    args = _extraer_especialidad_pr(texto)
+                    if not args:
+                        continue  # directorio sin término → mejor las capas LLM
+                else:
+                    args = ''
                 return (comando, args)
+        # FASE 31.23 — Capa 1.5: matcher semántico contra el catálogo COMPLETO
+        # de comandos de lectura (evalúa TODOS los comandos existentes sin
+        # necesidad de patrones manuales; determinístico y con umbral estricto)
+        _cmd_sem = _matchear_catalogo_semantico(t)
+        if _cmd_sem:
+            if _cmd_sem == 'clima':
+                return (_cmd_sem, _extraer_lugar_pr(texto))
+            if _cmd_sem in ('buscar_profesional', 'directorio', 'buscar_ia', 'empleo'):
+                _esp_sem = _extraer_especialidad_pr(texto)
+                if _cmd_sem == 'buscar_profesional' and not _esp_sem:
+                    return None  # ese comando exige término de búsqueda
+                return (_cmd_sem, _esp_sem)
+            return (_cmd_sem, '')
     except Exception:
         pass
     return None
@@ -5334,6 +5972,8 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         # total con privado y grupo). Si el audio transcrito calza con un
         # comando, el bot se lo ejecuta a sí mismo con sus argumentos.
         _ruta_v21 = _pre_rutear_comando(texto_transcrito)
+        if not _ruta_v21:
+            _ruta_v21 = await _rutear_semantico_embeddings(texto_transcrito)  # FASE 31.24
         if _ruta_v21:
             _cmd_v21, _args_v21 = _ruta_v21
             try:
@@ -5358,6 +5998,11 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 intencion_voz['comando'], intencion_voz['args'], update, context
             )
             if ejecutado:
+                # FASE 31.24: el fraseo real del usuario se guarda como
+                # ejemplo → la Capa 1.7 aprende automáticamente
+                asyncio.create_task(asyncio.to_thread(
+                    _intencion_guardar_ejemplo_sync,
+                    intencion_voz['comando'], texto_transcrito))
                 try:
                     await msg.delete()
                 except:
@@ -14351,6 +14996,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ══════════════════════════════════════════════════════════════
         # Capa 1: comando determinístico → el bot se lo ejecuta a sí mismo
         _ruta_g19 = _pre_rutear_comando(pregunta)
+        if not _ruta_g19:
+            _ruta_g19 = await _rutear_semantico_embeddings(pregunta)  # FASE 31.24
         if _ruta_g19:
             _cmd_g19, _args_g19 = _ruta_g19
             try:
@@ -14447,6 +15094,9 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 intencion_mencion['comando'], intencion_mencion['args'], update, context
             )
             if ejecutado:
+                asyncio.create_task(asyncio.to_thread(  # FASE 31.24: aprender
+                    _intencion_guardar_ejemplo_sync,
+                    intencion_mencion['comando'], pregunta))
                 await msg.delete()
                 return
         
@@ -16804,6 +17454,302 @@ async def dotacion_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== COMANDO BUSCAR PROFESIONAL (GOOGLE DRIVE) ====================
 
 @requiere_suscripcion
+def _buscar_en_tarjetas_bd(query: str) -> str:
+    """FASE 31.23: búsqueda compacta en tarjetas_profesional (BD) — fuente
+    complementaria del Excel de Drive. Equivalencias + tolerancia a acentos."""
+    try:
+        import unicodedata as _u23
+        _q = (query or '').lower().strip()
+        if len(_q) < 3:
+            return ''
+        terminos = {_q} | {t for t in _q.split() if len(t) >= 4}
+        _equiv = {'recursos humanos': {'rrhh', 'gestion de personas', 'gestión de personas'},
+                  'rrhh': {'recursos humanos'},
+                  'legal': {'abogado', 'derecho', 'jurídico', 'juridico'}}
+        for k, vs in _equiv.items():
+            if k in _q:
+                terminos |= vs
+        for t in list(terminos):
+            terminos.add(''.join(ch for ch in _u23.normalize('NFKD', t)
+                                 if not _u23.combining(ch)))
+        conn = get_db_connection()
+        if not conn:
+            return ''
+        c = conn.cursor()
+        vistos, filas = set(), []
+        for t in list(terminos)[:12]:
+            like = f"%{t}%"
+            ph = "%s" if DATABASE_URL else "?"
+            try:
+                c.execute(f"""SELECT nombre_completo, profesion, empresa, servicios,
+                              telefono, email FROM tarjetas_profesional
+                              WHERE LOWER(COALESCE(profesion,'')) LIKE {ph}
+                              OR LOWER(COALESCE(servicios,'')) LIKE {ph}
+                              OR LOWER(COALESCE(empresa,'')) LIKE {ph} LIMIT 6""",
+                          (like, like, like))
+                for r in c.fetchall():
+                    fila = dict(r) if DATABASE_URL else dict(zip(
+                        ['nombre_completo', 'profesion', 'empresa', 'servicios',
+                         'telefono', 'email'], r))
+                    clave = (fila.get('nombre_completo') or '').lower()
+                    if clave and clave not in vistos:
+                        vistos.add(clave)
+                        filas.append(fila)
+            except Exception:
+                if DATABASE_URL:
+                    conn.rollback()
+        conn.close()
+        if not filas:
+            return ''
+        lineas = []
+        for f in filas[:6]:
+            contacto = " · ".join(x for x in [f.get('telefono') or '',
+                                              f.get('email') or ''] if x)
+            lineas.append(
+                f"👤 <b>{f.get('nombre_completo', '?')}</b>\n"
+                f"   💼 {f.get('profesion') or 'Sin profesión registrada'}"
+                + (f" — {f['empresa']}" if f.get('empresa') else "")
+                + (f"\n   📞 {contacto}" if contacto else ""))
+        return "\n\n".join(lineas)
+    except Exception as e:
+        logger.debug(f"_buscar_en_tarjetas_bd: {e}")
+        return ''
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.25: REGISTRO UNIVERSAL DE MOTORES DE BÚSQUEDA (plug-in)
+# Pedido de Germán: que futuros repositorios y ERPs "se acoplen
+# automáticamente" a todas las búsquedas del bot.
+#
+# CONTRATO DE MOTOR: dict con
+#   nombre      → identificador único
+#   descripcion → qué aporta
+#   categoria   → 'profesionales' | 'conocimiento' | 'finanzas' | 'general'
+#   disponible  → callable() → bool (detecta credenciales/tabla/API viva)
+#   buscar      → callable(query:str) → str | None  (SÍNCRONA; None = sin datos)
+#   timeout     → segundos máximos para este motor
+#
+# CÓMO ACOPLAR UN ERP FUTURO — DOS VÍAS:
+#   A) Cero código: definir en Render las variables
+#        ERP_<NOMBRE>_URL   (endpoint REST que reciba ?q=<consulta>)
+#        ERP_<NOMBRE>_KEY   (opcional, va como Bearer)
+#        ERP_<NOMBRE>_CAT   (opcional, categoria; default 'general')
+#      El auto-descubridor lo registra al arrancar.
+#   B) Una línea: registrar_motor_busqueda({...}) junto a los demás.
+# Todos los motores registrados participan EN PARALELO, con timeout y
+# aislamiento de fallas: si uno cae, los demás responden igual.
+# ════════════════════════════════════════════════════════════════════════
+REGISTRO_MOTORES_BUSQUEDA = []
+
+
+def registrar_motor_busqueda(motor: dict):
+    """Acopla un motor al bus universal de búsqueda (idempotente por nombre)."""
+    try:
+        if not motor.get('nombre') or not callable(motor.get('buscar')):
+            return False
+        if any(m['nombre'] == motor['nombre'] for m in REGISTRO_MOTORES_BUSQUEDA):
+            return False
+        motor.setdefault('categoria', 'general')
+        motor.setdefault('timeout', 12)
+        motor.setdefault('disponible', lambda: True)
+        motor.setdefault('descripcion', '')
+        REGISTRO_MOTORES_BUSQUEDA.append(motor)
+        return True
+    except Exception:
+        return False
+
+
+async def ejecutar_motores_busqueda(query: str, categoria: str = None,
+                                    excluir: set = None,
+                                    timeout_total: int = 20) -> list:
+    """Ejecuta EN PARALELO todos los motores disponibles (de la categoría si
+    se indica) y devuelve [(nombre, descripcion, resultado_str), ...] de los
+    que aportaron datos. Falla-aislado: un motor caído no afecta al resto."""
+    excluir = excluir or set()
+    candidatos = []
+    for m in REGISTRO_MOTORES_BUSQUEDA:
+        try:
+            if m['nombre'] in excluir:
+                continue
+            if categoria and m['categoria'] not in (categoria, 'general'):
+                continue
+            if not m['disponible']():
+                continue
+            candidatos.append(m)
+        except Exception:
+            continue
+    if not candidatos:
+        return []
+
+    async def _correr(m):
+        try:
+            r = await asyncio.wait_for(
+                asyncio.to_thread(m['buscar'], query),
+                timeout=min(m['timeout'], timeout_total))
+            if r and isinstance(r, str) and r.strip():
+                return (m['nombre'], m['descripcion'], r.strip())
+        except Exception as e:
+            logger.debug(f"Motor '{m['nombre']}' falló: {e}")
+        return None
+
+    resultados = await asyncio.gather(*[_correr(m) for m in candidatos])
+    return [r for r in resultados if r]
+
+
+def _motor_drive_excel_buscar(query: str):
+    """Adaptador: Excel maestro 'BD Grupo Laboral' de Google Drive."""
+    try:
+        r = buscar_profesionales(query)
+        if not r or r.startswith('❌') or 'no se encontr' in r.lower():
+            return None
+        return r
+    except Exception:
+        return None
+
+
+def _motor_socios_disponible():
+    """Detección lazy (cacheada) de la tabla socios_cofradia importada."""
+    global _SOCIOS_TABLA_OK
+    try:
+        return _SOCIOS_TABLA_OK
+    except NameError:
+        pass
+    ok = False
+    try:
+        if DATABASE_URL:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM socios_cofradia LIMIT 1")
+            ok = True
+            conn.close()
+    except Exception:
+        ok = False
+    globals()['_SOCIOS_TABLA_OK'] = ok
+    return ok
+
+
+def _motor_socios_buscar(query: str):
+    """Tabla socios_cofradia (importación futura del Excel a la BD)."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        like = f"%{(query or '').lower()}%"
+        c.execute("""SELECT nombre_completo, profesion, empresa, telefono, email
+                     FROM socios_cofradia
+                     WHERE LOWER(COALESCE(profesion,'')) LIKE %s
+                     OR LOWER(COALESCE(servicios,'')) LIKE %s
+                     OR LOWER(COALESCE(empresa,'')) LIKE %s LIMIT 6""",
+                  (like, like, like))
+        filas = c.fetchall()
+        conn.close()
+        if not filas:
+            return None
+        return "\n\n".join(
+            f"👤 <b>{f['nombre_completo']}</b>\n   💼 {f.get('profesion') or '—'}"
+            + (f" — {f['empresa']}" if f.get('empresa') else "")
+            for f in filas)
+    except Exception:
+        return None
+
+
+def _crear_motor_erp_generico(nombre: str, url: str, key: str, categoria: str):
+    """Fábrica de motores REST genéricos (auto-descubiertos por env vars)."""
+    def _buscar(query: str):
+        try:
+            headers = {'Authorization': f'Bearer {key}'} if key else {}
+            r = requests.get(url, params={'q': query}, headers=headers,
+                             timeout=(5, 10))
+            if r.status_code != 200:
+                return None
+            try:
+                data = r.json()
+                items = data.get('resultados') or data.get('results') or []
+                if items:
+                    return "\n".join(
+                        f"• {it.get('titulo') or it.get('title', '?')}: "
+                        f"{str(it.get('detalle') or it.get('detail', ''))[:150]}"
+                        for it in items[:6])
+                return None
+            except ValueError:
+                txt = (r.text or '').strip()
+                return txt[:1200] if txt else None
+        except Exception:
+            return None
+    return {
+        'nombre': f'erp_{nombre.lower()}',
+        'descripcion': f'ERP externo {nombre} (auto-descubierto)',
+        'categoria': categoria,
+        'disponible': lambda: True,
+        'buscar': _buscar,
+        'timeout': 12,
+    }
+
+
+def _autoregistrar_motores():
+    """Registra los motores nativos + auto-descubre ERPs por variables
+    ERP_<NOMBRE>_URL / ERP_<NOMBRE>_KEY / ERP_<NOMBRE>_CAT en Render."""
+    registrar_motor_busqueda({
+        'nombre': 'drive_excel_profesionales',
+        'descripcion': 'Excel maestro "BD Grupo Laboral" (Google Drive)',
+        'categoria': 'profesionales',
+        'disponible': lambda: bool(os.environ.get('GOOGLE_DRIVE_CREDS')),
+        'buscar': _motor_drive_excel_buscar,
+        'timeout': 15,
+    })
+    registrar_motor_busqueda({
+        'nombre': 'tarjetas_bd',
+        'descripcion': 'Tarjetas profesionales (base de datos)',
+        'categoria': 'profesionales',
+        'disponible': lambda: bool(DATABASE_URL),
+        'buscar': _buscar_en_tarjetas_bd,
+        'timeout': 8,
+    })
+    registrar_motor_busqueda({
+        'nombre': 'socios_cofradia',
+        'descripcion': 'Padrón de socios importado (BD)',
+        'categoria': 'profesionales',
+        'disponible': _motor_socios_disponible,
+        'buscar': _motor_socios_buscar,
+        'timeout': 8,
+    })
+    # Auto-descubrimiento de ERPs: ERP_MIERP_URL → motor 'erp_mierp'
+    try:
+        for var, val in os.environ.items():
+            if var.startswith('ERP_') and var.endswith('_URL') and val:
+                nombre = var[4:-4]
+                key = os.environ.get(f'ERP_{nombre}_KEY', '')
+                cat = os.environ.get(f'ERP_{nombre}_CAT', 'general')
+                if registrar_motor_busqueda(
+                        _crear_motor_erp_generico(nombre, val, key, cat)):
+                    logger.info(f"🔌 Motor ERP auto-acoplado: erp_{nombre.lower()} "
+                                f"(categoría {cat})")
+    except Exception as e:
+        logger.debug(f"autoregistro ERP: {e}")
+
+
+_autoregistrar_motores()
+
+
+async def motores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.25: /motores (admin) — estado del bus universal de búsqueda."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador.")
+        return
+    lineas = [f"🔌 <b>MOTORES DE BÚSQUEDA ACOPLADOS</b>", "━" * 25, ""]
+    for m in REGISTRO_MOTORES_BUSQUEDA:
+        try:
+            estado = "🟢" if m['disponible']() else "⚪"
+        except Exception:
+            estado = "🔴"
+        lineas.append(f"{estado} <b>{m['nombre']}</b> [{m['categoria']}]")
+        lineas.append(f"   {m['descripcion']}")
+    lineas.append("")
+    lineas.append("➕ <b>Acoplar un ERP sin código:</b> define en Render")
+    lineas.append("   ERP_&lt;NOMBRE&gt;_URL (+ _KEY y _CAT opcionales)")
+    lineas.append("   y reinicia — se registra solo.")
+    await update.message.reply_text("\n".join(lineas), parse_mode='HTML')
+
+
 async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /buscar_profesional - Buscar en base de datos de Google Drive"""
     if not context.args:
@@ -16819,8 +17765,25 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
     query = ' '.join(context.args)
     msg = await update.message.reply_text(f"🔍 Buscando profesionales: {query}...")
     
-    # Buscar en Google Drive
-    resultado = buscar_profesionales(query)
+    # FASE 31.25: BUS UNIVERSAL — consulta EN PARALELO todos los motores de
+    # la categoría 'profesionales' (Excel Drive + tarjetas BD + padrón de
+    # socios + cualquier ERP futuro auto-acoplado). Falla-aislado.
+    try:
+        bloques = await ejecutar_motores_busqueda(query, categoria='profesionales')
+        if bloques:
+            partes_r = []
+            for _nom, _desc, _res in bloques:
+                partes_r.append(f"📚 <b>Fuente: {_desc}</b>\n\n{_res}")
+            resultado = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(partes_r)
+        else:
+            resultado = (
+                f"❌ No encontré profesionales para '<b>{query}</b>' en ninguna "
+                f"de las fuentes acopladas.\n\n"
+                f"💡 Prueba con otros términos, o invita a los expertos del "
+                f"área a crear su tarjeta con /mi_tarjeta (+15 coins).")
+    except Exception as _e_bus:
+        logger.warning(f"FASE 31.25 bus profesionales: {_e_bus}")
+        resultado = buscar_profesionales(query)  # respaldo: vía clásica
     
     await msg.delete()
     await enviar_mensaje_largo(update, resultado)
@@ -30412,6 +31375,55 @@ def _intencion_default(mensaje: str, tipo: str = 'consulta') -> dict:
     }
 
 
+# FASE 31.23: mapa ejecutable a nivel módulo — whitelist del matcher
+# semántico y única fuente de verdad de comandos auto-ejecutables
+_MAPA_COMANDOS_EJECUTABLES = {
+    'buscar_profesional': 'buscar_profesional_comando',
+    'buscar_apoyo': 'buscar_apoyo_comando',
+    'buscar_especialista_sec': 'buscar_especialista_sec_comando',
+    'buscar_ia': 'buscar_ia_comando',
+    'rag_consulta': 'rag_consulta_comando',
+    'empleo': 'empleo_comando',
+    'mi_tarjeta': 'mi_tarjeta_comando',
+    'directorio': 'directorio_comando',
+    'conectar': 'conectar_comando',
+    'mi_perfil': 'mi_perfil_comando',
+    'mi_cuenta': 'mi_cuenta_comando',
+    'eventos': 'eventos_comando',
+    'anuncios': 'anuncios_comando',
+    'consultas': 'consultas_comando',
+    'consultar': 'consultar_comando',
+    'recomendar': 'recomendar_comando',
+    'publicar': 'publicar_comando',
+    'resumen': 'resumen_comando',
+    'resumen_semanal': 'resumen_semanal_comando',
+    'resumen_mes': 'resumen_mes_comando',
+    'estadisticas': 'estadisticas_comando',
+    'graficos': 'graficos_comando',
+    'top_usuarios': 'top_usuarios_comando',
+    'top10': 'top10_comando',
+    'sismos': 'sismos_comando',  # FASE 31.19
+    'indicadores': 'indicadores_comando',  # FASE 31.19
+    'clima': 'clima_comando',  # FASE 31.20
+    'economia': 'economia_comando',  # FASE 31.20
+    'dotacion': 'dotacion_comando',
+    'cumpleanos_mes': 'cumpleanos_mes_comando',
+    'generar_cv': 'generar_cv_comando',
+    'entrevista': 'entrevista_comando',
+    'analisis_linkedin': 'analisis_linkedin_comando',
+    'finanzas': 'finanzas_comando',
+    'mentor': 'mentor_comando',
+    'mi_dashboard': 'mi_dashboard_comando',
+    'agente': 'agente_networking_comando',
+    'match': 'match_networking_comando',
+    'briefing': 'briefing_networking_comando',
+    'mi_agenda': 'mi_agenda_comando',
+    'mis_tareas': 'mis_tareas_comando',
+    'mis_coins': 'mis_coins_comando',
+    'ayuda': 'ayuda',
+}
+
+
 async def ejecutar_comando_desde_intencion(
     comando: str, args: str, update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -30422,51 +31434,7 @@ async def ejecutar_comando_desde_intencion(
     """
     try:
         # Mapa de comandos a funciones
-        MAPA_FUNCIONES = {
-            'buscar_profesional': 'buscar_profesional_comando',
-            'buscar_apoyo': 'buscar_apoyo_comando',
-            'buscar_especialista_sec': 'buscar_especialista_sec_comando',
-            'buscar_ia': 'buscar_ia_comando',
-            'rag_consulta': 'rag_consulta_comando',
-            'empleo': 'empleo_comando',
-            'mi_tarjeta': 'mi_tarjeta_comando',
-            'directorio': 'directorio_comando',
-            'conectar': 'conectar_comando',
-            'mi_perfil': 'mi_perfil_comando',
-            'mi_cuenta': 'mi_cuenta_comando',
-            'eventos': 'eventos_comando',
-            'anuncios': 'anuncios_comando',
-            'consultas': 'consultas_comando',
-            'consultar': 'consultar_comando',
-            'recomendar': 'recomendar_comando',
-            'publicar': 'publicar_comando',
-            'resumen': 'resumen_comando',
-            'resumen_semanal': 'resumen_semanal_comando',
-            'resumen_mes': 'resumen_mes_comando',
-            'estadisticas': 'estadisticas_comando',
-            'graficos': 'graficos_comando',
-            'top_usuarios': 'top_usuarios_comando',
-            'top10': 'top10_comando',
-            'sismos': 'sismos_comando',  # FASE 31.19
-            'indicadores': 'indicadores_comando',  # FASE 31.19
-            'clima': 'clima_comando',  # FASE 31.20
-            'economia': 'economia_comando',  # FASE 31.20
-            'dotacion': 'dotacion_comando',
-            'cumpleanos_mes': 'cumpleanos_mes_comando',
-            'generar_cv': 'generar_cv_comando',
-            'entrevista': 'entrevista_comando',
-            'analisis_linkedin': 'analisis_linkedin_comando',
-            'finanzas': 'finanzas_comando',
-            'mentor': 'mentor_comando',
-            'mi_dashboard': 'mi_dashboard_comando',
-            'agente': 'agente_networking_comando',
-            'match': 'match_networking_comando',
-            'briefing': 'briefing_networking_comando',
-            'mi_agenda': 'mi_agenda_comando',
-            'mis_tareas': 'mis_tareas_comando',
-            'mis_coins': 'mis_coins_comando',
-            'ayuda': 'ayuda',
-        }
+        MAPA_FUNCIONES = _MAPA_COMANDOS_EJECUTABLES  # FASE 31.23
         
         nombre_func = MAPA_FUNCIONES.get(comando)
         if not nombre_func:
@@ -39386,7 +40354,23 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
     ]
     quiere_participacion = any(p in msg_n for p in patrones_participacion)
     
-    if not quiere_conteo and not quiere_profesiones and not quiere_participacion:
+    # ──────────────────────────────────────────────────────────────────
+    # PATRÓN 4 (FASE 31.22, caso real): "¿quiénes de Cofradía son expertos
+    # en Recursos Humanos?" — buscaba en la web teniendo el directorio
+    # profesional en la propia BD. Busca por especialidad en las tarjetas.
+    # ──────────────────────────────────────────────────────────────────
+    patrones_expertos = [
+        'expertos en', 'experto en', 'expertas en', 'experta en',
+        'especialistas en', 'especialista en', 'quien sabe de',
+        'quienes saben de', 'profesionales de', 'profesionales en',
+        'alguien que sepa de', 'quien se dedica a', 'quienes se dedican a',
+        'que cofrades saben de',
+    ]
+    quiere_expertos = any(p in msg_n for p in patrones_expertos)
+    especialidad_p4 = _extraer_especialidad_pr(mensaje) if quiere_expertos else ''
+    quiere_expertos = quiere_expertos and bool(especialidad_p4)
+    
+    if not quiere_conteo and not quiere_profesiones and not quiere_participacion and not quiere_expertos:
         return None
     
     # ──────────────────────────────────────────────────────────────────
@@ -39455,6 +40439,97 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
                 )
             except Exception as e:
                 logger.warning(f"FASE 30: error conteo integrantes: {e}")
+        
+        # EXPERTOS POR ESPECIALIDAD (FASE 31.22)
+        if quiere_expertos:
+            try:
+                # Términos de búsqueda: frase completa + palabras significativas
+                # + equivalencias comunes (ej: recursos humanos ↔ rrhh)
+                _esp_low = especialidad_p4.lower()
+                terminos_p4 = {_esp_low}
+                for _tok in _esp_low.split():
+                    if len(_tok) >= 4:
+                        terminos_p4.add(_tok)
+                _equiv = {
+                    'recursos humanos': {'rrhh', 'gestion de personas',
+                                         'gestión de personas', 'people'},
+                    'rrhh': {'recursos humanos'},
+                    'tecnologia': {'informatica', 'informática', 'software'},
+                    'tecnología': {'informatica', 'informática', 'software'},
+                    'marketing': {'mercadeo', 'publicidad'},
+                    'finanzas': {'financiero', 'contabilidad'},
+                    'legal': {'abogado', 'juridico', 'jurídico', 'derecho'},
+                }
+                for _k, _vs in _equiv.items():
+                    if _k in _esp_low:
+                        terminos_p4.update(_vs)
+                # Variantes sin acentos + con acentos comunes (los datos de la
+                # BD pueden venir escritos de ambas formas)
+                import unicodedata as _u22
+                for _t in list(terminos_p4):
+                    _plano = ''.join(ch for ch in _u22.normalize('NFKD', _t)
+                                     if not _u22.combining(ch))
+                    terminos_p4.add(_plano)
+                terminos_p4 = set(list(terminos_p4)[:12])  # tope de consultas
+                
+                encontrados_p4, vistos_p4 = [], set()
+                
+                def _buscar_tabla_p4(tabla, cols_sel, cols_like):
+                    for _t in terminos_p4:
+                        like = f"%{_t}%"
+                        conds = " OR ".join(
+                            f"LOWER(COALESCE({col},'')) LIKE "
+                            + ("%s" if DATABASE_URL else "?") for col in cols_like)
+                        params = tuple([like] * len(cols_like))
+                        try:
+                            c.execute(f"SELECT {cols_sel} FROM {tabla} "
+                                      f"WHERE {conds} LIMIT 8", params)
+                            for r in c.fetchall():
+                                fila = (dict(r) if DATABASE_URL
+                                        else dict(zip(cols_sel.split(', '), r)))
+                                clave = (fila.get('nombre_completo') or '').lower()
+                                if clave and clave not in vistos_p4:
+                                    vistos_p4.add(clave)
+                                    encontrados_p4.append(fila)
+                        except Exception:
+                            conn.rollback() if DATABASE_URL else None
+                
+                _buscar_tabla_p4(
+                    'tarjetas_profesional',
+                    'nombre_completo, profesion, empresa, servicios, ciudad, telefono, email',
+                    ['profesion', 'servicios', 'empresa'])
+                # Tabla de socios importada desde el Excel maestro (si existe)
+                _buscar_tabla_p4(
+                    'socios_cofradia',
+                    'nombre_completo, profesion, empresa, servicios, ciudad, telefono, email',
+                    ['profesion', 'servicios', 'empresa'])
+                
+                if encontrados_p4:
+                    lineas_p4 = []
+                    for f in encontrados_p4[:8]:
+                        contacto = " · ".join(x for x in [
+                            f.get('telefono') or '', f.get('email') or ''] if x)
+                        lineas_p4.append(
+                            f"👤 <b>{f.get('nombre_completo','?')}</b>\n"
+                            f"   💼 {f.get('profesion') or 'Sin profesión registrada'}"
+                            + (f" — {f['empresa']}" if f.get('empresa') else "")
+                            + (f"\n   🛠️ {str(f['servicios'])[:90]}" if f.get('servicios') else "")
+                            + (f"\n   📞 {contacto}" if contacto else ""))
+                    partes.append(
+                        f"<b>🎯 Cofrades expertos en {especialidad_p4.title()}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(lineas_p4)
+                        + f"\n\n💡 Más resultados con /directorio {especialidad_p4}")
+                else:
+                    partes.append(
+                        f"<b>🎯 Expertos en {especialidad_p4.title()}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"Busqué en el directorio profesional y por ahora ningún "
+                        f"cofrade registra esa especialidad en su tarjeta.\n\n"
+                        f"💡 Prueba /directorio {especialidad_p4} con otros términos, "
+                        f"o invita a los expertos del área a crear su tarjeta "
+                        f"con /mi_tarjeta (¡ganan +15 coins!)")
+            except Exception as e:
+                logger.warning(f"FASE 31.22: error búsqueda expertos: {e}")
         
         # RANKING DE PARTICIPACIÓN (FASE 31.19)
         if quiere_participacion:
@@ -39930,6 +41005,8 @@ def main():
     application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
     application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
     application.add_handler(CommandHandler("version", version_comando))  # FASE 31.21: identidad de build
+    application.add_handler(CommandHandler("entrenar_intenciones", entrenar_intenciones_comando))  # FASE 31.24
+    application.add_handler(CommandHandler("motores", motores_comando))  # FASE 31.25: bus universal
     application.add_handler(CommandHandler("respaldos", respaldos_comando))  # FASE 31.18: buscador de respaldos
     application.add_handler(CommandHandler("canjear_renovacion", canjear_renovacion_comando))  # FASE 31.18: coins→30 días
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
@@ -40276,6 +41353,8 @@ def main():
             # calza con un comando conocido, el bot SE LO EJECUTA A SÍ MISMO
             # al instante (sin depender del criterio del LLM de intención).
             _ruta_19 = _pre_rutear_comando(mensaje)
+            if not _ruta_19:
+                _ruta_19 = await _rutear_semantico_embeddings(mensaje)  # FASE 31.24
             if _ruta_19:
                 _cmd_directo_19, _args_19 = _ruta_19
                 try:
@@ -40306,6 +41385,9 @@ def main():
                     intencion['comando'], intencion['args'], update, context
                 )
                 if ejecutado:
+                    asyncio.create_task(asyncio.to_thread(  # FASE 31.24: aprender
+                        _intencion_guardar_ejemplo_sync,
+                        intencion['comando'], mensaje))
                     return  # El comando fue ejecutado, no necesitamos respuesta de IA
                 # Si falló la ejecución, continuar con flujo normal
             
