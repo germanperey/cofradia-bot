@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.35 · Fix NameError fantasma (extractor período + coins /asistir) · Linter limpio"
+BOT_BUILD = "FASE 31.37 · Log limpio en el parto (409 silenciado en gracia) · Transporte Dual"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -40916,6 +40916,31 @@ def main():
             logger.info("🧵 FASE 31.26: pool ampliado a 24 hilos (anti-saturación)")
         except Exception as e:
             logger.warning(f"FASE 31.26 executor: {e}")
+        # FASE 31.37: durante la gracia de deploy, silenciar los ERROR rojos
+        # que la librería imprime por su cuenta ante cada 409 del parto —
+        # queda UNA sola línea amable (⏳). Pasada la gracia, todo vuelve a
+        # loguearse fuerte (el detector 🧟 sigue intacto).
+        try:
+            import logging as _lg37
+
+            class _FiltroGraciaDeploy(_lg37.Filter):
+                def filter(self, record):
+                    try:
+                        if 'Conflict' in record.getMessage():
+                            _edad = (datetime.now() - _BOT_ARRANQUE).total_seconds()
+                            if _edad < 120:
+                                return False  # silenciar durante el parto
+                    except Exception:
+                        pass
+                    return True
+
+            _f37 = _FiltroGraciaDeploy()
+            _lg37.getLogger('telegram.ext.Updater').addFilter(_f37)
+            _lg37.getLogger('telegram.ext._updater').addFilter(_f37)
+            logger.info("🔇 FASE 31.37: ruido 409 del parto silenciado "
+                        "(solo queda la línea ⏳; post-gracia loguea todo)")
+        except Exception as e:
+            logger.warning(f"FASE 31.37 filtro: {e}")
         try:
             globals()['_ULTIMO_LATIDO'] = tiempo_real.time()
 
@@ -40934,11 +40959,14 @@ def main():
         except Exception as e:
             logger.warning(f"FASE 31.26 latido: {e}")
         # PASO 1: Limpiar webhook para evitar Conflict en Render
-        try:
-            await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
-        except Exception as e:
-            logger.warning(f"Nota al limpiar webhook: {e}")
+        # FASE 31.36: SOLO en modo polling (en modo webhook, borrarlo
+        # nos dejaría sordos — run_webhook lo registra él mismo)
+        if os.environ.get('USE_WEBHOOK', '0') != '1':
+            try:
+                await app.bot.delete_webhook(drop_pending_updates=True)
+                logger.info("🧹 Webhook anterior eliminado - sin conflictos")
+            except Exception as e:
+                logger.warning(f"Nota al limpiar webhook: {e}")
         
         # PASO 2: Esperar un momento para que Telegram procese la eliminación
         await asyncio.sleep(2)
@@ -43203,11 +43231,41 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     application.add_error_handler(_global_error_handler)
     
     # POLLING
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        close_loop=False,
-    )
+    # ════════════════════════════════════════════════════════════════
+    # FASE 31.36: MODO DUAL DE TRANSPORTE (polling ↔ webhook)
+    # Los 409 Conflict son un fenómeno EXCLUSIVO del polling (dos
+    # procesos jalando getUpdates). Con WEBHOOK, Telegram EMPUJA los
+    # updates a nuestra URL: el solapamiento de deploy desaparece por
+    # diseño y cualquier instancia pirata queda muda para siempre.
+    # Activación (opt-in, reversible): en Render definir USE_WEBHOOK=1
+    # y cambiar el servicio de 'worker' a 'web service' (Render provee
+    # PORT y RENDER_EXTERNAL_URL automáticamente).
+    # ════════════════════════════════════════════════════════════════
+    _use_webhook = os.environ.get('USE_WEBHOOK', '0') == '1'
+    _url_publica = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
+    _puerto = int(os.environ.get('PORT', '10000'))
+    if _use_webhook and _url_publica:
+        logger.info(f"📡 FASE 31.36: MODO WEBHOOK en {_url_publica} "
+                    f"(puerto {_puerto}) — adiós 409 por diseño")
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=_puerto,
+            url_path=TOKEN_BOT,  # ruta secreta = el propio token
+            webhook_url=f"{_url_publica}/{TOKEN_BOT}",
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False,
+        )
+    else:
+        if _use_webhook and not _url_publica:
+            logger.warning("📡 USE_WEBHOOK=1 pero falta RENDER_EXTERNAL_URL "
+                           "(¿el servicio sigue como 'worker'?) — "
+                           "continuando en polling")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False,
+        )
 
 
 if __name__ == '__main__':
