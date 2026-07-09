@@ -4331,34 +4331,85 @@ async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAU
 # ════════════════════════════════════════════════════════════════════════
 
 _PRE_RUTEO_COMANDOS = [
-    # (comando del catálogo de intención, patrones normalizados sin acentos)
+    # (comando, patrones normalizados sin acentos, extraer_lugar: bool)
+    # extraer_lugar=True → captura la ciudad/comuna tras "en/de/para" y la
+    # pasa como argumento al comando (ej: "temperatura en Vitacura" → /clima Vitacura)
     ('top_usuarios', (
         'mas participan', 'participan mas', 'usuarios mas activos',
         'miembros mas activos', 'cofrades mas activos', 'quienes participan',
         'quien participa mas', 'quien escribe mas', 'quien habla mas',
         'quien publica mas', 'ranking de participacion', 'ranking de usuarios',
         'ranking de mensajes', 'top de usuarios', 'usuarios con mas mensajes',
-        'los que mas escriben', 'los que mas aportan', 'mayor participacion')),
+        'los que mas escriben', 'los que mas aportan', 'mayor participacion'), False),
     ('resumen_mes', (
         'resumen del mes', 'resumen mensual', 'actividad del mes',
-        'como estuvo el mes', 'que paso este mes en el grupo')),
+        'como estuvo el mes', 'que paso este mes en el grupo'), False),
     ('estadisticas', (
         'estadisticas del grupo', 'estadisticas de la cofradia',
-        'estadisticas generales', 'metricas del grupo')),
+        'estadisticas generales', 'metricas del grupo'), False),
     ('dotacion', (
-        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual')),
+        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual'), False),
     ('sismos', (
         'ultimos sismos', 'sismos recientes', 'temblores recientes',
-        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo')),
+        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo'), False),
     ('indicadores', (
         'indicadores economicos', 'valor del dolar', 'precio del dolar',
         'cuanto esta el dolar', 'valor de la uf', 'cuanto esta la uf',
-        'valor del euro', 'valor de la utm')),
+        'valor del euro', 'valor de la utm'), False),
+    # FASE 31.20 (caso real: "¿temperatura actual en Vitacura?" → decía no
+    # tener acceso a datos en tiempo real... teniendo /clima [ciudad])
+    ('clima', (
+        'temperatura actual', 'temperatura en', 'temperatura de',
+        'que temperatura hace', 'cual es la temperatura', 'clima en',
+        'clima de', 'como esta el clima', 'como estara el clima',
+        'pronostico del tiempo', 'pronostico para', 'pronostico en',
+        'hace frio en', 'hace calor en', 'va a llover', 'lloverá',
+        'va a hacer frio', 'va a hacer calor', 'el clima hoy'), True),
+    ('economia', (
+        'dashboard economico', 'situacion economica de chile',
+        'como esta la economia chilena', 'panorama economico'), False),
+    ('eventos', (
+        'proximos eventos', 'que eventos hay', 'eventos de la cofradia',
+        'agenda de eventos', 'eventos programados'), False),
+    ('cumpleanos_mes', (
+        'cumpleanos del mes', 'quien esta de cumpleanos',
+        'cumpleaneros del mes', 'cumpleanos de este mes'), False),
 ]
 
+_RE_LUGAR_PR = re.compile(
+    r'\b(?:en|de|para)\s+([A-Za-zÁÉÍÓÚÑÜáéíóúñü][A-Za-zÁÉÍÓÚÑÜáéíóúñü\s.\-]{1,28})')
 
-def _pre_rutear_comando(texto: str) -> str:
-    """Devuelve el comando del catálogo si el texto calza inequívocamente."""
+
+def _extraer_lugar_pr(texto: str) -> str:
+    """Extrae la ciudad/comuna del texto original (con acentos intactos)."""
+    try:
+        candidatos = _RE_LUGAR_PR.findall(texto or '')
+        if not candidatos:
+            return ''
+        lugar = candidatos[-1].strip(' ?!¿¡.,;:')
+        # Podar frases de cola (cortesía/temporales) que no son parte del lugar
+        lugar = re.sub(r'\s+(por favor|porfavor|ahora mismo|este momento|en este momento)\s*$',
+                       '', lugar, flags=re.IGNORECASE)
+        _cola = {'hoy', 'ahora', 'manana', 'mañana', 'actual', 'actualmente',
+                 'porfa', 'porfis', 'gracias'}
+        palabras = lugar.split()
+        while palabras and palabras[-1].lower() in _cola:
+            palabras.pop()
+        lugar = ' '.join(palabras[:4]).strip()
+        # Descartar capturas genéricas que no son lugares
+        if lugar.lower() in {'la', 'el', 'los', 'las', 'este', 'esta',
+                             'grupo', 'chile', 'la cofradia', 'el grupo'}:
+            return ''
+        return lugar if len(lugar) >= 3 else ''
+    except Exception:
+        return ''
+
+
+def _pre_rutear_comando(texto: str):
+    """Devuelve (comando, args_str) si el texto calza inequívocamente; None si no.
+
+    FASE 31.20: ahora también extrae argumentos (ej: la ciudad para /clima).
+    """
     try:
         if not texto or len(texto) < 8:
             return None
@@ -4366,9 +4417,10 @@ def _pre_rutear_comando(texto: str) -> str:
         t = _un19.normalize('NFKD', texto.lower())
         t = ''.join(ch for ch in t if not _un19.combining(ch))
         t = ' '.join(t.split())
-        for comando, patrones in _PRE_RUTEO_COMANDOS:
+        for comando, patrones, extraer_lugar in _PRE_RUTEO_COMANDOS:
             if any(p in t for p in patrones):
-                return comando
+                args = _extraer_lugar_pr(texto) if extraer_lugar else ''
+                return (comando, args)
     except Exception:
         pass
     return None
@@ -14246,16 +14298,23 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # del bot o texto genérico). Mismas 2 capas que el privado:
         # ══════════════════════════════════════════════════════════════
         # Capa 1: comando determinístico → el bot se lo ejecuta a sí mismo
-        _cmd_g19 = _pre_rutear_comando(pregunta)
-        if _cmd_g19:
+        _ruta_g19 = _pre_rutear_comando(pregunta)
+        if _ruta_g19:
+            _cmd_g19, _args_g19 = _ruta_g19
             try:
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                if await ejecutar_comando_desde_intencion(_cmd_g19, [], update, context):
-                    logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → /{_cmd_g19}")
+                # FASE 31.19c: ejecutar PRIMERO; borrar "Procesando..." solo
+                # tras el éxito (antes se borraba antes → si el comando
+                # fallaba, el flujo seguía con msg muerto → crash general)
+                if await ejecutar_comando_desde_intencion(_cmd_g19, _args_g19, update, context):
+                    logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → "
+                                f"/{_cmd_g19} {_args_g19}")
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
                     return
+                logger.info(f"🧭 FASE 31.19c (grupo): /{_cmd_g19} no ejecutó — "
+                            f"continuando con capas siguientes")
             except Exception as _e_g19:
                 logger.debug(f"FASE 31.19b pre-router grupo: {_e_g19}")
         # Capa 2: router SQL conversacional (participación, conteos, perfiles)
@@ -30338,6 +30397,8 @@ async def ejecutar_comando_desde_intencion(
             'top10': 'top10_comando',
             'sismos': 'sismos_comando',  # FASE 31.19
             'indicadores': 'indicadores_comando',  # FASE 31.19
+            'clima': 'clima_comando',  # FASE 31.20
+            'economia': 'economia_comando',  # FASE 31.20
             'dotacion': 'dotacion_comando',
             'cumpleanos_mes': 'cumpleanos_mes_comando',
             'generar_cv': 'generar_cv_comando',
@@ -30366,7 +30427,12 @@ async def ejecutar_comando_desde_intencion(
             return False
         
         # Inyectar argumentos y ejecutar
+        # FASE 31.19c: normalizar args — los llamadores históricos pasan str,
+        # el auto-router pasaba lista → AttributeError silencioso en .strip()
         args_originales = context.args
+        if isinstance(args, (list, tuple)):
+            args = ' '.join(str(a) for a in args)
+        args = args or ''
         context.args = args.split() if args.strip() else []
         
         try:
@@ -40156,19 +40222,23 @@ def main():
             # FASE 31.19: PRE-ROUTER determinístico — si la pregunta natural
             # calza con un comando conocido, el bot SE LO EJECUTA A SÍ MISMO
             # al instante (sin depender del criterio del LLM de intención).
-            _cmd_directo_19 = _pre_rutear_comando(mensaje)
-            if _cmd_directo_19:
+            _ruta_19 = _pre_rutear_comando(mensaje)
+            if _ruta_19:
+                _cmd_directo_19, _args_19 = _ruta_19
                 try:
-                    try:
-                        await msg.delete()  # limpia el "Buscando..." antes del comando
-                    except Exception:
-                        pass
+                    # FASE 31.19c: ejecutar PRIMERO, borrar msg tras el éxito
                     ejecutado_19 = await ejecutar_comando_desde_intencion(
-                        _cmd_directo_19, [], update, context)
+                        _cmd_directo_19, _args_19, update, context)
                     if ejecutado_19:
                         logger.info(f"🧭 FASE 31.19: '{mensaje[:50]}' → "
-                                    f"/{_cmd_directo_19} (auto-router)")
+                                    f"/{_cmd_directo_19} {_args_19} (auto-router)")
+                        try:
+                            await msg.delete()  # limpia el "Buscando..."
+                        except Exception:
+                            pass
                         return
+                    logger.info(f"🧭 FASE 31.19c: /{_cmd_directo_19} no ejecutó — "
+                                f"continuando con capas siguientes")
                 except Exception as _e_pr19:
                     logger.debug(f"FASE 31.19 pre-router: {_e_pr19}")
             
