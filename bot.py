@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.41 · Slot-filling: buscar_apoyo re-pregunta el área · Semillas afiladas"
+BOT_BUILD = "FASE 31.42 · Pase VIP: la respuesta al slot no necesita 'Bot' · Área limpia"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -5222,6 +5222,24 @@ _SLOT_PENDIENTE = {}  # FASE 31.41: user_id → {'cmd','ts'} — pregunta de vue
 _SLOT_TTL = 180  # segundos de validez de la re-pregunta
 
 
+def _limpiar_area_slot(texto: str) -> str:
+    """FASE 31.42: convierte la respuesta libre del usuario en un área limpia.
+    'Bot en finanzas' → 'finanzas' · '¿logística?' → 'logística'."""
+    try:
+        import re as _re42
+        t = _re42.sub(r'@\w+', '', texto or '')          # @menciones fuera
+        t = t.strip(' ¿?¡!.,;:')
+        palabras = t.split()
+        conectores = {'bot', 'robot', 'en', 'de', 'del', 'el', 'la', 'los',
+                      'las', 'area', 'área', 'rubro', 'sector', 'seria',
+                      'sería', 'es'}
+        while palabras and palabras[0].lower().strip('¿?¡!.,') in conectores:
+            palabras.pop(0)
+        return ' '.join(palabras[:4]).strip(' ¿?¡!.,')
+    except Exception:
+        return (texto or '').strip()
+
+
 def _extraer_area_pr(texto: str) -> str:
     """FASE 31.41: extrae el área/rubro de una pregunta de búsqueda laboral.
     'quiénes buscan trabajo en el área de finanzas' → 'finanzas'."""
@@ -5285,7 +5303,7 @@ def _pre_rutear_comando(texto: str, _uid_slot=None):
             import time as _t41
             if _t41.time() - _s['ts'] <= _SLOT_TTL and not texto.startswith('/'):
                 del _SLOT_PENDIENTE[_uid_slot]
-                _area_resp = ' '.join(texto.strip(' ?¿.!').split()[:4])
+                _area_resp = _limpiar_area_slot(texto)  # FASE 31.42
                 logger.info(f"🎯 FASE 31.41: slot consumido → "
                             f"/{_s['cmd']} '{_area_resp}'")
                 return (_s['cmd'], _area_resp)
@@ -15221,6 +15239,28 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje = update.message.text
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
+    
+    # FASE 31.42: PASE VIP — si el bot le hizo una re-pregunta a ESTE usuario
+    # (slot pendiente), su siguiente mensaje ES la respuesta y entra SIN
+    # necesidad de decir 'Bot' ("finanzas" a secas basta).
+    if user_id in _SLOT_PENDIENTE and not mensaje.startswith('/'):
+        import time as _t42
+        _s42 = _SLOT_PENDIENTE.get(user_id) or {}
+        if _t42.time() - _s42.get('ts', 0) <= _SLOT_TTL:
+            del _SLOT_PENDIENTE[user_id]
+            _area42 = _limpiar_area_slot(mensaje)
+            if _area42:
+                logger.info(f"🎯 FASE 31.42: slot grupal consumido → "
+                            f"/{_s42.get('cmd','buscar_apoyo')} '{_area42}'")
+                try:
+                    await ejecutar_comando_desde_intencion(
+                        _s42.get('cmd', 'buscar_apoyo'), _area42,
+                        update, context)
+                except Exception as _e42:
+                    logger.warning(f"FASE 31.42 slot grupal: {_e42}")
+                return
+        else:
+            del _SLOT_PENDIENTE[user_id]  # expirado
     
     try:
         bot_username = context.bot.username.lower()
