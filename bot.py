@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.43 · Interceptor de slots group=-1: 'finanzas' a secas basta"
+BOT_BUILD = "FASE 31.44 · Slot blindado: pregunta nueva NUNCA se traga como área"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -5222,6 +5222,32 @@ _SLOT_PENDIENTE = {}  # FASE 31.41: user_id → {'cmd','ts'} — pregunta de vue
 _SLOT_TTL = 180  # segundos de validez de la re-pregunta
 
 
+def _es_respuesta_de_area(texto: str) -> bool:
+    """FASE 31.44: distingue la respuesta a la re-pregunta ('finanzas',
+    'recursos humanos') de una PREGUNTA NUEVA ('Bot quiénes están en
+    búsqueda laboral?') — caso real: el slot se tragó la pregunta y buscó
+    'quiénes están en búsqueda' en el Excel."""
+    try:
+        t = (texto or '').strip()
+        if '?' in t or '¿' in t:
+            return False  # las áreas no llevan signos de pregunta
+        import unicodedata as _un44
+        tn = _un44.normalize('NFKD', t.lower())
+        tn = ''.join(ch for ch in tn if not _un44.combining(ch))
+        palabras = tn.split()
+        if len(palabras) > 5:
+            return False  # un área son 1-4 palabras, no una oración
+        interrogativos = {'quien', 'quienes', 'que', 'cual', 'cuales',
+                          'cuando', 'donde', 'como', 'cuanto', 'cuantos',
+                          'muestrame', 'dame', 'dime', 'listame', 'busca'}
+        sin_bot = [p for p in palabras if p not in ('bot', 'robot')]
+        if sin_bot and sin_bot[0] in interrogativos:
+            return False  # arranca interrogando → pregunta nueva
+        return True
+    except Exception:
+        return True
+
+
 async def _slot_interceptar_texto(update, context):
     """FASE 31.43: interceptor group=-1 — si el bot le hizo una re-pregunta
     a este usuario, su siguiente texto ES la respuesta, en CUALQUIER chat y
@@ -5241,6 +5267,9 @@ async def _slot_interceptar_texto(update, context):
         if _t43.time() - _s.get('ts', 0) > _SLOT_TTL:
             del _SLOT_PENDIENTE[_uid]
             return  # expirado → el mensaje sigue su flujo normal
+        if not _es_respuesta_de_area(_txt):
+            del _SLOT_PENDIENTE[_uid]  # FASE 31.44: es una PREGUNTA nueva
+            return  # → que la procese el flujo normal (y re-pregunte si toca)
         _area = _limpiar_area_slot(_txt)
         if not _area:
             return
@@ -5335,7 +5364,9 @@ def _pre_rutear_comando(texto: str, _uid_slot=None):
         if _uid_slot is not None and _uid_slot in _SLOT_PENDIENTE:
             _s = _SLOT_PENDIENTE[_uid_slot]
             import time as _t41
-            if _t41.time() - _s['ts'] <= _SLOT_TTL and not texto.startswith('/'):
+            if (_t41.time() - _s['ts'] <= _SLOT_TTL
+                    and not texto.startswith('/')
+                    and _es_respuesta_de_area(texto)):  # FASE 31.44
                 del _SLOT_PENDIENTE[_uid_slot]
                 _area_resp = _limpiar_area_slot(texto)  # FASE 31.42
                 logger.info(f"🎯 FASE 31.41: slot consumido → "
@@ -15280,7 +15311,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in _SLOT_PENDIENTE and not mensaje.startswith('/'):
         import time as _t42
         _s42 = _SLOT_PENDIENTE.get(user_id) or {}
-        if _t42.time() - _s42.get('ts', 0) <= _SLOT_TTL:
+        if (_t42.time() - _s42.get('ts', 0) <= _SLOT_TTL
+                and _es_respuesta_de_area(mensaje)):  # FASE 31.44
             del _SLOT_PENDIENTE[user_id]
             _area42 = _limpiar_area_slot(mensaje)
             if _area42:
