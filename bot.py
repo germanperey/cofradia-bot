@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.25 · Bus Universal de Motores (ERPs plug-and-play) · Embeddings · Memoria"
+BOT_BUILD = "FASE 31.26 · Anti-Congelamiento (loop protegido + 24 hilos + latido) · Bus · Memoria"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -3804,7 +3804,8 @@ async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Concurrencia:</b> 32 usuarios simultáneos\n"
             f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas\n"
             f"🧲 <b>Capa 1.7 (embeddings):</b> {'✅ activa' if (INTENCIONES_SEMANTICAS and DATABASE_URL) else '⚠️ off'} · entrena con /entrenar_intenciones\n"
-            f"🔌 <b>Motores acoplados:</b> {len(REGISTRO_MOTORES_BUSQUEDA)} · detalle con /motores",
+            f"🔌 <b>Motores acoplados:</b> {len(REGISTRO_MOTORES_BUSQUEDA)} · detalle con /motores\n"
+            f"🫀 <b>Latido del loop:</b> hace {int(time.time() - globals().get('_ULTIMO_LATIDO', time.time()))}s · pool 24 hilos",
             parse_mode='HTML')
     except Exception as e:
         await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
@@ -17573,8 +17574,8 @@ async def ejecutar_motores_busqueda(query: str, categoria: str = None,
                 continue
             if categoria and m['categoria'] not in (categoria, 'general'):
                 continue
-            if not m['disponible']():
-                continue
+            # FASE 31.26: disponible() NO se llama aquí (podría tocar BD/red
+            # y congelaría el event loop) — se evalúa dentro del hilo del motor
             candidatos.append(m)
         except Exception:
             continue
@@ -17583,6 +17584,11 @@ async def ejecutar_motores_busqueda(query: str, categoria: str = None,
 
     async def _correr(m):
         try:
+            # FASE 31.26: disponibilidad en hilo aparte, tope 2s
+            disp = await asyncio.wait_for(
+                asyncio.to_thread(m['disponible']), timeout=2)
+            if not disp:
+                return None
             r = await asyncio.wait_for(
                 asyncio.to_thread(m['buscar'], query),
                 timeout=min(m['timeout'], timeout_total))
@@ -40717,6 +40723,37 @@ def main():
     # Crear aplicación
     async def post_init(app):
         """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
+        # FASE 31.26 — ANTI-CONGELAMIENTO:
+        # (a) Render (1 vCPU) da un pool default de solo 5 hilos; la cascada
+        #     LLM puede retener hilos hasta 180s → saturación → el bot deja
+        #     de responder "a ratos". Ampliamos a 24 hilos dedicados.
+        # (b) Monitor cardíaco: un job late cada 60s; si el latido llega
+        #     tarde, es que ALGO bloqueó el event loop → queda en el log.
+        try:
+            import concurrent.futures as _cf
+            asyncio.get_running_loop().set_default_executor(
+                _cf.ThreadPoolExecutor(max_workers=24,
+                                       thread_name_prefix='cofradia'))
+            logger.info("🧵 FASE 31.26: pool ampliado a 24 hilos (anti-saturación)")
+        except Exception as e:
+            logger.warning(f"FASE 31.26 executor: {e}")
+        try:
+            globals()['_ULTIMO_LATIDO'] = time.time()
+
+            async def _job_latido(context):
+                ahora = time.time()
+                previo = globals().get('_ULTIMO_LATIDO', ahora)
+                atraso = ahora - previo - 60
+                if atraso > 5:
+                    logger.warning(f"🫀 FASE 31.26: LOOP ESTUVO BLOQUEADO "
+                                   f"~{atraso:.0f}s (latido atrasado)")
+                globals()['_ULTIMO_LATIDO'] = ahora
+
+            app.job_queue.run_repeating(_job_latido, interval=60, first=30,
+                                        name='latido_loop')
+            logger.info("🫀 FASE 31.26: monitor cardíaco del loop activo (60s)")
+        except Exception as e:
+            logger.warning(f"FASE 31.26 latido: {e}")
         # PASO 1: Limpiar webhook para evitar Conflict en Render
         try:
             await app.bot.delete_webhook(drop_pending_updates=True)
