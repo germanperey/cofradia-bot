@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.38 · Webhook blindado (fallback elegante + puerto de salud) · Log limpio"
+BOT_BUILD = "FASE 31.39 · Puerto en paz (keep-alive cede al webhook) · Fallback total"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -40887,13 +40887,22 @@ def main():
     except Exception as e:
         logger.warning(f"Empresas init: {e}")
     
-    # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
-    keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
-    keepalive_thread.start()
-    # Auto-ping cada 4min — Render NUNCA duerme el bot
+    # FASE 31.39: el keep-alive legacy y el webhook COMPITEN por el PORT
+    # ('Address already in use' → deploy Failed). En modo webhook, el
+    # propio webhook sirve el puerto (Render ve Live por él): keep-alive
+    # OMITIDO. En polling, todo sigue como siempre.
+    _modo_webhook_39 = (os.environ.get('USE_WEBHOOK', '0') == '1'
+                        and bool(os.environ.get('RENDER_EXTERNAL_URL')))
+    if _modo_webhook_39:
+        logger.info("📡 FASE 31.39: keep-alive HTTP omitido — el webhook "
+                    "servirá el PORT (adiós 'Address already in use')")
+    else:
+        keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
+        keepalive_thread.start()
+        logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
+    # Auto-ping cada 5min — mantiene el servicio tibio en cualquier modo
     ping_thread = threading.Thread(target=auto_ping, daemon=True)
     ping_thread.start()
-    logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
     
     if not TOKEN_BOT:
         logger.error("❌ TOKEN_BOT no configurado")
@@ -43285,21 +43294,23 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 close_loop=False,
             )
             _correr_polling = False
-        except RuntimeError as _e_wh:
-            # FASE 31.38: falta el extra [webhooks] en requirements →
-            # NO morimos: caemos con elegancia a polling y lo contamos
+        except (RuntimeError, OSError) as _e_wh:
+            # FASE 31.38/31.39: extra faltante (RuntimeError) o puerto
+            # ocupado (OSError) → NO morimos: polling elegante y lo contamos
             logger.critical(
                 f"📡 Webhook no disponible: {_e_wh}\n"
-                f"🔧 FIX: en requirements.txt usar "
-                f"python-telegram-bot[job-queue,webhooks]==20.7 y "
-                f"redeploy. Mientras tanto: POLLING (el bot sigue vivo).")
+                f"🔧 Causas típicas: (a) requirements sin "
+                f"python-telegram-bot[job-queue,webhooks]==20.7; "
+                f"(b) otro proceso ocupó el PORT. "
+                f"Mientras tanto: POLLING (el bot sigue vivo).")
     elif _use_webhook and not _url_publica:
         logger.warning("📡 USE_WEBHOOK=1 pero falta RENDER_EXTERNAL_URL "
                        "(¿el servicio sigue como 'worker'?) — "
                        "continuando en polling")
     if _correr_polling:
-        if os.environ.get('PORT'):
-            _iniciar_salud_http(_puerto)  # Web Service + polling → Live
+        if os.environ.get('PORT') and _use_webhook:
+            # solo en fallback de webhook (el keep-alive fue omitido)
+            _iniciar_salud_http(_puerto)
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
