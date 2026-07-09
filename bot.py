@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.34 · Gracia de Deploy (409 del arranque ≠ zombie) · TOP instrumentado"
+BOT_BUILD = "FASE 31.35 · Fix NameError fantasma (extractor período + coins /asistir) · Linter limpio"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -5170,10 +5170,15 @@ async def _rutear_semantico_embeddings(texto: str):
 
 
 def _extraer_periodo_pr(texto: str) -> str:
-    """FASE 31.28: detecta el período temporal de la pregunta.
-    Devuelve días como string ('30','7','1') o '' (= histórico total)."""
+    """FASE 31.28/31.35: detecta el período temporal de la pregunta.
+    Devuelve días como string ('30','7','1') o '' (= histórico total).
+    31.35: AUTOSUFICIENTE — normalización propia (la versión anterior
+    llamaba a un helper inexistente y moría en NameError silencioso)."""
     try:
-        t = _normalizar_pr(texto)
+        import unicodedata as _un35
+        t = _un35.normalize('NFKD', (texto or '').lower())
+        t = ''.join(ch for ch in t if not _un35.combining(ch))
+        t = ' '.join(t.split())
         if any(p in t for p in ('ultimo mes', 'este mes', 'del mes', 'mes pasado',
                                 'mensual', 'ultimos 30', '30 dias', 'treinta dias')):
             return '30'
@@ -28669,7 +28674,7 @@ async def asistir_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             
             await update.message.reply_text(f"✅ Asistencia confirmada a \"{titulo}\"\n\n📅 Te recordaremos 24h antes.")
-            otorgar_coins(user_id, 20, f'Asistir evento: {titulo}')
+            otorgar_coins(user.id, 20, f'Asistir evento: {titulo}')  # FASE 31.35: user_id no existía (NameError) — los +20 coins por asistir JAMÁS se entregaban
     except ValueError:
         await update.message.reply_text("❌ Uso: /asistir [número ID]")
     except Exception as e:
