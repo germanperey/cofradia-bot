@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.27 · Ranking último mes + Monetización empática ($↔Coins) · Anti-Congelamiento"
+BOT_BUILD = "FASE 31.28 · Conciencia Temporal (último mes/semana/hoy) · 50 semillas/comando"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -4383,7 +4383,7 @@ _PRE_RUTEO_COMANDOS = [
         'han participado', 'participado mas', 'mas participado',
         'participaron mas', 'mas participaron', 'personas mas activas',
         'personas mas participativas', 'mas participativos',
-        'mas activos del mes', 'mas activos este mes'), None),
+        'mas activos del mes', 'mas activos este mes'), 'periodo'),
     ('resumen_mes', (
         'resumen del mes', 'resumen mensual', 'actividad del mes',
         'como estuvo el mes', 'que paso este mes en el grupo'), None),
@@ -4909,6 +4909,50 @@ _PREGUNTAS_TIPO_SEED = {
 }
 
 
+_SEMILLAS_POR_COMANDO = int(os.environ.get('SEMILLAS_POR_COMANDO', '50'))
+
+_PREFIJOS_VARIANTE = (
+    '', 'dime ', 'oye, ', 'por favor, ', 'socio, ', 'hola, ',
+    'me puedes decir ', 'necesito saber ', 'quisiera saber ',
+    'una consulta: ', 'me interesa saber ',
+)
+_SUFIJOS_VARIANTE = ('', ' por favor', ' gracias', ' ahora', ' porfa')
+
+
+def _expandir_variantes_comando(preguntas, tope=None):
+    """FASE 31.28 (pedido de Germán: ~50 preguntas-tipo por comando).
+    Expande las semillas curadas combinándolas con prefijos/sufijos
+    naturales del habla → hasta `tope` variantes únicas por comando.
+    La expansión ocurre al ENTRENAR (van a la BD con su embedding),
+    manteniendo el código fuente liviano."""
+    tope = tope or _SEMILLAS_POR_COMANDO
+    vistas, salida = set(), []
+
+    def _agregar(v):
+        v = ' '.join(v.split()).strip()
+        k = v.lower()
+        if v and k not in vistas:
+            vistas.add(k)
+            salida.append(v)
+
+    for p in preguntas:  # primero, TODAS las originales curadas
+        _agregar(p)
+    for pref in _PREFIJOS_VARIANTE:
+        for suf in _SUFIJOS_VARIANTE:
+            if not pref and not suf:
+                continue
+            for p in preguntas:
+                if len(salida) >= tope:
+                    return salida
+                nucleo = p[1:] if (pref and p.startswith('¿')) else p
+                if suf and nucleo.endswith('?'):
+                    v = pref + nucleo[:-1] + suf + '?'
+                else:
+                    v = pref + nucleo + suf
+                _agregar(v)
+    return salida[:tope]
+
+
 def _intenciones_asegurar_tabla(c):
     c.execute("""CREATE TABLE IF NOT EXISTS intenciones_ejemplos (
         id SERIAL PRIMARY KEY,
@@ -4956,10 +5000,12 @@ async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEF
     if not DATABASE_URL:
         await update.message.reply_text("❌ Requiere PostgreSQL (Supabase).")
         return
-    total = sum(len(v) for v in _PREGUNTAS_TIPO_SEED.values())
+    total = len(_PREGUNTAS_TIPO_SEED) * _SEMILLAS_POR_COMANDO
     msg = await update.message.reply_text(
-        f"🧠 Entrenando intenciones: {total} preguntas-tipo de "
-        f"{len(_PREGUNTAS_TIPO_SEED)} comandos...\n⏳ (~1-2 min la primera vez)")
+        f"🧠 Entrenando intenciones: hasta {total} preguntas-tipo "
+        f"({_SEMILLAS_POR_COMANDO} por comando × {len(_PREGUNTAS_TIPO_SEED)} "
+        f"comandos)...\n⏳ (~5-10 min la primera vez; las siguientes son "
+        f"incrementales)")
 
     def _sembrar():
         conn = get_db_connection()
@@ -4969,7 +5015,8 @@ async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEF
         existentes = {(r['comando'], r['pregunta']) for r in c.fetchall()}
         nuevas, errores = 0, 0
         for cmd, preguntas in _PREGUNTAS_TIPO_SEED.items():
-            for p in preguntas:
+            # FASE 31.28: expansión a ~50 variantes por comando
+            for p in _expandir_variantes_comando(preguntas):
                 if (cmd, p) in existentes:
                     continue
                 emb = generar_embedding_gemini(p, 'RETRIEVAL_QUERY')
@@ -5068,6 +5115,24 @@ async def _rutear_semantico_embeddings(texto: str):
         return None
 
 
+def _extraer_periodo_pr(texto: str) -> str:
+    """FASE 31.28: detecta el período temporal de la pregunta.
+    Devuelve días como string ('30','7','1') o '' (= histórico total)."""
+    try:
+        t = _normalizar_pr(texto)
+        if any(p in t for p in ('ultimo mes', 'este mes', 'del mes', 'mes pasado',
+                                'mensual', 'ultimos 30', '30 dias', 'treinta dias')):
+            return '30'
+        if any(p in t for p in ('esta semana', 'ultima semana', 'semanal',
+                                'ultimos 7', '7 dias', 'siete dias')):
+            return '7'
+        if any(p in t for p in ('hoy', 'el dia de hoy', 'ultimas 24')):
+            return '1'
+    except Exception:
+        pass
+    return ''
+
+
 def _pre_rutear_comando(texto: str):
     """Devuelve (comando, args_str) si el texto calza inequívocamente; None si no.
 
@@ -5085,6 +5150,8 @@ def _pre_rutear_comando(texto: str):
             if any(p in t for p in patrones):
                 if extractor == 'lugar':
                     args = _extraer_lugar_pr(texto)
+                elif extractor == 'periodo':
+                    args = _extraer_periodo_pr(texto)  # FASE 31.28
                 elif extractor == 'especialidad':
                     args = _extraer_especialidad_pr(texto)
                     if not args:
@@ -16673,8 +16740,18 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,30)},'Nuevos 7d',green);
 
 @requiere_suscripcion
 async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /top_usuarios - Ranking de participación"""
+    """Comando /top_usuarios - Ranking de participación.
+    FASE 31.28: acepta período opcional en días (/top_usuarios 30) — el
+    auto-router lo alimenta cuando el usuario dice 'último mes', 'semana', etc."""
     try:
+        # Período solicitado (validado a int; '' o inválido = histórico total)
+        dias = 0
+        try:
+            if context.args and str(context.args[0]).strip().isdigit():
+                dias = min(int(context.args[0]), 3650)
+        except Exception:
+            dias = 0
+
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Error conectando a la base de datos")
@@ -16682,16 +16759,16 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         
         c = conn.cursor()
         
+        _sel = """SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes """
         if DATABASE_URL:
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
-                        COUNT(*) as msgs FROM mensajes 
-                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
+            _where = f"WHERE fecha >= NOW() - INTERVAL '{dias} days' " if dias else ""
+            c.execute(_sel + _where + "GROUP BY user_id ORDER BY msgs DESC LIMIT 15")
             top = c.fetchall()
             top = [((r['nombre_completo'] or 'Usuario').strip(), r['msgs']) for r in top]
         else:
-            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
-                        COUNT(*) as msgs FROM mensajes 
-                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
+            _where = f"WHERE fecha >= datetime('now', '-{dias} days') " if dias else ""
+            c.execute(_sel + _where + "GROUP BY user_id ORDER BY msgs DESC LIMIT 15")
             top = [(r[0].strip() if isinstance(r, tuple) else (r['nombre_completo'] or 'Usuario').strip(), 
                     r[1] if isinstance(r, tuple) else r['msgs']) for r in c.fetchall()]
         
@@ -16701,7 +16778,9 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 No hay suficientes datos aún.")
             return
         
-        mensaje = "🏆 TOP USUARIOS MAS ACTIVOS\n\n"
+        _etiqueta = {1: " (HOY)", 7: " (ÚLTIMOS 7 DÍAS)", 30: " (ÚLTIMOS 30 DÍAS)"}
+        _suf = _etiqueta.get(dias, f" (ÚLTIMOS {dias} DÍAS)" if dias else "")
+        mensaje = f"🏆 TOP USUARIOS MAS ACTIVOS{_suf}\n\n"
         medallas = ['🥇', '🥈', '🥉'] + ['🏅'] * 12
         
         for i, (nombre, msgs) in enumerate(top):
