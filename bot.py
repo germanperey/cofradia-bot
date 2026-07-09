@@ -1259,6 +1259,16 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         pregunta_fb = meta['pregunta']
 
+        # FASE 31.18b (detectado en prueba de Germán): la regeneración decía
+        # "no tengo información sobre tus intereses" porque este flujo NO
+        # pasaba por la inyección de memoria del flujo principal. Ahora la
+        # memoria del usuario también alimenta la respuesta regenerada.
+        _mem_blk_fb = ""
+        try:
+            _mem_blk_fb = await memoria_contexto(query.from_user.id, pregunta_fb)
+        except Exception:
+            _mem_blk_fb = ""
+
         _docs_regen = []  # FASE 31.5: docs de la respuesta BUENA (para aprender de ELLA)
         def _regenerar():
             # Criterios DISTINTOS: query expansion (sinónimos/variantes) y
@@ -1280,10 +1290,14 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
                 "cambia el enfoque, sé más concreto, estructura mejor y NO repitas la anterior.\n\n"
                 f"PREGUNTA: {pregunta_fb}\n\n"
                 f"RESPUESTA ANTERIOR (insatisfactoria, NO repetir):\n{meta.get('respuesta','')[:900]}\n\n"
+                + (f"{_mem_blk_fb}\n\n" if _mem_blk_fb else "")
                 + (f"CONTEXTO DE LA BIBLIOTECA (usa SOLO lo relevante):\n{ctx_fb}\n\n" if ctx_fb else "")
                 + "Si la biblioteca no cubre el tema, dilo con honestidad y responde con tu "
-                  "conocimiento general, indicándolo. Responde en español, claro y estructurado.")
-            return llamar_groq(prompt_fb, max_tokens=900, temperature=0.5)
+                  "conocimiento general, indicándolo. Personaliza usando la memoria del "
+                  "usuario si está disponible. Responde en español, claro y estructurado.")
+            # FASE 31.18b: cascada completa de 7 LLMs (antes solo Groq: si
+            # fallaba, el usuario no recibía regeneración)
+            return ejecutar_cascada_llm(prompt_fb, 900, 0.5)
 
         nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=75.0)  # FASE 31.7: 45→75s
         nueva = _cortar_degeneracion(nueva)  # FASE 31.6: mata el bucle "Mihailo..."
@@ -1295,6 +1309,7 @@ async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYP
             # FASE 31.4: sin asteriscos markdown (se veían crudos en Telegram)
             nueva_limpia = nueva.strip().replace('**', '').replace('*', '').replace('__', '')
             nueva_txt = nueva_limpia[:3900] + "\n\n─────────────────\n🔄 Respuesta regenerada con criterios ampliados"
+            memoria_registrar(query.from_user.id, "", nueva_limpia)  # FASE 31.18b
             await context.bot.send_message(
                 chat_id, nueva_txt,
                 reply_markup=_crear_botones_feedback('chat_privado'))
