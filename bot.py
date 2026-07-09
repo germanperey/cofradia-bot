@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.40 · Health+Proxy (Render Live + webhook interno) · Embeddings en cascada"
+BOT_BUILD = "FASE 31.41 · Slot-filling: buscar_apoyo re-pregunta el área · Semillas afiladas"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -4397,6 +4397,21 @@ async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAU
 
 _PRE_RUTEO_COMANDOS = [
     # (comando, patrones normalizados sin acentos, extractor: None|'lugar'|'especialidad')
+    # FASE 31.41: cofrades EN búsqueda laboral (≠ /empleo, que son OFERTAS de
+    # portales). Frases en 3ª persona/plural para NO secuestrar "estoy
+    # buscando empleo" (esa sí es /empleo). Extractor 'area' + slot-filling.
+    ('buscar_apoyo', (
+        'busqueda laboral', 'en busqueda activa', 'desemplead', 'cesante',
+        'sin trabajo', 'sin empleo', 'sin pega',
+        'quienes buscan trabajo', 'quienes buscan empleo',
+        'quienes buscan pega', 'quienes estan buscando',
+        'quien esta buscando trabajo', 'quien esta buscando empleo',
+        'integrantes buscando', 'cofrades buscando', 'socios buscando',
+        'miembros buscando', 'personas buscando trabajo',
+        'estan buscando trabajo', 'estan buscando empleo',
+        'estan buscando pega', 'necesitan trabajo', 'necesitan empleo',
+        'buscan reubicarse', 'buscando reubicacion',
+        'disponibles para trabajar', 'quienes necesitan pega'), 'area'),
     ('top_usuarios', (
         'mas participan', 'participan mas', 'usuarios mas activos',
         'miembros mas activos', 'cofrades mas activos', 'quienes participan',
@@ -4508,7 +4523,7 @@ def _extraer_especialidad_pr(texto: str) -> str:
 # (excluye acciones que crean/publican/modifican — cero riesgo de efectos
 # indeseados por un match difuso)
 _SEMANTICO_SOLO_LECTURA = {
-    'buscar_profesional', 'buscar_ia', 'empleo', 'eventos', 'anuncios',
+    'buscar_profesional', 'buscar_ia', 'empleo', 'buscar_apoyo', 'eventos', 'anuncios',
     'resumen', 'resumen_semanal', 'resumen_mes', 'estadisticas', 'graficos',
     'top_usuarios', 'top10', 'sismos', 'indicadores', 'clima', 'economia',
     'directorio', 'dotacion', 'cumpleanos_mes', 'finanzas', 'mi_dashboard',
@@ -4628,8 +4643,22 @@ _PREGUNTAS_TIPO_SEED = {
         "ver perfiles profesionales de los miembros",
         "acceder al directorio de socios",
     ],
+    'buscar_apoyo': [
+        "¿quiénes están en búsqueda laboral?",
+        "¿qué integrantes están sin trabajo?",
+        "¿quiénes están desempleados en la cofradía?",
+        "cofrades que están buscando pega",
+        "¿quién está cesante en el grupo?",
+        "socios en búsqueda activa de empleo",
+        "¿qué miembros necesitan trabajo?",
+        "¿quiénes buscan reubicarse laboralmente?",
+        "personas de la cofradía disponibles para trabajar",
+        "¿quién está buscando trabajo en logística?",
+    ],
     'empleo': [
         "¿hay ofertas de trabajo disponibles?",
+        "estoy buscando empleo, ¿qué ofertas hay?",
+        "busco pega para mí, ¿qué hay en los portales?",
         "busco empleo, ¿qué hay publicado?",
         "¿qué oportunidades laborales existen?",
         "muéstrame las vacantes de la cofradía",
@@ -5189,6 +5218,31 @@ async def _rutear_semantico_embeddings(texto: str):
         return None
 
 
+_SLOT_PENDIENTE = {}  # FASE 31.41: user_id → {'cmd','ts'} — pregunta de vuelta pendiente
+_SLOT_TTL = 180  # segundos de validez de la re-pregunta
+
+
+def _extraer_area_pr(texto: str) -> str:
+    """FASE 31.41: extrae el área/rubro de una pregunta de búsqueda laboral.
+    'quiénes buscan trabajo en el área de finanzas' → 'finanzas'."""
+    try:
+        import unicodedata as _un41, re as _re41
+        t = _un41.normalize('NFKD', (texto or '').lower())
+        t = ''.join(ch for ch in t if not _un41.combining(ch))
+        t = ' '.join(t.split())
+        m = _re41.search(
+            r'(?:area|rubro|sector|especialidad|profesion)\s+(?:de\s+|en\s+)?'
+            r'([a-z][a-z ]{2,34})', t)
+        if m:
+            area = m.group(1).strip(' ?¿.!')
+            palabras = [p for p in area.split()
+                        if p not in ('de', 'la', 'el', 'los', 'las', 'del')]
+            return ' '.join(palabras[:4])
+        return ''
+    except Exception:
+        return ''
+
+
 def _extraer_periodo_pr(texto: str) -> str:
     """FASE 31.28/31.35: detecta el período temporal de la pregunta.
     Devuelve días como string ('30','7','1') o '' (= histórico total).
@@ -5212,7 +5266,7 @@ def _extraer_periodo_pr(texto: str) -> str:
     return ''
 
 
-def _pre_rutear_comando(texto: str):
+def _pre_rutear_comando(texto: str, _uid_slot=None):
     """Devuelve (comando, args_str) si el texto calza inequívocamente; None si no.
 
     FASE 31.20: extrae argumentos (ciudad para /clima).
@@ -5225,12 +5279,25 @@ def _pre_rutear_comando(texto: str):
         t = _un19.normalize('NFKD', texto.lower())
         t = ''.join(ch for ch in t if not _un19.combining(ch))
         t = ' '.join(t.split())
+        # FASE 31.41: ¿hay una re-pregunta pendiente? → este texto ES el área
+        if _uid_slot is not None and _uid_slot in _SLOT_PENDIENTE:
+            _s = _SLOT_PENDIENTE[_uid_slot]
+            import time as _t41
+            if _t41.time() - _s['ts'] <= _SLOT_TTL and not texto.startswith('/'):
+                del _SLOT_PENDIENTE[_uid_slot]
+                _area_resp = ' '.join(texto.strip(' ?¿.!').split()[:4])
+                logger.info(f"🎯 FASE 31.41: slot consumido → "
+                            f"/{_s['cmd']} '{_area_resp}'")
+                return (_s['cmd'], _area_resp)
+            del _SLOT_PENDIENTE[_uid_slot]  # expirado → limpiar
         for comando, patrones, extractor in _PRE_RUTEO_COMANDOS:
             if any(p in t for p in patrones):
                 if extractor == 'lugar':
                     args = _extraer_lugar_pr(texto)
                 elif extractor == 'periodo':
                     args = _extraer_periodo_pr(texto)  # FASE 31.28
+                elif extractor == 'area':
+                    args = _extraer_area_pr(texto)  # FASE 31.41
                 elif extractor == 'especialidad':
                     args = _extraer_especialidad_pr(texto)
                     if not args:
@@ -6132,7 +6199,8 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         # FASE 31.21: AUTO-ROUTER determinístico también en VOZ (paridad
         # total con privado y grupo). Si el audio transcrito calza con un
         # comando, el bot se lo ejecuta a sí mismo con sus argumentos.
-        _ruta_v21 = _pre_rutear_comando(texto_transcrito)
+        _ruta_v21 = _pre_rutear_comando(texto_transcrito,
+                                        update.effective_user.id)  # 31.41
         if not _ruta_v21:
             _ruta_v21 = await _rutear_semantico_embeddings(texto_transcrito)  # FASE 31.24
         if _ruta_v21:
@@ -15200,7 +15268,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # del bot o texto genérico). Mismas 2 capas que el privado:
         # ══════════════════════════════════════════════════════════════
         # Capa 1: comando determinístico → el bot se lo ejecuta a sí mismo
-        _ruta_g19 = _pre_rutear_comando(pregunta)
+        _ruta_g19 = _pre_rutear_comando(pregunta,
+                                        update.effective_user.id)  # 31.41
         if not _ruta_g19:
             _ruta_g19 = await _rutear_semantico_embeddings(pregunta)  # FASE 31.24
         if _ruta_g19:
@@ -31257,12 +31326,12 @@ async def eliminar_solicitud_comando(update: Update, context: ContextTypes.DEFAU
 CATALOGO_COMANDOS_INTENCION = {
     # Búsqueda y consultas
     'buscar_profesional': 'Buscar cofrades por profesión, área o habilidad',
-    'buscar_apoyo': 'Buscar cofrades en búsqueda laboral activa',
+    'buscar_apoyo': 'QUIÉNES de la cofradía están en búsqueda laboral/desempleados/cesantes (lista de personas, por área)',
     'buscar_especialista_sec': 'Buscar especialistas registrados en la SEC',
     'buscar_ia': 'Búsqueda IA en historial y documentos del grupo',
     'buscar_web': 'Buscar información actualizada en Internet',
     'rag_consulta': 'Consultar libros, PDFs y documentos indexados',
-    'empleo': 'Buscar oportunidades de empleo',
+    'empleo': 'OFERTAS de empleo publicadas en portales externos (Computrabajo etc.) para postular',
     # Perfil y directorio
     'mi_tarjeta': 'Ver o actualizar tarjeta profesional propia',
     'directorio': 'Ver directorio completo de cofrades',
@@ -31674,6 +31743,21 @@ async def ejecutar_comando_desde_intencion(
     El usuario NO ve ningún mensaje previo - el comando simplemente "sucede".
     """
     try:
+        # FASE 31.41: /buscar_apoyo exige área — si la pregunta natural no
+        # la trae, el bot RE-PREGUNTA y recuerda el turno pendiente (el
+        # próximo mensaje del usuario será el área; ver _pre_rutear_comando)
+        if comando == 'buscar_apoyo' and not (args or '').strip():
+            import time as _t41b
+            _SLOT_PENDIENTE[update.effective_user.id] = {
+                'cmd': 'buscar_apoyo', 'ts': _t41b.time()}
+            await update.message.reply_text(
+                "👥 ¡Claro! Tenemos cofrades en búsqueda laboral activa.\n\n"
+                "🎯 ¿En qué *área o profesión* necesitas consultar?\n"
+                "_(ej: logística, TI, finanzas, gerencia, operaciones)_\n\n"
+                "✍️ Respóndeme aquí mismo con el área y te muestro la lista.",
+                parse_mode='Markdown')
+            return True
+
         # Mapa de comandos a funciones
         MAPA_FUNCIONES = _MAPA_COMANDOS_EJECUTABLES  # FASE 31.23
         
@@ -41662,7 +41746,8 @@ def main():
             # FASE 31.19: PRE-ROUTER determinístico — si la pregunta natural
             # calza con un comando conocido, el bot SE LO EJECUTA A SÍ MISMO
             # al instante (sin depender del criterio del LLM de intención).
-            _ruta_19 = _pre_rutear_comando(mensaje)
+            _ruta_19 = _pre_rutear_comando(mensaje,
+                                           update.effective_user.id)  # 31.41
             if not _ruta_19:
                 _ruta_19 = await _rutear_semantico_embeddings(mensaje)  # FASE 31.24
             if _ruta_19:
