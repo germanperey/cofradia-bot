@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.37 · Log limpio en el parto (409 silenciado en gracia) · Transporte Dual"
+BOT_BUILD = "FASE 31.38 · Webhook blindado (fallback elegante + puerto de salud) · Log limpio"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -43244,23 +43244,62 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     _use_webhook = os.environ.get('USE_WEBHOOK', '0') == '1'
     _url_publica = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
     _puerto = int(os.environ.get('PORT', '10000'))
+    def _iniciar_salud_http(puerto):
+        """FASE 31.38: mini-servidor de salud. Si el servicio es Web
+        Service pero corremos en polling (fallback), Render necesita ver
+        un puerto abierto para marcar 'Live' — este hilo se lo da."""
+        try:
+            import http.server, socketserver, threading
+
+            class _Salud(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(f"OK · {BOT_BUILD}".encode())
+                def do_HEAD(self):
+                    self.send_response(200); self.end_headers()
+                def log_message(self, *a):
+                    pass
+
+            srv = socketserver.TCPServer(('0.0.0.0', puerto), _Salud)
+            threading.Thread(target=srv.serve_forever, daemon=True,
+                             name='salud_http').start()
+            logger.info(f"🩺 FASE 31.38: puerto de salud {puerto} abierto "
+                        f"(Render verá 'Live' aunque corramos en polling)")
+        except Exception as e:
+            logger.warning(f"FASE 31.38 salud http: {e}")
+
+    _correr_polling = True
     if _use_webhook and _url_publica:
-        logger.info(f"📡 FASE 31.36: MODO WEBHOOK en {_url_publica} "
-                    f"(puerto {_puerto}) — adiós 409 por diseño")
-        application.run_webhook(
-            listen='0.0.0.0',
-            port=_puerto,
-            url_path=TOKEN_BOT,  # ruta secreta = el propio token
-            webhook_url=f"{_url_publica}/{TOKEN_BOT}",
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False,
-        )
-    else:
-        if _use_webhook and not _url_publica:
-            logger.warning("📡 USE_WEBHOOK=1 pero falta RENDER_EXTERNAL_URL "
-                           "(¿el servicio sigue como 'worker'?) — "
-                           "continuando en polling")
+        try:
+            logger.info(f"📡 FASE 31.36: MODO WEBHOOK en {_url_publica} "
+                        f"(puerto {_puerto}) — adiós 409 por diseño")
+            application.run_webhook(
+                listen='0.0.0.0',
+                port=_puerto,
+                url_path=TOKEN_BOT,  # ruta secreta = el propio token
+                webhook_url=f"{_url_publica}/{TOKEN_BOT}",
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                close_loop=False,
+            )
+            _correr_polling = False
+        except RuntimeError as _e_wh:
+            # FASE 31.38: falta el extra [webhooks] en requirements →
+            # NO morimos: caemos con elegancia a polling y lo contamos
+            logger.critical(
+                f"📡 Webhook no disponible: {_e_wh}\n"
+                f"🔧 FIX: en requirements.txt usar "
+                f"python-telegram-bot[job-queue,webhooks]==20.7 y "
+                f"redeploy. Mientras tanto: POLLING (el bot sigue vivo).")
+    elif _use_webhook and not _url_publica:
+        logger.warning("📡 USE_WEBHOOK=1 pero falta RENDER_EXTERNAL_URL "
+                       "(¿el servicio sigue como 'worker'?) — "
+                       "continuando en polling")
+    if _correr_polling:
+        if os.environ.get('PORT'):
+            _iniciar_salud_http(_puerto)  # Web Service + polling → Live
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
