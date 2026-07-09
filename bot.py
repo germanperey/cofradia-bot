@@ -40121,6 +40121,10 @@ def main():
             _cmd_directo_19 = _pre_rutear_comando(mensaje)
             if _cmd_directo_19:
                 try:
+                    try:
+                        await msg.delete()  # limpia el "Buscando..." antes del comando
+                    except Exception:
+                        pass
                     ejecutado_19 = await ejecutar_comando_desde_intencion(
                         _cmd_directo_19, [], update, context)
                     if ejecutado_19:
