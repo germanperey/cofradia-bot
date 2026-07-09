@@ -14240,8 +14240,44 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         pregunta_lower = pregunta.lower()
         
+        # ══════════════════════════════════════════════════════════════
+        # FASE 31.19b: AUTO-ROUTER también en el GRUPO (caso real: en
+        # privado ya funcionaba, pero en el grupo respondía estadísticas
+        # del bot o texto genérico). Mismas 2 capas que el privado:
+        # ══════════════════════════════════════════════════════════════
+        # Capa 1: comando determinístico → el bot se lo ejecuta a sí mismo
+        _cmd_g19 = _pre_rutear_comando(pregunta)
+        if _cmd_g19:
+            try:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                if await ejecutar_comando_desde_intencion(_cmd_g19, [], update, context):
+                    logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → /{_cmd_g19}")
+                    return
+            except Exception as _e_g19:
+                logger.debug(f"FASE 31.19b pre-router grupo: {_e_g19}")
+        # Capa 2: router SQL conversacional (participación, conteos, perfiles)
+        try:
+            _sql_g19 = await _intentar_responder_con_sql(pregunta, user_name)
+            if _sql_g19:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                await update.message.reply_text(_sql_g19, parse_mode='HTML')
+                logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → router SQL")
+                return
+        except Exception as _e_gsql:
+            logger.debug(f"FASE 31.19b router SQL grupo: {_e_gsql}")
+        
         # Detectar preguntas sobre estadísticas del bot
-        if any(palabra in pregunta_lower for palabra in ['cuántos', 'cuantos', 'registrado', 'usuarios', 'integrantes', 'miembros', 'suscrito']):
+        # FASE 31.19b: acotado a CONTEOS explícitos — antes disparaba con la
+        # sola palabra 'usuarios'/'miembros' y secuestraba preguntas como
+        # "¿quiénes son los usuarios que más participan?" (caso real).
+        # Los conteos conversacionales ya los resuelve el router SQL de arriba.
+        if any(palabra in pregunta_lower for palabra in ['cuántos registrado', 'cuantos registrado', 'usuarios registrados', 'cuántos suscrito', 'cuantos suscrito', 'estadísticas del bot', 'estadisticas del bot']):
             # Consultar base de datos
             conn = get_db_connection()
             if conn:
@@ -39192,6 +39228,8 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
         'total de miembros', 'total de cofrades', 'total de integrantes',
         'cantidad de integrantes', 'cantidad de miembros', 'cantidad de cofrades',
         'cuantos somos', 'cuantos hay', 'cuanta dotacion',
+        'cuantos usuarios', 'usuarios registrados', 'usuarios activos',
+        'cuantos registrados', 'total de usuarios',
         'tamano del grupo', 'tamano de la cofradia',
         'dotacion total', 'dotacion actual',
     ]
@@ -39431,7 +39469,7 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
             return None
         
         # Construir respuesta final
-        resp = ("Buenas noticias " + prefijo + ", aquí los datos exactos de la base:\n\n" if prefijo else "")
+        resp = (f"Buenas noticias {prefijo.rstrip(', ')}, aquí los datos exactos de la base:\n\n" if prefijo else "")
         resp += "\n\n".join(partes)
         resp += "\n\n<em>📊 Datos obtenidos directamente de la base de datos.</em>"
         return resp
