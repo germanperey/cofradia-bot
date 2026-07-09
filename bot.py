@@ -248,6 +248,13 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
     except Exception:
         pass
 
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
+# Verificable en vivo con /version. Actualizar el tag en cada entrega.
+# ════════════════════════════════════════════════════════════════════════
+BOT_BUILD = "FASE 31.21 · Auto-Router v2 (10 dominios + args) · Memoria · Respaldo"
+_BOT_ARRANQUE = datetime.now()
+
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
 # La variable DEEPSEEK_API_KEY ya está definida arriba en línea 74.
 # DeepSeek requiere SALDO recargado (no es free tier ilimitado).
@@ -3775,6 +3782,32 @@ def _sismo_texto_voz(sismo: dict) -> str:
     return txt
 
 
+async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.21: /version — identidad de build y diagnóstico en vivo.
+    Fin de la ambigüedad '¿qué versión está corriendo?' en cada deploy."""
+    try:
+        uptime = datetime.now() - _BOT_ARRANQUE
+        h, rem = divmod(int(uptime.total_seconds()), 3600)
+        m, _ = divmod(rem, 60)
+        mem_estado = ("✅ activa" if (_MEMORIA_OK and MEMORIA_ACTIVA)
+                      else "⚠️ no disponible")
+        dominios = ", ".join(f"/{c}" for c, _p, _e in _PRE_RUTEO_COMANDOS)
+        await update.message.reply_text(
+            f"🏷️ <b>VERSIÓN DEL BOT</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Build:</b> {BOT_BUILD}\n"
+            f"<b>Arranque:</b> {_BOT_ARRANQUE.strftime('%d/%m/%Y %H:%M:%S')} UTC\n"
+            f"<b>Uptime:</b> {h}h {m}m\n\n"
+            f"🧭 <b>Auto-router:</b> {len(_PRE_RUTEO_COMANDOS)} dominios\n"
+            f"   {dominios}\n"
+            f"🧠 <b>Memoria por usuario:</b> {mem_estado}\n"
+            f"⚙️ <b>Cascada LLM:</b> 7 niveles · "
+            f"<b>Concurrencia:</b> 32 usuarios simultáneos\n"
+            f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas",
+            parse_mode='HTML')
+    except Exception as e:
+        await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
+
+
 async def agente_monitor_sismos(context: ContextTypes.DEFAULT_TYPE):
     """FASE 31.15: Job cada 5 min — detecta y publica sismos nuevos >= umbral.
 
@@ -5297,6 +5330,25 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # PASO 3: Procesar consulta con IA - búsqueda exhaustiva en todas las fuentes
         # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
+        # FASE 31.21: AUTO-ROUTER determinístico también en VOZ (paridad
+        # total con privado y grupo). Si el audio transcrito calza con un
+        # comando, el bot se lo ejecuta a sí mismo con sus argumentos.
+        _ruta_v21 = _pre_rutear_comando(texto_transcrito)
+        if _ruta_v21:
+            _cmd_v21, _args_v21 = _ruta_v21
+            try:
+                if await ejecutar_comando_desde_intencion(_cmd_v21, _args_v21, update, context):
+                    logger.info(f"🧭 FASE 31.21 (voz): '{texto_transcrito[:50]}' → "
+                                f"/{_cmd_v21} {_args_v21}")
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    registrar_servicio_usado(user_id, 'voz_comando')
+                    return
+            except Exception as _e_v21:
+                logger.debug(f"FASE 31.21 pre-router voz: {_e_v21}")
+        
         intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
         texto_para_busqueda = intencion_voz['query_mejorada']
         
@@ -39877,6 +39929,7 @@ def main():
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
     application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
+    application.add_handler(CommandHandler("version", version_comando))  # FASE 31.21: identidad de build
     application.add_handler(CommandHandler("respaldos", respaldos_comando))  # FASE 31.18: buscador de respaldos
     application.add_handler(CommandHandler("canjear_renovacion", canjear_renovacion_comando))  # FASE 31.18: coins→30 días
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
@@ -41771,6 +41824,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
     logger.info("✅ Bot iniciado!")
+    logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDOS)} dominios")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
