@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.28 · Conciencia Temporal (último mes/semana/hoy) · 50 semillas/comando"
+BOT_BUILD = "FASE 31.29 · Rayos X del Ruteo (/diagnostico_ruteo) · Conciencia Temporal · 50 semillas"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -4991,6 +4991,55 @@ def _intencion_guardar_ejemplo_sync(comando: str, pregunta: str, origen: str = '
         return False
 
 
+async def diagnostico_ruteo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.29: /diagnostico_ruteo <frase> (admin) — muestra qué capa
+    capturaría la frase y con qué argumentos, SIN ejecutar el comando.
+    Herramienta anti-adivinanzas para verificar el ruteo en producción."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador.")
+        return
+    frase = ' '.join(context.args) if context.args else ''
+    if not frase:
+        await update.message.reply_text(
+            "Uso: /diagnostico_ruteo quiénes participaron más el último mes")
+        return
+    lineas = [f"🩻 <b>RAYOS X DEL RUTEO</b> · {BOT_BUILD.split('·')[0].strip()}",
+              f"«{frase}»", "━" * 25]
+    # Capa 1 / 1.5 (determinística)
+    try:
+        r1 = _pre_rutear_comando(frase)
+        if r1:
+            lineas.append(f"🎯 <b>Capa 1/1.5:</b> → /{r1[0]} "
+                          f"args=<code>{r1[1] or '(sin args)'}</code>")
+        else:
+            lineas.append("⚪ <b>Capa 1/1.5:</b> sin match (pasa a embeddings)")
+    except Exception as e:
+        lineas.append(f"🔴 Capa 1: error {e}")
+    # Extractor temporal (independiente, informativo)
+    try:
+        _per = _extraer_periodo_pr(frase)
+        lineas.append(f"⏰ <b>Período detectado:</b> "
+                      f"{(_per + ' días') if _per else 'histórico total'}")
+    except Exception:
+        pass
+    # Capa 1.7 (embeddings)
+    try:
+        r17 = await _rutear_semantico_embeddings(frase)
+        if r17:
+            lineas.append(f"🧲 <b>Capa 1.7 (embeddings):</b> → /{r17[0]} "
+                          f"args=<code>{r17[1] or '(sin args)'}</code>")
+        else:
+            lineas.append("⚪ <b>Capa 1.7:</b> sin match ≥ umbral "
+                          f"({_UMBRAL_INTENCION_EMB}) o sin entrenar")
+    except Exception as e:
+        lineas.append(f"🔴 Capa 1.7: {e}")
+    lineas.append("")
+    lineas.append("Si la Capa 1 muestra el comando y args correctos aquí, "
+                  "pero el bot responde distinto, la instancia que contesta "
+                  "NO es este build → revisar /version y el deploy.")
+    await update.message.reply_text("\n".join(lineas), parse_mode='HTML')
+
+
 async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """FASE 31.24: /entrenar_intenciones (admin) — siembra las preguntas-tipo
     curadas en la tabla pgvector. Idempotente: solo agrega las faltantes."""
@@ -5158,6 +5207,8 @@ def _pre_rutear_comando(texto: str):
                         continue  # directorio sin término → mejor las capas LLM
                 else:
                     args = ''
+                logger.info(f"🎯 Capa 1: '{texto[:60]}' → /{comando} "
+                            f"args='{args}'")  # FASE 31.29: traza
                 return (comando, args)
         # FASE 31.23 — Capa 1.5: matcher semántico contra el catálogo COMPLETO
         # de comandos de lectura (evalúa TODOS los comandos existentes sin
@@ -41143,6 +41194,7 @@ def main():
     application.add_handler(CommandHandler("version", version_comando))  # FASE 31.21: identidad de build
     application.add_handler(CommandHandler("entrenar_intenciones", entrenar_intenciones_comando))  # FASE 31.24
     application.add_handler(CommandHandler("motores", motores_comando))  # FASE 31.25: bus universal
+    application.add_handler(CommandHandler("diagnostico_ruteo", diagnostico_ruteo_comando))  # FASE 31.29
     application.add_handler(CommandHandler("respaldos", respaldos_comando))  # FASE 31.18: buscador de respaldos
     application.add_handler(CommandHandler("canjear_renovacion", canjear_renovacion_comando))  # FASE 31.18: coins→30 días
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
