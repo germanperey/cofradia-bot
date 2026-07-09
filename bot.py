@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.29 · Rayos X del Ruteo (/diagnostico_ruteo) · Conciencia Temporal · 50 semillas"
+BOT_BUILD = "FASE 31.30 · Defensa Temporal en Profundidad (período inferido en TODAS las rutas)"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -16800,6 +16800,22 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             if context.args and str(context.args[0]).strip().isdigit():
                 dias = min(int(context.args[0]), 3650)
+            elif not context.args:
+                # FASE 31.30 — DEFENSA EN PROFUNDIDAD: si NINGUNA capa pasó
+                # args (motor LLM, rutas antiguas, mención en grupo, etc.),
+                # inferir el período directamente de la pregunta original
+                # del usuario. "/top_usuarios" tipeado no trae período → 0.
+                _txt_orig = ''
+                try:
+                    _txt_orig = (update.message.text or
+                                 update.message.caption or '')
+                except Exception:
+                    _txt_orig = ''
+                _per_inf = _extraer_periodo_pr(_txt_orig)
+                if _per_inf:
+                    dias = int(_per_inf)
+                    logger.info(f"⏰ FASE 31.30: período inferido del mensaje "
+                                f"original → {dias} días")
         except Exception:
             dias = 0
 
