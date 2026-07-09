@@ -3903,6 +3903,410 @@ async def job_memoria_aprendizaje(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════════
+# FASE 31.18-A: AGENTE DE RESPALDO CLASIFICADO DE CONVERSACIONES
+# Los TEXTOS del grupo ya se respaldan en vivo (tabla `mensajes`, con
+# topic_id y categoría) y los documentos ya se registran como referencia
+# RAG (FASE 31.9). Esta fase completa el catastro:
+#   1. AUDIOS del grupo → transcritos a texto (Whisper/Groq) y catalogados
+#   2. FOTOS/VIDEOS/ARCHIVOS → título + breve resumen + quién + fecha/hora
+#      (NUNCA el archivo en sí — no satura los respaldos)
+#   3. Consolidador cada 6 horas → ciclo clasificado por topic en BD
+#   4. /respaldos <términos> → búsqueda expedita en todo el histórico
+# Nota honesta: Telegram no permite a los bots leer historial retroactivo;
+# el catastro se construye desde el deploy hacia adelante.
+# ════════════════════════════════════════════════════════════════════════
+
+_TOPIC_NAME_CACHE = {}
+
+
+def _topic_nombre_desde_update(update) -> str:
+    """Mejor nombre de topic disponible: cache ← service messages ← fallback."""
+    try:
+        m = update.effective_message
+        tid = getattr(m, 'message_thread_id', None)
+        # Aprender nombres cuando Telegram los expone
+        ftc = getattr(m, 'forum_topic_created', None) or getattr(
+            getattr(m, 'reply_to_message', None), 'forum_topic_created', None)
+        if ftc and getattr(ftc, 'name', None) and tid:
+            _TOPIC_NAME_CACHE[tid] = ftc.name
+        if tid is None:
+            return 'General'
+        return _TOPIC_NAME_CACHE.get(tid, f'Topic #{tid}')
+    except Exception:
+        return 'General'
+
+
+def _respaldo_asegurar_tablas(c):
+    c.execute('''CREATE TABLE IF NOT EXISTS respaldo_archivos (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        usuario TEXT,
+        topic_id BIGINT,
+        topic_nombre TEXT,
+        tipo TEXT,
+        titulo TEXT,
+        resumen TEXT,
+        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS respaldo_ciclos (
+        id SERIAL PRIMARY KEY,
+        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        resumen TEXT
+    )''')
+
+
+def _respaldo_guardar_sync(user_id, usuario, topic_id, topic_nombre,
+                           tipo, titulo, resumen):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        _respaldo_asegurar_tablas(c)
+        if DATABASE_URL:
+            c.execute("""INSERT INTO respaldo_archivos
+                         (user_id, usuario, topic_id, topic_nombre, tipo, titulo, resumen)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                      (user_id, usuario, topic_id, topic_nombre, tipo,
+                       (titulo or '')[:300], (resumen or '')[:1500]))
+        else:
+            c.execute("""INSERT INTO respaldo_archivos
+                         (user_id, usuario, topic_id, topic_nombre, tipo, titulo, resumen)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (user_id, usuario, topic_id, topic_nombre, tipo,
+                       (titulo or '')[:300], (resumen or '')[:1500]))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"respaldo guardar: {e}")
+
+
+async def respaldar_multimedia_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.18: Cataloga multimedia del grupo (audio→texto, resto→referencia).
+
+    Registrado en group=9: corre EN PARALELO a los handlers existentes sin
+    interferir con ninguno. Todo el trabajo pesado va a threads/background.
+    """
+    try:
+        m = update.effective_message
+        chat = update.effective_chat
+        if not m or not chat or chat.type not in ('group', 'supergroup'):
+            return
+        u = update.effective_user
+        usuario = (f"{u.first_name or ''} {u.last_name or ''}".strip()
+                   or (u.username or 'desconocido')) if u else 'desconocido'
+        topic_id = getattr(m, 'message_thread_id', None)
+        topic_nombre = _topic_nombre_desde_update(update)
+        caption = (m.caption or '').strip()
+
+        tipo, titulo, resumen, media_audio = None, None, caption, None
+        if m.voice or m.audio or m.video_note:
+            media_audio = m.voice or m.audio or m.video_note
+            tipo = 'audio' if not m.video_note else 'video_nota'
+            dur = getattr(media_audio, 'duration', 0) or 0
+            titulo = getattr(media_audio, 'file_name', None) or f"Audio de {usuario} ({dur}s)"
+        elif m.photo:
+            tipo, titulo = 'imagen', f"Imagen de {usuario}"
+            resumen = caption or 'Imagen compartida sin descripción'
+        elif m.video:
+            tipo = 'video'
+            dur = getattr(m.video, 'duration', 0) or 0
+            titulo = getattr(m.video, 'file_name', None) or f"Video de {usuario} ({dur}s)"
+            resumen = caption or f'Video de {dur} segundos, sin descripción'
+        elif m.document:
+            doc = m.document
+            ext = (doc.file_name or '').rsplit('.', 1)[-1].upper() if doc.file_name else '?'
+            tipo = {'PDF': 'pdf', 'XLSX': 'excel', 'XLS': 'excel',
+                    'DOCX': 'word', 'DOC': 'word'}.get(ext, 'documento')
+            titulo = doc.file_name or f"Documento de {usuario}"
+            resumen = caption or f'Archivo {ext} compartido sin descripción'
+        else:
+            return
+
+        async def _procesar():
+            texto_final = resumen
+            if media_audio is not None:
+                # Convertir audio del grupo a TEXTO (pedido de Germán)
+                try:
+                    f = await media_audio.get_file()
+                    audio_bytes = bytes(await f.download_as_bytearray())
+                    trans = await asyncio.to_thread(
+                        transcribir_audio_groq, audio_bytes, 'grupo.ogg')
+                    if trans:
+                        texto_final = f"Transcripción: {trans[:1200]}"
+                        if caption:
+                            texto_final = f"{caption} — {texto_final}"
+                except Exception as _e_tr:
+                    logger.debug(f"respaldo transcripción: {_e_tr}")
+                    texto_final = caption or 'Audio (transcripción no disponible)'
+            await asyncio.to_thread(
+                _respaldo_guardar_sync, u.id if u else 0, usuario,
+                topic_id, topic_nombre, tipo, titulo, texto_final)
+
+        asyncio.create_task(_procesar())  # fire-and-forget: cero latencia
+    except Exception as e:
+        logger.debug(f"respaldar_multimedia_grupo: {e}")
+
+
+async def agente_respaldo_conversaciones(context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.18: Job cada 6 horas — consolida y CLASIFICA el ciclo:
+    mensajes y archivos por topic/etiqueta y por categoría, dejando un
+    registro ordenado en respaldo_ciclos (consultable con /respaldos)."""
+    def _consolidar():
+        conn = get_db_connection()
+        if not conn:
+            return None
+        try:
+            c = conn.cursor()
+            _respaldo_asegurar_tablas(c)
+            iv = "now() - interval '6 hours'" if DATABASE_URL else "datetime('now','-6 hours')"
+            c.execute(f"""SELECT COALESCE(topic_id, 0) AS tid, categoria, COUNT(*) AS n
+                          FROM mensajes WHERE fecha > {iv}
+                          GROUP BY tid, categoria ORDER BY n DESC LIMIT 30""")
+            msgs = c.fetchall()
+            c.execute(f"""SELECT tipo, COUNT(*) AS n FROM respaldo_archivos
+                          WHERE fecha > {iv} GROUP BY tipo ORDER BY n DESC""")
+            archs = c.fetchall()
+            if not msgs and not archs:
+                conn.close()
+                return ''
+            lineas = ["CICLO DE RESPALDO (últimas 6 horas)"]
+            if msgs:
+                lineas.append("Mensajes por topic/categoría:")
+                for r in msgs:
+                    tid = r['tid'] if DATABASE_URL else r[0]
+                    cat = (r['categoria'] if DATABASE_URL else r[1]) or 'sin categoría'
+                    n = r['n'] if DATABASE_URL else r[2]
+                    tnom = _TOPIC_NAME_CACHE.get(tid, 'General' if not tid else f'Topic #{tid}')
+                    lineas.append(f"  [{tnom}] {cat}: {n}")
+            if archs:
+                lineas.append("Archivos catalogados:")
+                for r in archs:
+                    lineas.append(f"  {(r['tipo'] if DATABASE_URL else r[0])}: "
+                                  f"{r['n'] if DATABASE_URL else r[1]}")
+            resumen = "\n".join(lineas)
+            if DATABASE_URL:
+                c.execute("INSERT INTO respaldo_ciclos (resumen) VALUES (%s)", (resumen,))
+            else:
+                c.execute("INSERT INTO respaldo_ciclos (resumen) VALUES (?)", (resumen,))
+            conn.commit()
+            conn.close()
+            return resumen
+        except Exception as e:
+            logger.debug(f"consolidar respaldo: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return None
+    resumen = await asyncio.to_thread(_consolidar)
+    if resumen:
+        logger.info(f"🗄️ FASE 31.18: ciclo de respaldo consolidado "
+                    f"({len(resumen.splitlines())} líneas)")
+    elif resumen == '':
+        logger.info("🗄️ FASE 31.18: ciclo de respaldo sin actividad nueva")
+
+
+async def respaldos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.18: /respaldos [términos] — búsqueda expedita del catastro (admin).
+
+    Sin argumentos: estado general y último ciclo. Con términos: busca en
+    mensajes de texto Y en el catálogo de archivos/audios transcritos.
+    """
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Comando exclusivo del administrador."); return
+
+    def _buscar(terminos):
+        conn = get_db_connection()
+        if not conn:
+            return None
+        try:
+            c = conn.cursor()
+            _respaldo_asegurar_tablas(c)
+            if not terminos:
+                c.execute("SELECT COUNT(*) AS n FROM mensajes")
+                row = c.fetchone()
+                n_msgs = row['n'] if DATABASE_URL else row[0]
+                c.execute("SELECT COUNT(*) AS n FROM respaldo_archivos")
+                row = c.fetchone()
+                n_arch = row['n'] if DATABASE_URL else row[0]
+                c.execute("SELECT resumen FROM respaldo_ciclos ORDER BY fecha DESC LIMIT 1")
+                row = c.fetchone()
+                ultimo = (row['resumen'] if DATABASE_URL else row[0]) if row else 'Aún sin ciclos.'
+                conn.close()
+                return {'modo': 'estado', 'n_msgs': n_msgs, 'n_arch': n_arch, 'ultimo': ultimo}
+            like = f"%{terminos}%"
+            if DATABASE_URL:
+                c.execute("""SELECT first_name, message, fecha, topic_id FROM mensajes
+                             WHERE message ILIKE %s ORDER BY fecha DESC LIMIT 8""", (like,))
+            else:
+                c.execute("""SELECT first_name, message, fecha, topic_id FROM mensajes
+                             WHERE message LIKE ? ORDER BY fecha DESC LIMIT 8""", (like,))
+            msgs = c.fetchall()
+            if DATABASE_URL:
+                c.execute("""SELECT usuario, tipo, titulo, resumen, fecha, topic_nombre
+                             FROM respaldo_archivos
+                             WHERE titulo ILIKE %s OR resumen ILIKE %s
+                             ORDER BY fecha DESC LIMIT 8""", (like, like))
+            else:
+                c.execute("""SELECT usuario, tipo, titulo, resumen, fecha, topic_nombre
+                             FROM respaldo_archivos
+                             WHERE titulo LIKE ? OR resumen LIKE ?
+                             ORDER BY fecha DESC LIMIT 8""", (like, like))
+            archs = c.fetchall()
+            conn.close()
+            return {'modo': 'busqueda', 'msgs': msgs, 'archs': archs}
+        except Exception as e:
+            logger.debug(f"/respaldos: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return None
+
+    terminos = ' '.join(context.args) if context.args else ''
+    res = await asyncio.to_thread(_buscar, terminos)
+    if res is None:
+        await update.message.reply_text("❌ Error consultando los respaldos.")
+        return
+    if res['modo'] == 'estado':
+        await enviar_mensaje_largo(update, (
+            f"🗄️ RESPALDOS — ESTADO GENERAL\n{'━' * 30}\n\n"
+            f"💬 Mensajes de texto respaldados: {res['n_msgs']}\n"
+            f"📎 Archivos/audios catalogados: {res['n_arch']}\n"
+            f"🔄 Consolidación automática: cada 6 horas\n\n"
+            f"ÚLTIMO CICLO:\n{res['ultimo']}\n\n"
+            f"🔎 Busca con: /respaldos <términos>"))
+        return
+    lineas = [f"🔎 RESPALDOS — resultados para '{terminos}'", "━" * 30]
+    if res['msgs']:
+        lineas.append("\n💬 MENSAJES:")
+        for r in res['msgs']:
+            nom = r['first_name'] if DATABASE_URL else r[0]
+            txt = (r['message'] if DATABASE_URL else r[1]) or ''
+            fec = r['fecha'] if DATABASE_URL else r[2]
+            lineas.append(f"  • {nom} ({str(fec)[:16]}): {txt[:110]}")
+    if res['archs']:
+        lineas.append("\n📎 ARCHIVOS / AUDIOS:")
+        for r in res['archs']:
+            usr = r['usuario'] if DATABASE_URL else r[0]
+            tip = r['tipo'] if DATABASE_URL else r[1]
+            tit = r['titulo'] if DATABASE_URL else r[2]
+            resm = (r['resumen'] if DATABASE_URL else r[3]) or ''
+            fec = r['fecha'] if DATABASE_URL else r[4]
+            tnm = r['topic_nombre'] if DATABASE_URL else r[5]
+            lineas.append(f"  • [{tip}] {tit}")
+            lineas.append(f"    {usr} · {str(fec)[:16]} · {tnm}")
+            if resm:
+                lineas.append(f"    {resm[:130]}")
+    if not res['msgs'] and not res['archs']:
+        lineas.append("\nSin resultados. Prueba con otros términos.")
+    await enviar_mensaje_largo(update, "\n".join(lineas))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FASE 31.18-B: INVITACIÓN A GANAR COINS + CANJE DE RENOVACIÓN
+# ════════════════════════════════════════════════════════════════════════
+
+# Coins necesarios para canjear 30 días de suscripción (ajustable en Render)
+COINS_RENOVACION_30D = int(os.environ.get('COINS_RENOVACION_30D', '500'))
+
+
+def _mensaje_invitacion_coins(markdown: bool = False) -> str:
+    """Bloque motivacional que acompaña a los comandos de cuenta/renovación.
+
+    markdown=True escapa los guiones bajos de los comandos (\\_) para que
+    el parse_mode='Markdown' legacy de Telegram no los convierta en cursiva
+    (el texto renderizado conserva el comando cliqueable intacto).
+    """
+    txt = (
+        f"\n💰 ¿SABÍAS QUE PUEDES RENOVAR GRATIS?\n"
+        f"Participa en la comunidad y gana Cofradía Coins:\n"
+        f"  💬 Mensaje en grupo: +1   💡 Responder consulta: +10\n"
+        f"  ⭐ Recomendar cofrade: +5   📅 Asistir a evento: +20\n"
+        f"  📇 Crear tarjeta: +15\n\n"
+        f"Canjéalos por:\n"
+        f"  🔄 Renovación de 30 días GRATIS → /canjear_renovacion "
+        f"({COINS_RENOVACION_30D} coins)\n"
+        f"  📊 Reportes premium sin costo: /generar_cv, /analisis_linkedin, "
+        f"/mentor, /entrevista\n\n"
+        f"👉 Revisa tu balance con /mis_coins ¡y a interactuar!"
+    )
+    return txt.replace('_', '\\_') if markdown else txt
+
+
+async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.18: /canjear_renovacion — 30 días de suscripción por coins.
+
+    Descuenta COINS_RENOVACION_30D del balance (gastar_coins valida saldo)
+    y extiende la suscripción 30 días DESDE la fecha de vencimiento vigente
+    (o desde hoy si ya venció) — el usuario nunca pierde días pagados.
+    """
+    user_id = update.effective_user.id
+    try:
+        ok = await asyncio.to_thread(
+            gastar_coins, user_id, COINS_RENOVACION_30D, 'Canje: renovación 30 días')
+        if not ok:
+            await update.message.reply_text(
+                f"💰 No tienes coins suficientes.\n\n"
+                f"El canje de 30 días cuesta {COINS_RENOVACION_30D} coins.\n"
+                f"Revisa tu balance con /mis_coins y sigue participando "
+                f"en la comunidad para ganar más. ¡Estás cerca!")
+            return
+
+        def _extender():
+            conn = get_db_connection()
+            c = conn.cursor()
+            if DATABASE_URL:
+                c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = %s", (user_id,))
+            else:
+                c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+            base = datetime.now()
+            if row:
+                fexp = row['fecha_expiracion'] if DATABASE_URL else row[0]
+                try:
+                    if isinstance(fexp, str):
+                        fexp = datetime.fromisoformat(fexp.replace(' ', 'T')[:19])
+                    if fexp and fexp > base:
+                        base = fexp
+                except Exception:
+                    pass
+            nueva = base + timedelta(days=30)
+            if DATABASE_URL:
+                c.execute("""UPDATE suscripciones SET fecha_expiracion = %s, estado = 'activo'
+                             WHERE user_id = %s""", (nueva, user_id))
+            else:
+                c.execute("""UPDATE suscripciones SET fecha_expiracion = ?, estado = 'activo'
+                             WHERE user_id = ?""", (nueva.isoformat(), user_id))
+            actualizado = c.rowcount > 0
+            conn.commit()
+            conn.close()
+            return nueva if actualizado else None
+
+        nueva = await asyncio.to_thread(_extender)
+        if nueva:
+            await update.message.reply_text(
+                f"🎉 ¡CANJE EXITOSO!\n\n"
+                f"🔄 Tu suscripción se extendió 30 días GRATIS.\n"
+                f"📅 Nueva fecha de vencimiento: {nueva.strftime('%d/%m/%Y')}\n"
+                f"💰 Coins descontados: {COINS_RENOVACION_30D}\n\n"
+                f"¡Sigue participando para ganar más coins! /mis_coins")
+            logger.info(f"💰 Canje renovación: user {user_id} (+30 días por "
+                        f"{COINS_RENOVACION_30D} coins)")
+        else:
+            # Reembolso si la suscripción no pudo extenderse
+            await asyncio.to_thread(
+                otorgar_coins, user_id, COINS_RENOVACION_30D, 'Reembolso: canje fallido')
+            await update.message.reply_text(
+                "⚠️ No encontré una cuenta activa que extender. Tus coins fueron "
+                "reembolsados. Regístrate primero con /registrarse.")
+    except Exception as e:
+        logger.error(f"Error /canjear_renovacion: {e}")
+        await update.message.reply_text("❌ Error procesando el canje. Intenta más tarde.")
+
+
+# ════════════════════════════════════════════════════════════════════════
 # FASE 20: SISTEMA DE MONITOREO DE SALDO DEEPSEEK
 # ════════════════════════════════════════════════════════════════════════
 
@@ -11056,6 +11460,7 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ Tu suscripción está por vencer.
 💳 Usa /renovar para continuar disfrutando del bot.
+{_mensaje_invitacion_coins(markdown=True)}
 """, parse_mode='Markdown')
         else:
             await update.message.reply_text(f"""
@@ -11065,6 +11470,7 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📅 **Días restantes:** {dias} días
 
 🚀 ¡Disfruta todos los servicios del bot!
+{_mensaje_invitacion_coins(markdown=True)}
 """, parse_mode='Markdown')
     else:
         await update.message.reply_text("""
@@ -11101,6 +11507,8 @@ async def _renovar_mostrar_planes_usuario(update: Update, context: ContextTypes.
     elif dias_rest <= 30:
         encabezado += f"⏳ Tu suscripción vence en <b>{dias_rest} día{'s' if dias_rest != 1 else ''}</b>.\n\n"
     encabezado += "Selecciona el plan que deseas renovar:"
+    # FASE 31.18: invitación a renovar GRATIS con Cofradía Coins
+    encabezado += "\n" + _mensaje_invitacion_coins()
     
     await update.message.reply_text(
         encabezado,
@@ -39238,6 +39646,8 @@ def main():
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
     application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
+    application.add_handler(CommandHandler("respaldos", respaldos_comando))  # FASE 31.18: buscador de respaldos
+    application.add_handler(CommandHandler("canjear_renovacion", canjear_renovacion_comando))  # FASE 31.18: coins→30 días
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
     application.add_handler(CommandHandler("rag_reindexar_perfiles", rag_reindexar_perfiles_comando))  # FASE 30
@@ -39369,6 +39779,12 @@ def main():
     # para no interferir con los handlers existentes; los PDF privados los
     # salta porque ya tienen indexación completa propia)
     application.add_handler(MessageHandler(filters.Document.ALL, registrar_archivo_compartido), group=8)
+    # FASE 31.18: catastro de multimedia del grupo (audio→texto, fotos/videos/
+    # archivos→referencia). group=9: corre en paralelo, jamás interfiere.
+    application.add_handler(MessageHandler(
+        (filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE |
+         filters.PHOTO | filters.Document.ALL) & filters.ChatType.GROUPS,
+        respaldar_multimedia_grupo), group=9)
     
     # Handler de mensajes de voz (privado y grupo)
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
@@ -41086,6 +41502,17 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 logger.info("🧠 Memoria FASE 31.17: servicio no disponible — jobs omitidos (bot opera normal)")
         except Exception as e:
             logger.warning(f"No se pudo programar jobs de memoria: {e}")
+        
+        # FASE 31.18: AGENTE DE RESPALDO — consolidación clasificada cada 6 horas
+        try:
+            job_queue.run_repeating(
+                agente_respaldo_conversaciones,
+                interval=6 * 3600,
+                first=300,
+                name='agente_respaldo_conversaciones')
+            logger.info("🗄️ Agente de Respaldo: consolidación clasificada cada 6 horas")
+        except Exception as e:
+            logger.warning(f"No se pudo programar agente de respaldo: {e}")
         
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
