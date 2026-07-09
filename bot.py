@@ -20,6 +20,7 @@ import asyncio
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, time
+import time as tiempo_real  # FASE 31.31: 'time' quedó sombreado por datetime.time (línea anterior); usar tiempo_real.time()/sleep() en código nuevo
 from collections import Counter
 from io import BytesIO
 
@@ -77,7 +78,6 @@ TOKEN_BOT = os.environ.get('TOKEN_BOT')
 OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
-logger.info("🧬 VERSIÓN DEL CÓDIGO: FASE 31.9c — Decimales con coma + rangos «entre X y Y» en audio (2026-07-03)")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.30 · Defensa Temporal en Profundidad (período inferido en TODAS las rutas)"
+BOT_BUILD = "FASE 31.31 · Exorcismo (fix sombreado de time: latido+version+entrenar vivos) · Anti-Zombie"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -3805,7 +3805,7 @@ async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas\n"
             f"🧲 <b>Capa 1.7 (embeddings):</b> {'✅ activa' if (INTENCIONES_SEMANTICAS and DATABASE_URL) else '⚠️ off'} · entrena con /entrenar_intenciones\n"
             f"🔌 <b>Motores acoplados:</b> {len(REGISTRO_MOTORES_BUSQUEDA)} · detalle con /motores\n"
-            f"🫀 <b>Latido del loop:</b> hace {int(time.time() - globals().get('_ULTIMO_LATIDO', time.time()))}s · pool 24 hilos",
+            f"🫀 <b>Latido del loop:</b> hace {int(tiempo_real.time() - globals().get('_ULTIMO_LATIDO', tiempo_real.time()))}s · pool 24 hilos",
             parse_mode='HTML')
     except Exception as e:
         await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
@@ -5082,7 +5082,7 @@ async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEF
                 except Exception:
                     conn.rollback()
                     errores += 1
-                time.sleep(0.05)  # respeto al rate limit del tier free
+                tiempo_real.sleep(0.05)  # respeto al rate limit del tier free
         conn.commit()
         c.execute("SELECT COUNT(*) AS n FROM intenciones_ejemplos")
         total_bd = c.fetchone()['n']
@@ -40904,10 +40904,10 @@ def main():
         except Exception as e:
             logger.warning(f"FASE 31.26 executor: {e}")
         try:
-            globals()['_ULTIMO_LATIDO'] = time.time()
+            globals()['_ULTIMO_LATIDO'] = tiempo_real.time()
 
             async def _job_latido(context):
-                ahora = time.time()
+                ahora = tiempo_real.time()
                 previo = globals().get('_ULTIMO_LATIDO', ahora)
                 atraso = ahora - previo - 60
                 if atraso > 5:
@@ -43140,6 +43140,19 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             return
         
         # Otros errores: loguear
+        # FASE 31.31: diagnóstico claro del secuestro por doble instancia
+        if 'Conflict' in str(error) and 'getUpdates' in str(error):
+            _ult409 = globals().get('_ULT_AVISO_409', 0)
+            if tiempo_real.time() - _ult409 > 60:
+                globals()['_ULT_AVISO_409'] = tiempo_real.time()
+                logger.critical(
+                    "🧟 DOBLE INSTANCIA DETECTADA: otro proceso usa el MISMO "
+                    "token y se está robando los mensajes — ESTA instancia "
+                    "está sorda. Soluciones: (1) Render → Suspend y luego "
+                    "Resume del servicio; (2) cierra cualquier bot.py "
+                    "corriendo en tu PC; (3) si persiste, rota el token con "
+                    "@BotFather y actualiza TOKEN_BOT en Render.")
+            return
         logger.error(f"Error no manejado: {error}\n{''.join(traceback.format_exception(type(error), error, error.__traceback__))[:500]}")
     
     application.add_error_handler(_global_error_handler)
