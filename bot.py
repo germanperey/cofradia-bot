@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.39 · Puerto en paz (keep-alive cede al webhook) · Fallback total"
+BOT_BUILD = "FASE 31.40 · Health+Proxy (Render Live + webhook interno) · Embeddings en cascada"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -869,25 +869,45 @@ def generar_embedding_gemini(texto: str, tipo: str = 'RETRIEVAL_DOCUMENT'):
         return None
     
     try:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"text-embedding-004:embedContent?key={GEMINI_API_KEY}")
-        payload = {
-            "model": "models/text-embedding-004",
-            "content": {"parts": [{"text": texto}]},
-            "taskType": tipo,
-            "outputDimensionality": 768,
-        }
-        resp = requests.post(url, json=payload, timeout=5)  # FASE 30.1: timeout 5s (era 15s) — embeddings deben ser rápidos
-        if resp.status_code != 200:
+        # FASE 31.40: CASCADA DE MODELOS — Google retiró text-embedding-004
+        # de v1beta (HTTP 404 masivo en producción). Se prueba en orden y el
+        # ganador queda cacheado para el resto de la vida del proceso.
+        _candidatos = [
+            ('v1beta', 'text-embedding-004'),
+            ('v1', 'text-embedding-004'),
+            ('v1beta', 'gemini-embedding-001'),
+            ('v1', 'gemini-embedding-001'),
+        ]
+        _ganador = globals().get('_EMB_MODELO_OK')
+        if _ganador in _candidatos:
+            _candidatos = [_ganador] + [c for c in _candidatos if c != _ganador]
+        embedding, resp = None, None
+        for _api, _modelo in _candidatos:
+            url = (f"https://generativelanguage.googleapis.com/{_api}/models/"
+                   f"{_modelo}:embedContent?key={GEMINI_API_KEY}")
+            payload = {
+                "model": f"models/{_modelo}",
+                "content": {"parts": [{"text": texto}]},
+                "taskType": tipo,
+                "outputDimensionality": 768,
+            }
+            resp = requests.post(url, json=payload, timeout=5)
+            if resp.status_code == 404:
+                continue  # modelo retirado en esta API → siguiente candidato
+            if resp.status_code != 200:
+                break  # error real (429/500/clave) → no rotar modelos
+            _vals = resp.json().get('embedding', {}).get('values')
+            if _vals and len(_vals) >= 768:
+                embedding = _vals[:768]  # gemini-embedding-001 puede dar más
+                if globals().get('_EMB_MODELO_OK') != (_api, _modelo):
+                    globals()['_EMB_MODELO_OK'] = (_api, _modelo)
+                    logger.info(f"🧬 FASE 31.40: embeddings vía {_api}/{_modelo}")
+                break
+        if embedding is None:
             _EMBEDDING_STATS['failures'] += 1
-            logger.warning(f"FASE 29: Gemini embedding HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-        
-        data = resp.json()
-        embedding = data.get('embedding', {}).get('values')
-        if not embedding or len(embedding) != 768:
-            _EMBEDDING_STATS['failures'] += 1
-            logger.warning(f"FASE 29: Gemini embedding inválido (len={len(embedding) if embedding else 0})")
+            logger.warning(f"FASE 29/31.40: embedding falló en toda la cascada "
+                           f"(último HTTP {resp.status_code if resp is not None else '—'}: "
+                           f"{resp.text[:150] if resp is not None else ''})")
             return None
         
         # Guardar en cache (LRU simple)
@@ -7698,6 +7718,27 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse
         path = urlparse(self.path).path
         
+        # FASE 31.40: PROXY del webhook — Telegram postea a /<TOKEN> en el
+        # PORT público; se reenvía al servidor interno de PTB y se
+        # devuelve su respuesta. GET / sigue dando 200 (health de Render).
+        if TOKEN_BOT and path == f'/{TOKEN_BOT}':
+            try:
+                _n = int(self.headers.get('Content-Length', 0) or 0)
+                _body = self.rfile.read(_n) if _n else b''
+                _st, _resp = _reenviar_a_webhook_interno(
+                    path, _body, self.headers.get('Content-Type'))
+                self.send_response(_st)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(_resp or b'')
+            except Exception as _e_px:
+                logger.warning(f"FASE 31.40: proxy webhook falló: {_e_px}")
+                try:
+                    self.send_response(502); self.end_headers()
+                except Exception:
+                    pass
+            return
+        
         # FASE 15: API toggle feature
         if path == '/api/feature':
             if not self._check_admin_auth():
@@ -9354,6 +9395,21 @@ async function cargarSaldos(){
 cargarDashboard();
 </script>
 </body></html>"""
+
+
+def _reenviar_a_webhook_interno(path, body, content_type):
+    """FASE 31.40: reenvía un POST de Telegram al webhook interno de PTB.
+    Devuelve (status, cuerpo_respuesta_bytes)."""
+    import http.client
+    _p = int(os.environ.get('WEBHOOK_PORT_INTERNO', '8081'))
+    conn = http.client.HTTPConnection('127.0.0.1', _p, timeout=25)
+    try:
+        conn.request('POST', path, body=body,
+                     headers={'Content-Type': content_type or 'application/json'})
+        r = conn.getresponse()
+        return r.status, r.read()
+    finally:
+        conn.close()
 
 
 def run_keepalive_server():
@@ -40893,12 +40949,12 @@ def main():
     # OMITIDO. En polling, todo sigue como siempre.
     _modo_webhook_39 = (os.environ.get('USE_WEBHOOK', '0') == '1'
                         and bool(os.environ.get('RENDER_EXTERNAL_URL')))
+    keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
+    keepalive_thread.start()
     if _modo_webhook_39:
-        logger.info("📡 FASE 31.39: keep-alive HTTP omitido — el webhook "
-                    "servirá el PORT (adiós 'Address already in use')")
+        logger.info("🔁 FASE 31.40: keep-alive en PORT actúa como HEALTH+PROXY "
+                    "(GET / → 200 para Render · POST /<token> → webhook interno)")
     else:
-        keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
-        keepalive_thread.start()
         logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
     # Auto-ping cada 5min — mantiene el servicio tibio en cualquier modo
     ping_thread = threading.Thread(target=auto_ping, daemon=True)
@@ -43282,11 +43338,13 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
     _correr_polling = True
     if _use_webhook and _url_publica:
         try:
-            logger.info(f"📡 FASE 31.36: MODO WEBHOOK en {_url_publica} "
-                        f"(puerto {_puerto}) — adiós 409 por diseño")
+            _puerto_interno = int(os.environ.get('WEBHOOK_PORT_INTERNO', '8081'))
+            logger.info(f"📡 FASE 31.40: MODO WEBHOOK — PTB interno en "
+                        f"127.0.0.1:{_puerto_interno}; el keep-alive en "
+                        f"{_puerto} hace de health+proxy — adiós 409")
             application.run_webhook(
-                listen='0.0.0.0',
-                port=_puerto,
+                listen='127.0.0.1',
+                port=_puerto_interno,
                 url_path=TOKEN_BOT,  # ruta secreta = el propio token
                 webhook_url=f"{_url_publica}/{TOKEN_BOT}",
                 allowed_updates=Update.ALL_TYPES,
@@ -43308,9 +43366,8 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                        "(¿el servicio sigue como 'worker'?) — "
                        "continuando en polling")
     if _correr_polling:
-        if os.environ.get('PORT') and _use_webhook:
-            # solo en fallback de webhook (el keep-alive fue omitido)
-            _iniciar_salud_http(_puerto)
+        # FASE 31.40: el keep-alive (health+proxy) ya sirve el PORT en
+        # todos los modos — no hace falta puerto de salud aparte
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
