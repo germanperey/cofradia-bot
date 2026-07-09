@@ -252,7 +252,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.31 · Exorcismo (fix sombreado de time: latido+version+entrenar vivos) · Anti-Zombie"
+BOT_BUILD = "FASE 31.32 · Alerta Anti-Zombie por Telegram al Owner · Exorcismo · Defensa Temporal"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -43152,6 +43152,26 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                     "Resume del servicio; (2) cierra cualquier bot.py "
                     "corriendo en tu PC; (3) si persiste, rota el token con "
                     "@BotFather y actualiza TOKEN_BOT en Render.")
+            # FASE 31.32: ENVIAR sí funciona aunque otro proceso robe la
+            # recepción → alertar al owner EN TELEGRAM (freno: 10 min)
+            _ult409dm = globals().get('_ULT_DM_409', 0)
+            if tiempo_real.time() - _ult409dm > 600:
+                globals()['_ULT_DM_409'] = tiempo_real.time()
+                try:
+                    await context.bot.send_message(
+                        chat_id=OWNER_ID,
+                        text=(f"🧟 ALERTA: DOBLE INSTANCIA con el mismo token.\n"
+                              f"Esta instancia ({BOT_BUILD.split('·')[0].strip()}) "
+                              f"está SORDA: otro proceso se roba los mensajes.\n\n"
+                              f"🔧 Solución definitiva:\n"
+                              f"1) @BotFather → /mybots → tu bot → API Token "
+                              f"→ Revoke (token nuevo)\n"
+                              f"2) Render → Environment → TOKEN_BOT = token "
+                              f"nuevo → Save (redeploy automático)\n"
+                              f"3) La instancia pirata muere al instante, "
+                              f"donde sea que viva."))
+                except Exception:
+                    pass
             return
         logger.error(f"Error no manejado: {error}\n{''.join(traceback.format_exception(type(error), error, error.__traceback__))[:500]}")
     
