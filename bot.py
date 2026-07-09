@@ -4322,6 +4322,59 @@ async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAU
 
 
 # ════════════════════════════════════════════════════════════════════════
+# FASE 31.19: AUTO-ROUTER DE COMANDOS EN LENGUAJE NATURAL
+# Caso real de Germán: "¿quiénes son los usuarios que más participan?" →
+# el bot decía "no tengo esa información" y sugería /top... teniéndolo.
+# El motor de intención LLM existente es falible; esta capa DETERMINÍSTICA
+# mapea frases naturales → comando del catálogo y el bot SE LO EJECUTA A
+# SÍ MISMO, entregando los datos directamente. Cero latencia, cero LLM.
+# ════════════════════════════════════════════════════════════════════════
+
+_PRE_RUTEO_COMANDOS = [
+    # (comando del catálogo de intención, patrones normalizados sin acentos)
+    ('top_usuarios', (
+        'mas participan', 'participan mas', 'usuarios mas activos',
+        'miembros mas activos', 'cofrades mas activos', 'quienes participan',
+        'quien participa mas', 'quien escribe mas', 'quien habla mas',
+        'quien publica mas', 'ranking de participacion', 'ranking de usuarios',
+        'ranking de mensajes', 'top de usuarios', 'usuarios con mas mensajes',
+        'los que mas escriben', 'los que mas aportan', 'mayor participacion')),
+    ('resumen_mes', (
+        'resumen del mes', 'resumen mensual', 'actividad del mes',
+        'como estuvo el mes', 'que paso este mes en el grupo')),
+    ('estadisticas', (
+        'estadisticas del grupo', 'estadisticas de la cofradia',
+        'estadisticas generales', 'metricas del grupo')),
+    ('dotacion', (
+        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual')),
+    ('sismos', (
+        'ultimos sismos', 'sismos recientes', 'temblores recientes',
+        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo')),
+    ('indicadores', (
+        'indicadores economicos', 'valor del dolar', 'precio del dolar',
+        'cuanto esta el dolar', 'valor de la uf', 'cuanto esta la uf',
+        'valor del euro', 'valor de la utm')),
+]
+
+
+def _pre_rutear_comando(texto: str) -> str:
+    """Devuelve el comando del catálogo si el texto calza inequívocamente."""
+    try:
+        if not texto or len(texto) < 8:
+            return None
+        import unicodedata as _un19
+        t = _un19.normalize('NFKD', texto.lower())
+        t = ''.join(ch for ch in t if not _un19.combining(ch))
+        t = ' '.join(t.split())
+        for comando, patrones in _PRE_RUTEO_COMANDOS:
+            if any(p in t for p in patrones):
+                return comando
+    except Exception:
+        pass
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════════
 # FASE 20: SISTEMA DE MONITOREO DE SALDO DEEPSEEK
 # ════════════════════════════════════════════════════════════════════════
 
@@ -30247,6 +30300,8 @@ async def ejecutar_comando_desde_intencion(
             'graficos': 'graficos_comando',
             'top_usuarios': 'top_usuarios_comando',
             'top10': 'top10_comando',
+            'sismos': 'sismos_comando',  # FASE 31.19
+            'indicadores': 'indicadores_comando',  # FASE 31.19
             'dotacion': 'dotacion_comando',
             'cumpleanos_mes': 'cumpleanos_mes_comando',
             'generar_cv': 'generar_cv_comando',
@@ -39158,7 +39213,24 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
     ]
     quiere_profesiones = any(p in msg_n for p in patrones_profesiones)
     
-    if not quiere_conteo and not quiere_profesiones:
+    # ──────────────────────────────────────────────────────────────────
+    # PATRÓN 3 (FASE 31.19, caso real de Germán): "¿quiénes son los
+    # usuarios que más participan?" — el bot TENÍA estos datos (/top,
+    # /resumen_mes) pero respondía "no tengo esa información". Ahora
+    # responde con el ranking real extraído por SQL directo.
+    # ──────────────────────────────────────────────────────────────────
+    patrones_participacion = [
+        'mas participan', 'participan mas', 'mas activos', 'mas activo',
+        'usuarios mas activos', 'miembros mas activos', 'cofrades mas activos',
+        'quienes participan', 'quien participa mas', 'quien escribe mas',
+        'quien habla mas', 'quien publica mas', 'mayor participacion',
+        'ranking de participacion', 'ranking de usuarios', 'ranking de mensajes',
+        'top de usuarios', 'top usuarios', 'usuarios con mas mensajes',
+        'quienes son los que mas', 'los que mas escriben', 'los que mas aportan',
+    ]
+    quiere_participacion = any(p in msg_n for p in patrones_participacion)
+    
+    if not quiere_conteo and not quiere_profesiones and not quiere_participacion:
         return None
     
     # ──────────────────────────────────────────────────────────────────
@@ -39227,6 +39299,46 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
                 )
             except Exception as e:
                 logger.warning(f"FASE 30: error conteo integrantes: {e}")
+        
+        # RANKING DE PARTICIPACIÓN (FASE 31.19)
+        if quiere_participacion:
+            try:
+                if DATABASE_URL:
+                    c.execute("""SELECT user_id, MAX(first_name) AS nombre, COUNT(*) AS n
+                                 FROM mensajes
+                                 WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
+                                 GROUP BY user_id ORDER BY n DESC LIMIT 10""")
+                    ranking = [(r['nombre'] or f"Usuario {r['user_id']}", r['n'])
+                               for r in c.fetchall()]
+                    c.execute("""SELECT COUNT(*) AS t, COUNT(DISTINCT user_id) AS u
+                                 FROM mensajes
+                                 WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
+                    row = c.fetchone()
+                    tot_msgs, tot_users = (row['t'] or 0), (row['u'] or 0)
+                else:
+                    c.execute("""SELECT user_id, MAX(first_name) AS nombre, COUNT(*) AS n
+                                 FROM mensajes
+                                 WHERE fecha >= date('now', '-30 days')
+                                 GROUP BY user_id ORDER BY n DESC LIMIT 10""")
+                    ranking = [((r[1] or f"Usuario {r[0]}"), r[2]) for r in c.fetchall()]
+                    c.execute("""SELECT COUNT(*), COUNT(DISTINCT user_id) FROM mensajes
+                                 WHERE fecha >= date('now', '-30 days')""")
+                    row = c.fetchone()
+                    tot_msgs, tot_users = (row[0] or 0), (row[1] or 0)
+                
+                if ranking:
+                    medallas = ['🥇', '🥈', '🥉'] + ['▪️'] * 7
+                    lineas_rk = "\n".join(
+                        f"{medallas[i]} <b>{nom}</b>: {n} mensaje{'s' if n != 1 else ''}"
+                        for i, (nom, n) in enumerate(ranking))
+                    partes.append(
+                        f"<b>🏆 Usuarios más participativos (últimos 30 días)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n{lineas_rk}\n\n"
+                        f"📊 Total del período: <b>{tot_msgs}</b> mensajes "
+                        f"de <b>{tot_users}</b> usuarios activos\n\n"
+                        f"💡 Más detalle con /top y /resumen_mes")
+            except Exception as e:
+                logger.warning(f"FASE 31.19: error ranking participación: {e}")
         
         # PROFESIONES MÁS RECURRENTES
         if quiere_profesiones:
@@ -40003,6 +40115,21 @@ def main():
         msg = await update.message.reply_text("🧠 Buscando en toda la base de conocimientos...")
         
         try:
+            # FASE 31.19: PRE-ROUTER determinístico — si la pregunta natural
+            # calza con un comando conocido, el bot SE LO EJECUTA A SÍ MISMO
+            # al instante (sin depender del criterio del LLM de intención).
+            _cmd_directo_19 = _pre_rutear_comando(mensaje)
+            if _cmd_directo_19:
+                try:
+                    ejecutado_19 = await ejecutar_comando_desde_intencion(
+                        _cmd_directo_19, [], update, context)
+                    if ejecutado_19:
+                        logger.info(f"🧭 FASE 31.19: '{mensaje[:50]}' → "
+                                    f"/{_cmd_directo_19} (auto-router)")
+                        return
+                except Exception as _e_pr19:
+                    logger.debug(f"FASE 31.19 pre-router: {_e_pr19}")
+            
             # ===== MOTOR DE INTENCIÓN: Mejora silenciosa del mensaje =====
             intencion = mejorar_intencion(mensaje, user_name, user_id, canal='texto')
             query_para_busqueda = intencion['query_mejorada']
