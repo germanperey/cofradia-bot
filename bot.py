@@ -79,6 +79,11 @@ OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
+# FASE 31.33: link de POSTULACIÓN (el test de ingreso del bot). Se usa en la
+# difusión/promoción para que los nuevos pasen por el filtro; el link directo
+# al grupo (COFRADIA_INVITE_LINK) queda reservado para los APROBADOS.
+COFRADIA_LINK_POSTULACION = os.environ.get('COFRADIA_LINK_POSTULACION',
+                                           'https://t.me/Cofradia_Premium_Bot')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
@@ -252,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.32 · Alerta Anti-Zombie por Telegram al Owner · Exorcismo · Defensa Temporal"
+BOT_BUILD = "FASE 31.33 · Link de Postulación separado · TOP instrumentado · Anti-Zombie"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -16845,6 +16850,9 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 No hay suficientes datos aún.")
             return
         
+        logger.info(f"📊 /top_usuarios ejecutado: dias={dias} · "
+                    f"args={context.args} · "
+                    f"msg='{(getattr(update.message, 'text', '') or '')[:60]}'")
         _etiqueta = {1: " (HOY)", 7: " (ÚLTIMOS 7 DÍAS)", 30: " (ÚLTIMOS 30 DÍAS)"}
         _suf = _etiqueta.get(dias, f" (ÚLTIMOS {dias} DÍAS)" if dias else "")
         mensaje = f"🏆 TOP USUARIOS MAS ACTIVOS{_suf}\n\n"
@@ -42839,7 +42847,9 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 mensajes_pool = [
                     # Invitar a sumar marinos
                     "⚓ ¿Conoces cofrades que aún no están en el grupo?\n\n"
-                    "🎯 Invítalos con el link: " + COFRADIA_INVITE_LINK + "\n"
+                    "🎯 Invítalos a postular con el bot: " + COFRADIA_LINK_POSTULACION + "\n"
+                    "   (el bot les hace el test de ingreso y, aprobados, "
+                    "reciben el acceso)\n"
                     "💪 Mientras más seamos, más fuerte nuestra red!",
                     
                     # Recordar comandos útiles
