@@ -20,7 +20,6 @@ import asyncio
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, time
-import time as tiempo_real  # FASE 31.31: 'time' quedó sombreado por datetime.time (línea anterior); usar tiempo_real.time()/sleep() en código nuevo
 from collections import Counter
 from io import BytesIO
 
@@ -79,11 +78,6 @@ OWNER_ID = int(os.environ.get('OWNER_TELEGRAM_ID', '0'))
 COFRADIA_GROUP_ID = int(os.environ.get('COFRADIA_GROUP_ID', '0'))
 logger.info(f"🔧 COFRADIA_GROUP_ID = {COFRADIA_GROUP_ID}")
 COFRADIA_INVITE_LINK = os.environ.get('COFRADIA_INVITE_LINK', 'https://t.me/+MSQuQxeVpsExMThh')
-# FASE 31.33: link de POSTULACIÓN (el test de ingreso del bot). Se usa en la
-# difusión/promoción para que los nuevos pasen por el filtro; el link directo
-# al grupo (COFRADIA_INVITE_LINK) queda reservado para los APROBADOS.
-COFRADIA_LINK_POSTULACION = os.environ.get('COFRADIA_LINK_POSTULACION',
-                                           'https://t.me/Cofradia_Premium_Bot')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # URL de Supabase PostgreSQL
 BOT_USERNAME = "Cofradia_Premium_Bot"
 DIAS_PRUEBA_GRATIS = 90
@@ -168,97 +162,6 @@ def _cache_set(clave, valor):
 # FASE 19: glm-4-flash original DEPRECADO (causaba error 400 en logs).
 # Modelos actuales verificados (Mayo 2026): glm-4.5-air, glm-4.7-flash, glm-4.7
 GLM_API_KEY = os.environ.get('GLM_API_KEY', '')
-
-# FASE 31.12/31.13: OpenRouter — Una sola API key habilita 4 motores gratuitos:
-#   5° cascada: nex-agi/nex-n2-pro:free (MoE 397B/17B, Qwen3.5, ctx 262K)
-#   6° cascada: openai/gpt-oss-120b:free (Apache 2.0, ctx 131K)
-#   7° cascada: openrouter/free (router automático — inmune a retiros de modelos)
-#   /analizar_libro: nvidia/nemotron-3-super-120b-a12b:free (ctx 1M tokens)
-# Todos $0/$0 por token, PERO rate-limited por OpenRouter:
-#   - Sin créditos: ~50 req/día, 20 req/min (compartido entre modelos :free)
-#   - Con >= $10 USD en créditos: ~1000 req/día (créditos NO se consumen)
-# Los niveles 5-7 solo corren cuando Groq/Gemini/GLM/DeepSeek fallaron todos.
-# Registro: https://openrouter.ai → API Keys (sin tarjeta de crédito)
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.17: CAPA DE MEMORIA + APRENDIZAJE POR USUARIO
-# Integración QUIRÚRGICA del servicio independiente memory_service.py
-# (Supabase free tier + pgvector). Diseño a prueba de fallos:
-#   - Si memory_service.py no está en el repo → import falla → bot idéntico
-#   - Si las tablas no existen aún en Supabase → helpers devuelven vacío
-#   - Si la BD se cae → timeout 4s en contexto, log fire-and-forget
-#   - Kill-switch sin tocar código: variable de entorno MEMORIA_ACTIVA=0
-# El bot JAMÁS se rompe ni se pone lento por la memoria.
-# ════════════════════════════════════════════════════════════════════════
-MEMORIA_ACTIVA = os.environ.get('MEMORIA_ACTIVA', '1') == '1'
-_memoria_svc = None
-try:
-    from memory_service import MemoryService as _MemSvc
-    _MEMORIA_OK = True
-except Exception:
-    _MEMORIA_OK = False
-
-
-def _memoria():
-    """Singleton lazy del servicio de memoria. None si no está disponible."""
-    global _memoria_svc
-    if not (_MEMORIA_OK and MEMORIA_ACTIVA and DATABASE_URL):
-        return None
-    if _memoria_svc is None:
-        try:
-            _memoria_svc = _MemSvc(db_url=DATABASE_URL,
-                                   gemini_api_key=os.environ.get('GEMINI_API_KEY', ''))
-        except Exception as _e:
-            logger.debug(f"FASE 31.17: memoria no inicializada: {_e}")
-            return None
-    return _memoria_svc
-
-
-async def memoria_contexto(user_id, texto: str) -> str:
-    """Bloque de memoria del usuario para inyectar al prompt ('' si no hay)."""
-    svc = _memoria()
-    if not svc:
-        return ""
-    try:
-        blk = await asyncio.wait_for(
-            asyncio.to_thread(svc.build_prompt_block, f"tg:{user_id}", texto or ""),
-            timeout=4.0)
-        return blk or ""
-    except Exception as _e:
-        logger.debug(f"FASE 31.17 memoria_contexto: {_e}")
-        return ""
-
-
-def _memoria_log_sync(user_id, texto_usuario: str, respuesta_bot: str, nombre: str):
-    svc = _memoria()
-    if not svc:
-        return
-    try:
-        uk = f"tg:{user_id}"
-        if texto_usuario:
-            svc.log_message(uk, "user", texto_usuario, "telegram", nombre)
-        if respuesta_bot:
-            svc.log_message(uk, "bot", respuesta_bot)
-    except Exception as _e:
-        logger.debug(f"FASE 31.17 memoria_log: {_e}")
-
-
-def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: str = None):
-    """Registro fire-and-forget: cero latencia agregada, cero riesgo."""
-    try:
-        asyncio.get_running_loop()
-        asyncio.create_task(asyncio.to_thread(
-            _memoria_log_sync, user_id, texto_usuario, respuesta_bot, nombre))
-    except Exception:
-        pass
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
-# Verificable en vivo con /version. Actualizar el tag en cada entrega.
-# ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.44 · Slot blindado: pregunta nueva NUNCA se traga como área"
-_BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
 # La variable DEEPSEEK_API_KEY ya está definida arriba en línea 74.
@@ -869,45 +772,25 @@ def generar_embedding_gemini(texto: str, tipo: str = 'RETRIEVAL_DOCUMENT'):
         return None
     
     try:
-        # FASE 31.40: CASCADA DE MODELOS — Google retiró text-embedding-004
-        # de v1beta (HTTP 404 masivo en producción). Se prueba en orden y el
-        # ganador queda cacheado para el resto de la vida del proceso.
-        _candidatos = [
-            ('v1beta', 'text-embedding-004'),
-            ('v1', 'text-embedding-004'),
-            ('v1beta', 'gemini-embedding-001'),
-            ('v1', 'gemini-embedding-001'),
-        ]
-        _ganador = globals().get('_EMB_MODELO_OK')
-        if _ganador in _candidatos:
-            _candidatos = [_ganador] + [c for c in _candidatos if c != _ganador]
-        embedding, resp = None, None
-        for _api, _modelo in _candidatos:
-            url = (f"https://generativelanguage.googleapis.com/{_api}/models/"
-                   f"{_modelo}:embedContent?key={GEMINI_API_KEY}")
-            payload = {
-                "model": f"models/{_modelo}",
-                "content": {"parts": [{"text": texto}]},
-                "taskType": tipo,
-                "outputDimensionality": 768,
-            }
-            resp = requests.post(url, json=payload, timeout=5)
-            if resp.status_code == 404:
-                continue  # modelo retirado en esta API → siguiente candidato
-            if resp.status_code != 200:
-                break  # error real (429/500/clave) → no rotar modelos
-            _vals = resp.json().get('embedding', {}).get('values')
-            if _vals and len(_vals) >= 768:
-                embedding = _vals[:768]  # gemini-embedding-001 puede dar más
-                if globals().get('_EMB_MODELO_OK') != (_api, _modelo):
-                    globals()['_EMB_MODELO_OK'] = (_api, _modelo)
-                    logger.info(f"🧬 FASE 31.40: embeddings vía {_api}/{_modelo}")
-                break
-        if embedding is None:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"text-embedding-004:embedContent?key={GEMINI_API_KEY}")
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": texto}]},
+            "taskType": tipo,
+            "outputDimensionality": 768,
+        }
+        resp = requests.post(url, json=payload, timeout=5)  # FASE 30.1: timeout 5s (era 15s) — embeddings deben ser rápidos
+        if resp.status_code != 200:
             _EMBEDDING_STATS['failures'] += 1
-            logger.warning(f"FASE 29/31.40: embedding falló en toda la cascada "
-                           f"(último HTTP {resp.status_code if resp is not None else '—'}: "
-                           f"{resp.text[:150] if resp is not None else ''})")
+            logger.warning(f"FASE 29: Gemini embedding HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        
+        data = resp.json()
+        embedding = data.get('embedding', {}).get('values')
+        if not embedding or len(embedding) != 768:
+            _EMBEDDING_STATS['failures'] += 1
+            logger.warning(f"FASE 29: Gemini embedding inválido (len={len(embedding) if embedding else 0})")
             return None
         
         # Guardar en cache (LRU simple)
@@ -1101,292 +984,22 @@ def _crear_botones_feedback(funcion):
          InlineKeyboardButton("Mejorar", callback_data=f"fb_down_{funcion}")]
     ])
 
-def _fb_extraer_terminos(texto: str) -> str:
-    """FASE 31.3: términos clave de una pregunta para la memoria de
-    aprendizaje — nombres propios primero, luego palabras largas."""
-    import unicodedata as _ud_fb
-    def _n(t):
-        t = _ud_fb.normalize('NFKD', (t or '').lower())
-        return ''.join(ch for ch in t if not _ud_fb.combining(ch))
-    STOP_FB = {'sobre','libro','libros','acerca','trata','consiste','dice','habla',
-               'como','cual','cuales','donde','cuando','para','este','esta','tema'}
-    toks = (texto or '').split()
-    props, otros = [], []
-    for i, tk in enumerate(toks):
-        lp = tk.strip('¿?¡!.,;:()"\'«»')
-        ln = _n(lp)
-        if len(ln) < 4 or ln in STOP_FB:
-            continue
-        if lp[:1].isupper() and i > 0 and not toks[i-1].rstrip().endswith(('.', '?', '!', ':')):
-            props.append(ln)
-        else:
-            otros.append(ln)
-    vistos, orden = set(), []
-    for t in props + otros:
-        if t not in vistos:
-            vistos.add(t); orden.append(t)
-    return ' '.join(orden[:6])
-
-
-def _decimales_a_coma(texto: str) -> str:
-    """FASE 31.9c (pedido de Germán): en las respuestas de texto, los números
-    decimales SIEMPRE con coma (1.5% → 1,5%), convención chilena. Razón: con
-    punto, Catalina pronunciaba "uno cinco por ciento" en vez de "uno coma
-    cinco por ciento". Solo convierte punto + 1-2 dígitos (decimal real);
-    NUNCA toca miles chilenos (1.500), IPs, versiones (3.11.9) ni dominios."""
-    try:
-        return re.sub(r'(?<![\d.])(\d+)\.(\d{1,2})(?![.\d])', r'\1,\2', texto)
-    except Exception:
-        return texto
-
-
-def _cortar_degeneracion(texto: str) -> str:
-    """FASE 31.6: corta bucles de repetición del LLM (el caso 'Mihailo no,
-    sino de otro autor...' repetido ∞). Detecta la primera frase que se
-    repite >=3 veces y trunca ahí, devolviendo un texto limpio."""
-    if not texto:
-        return texto
-    import re as _re_d
-    frases = _re_d.split(r'(?<=[.!?])\s+', texto)
-    vistas = {}
-    corte = None
-    for i, fr in enumerate(frases):
-        clave = _re_d.sub(r'\s+', ' ', fr.strip().lower())[:60]
-        if len(clave) < 15:
-            continue
-        vistas[clave] = vistas.get(clave, 0) + 1
-        if vistas[clave] >= 3:
-            corte = i
-            break
-    if corte is not None:
-        limpio = ' '.join(frases[:corte]).strip()
-        return limpio if len(limpio) > 40 else texto[:600]
-    return texto
-
-
-def _fb_guardar_aprendizaje(pregunta: str, docs: list, delta: int):
-    """Upsert en rag_aprendizaje: 'Útil' suma votos a la asociación
-    términos→documentos; 'Mejorar' los resta (las malas asociaciones se
-    desvanecen). Crea la tabla si no existe."""
-    terminos = _fb_extraer_terminos(pregunta)
-    if not terminos or not docs:
-        return
-    docs_str = '||'.join(docs[:5])
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("""CREATE TABLE IF NOT EXISTS rag_aprendizaje (
-                            id SERIAL PRIMARY KEY,
-                            terminos TEXT NOT NULL,
-                            docs TEXT NOT NULL,
-                            votos INTEGER DEFAULT 0,
-                            actualizado TIMESTAMP DEFAULT NOW())""")
-            c.execute("SELECT id, votos FROM rag_aprendizaje WHERE terminos=%s AND docs=%s",
-                      (terminos, docs_str))
-            row = c.fetchone()
-            if row:
-                c.execute("UPDATE rag_aprendizaje SET votos=votos+%s, actualizado=NOW() WHERE id=%s",
-                          (delta, row['id'] if isinstance(row, dict) else row[0]))
-            else:
-                c.execute("INSERT INTO rag_aprendizaje (terminos, docs, votos) VALUES (%s,%s,%s)",
-                          (terminos, docs_str, delta))
-        else:
-            c.execute("""CREATE TABLE IF NOT EXISTS rag_aprendizaje (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            terminos TEXT NOT NULL, docs TEXT NOT NULL,
-                            votos INTEGER DEFAULT 0,
-                            actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            c.execute("SELECT id FROM rag_aprendizaje WHERE terminos=? AND docs=?",
-                      (terminos, docs_str))
-            row = c.fetchone()
-            if row:
-                c.execute("UPDATE rag_aprendizaje SET votos=votos+? WHERE id=?", (delta, row[0]))
-            else:
-                c.execute("INSERT INTO rag_aprendizaje (terminos, docs, votos) VALUES (?,?,?)",
-                          (terminos, docs_str, delta))
-        conn.commit(); conn.close()
-        logger.info(f"🧠 FASE 31.3 aprendizaje {'+'if delta>0 else ''}{delta}: '{terminos}' → {docs_str[:80]}")
-    except Exception as e:
-        logger.warning(f"aprendizaje feedback: {e}")
-
-
 async def callback_feedback_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer("Gracias por tu feedback!")
     parts = query.data.split('_', 2)
-    if len(parts) < 3:
-        await query.answer()
-        return
+    if len(parts) < 3: return
     feedback = 'positivo' if parts[1] == 'up' else 'negativo'
-    funcion = parts[2]
-    # Registro histórico (comportamiento previo, intacto)
     try:
         conn = get_db_connection()
         if conn and DATABASE_URL:
             c = conn.cursor()
             c.execute("INSERT INTO ia_feedback (user_id,message_id,funcion,feedback) VALUES (%s,%s,%s,%s)",
-                      (query.from_user.id, query.message.message_id if query.message else 0, funcion, feedback))
+                      (query.from_user.id, query.message.message_id if query.message else 0, parts[2], feedback))
             conn.commit(); conn.close()
     except Exception: pass
     try: await query.edit_message_reply_markup(reply_markup=None)
     except Exception: pass
-
-    meta = context.user_data.get('ultima_respuesta_meta') or {}
-
-    # ═══ "ÚTIL" → ENTRENAMIENTO: la asociación pregunta→documentos queda
-    #     en memoria con voto positivo; buscar_rag la usará primero (A0) ═══
-    if feedback == 'positivo':
-        await query.answer("✅ ¡Gracias! Aprendí de esta respuesta.")
-        if meta.get('docs'):
-            try:
-                await asyncio.to_thread(_fb_guardar_aprendizaje,
-                                        meta.get('pregunta', ''), meta['docs'], +1)
-            except Exception as e:
-                logger.debug(f"fb_up aprendizaje: {e}")
-        # FASE 31.9: respuesta que vino de INTERNET y fue validada como Útil
-        # → se transforma en markdown y se respalda en la base de
-        # conocimientos (rag_chunks + embedding). Conocimiento PERMANENTE:
-        # la próxima vez el bot responde desde su propia memoria, más rápido.
-        if meta.get('web_md'):
-            try:
-                _n_ch = await asyncio.to_thread(
-                    _guardar_web_en_rag, meta.get('pregunta', ''),
-                    meta.get('respuesta', ''), meta['web_md'],
-                    meta.get('web_urls', []))
-                if _n_ch:
-                    try:
-                        await context.bot.send_message(
-                            query.message.chat_id,
-                            f"💾 Información web respaldada en mi base de "
-                            f"conocimientos ({_n_ch} fragmentos markdown). "
-                            f"La próxima vez responderé desde mi propia memoria.")
-                    except Exception:
-                        pass
-            except Exception as _e_gw:
-                logger.debug(f"respaldo web→rag: {_e_gw}")
-        return
-
-    # ═══ "MEJORAR" → voto negativo + NUEVA RESPUESTA con criterios distintos ═══
-    await query.answer("🔄 Buscando con otros criterios...")
-    if meta.get('docs'):
-        try:
-            await asyncio.to_thread(_fb_guardar_aprendizaje,
-                                    meta.get('pregunta', ''), meta['docs'], -1)
-        except Exception:
-            pass
-    if funcion != 'chat_privado' or not meta.get('pregunta'):
-        try:
-            await query.message.reply_text(
-                "📝 Tomé nota. Reformula tu pregunta con más detalle "
-                "(autor, tema, fechas) y lo intento de nuevo.")
-        except Exception: pass
-        return
-    chat_id = query.message.chat_id
-    msg_rt = None
-    try:
-        msg_rt = await context.bot.send_message(chat_id, "🔄 Reintentando con criterios de búsqueda ampliados...")
-    except Exception: pass
-    try:
-        pregunta_fb = meta['pregunta']
-
-        # FASE 31.18b (detectado en prueba de Germán): la regeneración decía
-        # "no tengo información sobre tus intereses" porque este flujo NO
-        # pasaba por la inyección de memoria del flujo principal. Ahora la
-        # memoria del usuario también alimenta la respuesta regenerada.
-        _mem_blk_fb = ""
-        try:
-            _mem_blk_fb = await memoria_contexto(query.from_user.id, pregunta_fb)
-        except Exception:
-            _mem_blk_fb = ""
-
-        _docs_regen = []  # FASE 31.5: docs de la respuesta BUENA (para aprender de ELLA)
-        def _regenerar():
-            # Criterios DISTINTOS: query expansion (sinónimos/variantes) y
-            # más chunks; excluimos el sesgo de la ronda anterior.
-            try:
-                chunks_fb, score_fb = buscar_rag_expandido(pregunta_fb, 20)
-            except Exception:
-                chunks_fb, score_fb = buscar_rag(pregunta_fb, limit=20)
-            for _it in (chunks_fb or [])[:8]:
-                _s = _it[1] if isinstance(_it, (list, tuple)) and len(_it) > 1 else ''
-                if _s and _s not in _docs_regen:
-                    _docs_regen.append(_s)
-            ctx_fb = "\n\n".join(
-                f"[{(it[1] if len(it) > 1 else '?')}]\n{it[0][:700]}"
-                for it in (chunks_fb or [])[:8])
-            prompt_fb = (
-                "Eres el asistente de la Cofradía. El usuario marcó que tu respuesta "
-                "anterior NO fue satisfactoria. Genera una respuesta NUEVA y DISTINTA: "
-                "cambia el enfoque, sé más concreto, estructura mejor y NO repitas la anterior.\n\n"
-                f"PREGUNTA: {pregunta_fb}\n\n"
-                f"RESPUESTA ANTERIOR (insatisfactoria, NO repetir):\n{meta.get('respuesta','')[:900]}\n\n"
-                + (f"{_mem_blk_fb}\n\n" if _mem_blk_fb else "")
-                + (f"CONTEXTO DE LA BIBLIOTECA (usa SOLO lo relevante):\n{ctx_fb}\n\n" if ctx_fb else "")
-                + "Si la biblioteca no cubre el tema, dilo con honestidad y responde con tu "
-                  "conocimiento general, indicándolo. Personaliza usando la memoria del "
-                  "usuario si está disponible. Responde en español, claro y estructurado.")
-            # FASE 31.18b: cascada completa de 7 LLMs (antes solo Groq: si
-            # fallaba, el usuario no recibía regeneración)
-            return ejecutar_cascada_llm(prompt_fb, 900, 0.5)
-
-        nueva = await asyncio.wait_for(asyncio.to_thread(_regenerar), timeout=75.0)  # FASE 31.7: 45→75s
-        nueva = _cortar_degeneracion(nueva)  # FASE 31.6: mata el bucle "Mihailo..."
-        nueva = _decimales_a_coma(nueva)  # FASE 31.9c decimales con coma
-        if msg_rt:
-            try: await msg_rt.delete()
-            except Exception: pass
-        if nueva and nueva.strip():
-            # FASE 31.4: sin asteriscos markdown (se veían crudos en Telegram)
-            nueva_limpia = nueva.strip().replace('**', '').replace('*', '').replace('__', '')
-            nueva_txt = nueva_limpia[:3900] + "\n\n─────────────────\n🔄 Respuesta regenerada con criterios ampliados"
-            memoria_registrar(query.from_user.id, "", nueva_limpia)  # FASE 31.18b
-            await context.bot.send_message(
-                chat_id, nueva_txt,
-                reply_markup=_crear_botones_feedback('chat_privado'))
-            meta['respuesta'] = nueva_limpia[:1800]
-            # FASE 31.5 FIX MEMORIA: los docs correctos son los de ESTA
-            # respuesta (la buena). Antes se conservaban los de la respuesta
-            # mala → "Útil" entrenaba con la asociación equivocada y la
-            # siguiente vez volvía a fallar. Ahora aprende de la acertada.
-            if _docs_regen:
-                meta['docs'] = _docs_regen[:5]
-            context.user_data['ultima_respuesta_meta'] = meta
-            # FASE 31.6: sembrar la caché RAG con el resultado BUENO de la
-            # regeneración → si el usuario repite la pregunta, buscar_rag hará
-            # cache HIT de la versión acertada en vez de reintentar y fallar.
-            try:
-                import unicodedata as _uni_seed
-                _qn = _uni_seed.normalize('NFKD', (pregunta_fb or '').lower().strip())
-                _qn = ''.join(ch for ch in _qn if not _uni_seed.combining(ch))
-                _qn = ' '.join(_qn.split()[:10])
-                if _qn and _docs_regen:
-                    _res_seed = [(f"[{d}] contenido relevante confirmado por feedback", d)
-                                 for d in _docs_regen[:5]]
-                    _fase6_cache_set(_qn, _res_seed, 75.0)
-            except Exception:
-                pass
-            # FASE 31.4: AUDIO de la respuesta regenerada (pedido de Germán)
-            try:
-                audio_fb = await asyncio.wait_for(
-                    generar_audio_tts(nueva_limpia[:3000], f"/tmp/fb_{chat_id}.mp3"),
-                    timeout=15.0)
-                if audio_fb and os.path.exists(audio_fb):
-                    with open(audio_fb, 'rb') as af_fb:
-                        await context.bot.send_voice(chat_id, voice=af_fb)
-                    os.remove(audio_fb)
-            except Exception as _e_afb:
-                logger.debug(f"TTS regeneración: {_e_afb}")
-        else:
-            await context.bot.send_message(
-                chat_id, "😕 No logré una mejor respuesta. Reformula la pregunta con más detalle.")
-    except asyncio.TimeoutError:
-        if msg_rt:
-            try: await msg_rt.edit_text("⏱️ El reintento tardó demasiado. Reformula tu pregunta.")
-            except Exception: pass
-    except Exception as e:
-        logger.warning(f"fb_down regeneración: {e}")
 
 # ======================================================================
 # ===  MEJORA 5: ANALISIS MULTI-MODAL (IMAGENES EN GRUPO)  ============
@@ -2850,18 +2463,13 @@ Tu personalidad:
             }
         ],
         "max_tokens": max_tokens,
-        "temperature": temperature,
-        "frequency_penalty": 0.5,
-        "presence_penalty": 0.3
+        "temperature": temperature
     }
     
     for intento in range(reintentos):
         try:
             # FASE 25: timeout reducido de 30s a 25s (con 2 reintentos = max 50s vs 90s antes)
-            # FASE 31.11 (Germán): timeout=(connect, read) → si Groq está caído/
-            # inalcanzable, falla en 5s (antes 25s) y salta a Gemini más rápido.
-            # El presupuesto de LECTURA (25s) se mantiene: nunca trunca respuestas.
-            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=(5, 25))
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=25)
             
             if response.status_code == 200:
                 data = response.json()
@@ -2874,7 +2482,7 @@ Tu personalidad:
             elif response.status_code == 429:
                 logger.warning(f"Rate limit Groq, esperando... (intento {intento + 1})")
                 import time
-                time.sleep(1)  # FASE 31.11 (Germán): backoff 2s/4s → 1s para failover más rápido a Gemini
+                time.sleep(2 * (intento + 1))
                 
             elif response.status_code >= 500:
                 logger.warning(f"Error servidor Groq {response.status_code} (intento {intento + 1})")
@@ -2920,7 +2528,7 @@ def llamar_gemini_texto(prompt: str, max_tokens: int = 1024, temperature: float 
                 "temperature": temperature,
             }
         }
-        r = requests.post(url, json=payload, timeout=(5, 30))  # FASE 31.11: (connect,read) → failover rápido si Gemini cae
+        r = requests.post(url, json=payload, timeout=30)
         if r.status_code == 200:
             texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
             if texto and texto.strip():
@@ -2967,7 +2575,7 @@ def llamar_glm5(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -
                 "max_tokens": max_tokens,
                 "temperature": temperature,
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=(5, 25))  # FASE 31.11: (connect,read) → failover rápido
+            r = requests.post(url, json=payload, headers=headers, timeout=25)
             if r.status_code == 200:
                 texto = r.json()["choices"][0]["message"]["content"]
                 if texto and texto.strip():
@@ -3039,7 +2647,7 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
                 "temperature": temperature,
                 "stream": False,
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=(5, 30))  # FASE 31.11: (connect,read) → failover rápido
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
             if r.status_code == 200:
                 data = r.json()
                 texto = data["choices"][0]["message"]["content"]
@@ -3068,2343 +2676,6 @@ def llamar_deepseek(prompt: str, max_tokens: int = 1024, temperature: float = 0.
             continue
     
     logger.warning("DeepSeek: todos los modelos fallaron")
-    return None
-
-
-def llamar_openrouter(prompt: str, modelo: str, max_tokens: int = 1024,
-                      temperature: float = 0.7, timeout_read: int = 40,
-                      razonamiento_bajo: bool = True, etiqueta: str = None) -> str:
-    """FASE 31.13: Llamador GENÉRICO OpenRouter (API OpenAI-compatible).
-
-    Un solo punto de acceso para TODOS los modelos gratuitos de OpenRouter.
-    Rate limits del tier free: ~50 req/día sin créditos (20 req/min);
-    ~1000 req/día con >= $10 USD en créditos (los créditos NO se consumen
-    con modelos :free, solo elevan el límite).
-
-    Modelos usados por el bot (todos $0/$0 por token):
-      - nex-agi/nex-n2-pro:free ............. 5° cascada (262K ctx, agéntico)
-      - openai/gpt-oss-120b:free ............ 6° cascada (131K ctx, Apache 2.0)
-      - openrouter/free ..................... 7° cascada (router automático:
-            OpenRouter elige el mejor modelo gratuito disponible; inmune a
-            que un modelo :free sea retirado del catálogo sin aviso)
-      - nvidia/nemotron-3-super-120b-a12b:free ... análisis de libros RAG
-            (contexto 1M tokens — comando /analizar_libro)
-
-    Endpoint: https://openrouter.ai/api/v1/chat/completions
-    Variable de entorno requerida: OPENROUTER_API_KEY
-    """
-    if not OPENROUTER_API_KEY:
-        return None
-
-    tag = etiqueta or modelo
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        # Headers recomendados por OpenRouter (atribución de la app)
-        "HTTP-Referer": "https://cofradia-networking.cl",
-        "X-Title": "Cofradia de Networking Bot",
-    }
-    payload = {
-        "model": modelo,
-        "messages": [
-            {"role": "system", "content": "Eres el asistente IA de Cofradía de Networking, comunidad profesional chilena de oficiales de la Armada. Responde en español, profesional, cercano y directo. Sin asteriscos."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": min(max_tokens, 8000),
-        "temperature": temperature,
-        "stream": False,
-    }
-    if razonamiento_bajo:
-        # Modelos de razonamiento: limitar esfuerzo de "thinking" para
-        # reducir latencia (los modelos sin reasoning ignoran el parámetro)
-        payload["reasoning"] = {"effort": "low"}
-
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=(5, timeout_read))
-        if r.status_code == 200:
-            data = r.json()
-            texto = data.get("choices", [{}])[0].get("message", {}).get("content")
-            if texto and texto.strip():
-                logger.info(f"✅ Respuesta OpenRouter ({tag})")
-                return texto.strip()
-            logger.warning(f"OpenRouter {tag}: respuesta 200 pero sin contenido")
-        elif r.status_code == 429:
-            logger.warning(f"OpenRouter {tag}: rate limit free tier agotado (429)")
-        elif r.status_code in (401, 403):
-            logger.warning(f"OpenRouter {tag}: auth fallida (status {r.status_code}) - verificar OPENROUTER_API_KEY")
-        elif r.status_code == 404:
-            logger.warning(f"OpenRouter {tag}: modelo no disponible (404) — pudo ser retirado del tier gratuito")
-        elif r.status_code == 402:
-            logger.warning(f"OpenRouter {tag}: exige créditos (402)")
-        else:
-            logger.warning(f"OpenRouter {tag}: error {r.status_code}")
-    except requests.Timeout:
-        logger.warning(f"OpenRouter {tag}: timeout (>{timeout_read}s)")
-    except Exception as e:
-        logger.debug(f"Error OpenRouter {tag}: {e}")
-
-    return None
-
-
-def llamar_nexn2(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Nex-N2-Pro:free — QUINTO fallback LLM (FASE 31.12).
-
-    Modelo agéntico open-source (Apache 2.0) de Nex AGI sobre base Qwen3.5:
-    MoE 397B totales / 17B activos, contexto 262K, razonamiento adaptativo.
-    """
-    return llamar_openrouter(prompt, "nex-agi/nex-n2-pro:free",
-                             max_tokens=max_tokens, temperature=temperature,
-                             timeout_read=40, etiqueta="Nex-N2-Pro:free, 5° fallback")
-
-
-def llamar_gptoss(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """GPT-OSS 120B:free (OpenAI, Apache 2.0) — SEXTO fallback LLM (FASE 31.13).
-
-    Modelo abierto de OpenAI, 120B parámetros, contexto 131K. Rendimiento
-    comparable a o3-mini en benchmarks. Alternativa general sólida cuando
-    Nex-N2 no responde (rate limit propio del modelo o retiro del catálogo).
-    """
-    return llamar_openrouter(prompt, "openai/gpt-oss-120b:free",
-                             max_tokens=max_tokens, temperature=temperature,
-                             timeout_read=40, etiqueta="GPT-OSS-120B:free, 6° fallback")
-
-
-def llamar_openrouter_free(prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """openrouter/free (router automático) — SÉPTIMO y ÚLTIMO fallback (FASE 31.13).
-
-    Meta-modelo de OpenRouter que selecciona automáticamente entre TODOS los
-    modelos gratuitos disponibles según el request. Es la red de seguridad
-    definitiva: los modelos :free desaparecen del catálogo sin aviso (pasó
-    con Qwen3 Coder y DeepSeek V4 Flash en jun-2026), pero este router
-    siempre rutea a lo que esté vivo. Si esto falla, no hay LLM disponible.
-    """
-    return llamar_openrouter(prompt, "openrouter/free",
-                             max_tokens=max_tokens, temperature=temperature,
-                             timeout_read=45, etiqueta="Router-Free, 7° fallback")
-
-
-def llamar_nemotron(prompt: str, max_tokens: int = 4000, temperature: float = 0.4) -> str:
-    """NVIDIA Nemotron 3 Super:free — Motor de ANÁLISIS DE LIBROS (FASE 31.13).
-
-    MoE híbrido Mamba-Transformer de 120B (12B activos) con contexto nativo
-    de 1 MILLÓN de tokens y procesamiento lineal de secuencias — diseñado
-    para razonamiento sobre documentos gigantes sin truncar.
-
-    NO forma parte de la cascada conversacional: es el motor dedicado del
-    comando /analizar_libro, que le envía libros COMPLETOS de la biblioteca
-    RAG (280+ obras en rag_chunks) de una sola pasada.
-    Timeout read 180s: procesar cientos de miles de tokens toma tiempo.
-    """
-    return llamar_openrouter(prompt, "nvidia/nemotron-3-super-120b-a12b:free",
-                             max_tokens=max_tokens, temperature=temperature,
-                             timeout_read=180, etiqueta="Nemotron-3-Super:free, análisis libros")
-
-
-def ejecutar_cascada_llm(prompt: str, max_tokens: int = 1000, temperature: float = 0.5,
-                         incluir_gemini: bool = True) -> str:
-    """FASE 31.14: Cascada SÍNCRONA de 7 LLMs — diseñada para correr dentro de
-    asyncio.to_thread() y NO bloquear el event loop del bot.
-
-    Antes, las llamadas requests.post() síncronas dentro de los handlers async
-    congelaban el bot completo mientras un LLM respondía (5-40s): los demás
-    usuarios quedaban en espera. Al mover toda la cadena a un thread aparte,
-    el event loop queda libre para atender otros mensajes en paralelo
-    (combinado con concurrent_updates(32) en el Application builder).
-
-    Orden: Groq → Gemini → GLM → DeepSeek → Nex-N2 → GPT-OSS → router free.
-    incluir_gemini=False replica el orden del "intento simplificado" FASE 25
-    (Groq → GLM → DeepSeek → ...), que omite Gemini.
-    """
-    respuesta = llamar_groq(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta and incluir_gemini:
-        logger.warning("⚠️ Cascada: Groq falló — fallback Gemini")
-        respuesta = llamar_gemini_texto(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta:
-        logger.warning("⚠️ Cascada: fallback GLM (Z.AI)")
-        respuesta = llamar_glm5(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta:
-        logger.warning("⚠️ Cascada: fallback DeepSeek")
-        respuesta = llamar_deepseek(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta:
-        logger.warning("⚠️ Cascada: fallback Nex-N2-Pro:free (FASE 31.12)")
-        respuesta = llamar_nexn2(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta:
-        logger.warning("⚠️ Cascada: fallback GPT-OSS-120B:free (FASE 31.13)")
-        respuesta = llamar_gptoss(prompt, max_tokens=max_tokens, temperature=temperature)
-    if not respuesta:
-        logger.warning("⚠️ Cascada: fallback router automático openrouter/free (FASE 31.13)")
-        respuesta = llamar_openrouter_free(prompt, max_tokens=max_tokens, temperature=temperature)
-    return respuesta
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.14: ANÁLISIS PROFUNDO DE LIBROS EN CONVERSACIÓN NATURAL
-# (texto y voz, sin comando) — motor Nemotron 3 Super, contexto 1M tokens
-# ════════════════════════════════════════════════════════════════════════
-
-# Patrón que indica que la pregunta trata sobre un libro/documento/autor
-# (alineado con el detector anti-homónimos FASE 31 del chat privado)
-_PATRON_PREGUNTA_LIBRO = re.compile(
-    r'\b(libro|libros|documento|documentos|pdf|autor|autora|obra|texto|'
-    r'biblioteca|capitulo|capítulo|escribio|escribió|publicó|publico|lei|leí|'
-    r'resumen|resume|resumir|analiza|analizar|analisis|análisis|trata|'
-    r'ensena|enseña|propone|plantea)\b'
-)
-
-# Caché de fuentes de la biblioteca (evita consultar la BD en cada mensaje)
-_LIBROS_RAG_CACHE = {'ts': None, 'fuentes': []}
-
-_STOPWORDS_TITULO = {
-    'los', 'las', 'del', 'por', 'con', 'una', 'uno', 'sus', 'mas', 'que',
-    'sin', 'the', 'and',
-    'para', 'como', 'sobre', 'entre', 'desde', 'hasta', 'este', 'esta',
-    'estos', 'estas', 'pero', 'porque', 'cuando', 'donde', 'libro',
-    'autor', 'edicion', 'tomo', 'volumen', 'parte', 'guia', 'manual',
-    'introduccion', 'tratado', 'curso', 'apuntes', 'version', 'completo',
-}
-
-
-def _normalizar_texto_libro(txt: str) -> str:
-    """Minúsculas sin acentos NI puntuación, para comparar títulos vs preguntas."""
-    import unicodedata
-    txt = (txt or '').lower()
-    txt = unicodedata.normalize('NFD', txt)
-    txt = ''.join(ch for ch in txt if unicodedata.category(ch) != 'Mn')
-    # Puntuación → espacio (evita que 'guerra?' o '¿libro' rompan el match)
-    return re.sub(r'[^a-z0-9ñ ]+', ' ', txt)
-
-
-def obtener_fuentes_libros() -> list:
-    """Lista de fuentes 'PDF:...' de rag_chunks, con caché de 1 hora."""
-    ahora = datetime.now()
-    if (_LIBROS_RAG_CACHE['ts'] and _LIBROS_RAG_CACHE['fuentes'] and
-            (ahora - _LIBROS_RAG_CACHE['ts']).total_seconds() < 3600):
-        return _LIBROS_RAG_CACHE['fuentes']
-    fuentes = []
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%%'")
-                fuentes = [r['source'] for r in c.fetchall()]
-            else:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%'")
-                fuentes = [r[0] for r in c.fetchall()]
-            conn.close()
-            _LIBROS_RAG_CACHE['ts'] = ahora
-            _LIBROS_RAG_CACHE['fuentes'] = fuentes
-    except Exception as e:
-        logger.debug(f"FASE 31.14: error listando fuentes de libros: {e}")
-    return fuentes
-
-
-def detectar_libro_en_pregunta(pregunta: str) -> str:
-    """Detecta si la pregunta menciona un libro de la biblioteca RAG.
-
-    Compara las palabras significativas (>=4 letras, sin stopwords) de cada
-    título indexado contra la pregunta normalizada. Retorna el source del
-    mejor match o None. Umbral conservador para evitar falsos positivos:
-    se exigen >=2 palabras del título, o 1 sola si el título solo tiene una
-    palabra significativa de >=5 letras (ej. 'Milei').
-    """
-    pregunta_norm = ' ' + _normalizar_texto_libro(pregunta) + ' '
-    mejor_source, mejor_score = None, 0
-    for source in obtener_fuentes_libros():
-        titulo = source.replace('PDF:', '')
-        titulo = re.sub(r'\.(pdf|epub|txt|docx?)$', '', titulo, flags=re.IGNORECASE)
-        titulo_norm = _normalizar_texto_libro(re.sub(r'[_\-\.]+', ' ', titulo))
-        palabras = [p for p in titulo_norm.split()
-                    if len(p) >= 3 and p not in _STOPWORDS_TITULO]
-        if not palabras:
-            continue
-        coincidencias = [p for p in palabras if f' {p} ' in pregunta_norm or p in pregunta_norm.split()]
-        n = len(coincidencias)
-        # FASE 31.16: además del match multi-palabra, aceptar UNA palabra
-        # DISTINTIVA (>=5 letras, ej. 'milei', 'inflacion') aunque el título
-        # tenga más palabras — con score menor para que los matches múltiples
-        # sigan ganando. El gate previo (_PATRON_PREGUNTA_LIBRO) ya limita
-        # esto a preguntas que son genuinamente sobre libros.
-        match_multi = n >= 2 or (n == 1 and len(palabras) == 1 and len(coincidencias[0]) >= 5)
-        match_distintivo = (n == 1 and max((len(c) for c in coincidencias), default=0) >= 5)
-        if match_multi or match_distintivo:
-            score = n * 10 + int(20 * n / len(palabras))  # cantidad + cobertura del título
-            if match_distintivo and not match_multi:
-                score = 5 + len(coincidencias[0])  # distintivo: score bajo (5-20)
-            if score > mejor_score:
-                mejor_score, mejor_source = score, source
-    return mejor_source
-
-
-def cargar_libro_para_analisis(source: str, limite_chars: int = 120_000) -> str:
-    """Concatena los chunks del libro (en orden) hasta limite_chars.
-
-    120K chars (~30K tokens) es suficiente para respuestas profundas en
-    conversación y cabe holgado en el contexto 1M de Nemotron, manteniendo
-    la latencia razonable para un chat (vs. los 600K de /analizar_libro).
-    """
-    texto = ''
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return ''
-        c = conn.cursor()
-        if DATABASE_URL:
-            c.execute("SELECT chunk_text FROM rag_chunks WHERE source = %s ORDER BY id", (source,))
-        else:
-            c.execute("SELECT chunk_text FROM rag_chunks WHERE source = ? ORDER BY id", (source,))
-        partes = []
-        total = 0
-        for f in c.fetchall():
-            t = (f['chunk_text'] if DATABASE_URL else f[0]) or ''
-            partes.append(t)
-            total += len(t)
-            if total >= limite_chars:
-                break
-        conn.close()
-        texto = '\n'.join(partes)[:limite_chars]
-    except Exception as e:
-        logger.debug(f"FASE 31.14: error cargando libro '{source}': {e}")
-    return texto
-
-
-async def intentar_respuesta_libro(pregunta: str, user_name: str) -> str:
-    """FASE 31.14: Si la pregunta conversacional (texto o voz transcrita) es
-    sobre un libro de la biblioteca, responde con ANÁLISIS PROFUNDO usando
-    Nemotron 3 Super (contexto extendido de 120K chars del libro real).
-
-    Retorna la respuesta, o None para que el flujo continúe con la cascada
-    normal (RAG estándar de ~30 chunks). Todo el trabajo pesado (BD + LLM)
-    corre en threads → no bloquea a los demás usuarios.
-    Consume 1 request del tier free de OpenRouter solo cuando hay match real.
-    """
-    if not OPENROUTER_API_KEY:
-        return None
-    if not _PATRON_PREGUNTA_LIBRO.search((pregunta or '').lower()):
-        return None
-    try:
-        libro = await asyncio.to_thread(detectar_libro_en_pregunta, pregunta)
-        if not libro:
-            return None
-        texto_libro = await asyncio.to_thread(cargar_libro_para_analisis, libro, 120_000)
-        if not texto_libro or len(texto_libro) < 2000:
-            return None
-        titulo_limpio = libro.replace('PDF:', '')
-        logger.info(f"📚 FASE 31.14: pregunta sobre '{titulo_limpio}' — análisis profundo Nemotron")
-        prompt_libro = (
-            f"Eres el asistente IA de la Cofradía de Networking (comunidad "
-            f"profesional chilena de oficiales de la Armada). {user_name} te "
-            f"pregunta sobre un libro de la biblioteca y tienes acceso a su "
-            f"TEXTO REAL extendido (no solo fragmentos).\n\n"
-            f"LIBRO: {titulo_limpio}\n"
-            f"PREGUNTA DE {user_name}: \"{pregunta}\"\n\n"
-            f"REGLAS:\n"
-            f"1. Responde SOLO con base en el texto del libro provisto abajo. "
-            f"Cita ideas CONCRETAS del libro (conceptos, argumentos, ejemplos), "
-            f"nunca generalidades tipo 'el libro habla de eso'.\n"
-            f"2. Comienza dirigiéndote a {user_name} por su nombre, cordial y "
-            f"profesional.\n"
-            f"3. Máximo 3-4 párrafos, en español, SIN asteriscos ni Markdown.\n"
-            f"4. Si la pregunta pide resumen o análisis general: entrega tesis "
-            f"central, 3-4 ideas clave y una aplicación práctica para "
-            f"profesionales de la Cofradía.\n"
-            f"5. Al final sugiere: 'Para un análisis completo del libro, el "
-            f"administrador puede usar /analizar_libro'.\n\n"
-            f"TEXTO DEL LIBRO:\n{texto_libro}"
-        )
-        respuesta = await asyncio.to_thread(llamar_nemotron, prompt_libro, 1200, 0.5)
-        # ═══ FASE 31.16: GARANTÍA MULTI-MOTOR — si el libro está en la
-        # biblioteca, el usuario SIEMPRE recibe respuesta basada en su texto
-        # real, aunque OpenRouter/Nemotron falle (rate limit, key ausente):
-        #   2° intento: Gemini 2.0 Flash (contexto 1M, gratis) con 60K chars
-        #   3° intento: cascada completa de 7 LLMs con extracto de 12K chars
-        #               (cabe en el límite TPM del tier free de Groq)
-        if not respuesta:
-            logger.warning(f"📚 FASE 31.16: Nemotron falló para '{titulo_limpio}' — reintento Gemini 1M")
-            try:
-                prompt_gemini = prompt_libro.replace(texto_libro, texto_libro[:60_000])
-                respuesta = await asyncio.to_thread(llamar_gemini_texto, prompt_gemini, 1200, 0.5)
-            except Exception as _e_gem16:
-                logger.debug(f"FASE 31.16 Gemini libro: {_e_gem16}")
-        if not respuesta:
-            logger.warning(f"📚 FASE 31.16: Gemini falló para '{titulo_limpio}' — cascada con extracto 12K")
-            try:
-                prompt_cascada = prompt_libro.replace(texto_libro, texto_libro[:12_000])
-                respuesta = await asyncio.to_thread(ejecutar_cascada_llm, prompt_cascada, 1000, 0.5)
-            except Exception as _e_cas16:
-                logger.debug(f"FASE 31.16 cascada libro: {_e_cas16}")
-        if respuesta:
-            logger.info(f"📚 Respuesta de libro entregada desde biblioteca RAG: '{titulo_limpio}'")
-        else:
-            logger.warning(f"📚 FASE 31.16: TODOS los motores fallaron para '{titulo_limpio}' "
-                           f"— el flujo normal continuará (verificar conectividad LLM)")
-        return respuesta
-    except Exception as e:
-        logger.debug(f"FASE 31.14: intentar_respuesta_libro falló: {e}")
-        return None
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.15: AGENTE SÍSMICO Y DE EMERGENCIAS NATURALES (CHILE)
-# Monitor en tiempo real (cada 5 min) de sismos y alertas de tsunami.
-# Fuentes: USGS (primaria, mundial, con coordenadas + flag tsunami) →
-#          GAEL/CSN (fallback chileno). Ambas gratuitas, sin API key.
-# Al detectar un evento: mensaje de texto + audio TTS + informe HTML
-# didáctico con gráficos ECharts e información histórica vinculada.
-# ════════════════════════════════════════════════════════════════════════
-
-# Magnitud mínima para publicar alerta automática en el grupo (configurable)
-SISMO_MAGNITUD_MINIMA = float(os.environ.get('SISMO_MAGNITUD_MINIMA', '5.0'))
-# Intervalo del monitor en minutos
-SISMO_CHECK_INTERVALO_MIN = int(os.environ.get('SISMO_CHECK_INTERVALO_MIN', '5'))
-
-# Grandes terremotos históricos de Chile (para contexto comparativo en el HTML)
-_TERREMOTOS_HISTORICOS_CHILE = [
-    ('Valdivia 1960', 9.5, 'El mayor terremoto registrado en la historia mundial. Tsunami transpacífico.'),
-    ('Maule 2010 (27F)', 8.8, 'Afectó a 12 millones de personas. Tsunami devastó Constitución y Talcahuano.'),
-    ('Vallenar 1922', 8.5, 'Terremoto y tsunami en Atacama.'),
-    ('Illapel 2015', 8.4, 'Tsunami en Coquimbo. Evacuación costera masiva exitosa.'),
-    ('Iquique 2014', 8.2, 'Precedido por intensa secuencia de precursores.'),
-    ('Algarrobo 1985', 8.0, 'Grave daño en Valparaíso y San Antonio.'),
-]
-
-
-def _tz_chile():
-    """Timezone de Chile, autocontenida (zoneinfo → pytz → None)."""
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo('America/Santiago')
-    except Exception:
-        try:
-            import pytz
-            return pytz.timezone('America/Santiago')
-        except Exception:
-            return None
-
-
-def _clasificar_sismo(mag: float) -> tuple:
-    """Clasificación chilena coloquial + emoji según magnitud."""
-    if mag >= 8.0:
-        return ('🔴', 'GRAN TERREMOTO')
-    if mag >= 7.0:
-        return ('🔴', 'TERREMOTO')
-    if mag >= 6.0:
-        return ('🟠', 'SISMO FUERTE')
-    if mag >= 5.0:
-        return ('🟡', 'SISMO MODERADO')
-    return ('🟢', 'TEMBLOR LEVE')
-
-
-def obtener_sismos_usgs(horas: int = 2, mag_min: float = 4.0) -> list:
-    """Sismos en Chile desde USGS FDSN (fuente primaria).
-
-    Bounding box Chile continental e insular: lat -56..-17, lon -76..-66.
-    Retorna lista de dicts normalizados:
-    {id, magnitud, lugar, ts_utc, lat, lon, prof_km, tsunami, fuente}
-    """
-    try:
-        desde = (datetime.utcnow() - timedelta(hours=horas)).strftime('%Y-%m-%dT%H:%M:%S')
-        url = ('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson'
-               f'&starttime={desde}&minlatitude=-56&maxlatitude=-17'
-               f'&minlongitude=-76&maxlongitude=-66&minmagnitude={mag_min}'
-               '&orderby=time&limit=30')
-        r = requests.get(url, timeout=(5, 15))
-        if r.status_code != 200:
-            logger.warning(f"Sismos USGS: status {r.status_code}")
-            return []
-        sismos = []
-        for f in r.json().get('features', []):
-            try:
-                p = f.get('properties', {})
-                g = f.get('geometry', {}).get('coordinates', [None, None, None])
-                sismos.append({
-                    'id': f.get('id') or f"usgs_{p.get('time')}",
-                    'magnitud': float(p.get('mag') or 0),
-                    'lugar': p.get('place') or 'Chile',
-                    'ts_utc': datetime.utcfromtimestamp((p.get('time') or 0) / 1000),
-                    'lat': g[1], 'lon': g[0],
-                    'prof_km': round(float(g[2]), 1) if g[2] is not None else None,
-                    'tsunami': int(p.get('tsunami') or 0),
-                    'fuente': 'USGS',
-                })
-            except Exception:
-                continue
-        return sismos
-    except Exception as e:
-        logger.warning(f"Sismos USGS error: {e}")
-        return []
-
-
-def obtener_sismos_gael(horas: int = 2, mag_min: float = 4.0) -> list:
-    """Sismos desde GAEL (espejo del CSN chileno) — fuente de respaldo.
-
-    GAEL no publica coordenadas ni ID: se deriva un ID estable de
-    fecha+referencia geográfica para la deduplicación.
-    """
-    try:
-        r = requests.get('https://api.gael.cloud/general/public/sismos', timeout=(5, 15))
-        if r.status_code != 200:
-            return []
-        sismos = []
-        limite = datetime.utcnow() - timedelta(hours=horas + 4)  # margen por TZ local del feed
-        for s in r.json():
-            try:
-                mag = float(str(s.get('Magnitud', '0')).replace(',', '.'))
-                if mag < mag_min:
-                    continue
-                fecha_str = s.get('Fecha', '')
-                ts = datetime.strptime(fecha_str, '%Y-%m-%d %H:%M:%S') if fecha_str else datetime.utcnow()
-                if ts < limite:
-                    continue
-                ref = s.get('RefGeografica', 'Chile')
-                import hashlib
-                sid = 'gael_' + hashlib.md5(f"{fecha_str}|{ref}".encode()).hexdigest()[:12]
-                prof = s.get('Profundidad')
-                sismos.append({
-                    'id': sid, 'magnitud': mag, 'lugar': ref, 'ts_utc': ts,
-                    'lat': None, 'lon': None,
-                    'prof_km': round(float(str(prof).replace(',', '.')), 1) if prof else None,
-                    'tsunami': 0, 'fuente': 'CSN/GAEL',
-                })
-            except Exception:
-                continue
-        return sismos
-    except Exception as e:
-        logger.warning(f"Sismos GAEL error: {e}")
-        return []
-
-
-def obtener_sismos_chile(horas: int = 2, mag_min: float = 4.0) -> list:
-    """Cadena de respaldo: USGS → GAEL/CSN."""
-    sismos = obtener_sismos_usgs(horas, mag_min)
-    if not sismos:
-        sismos = obtener_sismos_gael(horas, mag_min)
-    return sismos
-
-
-def _sismo_asegurar_tabla(c, es_pg: bool):
-    """Crea la tabla de deduplicación si no existe (lazy, autocontenida)."""
-    c.execute('''CREATE TABLE IF NOT EXISTS sismos_reportados (
-        sismo_id TEXT PRIMARY KEY,
-        magnitud REAL,
-        lugar TEXT,
-        fecha_reporte TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-
-
-def _sismo_ya_reportado(sismo_id: str) -> bool:
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return False
-        c = conn.cursor()
-        _sismo_asegurar_tabla(c, bool(DATABASE_URL))
-        if DATABASE_URL:
-            c.execute("SELECT 1 FROM sismos_reportados WHERE sismo_id = %s", (sismo_id,))
-        else:
-            c.execute("SELECT 1 FROM sismos_reportados WHERE sismo_id = ?", (sismo_id,))
-        existe = c.fetchone() is not None
-        conn.commit()
-        conn.close()
-        return existe
-    except Exception as e:
-        logger.debug(f"Sismo dedup check error: {e}")
-        return False
-
-
-def _sismo_marcar_reportado(sismo: dict):
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        _sismo_asegurar_tabla(c, bool(DATABASE_URL))
-        if DATABASE_URL:
-            c.execute("""INSERT INTO sismos_reportados (sismo_id, magnitud, lugar)
-                         VALUES (%s, %s, %s) ON CONFLICT (sismo_id) DO NOTHING""",
-                      (sismo['id'], sismo['magnitud'], sismo['lugar'][:200]))
-        else:
-            c.execute("INSERT OR IGNORE INTO sismos_reportados (sismo_id, magnitud, lugar) VALUES (?, ?, ?)",
-                      (sismo['id'], sismo['magnitud'], sismo['lugar'][:200]))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.debug(f"Sismo dedup insert error: {e}")
-
-
-def _sismo_hora_chile(ts_utc: datetime) -> str:
-    """Convierte UTC → hora Chile legible."""
-    try:
-        tz = _tz_chile()
-        if tz:
-            from datetime import timezone as _tzmod
-            return ts_utc.replace(tzinfo=_tzmod.utc).astimezone(tz).strftime('%d-%m-%Y %H:%M')
-    except Exception:
-        pass
-    return ts_utc.strftime('%d-%m-%Y %H:%M UTC')
-
-
-def generar_html_sismo(sismo: dict, recientes: list) -> str:
-    """Genera informe HTML didáctico del evento sísmico con gráficos ECharts.
-
-    Incluye: ficha del evento, gauge de magnitud, comparación con los grandes
-    terremotos históricos de Chile, tabla de sismos recientes, mapa del
-    epicentro (si hay coordenadas), recomendaciones de seguridad y sección
-    educativa (Richter vs Mercalli, por qué la duración no se publica).
-    """
-    emoji, categoria = _clasificar_sismo(sismo['magnitud'])
-    hora_cl = _sismo_hora_chile(sismo['ts_utc'])
-    prof = f"{sismo['prof_km']} km" if sismo.get('prof_km') is not None else "No informada"
-    coords_txt = (f"{sismo['lat']:.3f}, {sismo['lon']:.3f}" if sismo.get('lat') is not None else "No disponible (fuente CSN)")
-    link_mapa = (f"https://www.google.com/maps?q={sismo['lat']},{sismo['lon']}"
-                 if sismo.get('lat') is not None else "https://www.sismologia.cl")
-
-    # Datos para gráfico comparativo histórico (evento actual resaltado)
-    hist_nombres = [h[0] for h in _TERREMOTOS_HISTORICOS_CHILE] + ['ESTE EVENTO']
-    hist_mags = [h[1] for h in _TERREMOTOS_HISTORICOS_CHILE] + [sismo['magnitud']]
-    hist_desc = ''.join(f"<li><b>{n} (M{m})</b>: {d}</li>" for n, m, d in _TERREMOTOS_HISTORICOS_CHILE)
-
-    filas_recientes = ''.join(
-        f"<tr><td>{_sismo_hora_chile(s['ts_utc'])}</td><td>{s['magnitud']:.1f}</td>"
-        f"<td>{(str(s.get('prof_km')) + ' km') if s.get('prof_km') is not None else '—'}</td>"
-        f"<td>{s['lugar']}</td></tr>"
-        for s in recientes[:12]
-    ) or "<tr><td colspan='4'>Sin otros sismos recientes</td></tr>"
-
-    alerta_tsunami = ""
-    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
-        alerta_tsunami = (
-            "<div class='tsunami'>🌊 <b>POSIBLE RIESGO DE TSUNAMI</b> — Si estás en zona "
-            "costera, aléjate de la playa hacia zonas altas y sigue las instrucciones "
-            "oficiales del <a href='https://www.snamchile.cl' style='color:#fff'>SHOA/SNAM</a> "
-            "y <a href='https://senapred.cl' style='color:#fff'>SENAPRED</a>.</div>")
-
-    html = f"""<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Informe Sísmico — Cofradía de Networking</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<style>
-  body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1421;color:#eaf0f6;margin:0;padding:20px}}
-  .card{{background:#16213a;border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:0 4px 14px rgba(0,0,0,.35)}}
-  h1{{color:#ffd166;margin:0 0 6px;font-size:1.5em}} h2{{color:#8fd8ff;font-size:1.15em;border-bottom:1px solid #2b3a5e;padding-bottom:6px}}
-  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}
-  .kpi{{background:#1e2b4d;border-radius:10px;padding:14px;text-align:center}}
-  .kpi .v{{font-size:1.6em;font-weight:700;color:#ffd166}} .kpi .l{{font-size:.8em;color:#9fb3d1}}
-  table{{width:100%;border-collapse:collapse;font-size:.9em}} td,th{{padding:8px;border-bottom:1px solid #2b3a5e;text-align:left}}
-  th{{color:#8fd8ff}} .chart{{width:100%;height:320px}}
-  .tsunami{{background:#b3261e;padding:14px;border-radius:10px;margin:14px 0;font-size:1.05em}}
-  .rec{{background:#1e2b4d;border-left:4px solid #ffd166;padding:12px 16px;border-radius:8px;margin:8px 0}}
-  a{{color:#8fd8ff}} .foot{{text-align:center;color:#9fb3d1;font-size:.8em;margin-top:20px}}
-</style></head><body>
-<div class="card">
-  <h1>{emoji} {categoria} — Magnitud {sismo['magnitud']:.1f}</h1>
-  <div style="color:#9fb3d1">Informe generado por el Agente Sísmico de la Cofradía de Networking</div>
-  {alerta_tsunami}
-  <div class="grid" style="margin-top:14px">
-    <div class="kpi"><div class="v">{sismo['magnitud']:.1f}</div><div class="l">Magnitud (Richter/Mw)</div></div>
-    <div class="kpi"><div class="v">{prof}</div><div class="l">Profundidad del hipocentro</div></div>
-    <div class="kpi"><div class="v">{hora_cl}</div><div class="l">Hora de Chile</div></div>
-    <div class="kpi"><div class="v">{sismo['fuente']}</div><div class="l">Fuente oficial</div></div>
-  </div>
-  <p>📍 <b>Epicentro:</b> {sismo['lugar']}<br>
-     🧭 <b>Coordenadas:</b> {coords_txt} — <a href="{link_mapa}" target="_blank">Ver en el mapa</a></p>
-</div>
-
-<div class="card"><h2>📊 Intensidad del evento</h2><div id="gauge" class="chart"></div></div>
-
-<div class="card"><h2>🏛️ Comparación con los grandes terremotos de Chile</h2>
-  <div id="hist" class="chart"></div>
-  <p style="color:#9fb3d1;font-size:.85em">La escala de magnitud es logarítmica: cada punto adicional
-  libera ~32 veces más energía. Un M6.0 libera mil veces menos energía que el M9.5 de Valdivia 1960.</p>
-  <ul style="font-size:.9em">{hist_desc}</ul>
-</div>
-
-<div class="card"><h2>🕐 Sismos recientes en Chile</h2>
-  <table><tr><th>Hora (Chile)</th><th>Magnitud</th><th>Profundidad</th><th>Referencia</th></tr>
-  {filas_recientes}</table>
-</div>
-
-<div class="card"><h2>🎓 Sección educativa</h2>
-  <p><b>Richter vs Mercalli:</b> la <b>magnitud</b> (Richter/Momento) mide la energía liberada
-  en el hipocentro y es un valor único por evento. La <b>intensidad</b> (Mercalli) mide los
-  efectos percibidos en cada lugar y varía con la distancia y el tipo de suelo.</p>
-  <p><b>¿Por qué no se informa la duración?</b> La duración percibida del movimiento depende del
-  suelo, la distancia y la construcción, por lo que los organismos sismológicos (CSN, USGS) no la
-  publican como dato oficial; sí publican magnitud, profundidad y ubicación, que son objetivas.</p>
-  <p><b>Profundidad importa:</b> sismos superficiales (&lt;60 km) suelen percibirse con más fuerza
-  y, si son costeros y de gran magnitud, tienen mayor potencial tsunamigénico.</p>
-  <h2>✅ Recomendaciones de seguridad</h2>
-  <div class="rec">🧍 Durante el sismo: <b>agáchate, cúbrete y afírmate</b>. Aléjate de ventanas.</div>
-  <div class="rec">🌊 Si estás en la costa y el sismo te impide mantenerte en pie: <b>evacúa hacia
-  zonas altas sin esperar alarma oficial</b> (regla de oro chilena).</div>
-  <div class="rec">📱 Tras el evento: verifica gas y electricidad; usa mensajes en vez de llamadas;
-  infórmate solo por canales oficiales (SENAPRED, SHOA, CSN).</div>
-</div>
-
-<div class="foot">⚓ Cofradía de Networking — Agente Sísmico FASE 31.15 ·
-Fuentes: USGS · CSN/GAEL · Informe automático, verifica siempre canales oficiales</div>
-
-<script>
-  const gauge = echarts.init(document.getElementById('gauge'));
-  gauge.setOption({{series:[{{type:'gauge',min:0,max:10,splitNumber:10,
-    axisLine:{{lineStyle:{{width:18,color:[[0.5,'#2ecc71'],[0.6,'#f1c40f'],[0.7,'#e67e22'],[1,'#e74c3c']]}}}},
-    pointer:{{itemStyle:{{color:'#ffd166'}}}},axisLabel:{{color:'#9fb3d1',distance:22}},
-    detail:{{formatter:'M {sismo['magnitud']:.1f}',color:'#ffd166',fontSize:26}},
-    data:[{{value:{sismo['magnitud']:.1f}}}]}}]}});
-  const hist = echarts.init(document.getElementById('hist'));
-  hist.setOption({{grid:{{left:110,right:30,top:10,bottom:30}},
-    xAxis:{{type:'value',max:10,axisLabel:{{color:'#9fb3d1'}}}},
-    yAxis:{{type:'category',data:{hist_nombres!r},axisLabel:{{color:'#eaf0f6'}}}},
-    series:[{{type:'bar',data:{hist_mags!r},
-      itemStyle:{{color:p=>p.dataIndex==={len(hist_mags) - 1}?'#ffd166':'#3b6ea5'}},
-      label:{{show:true,position:'right',color:'#eaf0f6',formatter:'M{{c}}'}}}}]}});
-  window.addEventListener('resize',()=>{{gauge.resize();hist.resize();}});
-</script></body></html>"""
-
-    path = f"/tmp/informe_sismo_{sismo['id'].replace('/', '_')}.html"
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    return path
-
-
-def _sismo_texto_alerta(sismo: dict) -> str:
-    """Mensaje de texto para el grupo."""
-    emoji, categoria = _clasificar_sismo(sismo['magnitud'])
-    lineas = [
-        f"{emoji} {categoria} EN CHILE {emoji}",
-        "━" * 30, "",
-        f"📊 Magnitud: {sismo['magnitud']:.1f}",
-        f"📍 Epicentro: {sismo['lugar']}",
-        f"📏 Profundidad: {sismo['prof_km']} km" if sismo.get('prof_km') is not None else "📏 Profundidad: no informada",
-        f"🕐 Hora Chile: {_sismo_hora_chile(sismo['ts_utc'])}",
-        f"📡 Fuente: {sismo['fuente']}",
-    ]
-    if sismo.get('lat') is not None:
-        lineas.append(f"🧭 Coordenadas: {sismo['lat']:.3f}, {sismo['lon']:.3f}")
-    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
-        lineas += ["", "🌊 POSIBLE RIESGO DE TSUNAMI: si estás en la costa, aléjate hacia",
-                   "zonas altas y sigue instrucciones de SHOA/SNAM y SENAPRED."]
-    lineas += ["", "📄 Adjunto informe HTML con gráficos, comparación histórica",
-               "y recomendaciones de seguridad.",
-               "", "⚓ Agente Sísmico — Cofradía de Networking"]
-    return "\n".join(lineas)
-
-
-def _sismo_texto_voz(sismo: dict) -> str:
-    """Resumen breve para el audio TTS."""
-    _, categoria = _clasificar_sismo(sismo['magnitud'])
-    prof = f", a una profundidad de {sismo['prof_km']:.0f} kilómetros" if sismo.get('prof_km') is not None else ""
-    txt = (f"Atención cofrades. {categoria.capitalize()} en Chile. "
-           f"Se registró un sismo de magnitud {sismo['magnitud']:.1f}, "
-           f"con epicentro {sismo['lugar']}{prof}, "
-           f"a las {_sismo_hora_chile(sismo['ts_utc']).split(' ')[-1]} hora de Chile. ")
-    if sismo.get('tsunami') or (sismo['magnitud'] >= 7.0 and (sismo.get('prof_km') or 99) < 60):
-        txt += ("Posible riesgo de tsunami: si estás en la costa, aléjate hacia zonas altas "
-                "y sigue las instrucciones oficiales. ")
-    txt += "Revisa el informe completo adjunto en el grupo."
-    return txt
-
-
-async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.21: /version — identidad de build y diagnóstico en vivo.
-    Fin de la ambigüedad '¿qué versión está corriendo?' en cada deploy."""
-    try:
-        uptime = datetime.now() - _BOT_ARRANQUE
-        h, rem = divmod(int(uptime.total_seconds()), 3600)
-        m, _ = divmod(rem, 60)
-        mem_estado = ("✅ activa" if (_MEMORIA_OK and MEMORIA_ACTIVA)
-                      else "⚠️ no disponible")
-        dominios = ", ".join(f"/{c}" for c, _p, _e in _PRE_RUTEO_COMANDOS)
-        await update.message.reply_text(
-            f"🏷️ <b>VERSIÓN DEL BOT</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<b>Build:</b> {BOT_BUILD}\n"
-            f"<b>Arranque:</b> {_BOT_ARRANQUE.strftime('%d/%m/%Y %H:%M:%S')} UTC\n"
-            f"<b>Uptime:</b> {h}h {m}m\n\n"
-            f"🧭 <b>Auto-router:</b> {len(_PRE_RUTEO_COMANDOS)} dominios\n"
-            f"   {dominios}\n"
-            f"🧠 <b>Memoria por usuario:</b> {mem_estado}\n"
-            f"⚙️ <b>Cascada LLM:</b> 7 niveles · "
-            f"<b>Concurrencia:</b> 32 usuarios simultáneos\n"
-            f"🗄️ <b>Respaldo clasificado:</b> cada 6 horas\n"
-            f"🧲 <b>Capa 1.7 (embeddings):</b> {'✅ activa' if (INTENCIONES_SEMANTICAS and DATABASE_URL) else '⚠️ off'} · entrena con /entrenar_intenciones\n"
-            f"🔌 <b>Motores acoplados:</b> {len(REGISTRO_MOTORES_BUSQUEDA)} · detalle con /motores\n"
-            f"🫀 <b>Latido del loop:</b> hace {int(tiempo_real.time() - globals().get('_ULTIMO_LATIDO', tiempo_real.time()))}s · pool 24 hilos",
-            parse_mode='HTML')
-    except Exception as e:
-        await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
-
-
-async def agente_monitor_sismos(context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.15: Job cada 5 min — detecta y publica sismos nuevos >= umbral.
-
-    Por cada evento nuevo: (1) marca en BD para deduplicar, (2) mensaje de
-    texto al grupo, (3) audio TTS, (4) informe HTML adjunto. Cada paso con
-    try/except propio: un fallo parcial nunca bloquea la alerta principal.
-    """
-    if not COFRADIA_GROUP_ID:
-        return
-    try:
-        sismos = await asyncio.to_thread(obtener_sismos_chile, 2, SISMO_MAGNITUD_MINIMA)
-        if not sismos:
-            return
-        # Contexto de sismos menores recientes para el informe
-        recientes = await asyncio.to_thread(obtener_sismos_chile, 24, 4.0)
-
-        for sismo in sismos:
-            try:
-                if await asyncio.to_thread(_sismo_ya_reportado, sismo['id']):
-                    continue
-                # Marcar ANTES de publicar: evita doble alerta si el job se
-                # solapa (concurrent_updates) o el envío tarda
-                await asyncio.to_thread(_sismo_marcar_reportado, sismo)
-
-                logger.info(f"🌍 SISMO detectado M{sismo['magnitud']:.1f} — {sismo['lugar']}")
-
-                # 1) Texto
-                await context.bot.send_message(
-                    chat_id=COFRADIA_GROUP_ID, text=_sismo_texto_alerta(sismo))
-
-                # 2) Audio TTS
-                try:
-                    audio_path = await generar_audio_tts(
-                        _sismo_texto_voz(sismo), f"/tmp/sismo_{sismo['id'][-8:]}.mp3")
-                    if audio_path and os.path.exists(audio_path):
-                        with open(audio_path, 'rb') as af:
-                            await context.bot.send_voice(chat_id=COFRADIA_GROUP_ID, voice=af)
-                        try:
-                            os.remove(audio_path)
-                        except Exception:
-                            pass
-                except Exception as _e_tts:
-                    logger.warning(f"Sismo TTS falló: {_e_tts}")
-
-                # 3) Informe HTML didáctico
-                try:
-                    html_path = await asyncio.to_thread(generar_html_sismo, sismo, recientes)
-                    with open(html_path, 'rb') as hf:
-                        await context.bot.send_document(
-                            chat_id=COFRADIA_GROUP_ID, document=hf,
-                            filename=f"Informe_Sismo_M{sismo['magnitud']:.1f}_Chile.html",
-                            caption="📊 Informe sísmico interactivo — ábrelo en tu navegador")
-                    try:
-                        os.remove(html_path)
-                    except Exception:
-                        pass
-                except Exception as _e_html:
-                    logger.warning(f"Sismo HTML falló: {_e_html}")
-
-            except Exception as _e_ev:
-                logger.warning(f"Error publicando sismo {sismo.get('id')}: {_e_ev}")
-    except Exception as e:
-        logger.debug(f"Agente monitor sismos error: {e}")
-
-
-async def sismos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.15: Comando /sismos — últimos sismos en Chile bajo demanda."""
-    msg = await update.message.reply_text("🌍 Consultando sismos recientes en Chile...")
-    try:
-        sismos = await asyncio.to_thread(obtener_sismos_chile, 24, 4.0)
-        if not sismos:
-            await msg.edit_text(
-                "✅ Sin sismos de magnitud 4.0 o superior en Chile en las últimas 24 horas.\n\n"
-                "🔔 El Agente Sísmico monitorea cada 5 minutos y alertará "
-                f"automáticamente eventos de magnitud {SISMO_MAGNITUD_MINIMA:.1f}+."
-            )
-            return
-        lineas = ["🌍 SISMOS EN CHILE — ÚLTIMAS 24 HORAS", "━" * 30, ""]
-        for s in sismos[:10]:
-            emoji, _ = _clasificar_sismo(s['magnitud'])
-            prof = f" · {s['prof_km']:.0f} km" if s.get('prof_km') is not None else ""
-            lineas.append(f"{emoji} M{s['magnitud']:.1f}{prof} — {s['lugar']}")
-            lineas.append(f"    🕐 {_sismo_hora_chile(s['ts_utc'])}")
-        lineas += ["", f"📡 Fuente: {sismos[0]['fuente']}",
-                   f"🔔 Alertas automáticas desde M{SISMO_MAGNITUD_MINIMA:.1f} "
-                   f"(texto + voz + informe HTML)",
-                   "", "⚓ Agente Sísmico — Cofradía de Networking"]
-        await msg.edit_text("\n".join(lineas))
-    except Exception as e:
-        logger.error(f"Error /sismos: {e}")
-        await msg.edit_text("❌ No pude consultar los sismos en este momento. Intenta más tarde.")
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.17: JOBS PERIÓDICOS DE MEMORIA + APRENDIZAJE
-# ════════════════════════════════════════════════════════════════════════
-
-async def job_memoria_consolidar(context: ContextTypes.DEFAULT_TYPE):
-    """Diario: destila el perfil de los usuarios activos de las últimas 24h
-    usando la cascada gratuita de LLMs del propio bot (cero costo nuevo)."""
-    svc = _memoria()
-    if not svc:
-        return
-    try:
-        claves = await asyncio.to_thread(svc.active_user_keys, 24, 60)
-        n = 0
-        for uk in claves:
-            try:
-                ok = await asyncio.to_thread(
-                    svc.consolidate_profile, uk,
-                    lambda p: ejecutar_cascada_llm(p, 300, 0.3))
-                if ok:
-                    n += 1
-            except Exception:
-                continue
-        if claves:
-            logger.info(f"🧠 FASE 31.17: {n}/{len(claves)} perfiles consolidados")
-    except Exception as e:
-        logger.debug(f"job_memoria_consolidar: {e}")
-
-
-async def job_memoria_aprendizaje(context: ContextTypes.DEFAULT_TYPE):
-    """Semanal (domingo): mina FAQs → cola 'pending' (humano en el loop) y
-    envía al admin el reporte de mejora con las preguntas sin respuesta."""
-    svc = _memoria()
-    if not svc:
-        return
-    try:
-        n = await asyncio.to_thread(svc.suggest_kb_from_conversations, 3, 30)
-        rep = await asyncio.to_thread(svc.weekly_report)
-        if OWNER_ID:
-            texto = (f"🧠 MEMORIA — APRENDIZAJE SEMANAL\n{'━' * 30}\n\n"
-                     f"📥 {n} nuevas FAQs propuestas (estado: pendiente de TU aprobación).\n"
-                     f"Revisa y aprueba con:\n"
-                     f"  python memory_service.py pending\n"
-                     f"  python memory_service.py approve <id>\n"
-                     f"O en Supabase → Table Editor → v_kb_pending\n\n{rep}")
-            await context.bot.send_message(chat_id=OWNER_ID, text=texto[:4000])
-    except Exception as e:
-        logger.debug(f"job_memoria_aprendizaje: {e}")
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.18-A: AGENTE DE RESPALDO CLASIFICADO DE CONVERSACIONES
-# Los TEXTOS del grupo ya se respaldan en vivo (tabla `mensajes`, con
-# topic_id y categoría) y los documentos ya se registran como referencia
-# RAG (FASE 31.9). Esta fase completa el catastro:
-#   1. AUDIOS del grupo → transcritos a texto (Whisper/Groq) y catalogados
-#   2. FOTOS/VIDEOS/ARCHIVOS → título + breve resumen + quién + fecha/hora
-#      (NUNCA el archivo en sí — no satura los respaldos)
-#   3. Consolidador cada 6 horas → ciclo clasificado por topic en BD
-#   4. /respaldos <términos> → búsqueda expedita en todo el histórico
-# Nota honesta: Telegram no permite a los bots leer historial retroactivo;
-# el catastro se construye desde el deploy hacia adelante.
-# ════════════════════════════════════════════════════════════════════════
-
-_TOPIC_NAME_CACHE = {}
-
-
-def _topic_nombre_desde_update(update) -> str:
-    """Mejor nombre de topic disponible: cache ← service messages ← fallback."""
-    try:
-        m = update.effective_message
-        tid = getattr(m, 'message_thread_id', None)
-        # Aprender nombres cuando Telegram los expone
-        ftc = getattr(m, 'forum_topic_created', None) or getattr(
-            getattr(m, 'reply_to_message', None), 'forum_topic_created', None)
-        if ftc and getattr(ftc, 'name', None) and tid:
-            _TOPIC_NAME_CACHE[tid] = ftc.name
-        if tid is None:
-            return 'General'
-        return _TOPIC_NAME_CACHE.get(tid, f'Topic #{tid}')
-    except Exception:
-        return 'General'
-
-
-def _respaldo_asegurar_tablas(c):
-    c.execute('''CREATE TABLE IF NOT EXISTS respaldo_archivos (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        usuario TEXT,
-        topic_id BIGINT,
-        topic_nombre TEXT,
-        tipo TEXT,
-        titulo TEXT,
-        resumen TEXT,
-        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS respaldo_ciclos (
-        id SERIAL PRIMARY KEY,
-        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        resumen TEXT
-    )''')
-
-
-def _respaldo_guardar_sync(user_id, usuario, topic_id, topic_nombre,
-                           tipo, titulo, resumen):
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        c = conn.cursor()
-        _respaldo_asegurar_tablas(c)
-        if DATABASE_URL:
-            c.execute("""INSERT INTO respaldo_archivos
-                         (user_id, usuario, topic_id, topic_nombre, tipo, titulo, resumen)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                      (user_id, usuario, topic_id, topic_nombre, tipo,
-                       (titulo or '')[:300], (resumen or '')[:1500]))
-        else:
-            c.execute("""INSERT INTO respaldo_archivos
-                         (user_id, usuario, topic_id, topic_nombre, tipo, titulo, resumen)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                      (user_id, usuario, topic_id, topic_nombre, tipo,
-                       (titulo or '')[:300], (resumen or '')[:1500]))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.debug(f"respaldo guardar: {e}")
-
-
-async def respaldar_multimedia_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.18: Cataloga multimedia del grupo (audio→texto, resto→referencia).
-
-    Registrado en group=9: corre EN PARALELO a los handlers existentes sin
-    interferir con ninguno. Todo el trabajo pesado va a threads/background.
-    """
-    try:
-        m = update.effective_message
-        chat = update.effective_chat
-        if not m or not chat or chat.type not in ('group', 'supergroup'):
-            return
-        u = update.effective_user
-        usuario = (f"{u.first_name or ''} {u.last_name or ''}".strip()
-                   or (u.username or 'desconocido')) if u else 'desconocido'
-        topic_id = getattr(m, 'message_thread_id', None)
-        topic_nombre = _topic_nombre_desde_update(update)
-        caption = (m.caption or '').strip()
-
-        tipo, titulo, resumen, media_audio = None, None, caption, None
-        if m.voice or m.audio or m.video_note:
-            media_audio = m.voice or m.audio or m.video_note
-            tipo = 'audio' if not m.video_note else 'video_nota'
-            dur = getattr(media_audio, 'duration', 0) or 0
-            titulo = getattr(media_audio, 'file_name', None) or f"Audio de {usuario} ({dur}s)"
-        elif m.photo:
-            tipo, titulo = 'imagen', f"Imagen de {usuario}"
-            resumen = caption or 'Imagen compartida sin descripción'
-        elif m.video:
-            tipo = 'video'
-            dur = getattr(m.video, 'duration', 0) or 0
-            titulo = getattr(m.video, 'file_name', None) or f"Video de {usuario} ({dur}s)"
-            resumen = caption or f'Video de {dur} segundos, sin descripción'
-        elif m.document:
-            doc = m.document
-            ext = (doc.file_name or '').rsplit('.', 1)[-1].upper() if doc.file_name else '?'
-            tipo = {'PDF': 'pdf', 'XLSX': 'excel', 'XLS': 'excel',
-                    'DOCX': 'word', 'DOC': 'word'}.get(ext, 'documento')
-            titulo = doc.file_name or f"Documento de {usuario}"
-            resumen = caption or f'Archivo {ext} compartido sin descripción'
-        else:
-            return
-
-        async def _procesar():
-            texto_final = resumen
-            if media_audio is not None:
-                # Convertir audio del grupo a TEXTO (pedido de Germán)
-                try:
-                    f = await media_audio.get_file()
-                    audio_bytes = bytes(await f.download_as_bytearray())
-                    trans = await asyncio.to_thread(
-                        transcribir_audio_groq, audio_bytes, 'grupo.ogg')
-                    if trans:
-                        texto_final = f"Transcripción: {trans[:1200]}"
-                        if caption:
-                            texto_final = f"{caption} — {texto_final}"
-                except Exception as _e_tr:
-                    logger.debug(f"respaldo transcripción: {_e_tr}")
-                    texto_final = caption or 'Audio (transcripción no disponible)'
-            await asyncio.to_thread(
-                _respaldo_guardar_sync, u.id if u else 0, usuario,
-                topic_id, topic_nombre, tipo, titulo, texto_final)
-
-        asyncio.create_task(_procesar())  # fire-and-forget: cero latencia
-    except Exception as e:
-        logger.debug(f"respaldar_multimedia_grupo: {e}")
-
-
-async def agente_respaldo_conversaciones(context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.18: Job cada 6 horas — consolida y CLASIFICA el ciclo:
-    mensajes y archivos por topic/etiqueta y por categoría, dejando un
-    registro ordenado en respaldo_ciclos (consultable con /respaldos)."""
-    def _consolidar():
-        conn = get_db_connection()
-        if not conn:
-            return None
-        try:
-            c = conn.cursor()
-            _respaldo_asegurar_tablas(c)
-            iv = "now() - interval '6 hours'" if DATABASE_URL else "datetime('now','-6 hours')"
-            c.execute(f"""SELECT COALESCE(topic_id, 0) AS tid, categoria, COUNT(*) AS n
-                          FROM mensajes WHERE fecha > {iv}
-                          GROUP BY tid, categoria ORDER BY n DESC LIMIT 30""")
-            msgs = c.fetchall()
-            c.execute(f"""SELECT tipo, COUNT(*) AS n FROM respaldo_archivos
-                          WHERE fecha > {iv} GROUP BY tipo ORDER BY n DESC""")
-            archs = c.fetchall()
-            if not msgs and not archs:
-                conn.close()
-                return ''
-            lineas = ["CICLO DE RESPALDO (últimas 6 horas)"]
-            if msgs:
-                lineas.append("Mensajes por topic/categoría:")
-                for r in msgs:
-                    tid = r['tid'] if DATABASE_URL else r[0]
-                    cat = (r['categoria'] if DATABASE_URL else r[1]) or 'sin categoría'
-                    n = r['n'] if DATABASE_URL else r[2]
-                    tnom = _TOPIC_NAME_CACHE.get(tid, 'General' if not tid else f'Topic #{tid}')
-                    lineas.append(f"  [{tnom}] {cat}: {n}")
-            if archs:
-                lineas.append("Archivos catalogados:")
-                for r in archs:
-                    lineas.append(f"  {(r['tipo'] if DATABASE_URL else r[0])}: "
-                                  f"{r['n'] if DATABASE_URL else r[1]}")
-            resumen = "\n".join(lineas)
-            if DATABASE_URL:
-                c.execute("INSERT INTO respaldo_ciclos (resumen) VALUES (%s)", (resumen,))
-            else:
-                c.execute("INSERT INTO respaldo_ciclos (resumen) VALUES (?)", (resumen,))
-            conn.commit()
-            conn.close()
-            return resumen
-        except Exception as e:
-            logger.debug(f"consolidar respaldo: {e}")
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return None
-    resumen = await asyncio.to_thread(_consolidar)
-    if resumen:
-        logger.info(f"🗄️ FASE 31.18: ciclo de respaldo consolidado "
-                    f"({len(resumen.splitlines())} líneas)")
-    elif resumen == '':
-        logger.info("🗄️ FASE 31.18: ciclo de respaldo sin actividad nueva")
-
-
-async def respaldos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.18: /respaldos [términos] — búsqueda expedita del catastro (admin).
-
-    Sin argumentos: estado general y último ciclo. Con términos: busca en
-    mensajes de texto Y en el catálogo de archivos/audios transcritos.
-    """
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Comando exclusivo del administrador."); return
-
-    def _buscar(terminos):
-        conn = get_db_connection()
-        if not conn:
-            return None
-        try:
-            c = conn.cursor()
-            _respaldo_asegurar_tablas(c)
-            if not terminos:
-                c.execute("SELECT COUNT(*) AS n FROM mensajes")
-                row = c.fetchone()
-                n_msgs = row['n'] if DATABASE_URL else row[0]
-                c.execute("SELECT COUNT(*) AS n FROM respaldo_archivos")
-                row = c.fetchone()
-                n_arch = row['n'] if DATABASE_URL else row[0]
-                c.execute("SELECT resumen FROM respaldo_ciclos ORDER BY fecha DESC LIMIT 1")
-                row = c.fetchone()
-                ultimo = (row['resumen'] if DATABASE_URL else row[0]) if row else 'Aún sin ciclos.'
-                conn.close()
-                return {'modo': 'estado', 'n_msgs': n_msgs, 'n_arch': n_arch, 'ultimo': ultimo}
-            like = f"%{terminos}%"
-            if DATABASE_URL:
-                c.execute("""SELECT first_name, message, fecha, topic_id FROM mensajes
-                             WHERE message ILIKE %s ORDER BY fecha DESC LIMIT 8""", (like,))
-            else:
-                c.execute("""SELECT first_name, message, fecha, topic_id FROM mensajes
-                             WHERE message LIKE ? ORDER BY fecha DESC LIMIT 8""", (like,))
-            msgs = c.fetchall()
-            if DATABASE_URL:
-                c.execute("""SELECT usuario, tipo, titulo, resumen, fecha, topic_nombre
-                             FROM respaldo_archivos
-                             WHERE titulo ILIKE %s OR resumen ILIKE %s
-                             ORDER BY fecha DESC LIMIT 8""", (like, like))
-            else:
-                c.execute("""SELECT usuario, tipo, titulo, resumen, fecha, topic_nombre
-                             FROM respaldo_archivos
-                             WHERE titulo LIKE ? OR resumen LIKE ?
-                             ORDER BY fecha DESC LIMIT 8""", (like, like))
-            archs = c.fetchall()
-            conn.close()
-            return {'modo': 'busqueda', 'msgs': msgs, 'archs': archs}
-        except Exception as e:
-            logger.debug(f"/respaldos: {e}")
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return None
-
-    terminos = ' '.join(context.args) if context.args else ''
-    res = await asyncio.to_thread(_buscar, terminos)
-    if res is None:
-        await update.message.reply_text("❌ Error consultando los respaldos.")
-        return
-    if res['modo'] == 'estado':
-        await enviar_mensaje_largo(update, (
-            f"🗄️ RESPALDOS — ESTADO GENERAL\n{'━' * 30}\n\n"
-            f"💬 Mensajes de texto respaldados: {res['n_msgs']}\n"
-            f"📎 Archivos/audios catalogados: {res['n_arch']}\n"
-            f"🔄 Consolidación automática: cada 6 horas\n\n"
-            f"ÚLTIMO CICLO:\n{res['ultimo']}\n\n"
-            f"🔎 Busca con: /respaldos <términos>"))
-        return
-    lineas = [f"🔎 RESPALDOS — resultados para '{terminos}'", "━" * 30]
-    if res['msgs']:
-        lineas.append("\n💬 MENSAJES:")
-        for r in res['msgs']:
-            nom = r['first_name'] if DATABASE_URL else r[0]
-            txt = (r['message'] if DATABASE_URL else r[1]) or ''
-            fec = r['fecha'] if DATABASE_URL else r[2]
-            lineas.append(f"  • {nom} ({str(fec)[:16]}): {txt[:110]}")
-    if res['archs']:
-        lineas.append("\n📎 ARCHIVOS / AUDIOS:")
-        for r in res['archs']:
-            usr = r['usuario'] if DATABASE_URL else r[0]
-            tip = r['tipo'] if DATABASE_URL else r[1]
-            tit = r['titulo'] if DATABASE_URL else r[2]
-            resm = (r['resumen'] if DATABASE_URL else r[3]) or ''
-            fec = r['fecha'] if DATABASE_URL else r[4]
-            tnm = r['topic_nombre'] if DATABASE_URL else r[5]
-            lineas.append(f"  • [{tip}] {tit}")
-            lineas.append(f"    {usr} · {str(fec)[:16]} · {tnm}")
-            if resm:
-                lineas.append(f"    {resm[:130]}")
-    if not res['msgs'] and not res['archs']:
-        lineas.append("\nSin resultados. Prueba con otros términos.")
-    await enviar_mensaje_largo(update, "\n".join(lineas))
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.18-B: INVITACIÓN A GANAR COINS + CANJE DE RENOVACIÓN
-# ════════════════════════════════════════════════════════════════════════
-
-# Coins necesarios para canjear 30 días de suscripción (ajustable en Render)
-COINS_RENOVACION_30D = int(os.environ.get('COINS_RENOVACION_30D', '500'))
-
-
-def _mensaje_invitacion_coins(markdown: bool = False) -> str:
-    """Bloque motivacional que acompaña a los comandos de cuenta/renovación.
-
-    markdown=True escapa los guiones bajos de los comandos (\\_) para que
-    el parse_mode='Markdown' legacy de Telegram no los convierta en cursiva
-    (el texto renderizado conserva el comando cliqueable intacto).
-    """
-    txt = (
-        f"\n🚀 PARTICIPA Y GANA COINS\n"
-        f"El valor de la suscripción tiene UN propósito: impulsar la "
-        f"participación activa de todos en la Red. Y participar tiene "
-        f"premio — puedes renovar GRATIS:\n\n"
-        f"💰 Así ganas Cofradía Coins:\n"
-        f"  💬 Mensaje en grupo: +1   💡 Responder consulta: +10\n"
-        f"  ⭐ Recomendar cofrade: +5   📅 Asistir a evento: +20\n"
-        f"  📇 Crear tu tarjeta: +15\n\n"
-        f"🎁 Canjéalos por:\n"
-        f"  🔄 30 días de suscripción GRATIS → /canjear_renovacion "
-        f"({COINS_RENOVACION_30D} coins)\n"
-        f"  📊 Reportes premium sin costo: /generar_cv (25), "
-        f"/analisis_linkedin (30), /mentor (40), /entrevista (50)\n\n"
-        f"👉 Tu balance: /mis_coins — ¡cada interacción te acerca a tu "
-        f"próxima renovación gratis!"
-    )
-    return txt.replace('_', '\\_') if markdown else txt
-
-
-async def canjear_renovacion_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.18: /canjear_renovacion — 30 días de suscripción por coins.
-
-    Descuenta COINS_RENOVACION_30D del balance (gastar_coins valida saldo)
-    y extiende la suscripción 30 días DESDE la fecha de vencimiento vigente
-    (o desde hoy si ya venció) — el usuario nunca pierde días pagados.
-    """
-    user_id = update.effective_user.id
-    try:
-        ok = await asyncio.to_thread(
-            gastar_coins, user_id, COINS_RENOVACION_30D, 'Canje: renovación 30 días')
-        if not ok:
-            await update.message.reply_text(
-                f"💰 No tienes coins suficientes.\n\n"
-                f"El canje de 30 días cuesta {COINS_RENOVACION_30D} coins.\n"
-                f"Revisa tu balance con /mis_coins y sigue participando "
-                f"en la comunidad para ganar más. ¡Estás cerca!")
-            return
-
-        def _extender():
-            conn = get_db_connection()
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = %s", (user_id,))
-            else:
-                c.execute("SELECT fecha_expiracion FROM suscripciones WHERE user_id = ?", (user_id,))
-            row = c.fetchone()
-            base = datetime.now()
-            if row:
-                fexp = row['fecha_expiracion'] if DATABASE_URL else row[0]
-                try:
-                    if isinstance(fexp, str):
-                        fexp = datetime.fromisoformat(fexp.replace(' ', 'T')[:19])
-                    if fexp and fexp > base:
-                        base = fexp
-                except Exception:
-                    pass
-            nueva = base + timedelta(days=30)
-            if DATABASE_URL:
-                c.execute("""UPDATE suscripciones SET fecha_expiracion = %s, estado = 'activo'
-                             WHERE user_id = %s""", (nueva, user_id))
-            else:
-                c.execute("""UPDATE suscripciones SET fecha_expiracion = ?, estado = 'activo'
-                             WHERE user_id = ?""", (nueva.isoformat(), user_id))
-            actualizado = c.rowcount > 0
-            conn.commit()
-            conn.close()
-            return nueva if actualizado else None
-
-        nueva = await asyncio.to_thread(_extender)
-        if nueva:
-            await update.message.reply_text(
-                f"🎉 ¡CANJE EXITOSO!\n\n"
-                f"🔄 Tu suscripción se extendió 30 días GRATIS.\n"
-                f"📅 Nueva fecha de vencimiento: {nueva.strftime('%d/%m/%Y')}\n"
-                f"💰 Coins descontados: {COINS_RENOVACION_30D}\n\n"
-                f"¡Sigue participando para ganar más coins! /mis_coins")
-            logger.info(f"💰 Canje renovación: user {user_id} (+30 días por "
-                        f"{COINS_RENOVACION_30D} coins)")
-        else:
-            # Reembolso si la suscripción no pudo extenderse
-            await asyncio.to_thread(
-                otorgar_coins, user_id, COINS_RENOVACION_30D, 'Reembolso: canje fallido')
-            await update.message.reply_text(
-                "⚠️ No encontré una cuenta activa que extender. Tus coins fueron "
-                "reembolsados. Regístrate primero con /registrarse.")
-    except Exception as e:
-        logger.error(f"Error /canjear_renovacion: {e}")
-        await update.message.reply_text("❌ Error procesando el canje. Intenta más tarde.")
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.19: AUTO-ROUTER DE COMANDOS EN LENGUAJE NATURAL
-# Caso real de Germán: "¿quiénes son los usuarios que más participan?" →
-# el bot decía "no tengo esa información" y sugería /top... teniéndolo.
-# El motor de intención LLM existente es falible; esta capa DETERMINÍSTICA
-# mapea frases naturales → comando del catálogo y el bot SE LO EJECUTA A
-# SÍ MISMO, entregando los datos directamente. Cero latencia, cero LLM.
-# ════════════════════════════════════════════════════════════════════════
-
-_PRE_RUTEO_COMANDOS = [
-    # (comando, patrones normalizados sin acentos, extractor: None|'lugar'|'especialidad')
-    # FASE 31.41: cofrades EN búsqueda laboral (≠ /empleo, que son OFERTAS de
-    # portales). Frases en 3ª persona/plural para NO secuestrar "estoy
-    # buscando empleo" (esa sí es /empleo). Extractor 'area' + slot-filling.
-    ('buscar_apoyo', (
-        'busqueda laboral', 'en busqueda activa', 'desemplead', 'cesante',
-        'sin trabajo', 'sin empleo', 'sin pega',
-        'quienes buscan trabajo', 'quienes buscan empleo',
-        'quienes buscan pega', 'quienes estan buscando',
-        'quien esta buscando trabajo', 'quien esta buscando empleo',
-        'integrantes buscando', 'cofrades buscando', 'socios buscando',
-        'miembros buscando', 'personas buscando trabajo',
-        'estan buscando trabajo', 'estan buscando empleo',
-        'estan buscando pega', 'necesitan trabajo', 'necesitan empleo',
-        'buscan reubicarse', 'buscando reubicacion',
-        'disponibles para trabajar', 'quienes necesitan pega'), 'area'),
-    ('top_usuarios', (
-        'mas participan', 'participan mas', 'usuarios mas activos',
-        'miembros mas activos', 'cofrades mas activos', 'quienes participan',
-        'quien participa mas', 'quien escribe mas', 'quien habla mas',
-        'quien publica mas', 'ranking de participacion', 'ranking de usuarios',
-        'ranking de mensajes', 'top de usuarios', 'usuarios con mas mensajes',
-        'los que mas escriben', 'los que mas aportan', 'mayor participacion',
-        # FASE 31.27 (caso real): "personas que más HAN PARTICIPADO el último mes"
-        'han participado', 'participado mas', 'mas participado',
-        'participaron mas', 'mas participaron', 'personas mas activas',
-        'personas mas participativas', 'mas participativos',
-        'mas activos del mes', 'mas activos este mes'), 'periodo'),
-    ('resumen_mes', (
-        'resumen del mes', 'resumen mensual', 'actividad del mes',
-        'como estuvo el mes', 'que paso este mes en el grupo'), None),
-    ('estadisticas', (
-        'estadisticas del grupo', 'estadisticas de la cofradia',
-        'estadisticas generales', 'metricas del grupo'), None),
-    ('dotacion', (
-        'dotacion de la cofradia', 'dotacion del grupo', 'dotacion actual'), None),
-    ('sismos', (
-        'ultimos sismos', 'sismos recientes', 'temblores recientes',
-        'ultimo temblor', 'ha temblado', 'hubo temblor', 'hubo sismo'), None),
-    ('indicadores', (
-        'indicadores economicos', 'valor del dolar', 'precio del dolar',
-        'cuanto esta el dolar', 'valor de la uf', 'cuanto esta la uf',
-        'valor del euro', 'valor de la utm'), None),
-    ('clima', (
-        'temperatura actual', 'temperatura en', 'temperatura de',
-        'que temperatura hace', 'cual es la temperatura', 'clima en',
-        'clima de', 'como esta el clima', 'como estara el clima',
-        'pronostico del tiempo', 'pronostico para', 'pronostico en',
-        'hace frio en', 'hace calor en', 'va a llover', 'llovera',
-        'va a hacer frio', 'va a hacer calor', 'el clima hoy'), 'lugar'),
-    ('economia', (
-        'dashboard economico', 'situacion economica de chile',
-        'como esta la economia chilena', 'panorama economico'), None),
-    ('eventos', (
-        'proximos eventos', 'que eventos hay', 'eventos de la cofradia',
-        'agenda de eventos', 'eventos programados'), None),
-    ('cumpleanos_mes', (
-        'cumpleanos del mes', 'quien esta de cumpleanos',
-        'cumpleaneros del mes', 'cumpleanos de este mes'), None),
-    # FASE 31.22→31.23: "¿quiénes son expertos en RRHH?" → busca en el Excel
-    # maestro "BD Grupo Laboral" de Google Drive (toda la Red Cofradía);
-    # las tarjetas de la BD quedan como fuente complementaria (PATRÓN 4 SQL
-    # y fallback dual-fuente dentro del propio comando)
-    ('buscar_profesional', (
-        'expertos en', 'experto en', 'expertas en', 'experta en',
-        'especialistas en', 'especialista en', 'quien sabe de',
-        'quienes saben de', 'profesionales de', 'profesionales en',
-        'alguien que sepa de', 'quien se dedica a', 'quienes se dedican a',
-        'busco un profesional', 'necesito un especialista',
-        'hay alguien experto', 'que cofrades saben de'), 'especialidad'),
-]
-
-_RE_LUGAR_PR = re.compile(
-    r'\b(?:en|de|para)\s+([A-Za-zÁÉÍÓÚÑÜáéíóúñü][A-Za-zÁÉÍÓÚÑÜáéíóúñü\s.\-]{1,28})')
-
-_RE_ESPECIALIDAD_PR = re.compile(
-    r'(?:expert[oa]s?\s+en|especialistas?\s+en|profesionales\s+(?:de|en)|'
-    r'sabe[n]?\s+de|se\s+dedica[n]?\s+a|sepa\s+de|saben\s+de)\s+'
-    r'([A-Za-zÁÉÍÓÚÑÜáéíóúñü][\w\sÁÉÍÓÚÑÜáéíóúñü.&\-]{2,40})',
-    re.IGNORECASE)
-
-
-def _extraer_lugar_pr(texto: str) -> str:
-    """Extrae la ciudad/comuna del texto original (con acentos intactos)."""
-    try:
-        candidatos = _RE_LUGAR_PR.findall(texto or '')
-        if not candidatos:
-            return ''
-        lugar = candidatos[-1].strip(' ?!¿¡.,;:')
-        lugar = re.sub(r'\s+(por favor|porfavor|ahora mismo|este momento|en este momento)\s*$',
-                       '', lugar, flags=re.IGNORECASE)
-        _cola = {'hoy', 'ahora', 'manana', 'mañana', 'actual', 'actualmente',
-                 'porfa', 'porfis', 'gracias'}
-        palabras = lugar.split()
-        while palabras and palabras[-1].lower() in _cola:
-            palabras.pop()
-        lugar = ' '.join(palabras[:4]).strip()
-        if lugar.lower() in {'la', 'el', 'los', 'las', 'este', 'esta',
-                             'grupo', 'chile', 'la cofradia', 'el grupo'}:
-            return ''
-        return lugar if len(lugar) >= 3 else ''
-    except Exception:
-        return ''
-
-
-def _extraer_especialidad_pr(texto: str) -> str:
-    """FASE 31.22: extrae la especialidad ('expertos en X' → 'X')."""
-    try:
-        m = _RE_ESPECIALIDAD_PR.search(texto or '')
-        if not m:
-            return ''
-        esp = m.group(1).strip(' ?!¿¡.,;:')
-        # Podar colas que no son parte de la especialidad
-        esp = re.sub(r'\s+(de la cofrad[ií]a|de cofrad[ií]a|en la cofrad[ií]a|'
-                     r'del grupo|en el grupo|de la comunidad|por favor|'
-                     r'aqu[ií]|ac[aá])\s*$',
-                     '', esp, flags=re.IGNORECASE)
-        esp = ' '.join(esp.split()[:5]).strip()
-        return esp if len(esp) >= 3 else ''
-    except Exception:
-        return ''
-
-
-# FASE 31.23: comandos de SOLO LECTURA elegibles para el matcher semántico
-# (excluye acciones que crean/publican/modifican — cero riesgo de efectos
-# indeseados por un match difuso)
-_SEMANTICO_SOLO_LECTURA = {
-    'buscar_profesional', 'buscar_ia', 'empleo', 'buscar_apoyo', 'eventos', 'anuncios',
-    'resumen', 'resumen_semanal', 'resumen_mes', 'estadisticas', 'graficos',
-    'top_usuarios', 'top10', 'sismos', 'indicadores', 'clima', 'economia',
-    'directorio', 'dotacion', 'cumpleanos_mes', 'finanzas', 'mi_dashboard',
-    'mis_coins', 'mi_perfil', 'mi_cuenta', 'mi_agenda', 'mis_tareas',
-    'consultas',
-}
-_STOPWORDS_SEM = {
-    'para', 'como', 'del', 'los', 'las', 'con', 'que', 'una', 'uno', 'unos',
-    'este', 'esta', 'estos', 'estas', 'por', 'mas', 'más', 'tus', 'sus',
-    'mis', 'the', 'and', 'con', 'sin', 'sobre', 'entre', 'hacia', 'desde',
-    'hay', 'son', 'muestra', 'muestrame', 'dame', 'dime', 'quiero', 'ver',
-    'cual', 'cuales', 'quien', 'quienes', 'donde', 'cuando', 'cuanto',
-    'cuanta', 'cuantos', 'cuantas', 'grupo', 'cofradia', 'bot',
-}
-_IDX_SEMANTICO = None
-
-
-def _normalizar_sem(s: str) -> str:
-    import unicodedata as _u
-    t = _u.normalize('NFKD', (s or '').lower())
-    return ''.join(ch for ch in t if not _u.combining(ch))
-
-
-def _construir_idx_semantico():
-    """Índice lazy: comando → (frase_nombre, tokens_nombre, tokens_desc)."""
-    global _IDX_SEMANTICO
-    if _IDX_SEMANTICO is not None:
-        return _IDX_SEMANTICO
-    idx = {}
-    catalogo = globals().get('CATALOGO_COMANDOS_INTENCION', {}) or {}
-    for cmd in _SEMANTICO_SOLO_LECTURA:
-        if cmd not in _MAPA_COMANDOS_EJECUTABLES:
-            continue
-        desc = _normalizar_sem(catalogo.get(cmd, ''))
-        frase_nombre = _normalizar_sem(cmd.replace('_', ' '))
-        toks_nombre = {t for t in frase_nombre.split()
-                       if len(t) >= 3 and t not in _STOPWORDS_SEM}
-        toks_desc = {t for t in desc.split()
-                     if len(t) >= 4 and t not in _STOPWORDS_SEM} - toks_nombre
-        idx[cmd] = (frase_nombre, toks_nombre, toks_desc)
-    _IDX_SEMANTICO = idx
-    return idx
-
-
-def _matchear_catalogo_semantico(texto_norm: str):
-    """FASE 31.23 — Capa 1.5: compara la pregunta contra el catálogo COMPLETO
-    de comandos de lectura y devuelve (comando, score, nombre_presente) del
-    mejor candidato si supera el umbral con ventaja clara. Determinístico."""
-    try:
-        idx = _construir_idx_semantico()
-        toks_preg = {t for t in texto_norm.split()
-                     if len(t) >= 3 and t not in _STOPWORDS_SEM}
-        if not toks_preg:
-            return None
-        puntajes = []
-        for cmd, (frase, tn, td) in idx.items():
-            score = 0
-            nombre_hit = False
-            if ' ' in frase and frase in texto_norm:
-                score += 4
-                nombre_hit = True
-            inter_n = toks_preg & tn
-            if inter_n:
-                score += 3 * len(inter_n)
-                nombre_hit = True
-            score += len(toks_preg & td)
-            if score:
-                puntajes.append((score, nombre_hit, cmd))
-        if not puntajes:
-            return None
-        puntajes.sort(reverse=True)
-        best_score, best_nombre, best_cmd = puntajes[0]
-        second = puntajes[1][0] if len(puntajes) > 1 else 0
-        umbral = 3 if best_nombre else 4
-        if best_score >= umbral and (best_score - second) >= 2:
-            return best_cmd
-    except Exception:
-        pass
-    return None
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.24: CAPA 1.7 — INTENCIÓN POR EMBEDDINGS (preguntas-tipo)
-# Pedido de Germán: preguntas de ejemplo por comando para matching semántico.
-# Diseño profesional: tabla pgvector dedicada (NO contamina el RAG de
-# conocimiento), semillas curadas y variadas por comando, y APRENDIZAJE
-# AUTOMÁTICO: cada fraseo nuevo que el motor LLM resuelva bien se guarda
-# como ejemplo → el matcher mejora solo con el uso real de la comunidad.
-# Kill-switch: INTENCIONES_SEMANTICAS=0 en Render.
-# ════════════════════════════════════════════════════════════════════════
-INTENCIONES_SEMANTICAS = os.environ.get('INTENCIONES_SEMANTICAS', '1') == '1'
-_UMBRAL_INTENCION_EMB = float(os.environ.get('UMBRAL_INTENCION_EMB', '0.80'))
-_EMB_INTENCION_CACHE = {}
-
-_PREGUNTAS_TIPO_SEED = {
-    'buscar_profesional': [
-        "¿quiénes son expertos en recursos humanos?",
-        "necesito un abogado de la cofradía",
-        "¿hay algún contador en la red?",
-        "busco un especialista en logística",
-        "¿quién sabe de comercio exterior?",
-        "¿tenemos ingenieros navales en el grupo?",
-        "recomiéndame un profesional de marketing",
-        "¿algún cofrade trabaja en minería?",
-        "¿quiénes se dedican a la construcción?",
-        "dame el contacto de un experto en seguros",
-    ],
-    'directorio': [
-        "muéstrame el directorio profesional",
-        "¿dónde veo las tarjetas de los cofrades?",
-        "quiero ver el directorio de la cofradía",
-        "listado de profesionales del grupo",
-        "¿cómo busco en el directorio?",
-        "muéstrame las tarjetas profesionales",
-        "directorio de contactos de la red",
-        "¿qué profesionales están registrados?",
-        "ver perfiles profesionales de los miembros",
-        "acceder al directorio de socios",
-    ],
-    'buscar_apoyo': [
-        "¿quiénes están en búsqueda laboral?",
-        "¿qué integrantes están sin trabajo?",
-        "¿quiénes están desempleados en la cofradía?",
-        "cofrades que están buscando pega",
-        "¿quién está cesante en el grupo?",
-        "socios en búsqueda activa de empleo",
-        "¿qué miembros necesitan trabajo?",
-        "¿quiénes buscan reubicarse laboralmente?",
-        "personas de la cofradía disponibles para trabajar",
-        "¿quién está buscando trabajo en logística?",
-    ],
-    'empleo': [
-        "¿hay ofertas de trabajo disponibles?",
-        "estoy buscando empleo, ¿qué ofertas hay?",
-        "busco pega para mí, ¿qué hay en los portales?",
-        "busco empleo, ¿qué hay publicado?",
-        "¿qué oportunidades laborales existen?",
-        "muéstrame las vacantes de la cofradía",
-        "¿alguien está contratando?",
-        "ofertas de empleo para oficiales",
-        "¿hay pegas disponibles en el grupo?",
-        "oportunidades de trabajo publicadas",
-        "¿dónde veo los avisos de empleo?",
-        "necesito trabajo, ¿qué opciones hay?",
-    ],
-    'eventos': [
-        "¿qué eventos hay programados?",
-        "¿cuándo es la próxima reunión?",
-        "muéstrame la agenda de eventos",
-        "¿hay actividades esta semana?",
-        "próximos encuentros de la cofradía",
-        "¿qué asados o juntas vienen?",
-        "calendario de actividades del grupo",
-        "¿cuándo nos juntamos de nuevo?",
-        "eventos confirmados del mes",
-        "¿hay algún seminario pronto?",
-    ],
-    'anuncios': [
-        "¿qué anuncios hay publicados?",
-        "muéstrame los avisos del grupo",
-        "¿hay anuncios nuevos?",
-        "ver publicaciones y anuncios",
-        "¿qué se ha anunciado últimamente?",
-        "avisos importantes de la cofradía",
-        "¿hay comunicados recientes?",
-        "muéstrame el tablón de anuncios",
-        "anuncios vigentes de la comunidad",
-        "¿qué novedades se han publicado?",
-    ],
-    'resumen': [
-        "dame un resumen de la conversación",
-        "¿qué se ha hablado hoy en el grupo?",
-        "resume lo último del chat",
-        "¿de qué hablaron hoy?",
-        "ponme al día con la conversación",
-        "resumen de los mensajes de hoy",
-        "¿qué me perdí en el grupo?",
-        "resume la actividad de hoy",
-        "¿qué temas se tocaron hoy?",
-        "dame el resumen del día",
-    ],
-    'resumen_semanal': [
-        "dame el resumen semanal",
-        "¿qué pasó esta semana en el grupo?",
-        "resumen de la semana por favor",
-        "¿cómo estuvo la semana en la cofradía?",
-        "actividad de la última semana",
-        "¿qué se conversó esta semana?",
-        "ponme al día con la semana",
-        "informe semanal del grupo",
-        "resumen de los últimos 7 días",
-        "¿qué me perdí esta semana?",
-    ],
-    'resumen_mes': [
-        "muéstrame el resumen del mes",
-        "¿cómo estuvo el mes en el grupo?",
-        "resumen mensual de actividad",
-        "¿qué pasó este mes en la cofradía?",
-        "informe del mes por favor",
-        "actividad mensual del grupo",
-        "balance del mes de la comunidad",
-        "¿qué temas marcaron el mes?",
-        "resumen de los últimos 30 días",
-        "estadísticas y resumen del mes",
-    ],
-    'estadisticas': [
-        "muéstrame las estadísticas del grupo",
-        "¿cuántos mensajes se han enviado?",
-        "estadísticas generales de la cofradía",
-        "métricas de actividad del grupo",
-        "¿cómo van los números del grupo?",
-        "datos de participación general",
-        "estadísticas de uso del bot",
-        "¿cuántos usuarios registrados hay?",
-        "cifras de la comunidad",
-        "muéstrame las métricas generales",
-    ],
-    'graficos': [
-        "muéstrame los gráficos de actividad",
-        "quiero ver los gráficos del grupo",
-        "gráficos de participación por favor",
-        "visualización de la actividad",
-        "¿tienes gráficos de las estadísticas?",
-        "muéstrame las curvas de actividad",
-        "gráficos de mensajes por día",
-        "dashboard gráfico del grupo",
-        "quiero ver tendencias en gráficos",
-        "gráficas de la comunidad",
-    ],
-    'top_usuarios': [
-        "¿quiénes son las personas que más han participado el último mes?",
-        "¿qué miembros participaron más este mes?",
-        "¿quiénes han sido los más participativos últimamente?",
-        "¿quiénes son los usuarios que más participan?",
-        "¿quién habla más en el grupo?",
-        "ranking de participación de la cofradía",
-        "los miembros más activos del grupo",
-        "¿quiénes escriben más mensajes?",
-        "top de usuarios más participativos",
-        "¿quién aporta más en la comunidad?",
-        "muéstrame el ranking de usuarios",
-        "¿quiénes son los cofrades más activos?",
-        "usuarios con mayor participación",
-    ],
-    'top10': [
-        "muéstrame el top 10 del mes",
-        "¿quiénes lideran la gamificación?",
-        "top 10 de cofrades con más puntos",
-        "ranking de puntos del mes actual",
-        "¿quién va ganando este mes?",
-        "los 10 mejores del mes",
-        "tabla de posiciones de la cofradía",
-        "¿cómo va el ranking mensual de puntos?",
-        "top diez de la comunidad",
-        "líderes del mes en puntos",
-    ],
-    'sismos': [
-        "¿ha temblado hoy?",
-        "¿hubo algún sismo recién?",
-        "últimos temblores en chile",
-        "¿registraron algún terremoto?",
-        "sismos recientes por favor",
-        "¿se sintió un temblor?",
-        "actividad sísmica de hoy",
-        "¿dónde fue el último sismo?",
-        "reporte de temblores recientes",
-        "¿de cuánto fue el temblor?",
-    ],
-    'indicadores': [
-        "¿cuánto está el dólar hoy?",
-        "valor de la uf actual",
-        "¿a cuánto está el euro?",
-        "indicadores económicos de hoy",
-        "¿cuál es el valor de la utm?",
-        "precio del dólar observado",
-        "¿cómo está el tipo de cambio?",
-        "dame los indicadores del día",
-        "valor del ipc y la uf",
-        "¿cuánto vale el dólar en pesos?",
-    ],
-    'clima': [
-        "¿cuál es la temperatura actual?",
-        "¿cómo está el clima en santiago?",
-        "pronóstico del tiempo para mañana",
-        "¿va a llover hoy?",
-        "¿qué temperatura hace en valparaíso?",
-        "clima para el fin de semana",
-        "¿hace frío en punta arenas?",
-        "pronóstico del tiempo en viña del mar",
-        "¿cómo estará el tiempo mañana?",
-        "temperatura y clima de hoy",
-    ],
-    'economia': [
-        "muéstrame el dashboard económico",
-        "¿cómo está la economía chilena?",
-        "panorama económico de chile",
-        "situación económica actual del país",
-        "análisis económico por favor",
-        "¿cómo van los mercados en chile?",
-        "informe económico completo",
-        "muéstrame los datos macroeconómicos",
-        "¿cómo está la inflación en chile?",
-        "estado de la economía nacional",
-    ],
-    'dotacion': [
-        "¿cuál es la dotación de la cofradía?",
-        "¿cuántos somos en el grupo?",
-        "¿cuántos miembros tiene la cofradía?",
-        "dotación actual de la comunidad",
-        "¿cuánta gente hay en el grupo?",
-        "número de integrantes de la red",
-        "¿cuántos cofrades somos?",
-        "total de miembros registrados",
-        "¿de cuántas personas es el grupo?",
-        "tamaño de la comunidad",
-    ],
-    'cumpleanos_mes': [
-        "¿quién está de cumpleaños este mes?",
-        "cumpleaños del mes por favor",
-        "¿qué cofrades cumplen años ahora?",
-        "muéstrame los cumpleañeros del mes",
-        "¿hay cumpleaños esta semana?",
-        "lista de cumpleaños del mes",
-        "¿quiénes celebran cumpleaños?",
-        "cumpleañeros de la cofradía",
-        "¿a quién saludamos este mes?",
-        "próximos cumpleaños del grupo",
-    ],
-    'finanzas': [
-        "dame consejos de finanzas personales",
-        "¿cómo ordeno mis finanzas?",
-        "tips financieros por favor",
-        "ayuda con mi presupuesto personal",
-        "¿cómo ahorro mejor mi sueldo?",
-        "consejos de inversión básicos",
-        "educación financiera para empezar",
-        "¿cómo manejo mis deudas?",
-        "recomendaciones de finanzas personales",
-        "quiero mejorar mis finanzas",
-    ],
-    'mi_dashboard': [
-        "muéstrame mi dashboard personal",
-        "quiero ver mi panel de control",
-        "mi dashboard por favor",
-        "¿cómo va mi actividad personal?",
-        "muéstrame mi resumen personal",
-        "mi panel de estadísticas",
-        "dashboard con mis datos",
-        "¿cómo voy yo en el grupo?",
-        "mi tablero personal",
-        "ver mi dashboard de cofrade",
-    ],
-    'mis_coins': [
-        "¿cuántos coins tengo?",
-        "muéstrame mi balance de coins",
-        "mis coins por favor",
-        "¿cuántas monedas he ganado?",
-        "saldo de mis cofradía coins",
-        "¿cómo van mis puntos coins?",
-        "balance de monedas acumuladas",
-        "¿cuántos coins me quedan?",
-        "revisar mis coins ganados",
-        "estado de mis coins",
-    ],
-    'mi_perfil': [
-        "muéstrame mi perfil",
-        "¿cómo está mi perfil de cofrade?",
-        "quiero ver mi perfil completo",
-        "mi perfil por favor",
-        "¿cuál es mi trust score?",
-        "datos de mi perfil personal",
-        "¿cuántos mensajes llevo?",
-        "ver mi información de miembro",
-        "mi ficha de usuario",
-        "¿cómo va mi reputación en el grupo?",
-    ],
-    'mi_cuenta': [
-        "¿cómo está mi cuenta?",
-        "¿cuántos días me quedan de suscripción?",
-        "estado de mi cuenta por favor",
-        "¿cuándo vence mi suscripción?",
-        "muéstrame mi cuenta",
-        "¿mi cuenta está activa?",
-        "días restantes de mi membresía",
-        "¿cuándo expira mi cuenta?",
-        "revisar el estado de mi suscripción",
-        "información de mi cuenta",
-    ],
-    'mi_agenda': [
-        "muéstrame mi agenda",
-        "¿qué tengo agendado?",
-        "mi agenda de networking",
-        "¿qué reuniones tengo pendientes?",
-        "ver mi agenda personal",
-        "mis citas y compromisos",
-        "¿qué tengo programado?",
-        "agenda de mis conexiones",
-        "mis próximas reuniones",
-        "revisar mi agenda",
-    ],
-    'mis_tareas': [
-        "muéstrame mis tareas pendientes",
-        "¿qué tareas tengo?",
-        "mis pendientes por favor",
-        "lista de mis tareas",
-        "¿qué me falta por hacer?",
-        "ver mis tareas de networking",
-        "tareas asignadas a mí",
-        "¿qué compromisos tengo pendientes?",
-        "mis to-do de la cofradía",
-        "revisar mis pendientes",
-    ],
-    'consultas': [
-        "¿qué consultas hay abiertas?",
-        "muéstrame las consultas del grupo",
-        "consultas pendientes de responder",
-        "¿alguien necesita ayuda con algo?",
-        "ver las consultas publicadas",
-        "¿qué preguntas ha hecho la comunidad?",
-        "consultas activas de los cofrades",
-        "¿hay consultas sin responder?",
-        "listado de consultas del grupo",
-        "preguntas abiertas de la comunidad",
-    ],
-    'buscar_ia': [
-        "busca en el historial del grupo sobre inversiones",
-        "¿qué se ha dicho sobre criptomonedas?",
-        "busca conversaciones sobre emprendimiento",
-        "¿qué se habló sobre el tema pensiones?",
-        "buscar en los mensajes antiguos sobre viajes",
-        "¿alguien mencionó algo de seguros?",
-        "busca en el historial menciones de startups",
-        "¿qué opiniones hubo sobre teletrabajo?",
-        "revisar qué se dijo sobre educación",
-        "buscar temas conversados sobre salud",
-    ],
-}
-
-
-_SEMILLAS_POR_COMANDO = int(os.environ.get('SEMILLAS_POR_COMANDO', '50'))
-
-_PREFIJOS_VARIANTE = (
-    '', 'dime ', 'oye, ', 'por favor, ', 'socio, ', 'hola, ',
-    'me puedes decir ', 'necesito saber ', 'quisiera saber ',
-    'una consulta: ', 'me interesa saber ',
-)
-_SUFIJOS_VARIANTE = ('', ' por favor', ' gracias', ' ahora', ' porfa')
-
-
-def _expandir_variantes_comando(preguntas, tope=None):
-    """FASE 31.28 (pedido de Germán: ~50 preguntas-tipo por comando).
-    Expande las semillas curadas combinándolas con prefijos/sufijos
-    naturales del habla → hasta `tope` variantes únicas por comando.
-    La expansión ocurre al ENTRENAR (van a la BD con su embedding),
-    manteniendo el código fuente liviano."""
-    tope = tope or _SEMILLAS_POR_COMANDO
-    vistas, salida = set(), []
-
-    def _agregar(v):
-        v = ' '.join(v.split()).strip()
-        k = v.lower()
-        if v and k not in vistas:
-            vistas.add(k)
-            salida.append(v)
-
-    for p in preguntas:  # primero, TODAS las originales curadas
-        _agregar(p)
-    for pref in _PREFIJOS_VARIANTE:
-        for suf in _SUFIJOS_VARIANTE:
-            if not pref and not suf:
-                continue
-            for p in preguntas:
-                if len(salida) >= tope:
-                    return salida
-                nucleo = p[1:] if (pref and p.startswith('¿')) else p
-                if suf and nucleo.endswith('?'):
-                    v = pref + nucleo[:-1] + suf + '?'
-                else:
-                    v = pref + nucleo + suf
-                _agregar(v)
-    return salida[:tope]
-
-
-def _intenciones_asegurar_tabla(c):
-    c.execute("""CREATE TABLE IF NOT EXISTS intenciones_ejemplos (
-        id SERIAL PRIMARY KEY,
-        comando TEXT NOT NULL,
-        pregunta TEXT NOT NULL,
-        embedding vector(768),
-        origen TEXT DEFAULT 'seed',
-        creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (comando, pregunta)
-    )""")
-
-
-def _intencion_guardar_ejemplo_sync(comando: str, pregunta: str, origen: str = 'aprendido'):
-    """Guarda un ejemplo nuevo con su embedding (aprendizaje automático)."""
-    try:
-        if not (DATABASE_URL and comando in _SEMANTICO_SOLO_LECTURA):
-            return False
-        pregunta = (pregunta or '').strip()[:300]
-        if len(pregunta) < 8:
-            return False
-        emb = generar_embedding_gemini(pregunta, 'RETRIEVAL_QUERY')
-        if not emb:
-            return False
-        conn = get_db_connection()
-        c = conn.cursor()
-        _intenciones_asegurar_tabla(c)
-        c.execute("""INSERT INTO intenciones_ejemplos (comando, pregunta, embedding, origen)
-                     VALUES (%s, %s, %s::vector, %s)
-                     ON CONFLICT (comando, pregunta) DO NOTHING""",
-                  (comando, pregunta, embedding_to_pgvector(emb), origen))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.debug(f"intencion_guardar_ejemplo: {e}")
-        return False
-
-
-async def diagnostico_ruteo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.29: /diagnostico_ruteo <frase> (admin) — muestra qué capa
-    capturaría la frase y con qué argumentos, SIN ejecutar el comando.
-    Herramienta anti-adivinanzas para verificar el ruteo en producción."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Comando exclusivo del administrador.")
-        return
-    frase = ' '.join(context.args) if context.args else ''
-    if not frase:
-        await update.message.reply_text(
-            "Uso: /diagnostico_ruteo quiénes participaron más el último mes")
-        return
-    lineas = [f"🩻 <b>RAYOS X DEL RUTEO</b> · {BOT_BUILD.split('·')[0].strip()}",
-              f"«{frase}»", "━" * 25]
-    # Capa 1 / 1.5 (determinística)
-    try:
-        r1 = _pre_rutear_comando(frase)
-        if r1:
-            lineas.append(f"🎯 <b>Capa 1/1.5:</b> → /{r1[0]} "
-                          f"args=<code>{r1[1] or '(sin args)'}</code>")
-        else:
-            lineas.append("⚪ <b>Capa 1/1.5:</b> sin match (pasa a embeddings)")
-    except Exception as e:
-        lineas.append(f"🔴 Capa 1: error {e}")
-    # Extractor temporal (independiente, informativo)
-    try:
-        _per = _extraer_periodo_pr(frase)
-        lineas.append(f"⏰ <b>Período detectado:</b> "
-                      f"{(_per + ' días') if _per else 'histórico total'}")
-    except Exception:
-        pass
-    # Capa 1.7 (embeddings)
-    try:
-        r17 = await _rutear_semantico_embeddings(frase)
-        if r17:
-            lineas.append(f"🧲 <b>Capa 1.7 (embeddings):</b> → /{r17[0]} "
-                          f"args=<code>{r17[1] or '(sin args)'}</code>")
-        else:
-            lineas.append("⚪ <b>Capa 1.7:</b> sin match ≥ umbral "
-                          f"({_UMBRAL_INTENCION_EMB}) o sin entrenar")
-    except Exception as e:
-        lineas.append(f"🔴 Capa 1.7: {e}")
-    lineas.append("")
-    lineas.append("Si la Capa 1 muestra el comando y args correctos aquí, "
-                  "pero el bot responde distinto, la instancia que contesta "
-                  "NO es este build → revisar /version y el deploy.")
-    await update.message.reply_text("\n".join(lineas), parse_mode='HTML')
-
-
-async def entrenar_intenciones_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.24: /entrenar_intenciones (admin) — siembra las preguntas-tipo
-    curadas en la tabla pgvector. Idempotente: solo agrega las faltantes."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Comando exclusivo del administrador.")
-        return
-    if not DATABASE_URL:
-        await update.message.reply_text("❌ Requiere PostgreSQL (Supabase).")
-        return
-    total = len(_PREGUNTAS_TIPO_SEED) * _SEMILLAS_POR_COMANDO
-    msg = await update.message.reply_text(
-        f"🧠 Entrenando intenciones: hasta {total} preguntas-tipo "
-        f"({_SEMILLAS_POR_COMANDO} por comando × {len(_PREGUNTAS_TIPO_SEED)} "
-        f"comandos)...\n⏳ (~5-10 min la primera vez; las siguientes son "
-        f"incrementales)")
-
-    def _sembrar():
-        conn = get_db_connection()
-        c = conn.cursor()
-        _intenciones_asegurar_tabla(c)
-        c.execute("SELECT comando, pregunta FROM intenciones_ejemplos")
-        existentes = {(r['comando'], r['pregunta']) for r in c.fetchall()}
-        nuevas, errores = 0, 0
-        for cmd, preguntas in _PREGUNTAS_TIPO_SEED.items():
-            # FASE 31.28: expansión a ~50 variantes por comando
-            for p in _expandir_variantes_comando(preguntas):
-                if (cmd, p) in existentes:
-                    continue
-                emb = generar_embedding_gemini(p, 'RETRIEVAL_QUERY')
-                if not emb:
-                    errores += 1
-                    continue
-                try:
-                    c.execute("""INSERT INTO intenciones_ejemplos
-                                 (comando, pregunta, embedding, origen)
-                                 VALUES (%s, %s, %s::vector, 'seed')
-                                 ON CONFLICT (comando, pregunta) DO NOTHING""",
-                              (cmd, p, embedding_to_pgvector(emb)))
-                    nuevas += 1
-                except Exception:
-                    conn.rollback()
-                    errores += 1
-                tiempo_real.sleep(0.05)  # respeto al rate limit del tier free
-        conn.commit()
-        c.execute("SELECT COUNT(*) AS n FROM intenciones_ejemplos")
-        total_bd = c.fetchone()['n']
-        conn.close()
-        return nuevas, errores, total_bd
-
-    try:
-        nuevas, errores, total_bd = await asyncio.to_thread(_sembrar)
-        await msg.edit_text(
-            f"✅ ENTRENAMIENTO COMPLETADO\n{'━' * 25}\n\n"
-            f"🌱 Nuevas sembradas: {nuevas}\n"
-            f"📚 Total en memoria de intenciones: {total_bd}\n"
-            + (f"⚠️ Con error (reintenta luego): {errores}\n" if errores else "")
-            + f"\n🧭 La Capa 1.7 ya compara cada pregunta de los usuarios "
-            f"contra estos ejemplos por similitud semántica, y APRENDE "
-            f"nuevos fraseos automáticamente con el uso.")
-    except Exception as e:
-        logger.error(f"entrenar_intenciones: {e}")
-        await msg.edit_text(f"❌ Error entrenando: {e}")
-
-
-async def _rutear_semantico_embeddings(texto: str):
-    """FASE 31.24 — Capa 1.7: matching por similitud de embeddings contra las
-    preguntas-tipo. Devuelve (comando, args) si supera el umbral; None si no.
-    Blindada: timeout 2.5s, caché, y jamás rompe el flujo."""
-    try:
-        if not (INTENCIONES_SEMANTICAS and DATABASE_URL and GEMINI_API_KEY):
-            return None
-        if not texto or len(texto) < 10:
-            return None
-        clave = texto.lower().strip()[:200]
-        if clave in _EMB_INTENCION_CACHE:
-            return _EMB_INTENCION_CACHE[clave]
-        emb = await asyncio.wait_for(
-            asyncio.to_thread(generar_embedding_gemini, texto, 'RETRIEVAL_QUERY'),
-            timeout=2.5)
-        if not emb:
-            return None
-
-        def _consultar():
-            conn = get_db_connection()
-            c = conn.cursor()
-            vec = embedding_to_pgvector(emb)
-            c.execute("""SELECT comando, pregunta,
-                                1 - (embedding <=> %s::vector) AS sim
-                         FROM intenciones_ejemplos
-                         WHERE embedding IS NOT NULL
-                         ORDER BY embedding <=> %s::vector LIMIT 3""", (vec, vec))
-            filas = c.fetchall()
-            conn.close()
-            return filas
-
-        filas = await asyncio.wait_for(asyncio.to_thread(_consultar), timeout=2.5)
-        resultado = None
-        if filas:
-            top = filas[0]
-            sim = float(top['sim'] or 0)
-            cmd = top['comando']
-            if sim >= _UMBRAL_INTENCION_EMB and cmd in _SEMANTICO_SOLO_LECTURA:
-                if cmd == 'clima':
-                    resultado = (cmd, _extraer_lugar_pr(texto))
-                elif cmd in ('buscar_profesional', 'directorio', 'buscar_ia', 'empleo'):
-                    _esp = _extraer_especialidad_pr(texto)
-                    if cmd == 'buscar_profesional' and not _esp:
-                        resultado = None
-                    else:
-                        resultado = (cmd, _esp)
-                else:
-                    resultado = (cmd, '')
-                if resultado:
-                    logger.info(f"🧲 FASE 31.24 (Capa 1.7): sim={sim:.2f} con "
-                                f"'{top['pregunta'][:40]}' → /{cmd}")
-        if len(_EMB_INTENCION_CACHE) > 400:
-            _EMB_INTENCION_CACHE.clear()
-        _EMB_INTENCION_CACHE[clave] = resultado
-        return resultado
-    except Exception as e:
-        logger.debug(f"Capa 1.7: {e}")
-        return None
-
-
-_SLOT_PENDIENTE = {}  # FASE 31.41: user_id → {'cmd','ts'} — pregunta de vuelta pendiente
-_SLOT_TTL = 180  # segundos de validez de la re-pregunta
-
-
-def _es_respuesta_de_area(texto: str) -> bool:
-    """FASE 31.44: distingue la respuesta a la re-pregunta ('finanzas',
-    'recursos humanos') de una PREGUNTA NUEVA ('Bot quiénes están en
-    búsqueda laboral?') — caso real: el slot se tragó la pregunta y buscó
-    'quiénes están en búsqueda' en el Excel."""
-    try:
-        t = (texto or '').strip()
-        if '?' in t or '¿' in t:
-            return False  # las áreas no llevan signos de pregunta
-        import unicodedata as _un44
-        tn = _un44.normalize('NFKD', t.lower())
-        tn = ''.join(ch for ch in tn if not _un44.combining(ch))
-        palabras = tn.split()
-        if len(palabras) > 5:
-            return False  # un área son 1-4 palabras, no una oración
-        interrogativos = {'quien', 'quienes', 'que', 'cual', 'cuales',
-                          'cuando', 'donde', 'como', 'cuanto', 'cuantos',
-                          'muestrame', 'dame', 'dime', 'listame', 'busca'}
-        sin_bot = [p for p in palabras if p not in ('bot', 'robot')]
-        if sin_bot and sin_bot[0] in interrogativos:
-            return False  # arranca interrogando → pregunta nueva
-        return True
-    except Exception:
-        return True
-
-
-async def _slot_interceptar_texto(update, context):
-    """FASE 31.43: interceptor group=-1 — si el bot le hizo una re-pregunta
-    a este usuario, su siguiente texto ES la respuesta, en CUALQUIER chat y
-    sin necesidad de decir 'Bot' (el filtro Regex del handler de menciones
-    nunca dejaba pasar 'finanzas' a secas)."""
-    try:
-        if not update.message or not update.message.text:
-            return
-        _uid = update.effective_user.id
-        if _uid not in _SLOT_PENDIENTE:
-            return
-        _txt = update.message.text
-        if _txt.startswith('/'):
-            return  # comando explícito → sigue su curso; el slot espera
-        import time as _t43
-        _s = _SLOT_PENDIENTE.get(_uid) or {}
-        if _t43.time() - _s.get('ts', 0) > _SLOT_TTL:
-            del _SLOT_PENDIENTE[_uid]
-            return  # expirado → el mensaje sigue su flujo normal
-        if not _es_respuesta_de_area(_txt):
-            del _SLOT_PENDIENTE[_uid]  # FASE 31.44: es una PREGUNTA nueva
-            return  # → que la procese el flujo normal (y re-pregunte si toca)
-        _area = _limpiar_area_slot(_txt)
-        if not _area:
-            return
-        del _SLOT_PENDIENTE[_uid]
-        logger.info(f"🎯 FASE 31.43: slot interceptado → "
-                    f"/{_s.get('cmd', 'buscar_apoyo')} '{_area}'")
-        await ejecutar_comando_desde_intencion(
-            _s.get('cmd', 'buscar_apoyo'), _area, update, context)
-        raise ApplicationHandlerStop  # respuesta entregada: nadie más procesa
-    except ApplicationHandlerStop:
-        raise
-    except Exception as _e43:
-        logger.debug(f"FASE 31.43 interceptor: {_e43}")
-
-
-def _limpiar_area_slot(texto: str) -> str:
-    """FASE 31.42: convierte la respuesta libre del usuario en un área limpia.
-    'Bot en finanzas' → 'finanzas' · '¿logística?' → 'logística'."""
-    try:
-        import re as _re42
-        t = _re42.sub(r'@\w+', '', texto or '')          # @menciones fuera
-        t = t.strip(' ¿?¡!.,;:')
-        palabras = t.split()
-        conectores = {'bot', 'robot', 'en', 'de', 'del', 'el', 'la', 'los',
-                      'las', 'area', 'área', 'rubro', 'sector', 'seria',
-                      'sería', 'es'}
-        while palabras and palabras[0].lower().strip('¿?¡!.,') in conectores:
-            palabras.pop(0)
-        return ' '.join(palabras[:4]).strip(' ¿?¡!.,')
-    except Exception:
-        return (texto or '').strip()
-
-
-def _extraer_area_pr(texto: str) -> str:
-    """FASE 31.41: extrae el área/rubro de una pregunta de búsqueda laboral.
-    'quiénes buscan trabajo en el área de finanzas' → 'finanzas'."""
-    try:
-        import unicodedata as _un41, re as _re41
-        t = _un41.normalize('NFKD', (texto or '').lower())
-        t = ''.join(ch for ch in t if not _un41.combining(ch))
-        t = ' '.join(t.split())
-        m = _re41.search(
-            r'(?:area|rubro|sector|especialidad|profesion)\s+(?:de\s+|en\s+)?'
-            r'([a-z][a-z ]{2,34})', t)
-        if m:
-            area = m.group(1).strip(' ?¿.!')
-            palabras = [p for p in area.split()
-                        if p not in ('de', 'la', 'el', 'los', 'las', 'del')]
-            return ' '.join(palabras[:4])
-        return ''
-    except Exception:
-        return ''
-
-
-def _extraer_periodo_pr(texto: str) -> str:
-    """FASE 31.28/31.35: detecta el período temporal de la pregunta.
-    Devuelve días como string ('30','7','1') o '' (= histórico total).
-    31.35: AUTOSUFICIENTE — normalización propia (la versión anterior
-    llamaba a un helper inexistente y moría en NameError silencioso)."""
-    try:
-        import unicodedata as _un35
-        t = _un35.normalize('NFKD', (texto or '').lower())
-        t = ''.join(ch for ch in t if not _un35.combining(ch))
-        t = ' '.join(t.split())
-        if any(p in t for p in ('ultimo mes', 'este mes', 'del mes', 'mes pasado',
-                                'mensual', 'ultimos 30', '30 dias', 'treinta dias')):
-            return '30'
-        if any(p in t for p in ('esta semana', 'ultima semana', 'semanal',
-                                'ultimos 7', '7 dias', 'siete dias')):
-            return '7'
-        if any(p in t for p in ('hoy', 'el dia de hoy', 'ultimas 24')):
-            return '1'
-    except Exception:
-        pass
-    return ''
-
-
-def _pre_rutear_comando(texto: str, _uid_slot=None):
-    """Devuelve (comando, args_str) si el texto calza inequívocamente; None si no.
-
-    FASE 31.20: extrae argumentos (ciudad para /clima).
-    FASE 31.22: extrae especialidades (área para /directorio).
-    """
-    try:
-        if not texto or len(texto) < 8:
-            return None
-        import unicodedata as _un19
-        t = _un19.normalize('NFKD', texto.lower())
-        t = ''.join(ch for ch in t if not _un19.combining(ch))
-        t = ' '.join(t.split())
-        # FASE 31.41: ¿hay una re-pregunta pendiente? → este texto ES el área
-        if _uid_slot is not None and _uid_slot in _SLOT_PENDIENTE:
-            _s = _SLOT_PENDIENTE[_uid_slot]
-            import time as _t41
-            if (_t41.time() - _s['ts'] <= _SLOT_TTL
-                    and not texto.startswith('/')
-                    and _es_respuesta_de_area(texto)):  # FASE 31.44
-                del _SLOT_PENDIENTE[_uid_slot]
-                _area_resp = _limpiar_area_slot(texto)  # FASE 31.42
-                logger.info(f"🎯 FASE 31.41: slot consumido → "
-                            f"/{_s['cmd']} '{_area_resp}'")
-                return (_s['cmd'], _area_resp)
-            del _SLOT_PENDIENTE[_uid_slot]  # expirado → limpiar
-        for comando, patrones, extractor in _PRE_RUTEO_COMANDOS:
-            if any(p in t for p in patrones):
-                if extractor == 'lugar':
-                    args = _extraer_lugar_pr(texto)
-                elif extractor == 'periodo':
-                    args = _extraer_periodo_pr(texto)  # FASE 31.28
-                elif extractor == 'area':
-                    args = _extraer_area_pr(texto)  # FASE 31.41
-                elif extractor == 'especialidad':
-                    args = _extraer_especialidad_pr(texto)
-                    if not args:
-                        continue  # directorio sin término → mejor las capas LLM
-                else:
-                    args = ''
-                logger.info(f"🎯 Capa 1: '{texto[:60]}' → /{comando} "
-                            f"args='{args}'")  # FASE 31.29: traza
-                return (comando, args)
-        # FASE 31.23 — Capa 1.5: matcher semántico contra el catálogo COMPLETO
-        # de comandos de lectura (evalúa TODOS los comandos existentes sin
-        # necesidad de patrones manuales; determinístico y con umbral estricto)
-        _cmd_sem = _matchear_catalogo_semantico(t)
-        if _cmd_sem:
-            if _cmd_sem == 'clima':
-                return (_cmd_sem, _extraer_lugar_pr(texto))
-            if _cmd_sem in ('buscar_profesional', 'directorio', 'buscar_ia', 'empleo'):
-                _esp_sem = _extraer_especialidad_pr(texto)
-                if _cmd_sem == 'buscar_profesional' and not _esp_sem:
-                    return None  # ese comando exige término de búsqueda
-                return (_cmd_sem, _esp_sem)
-            return (_cmd_sem, '')
-    except Exception:
-        pass
     return None
 
 
@@ -6279,28 +3550,6 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # PASO 3: Procesar consulta con IA - búsqueda exhaustiva en todas las fuentes
         # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
-        # FASE 31.21: AUTO-ROUTER determinístico también en VOZ (paridad
-        # total con privado y grupo). Si el audio transcrito calza con un
-        # comando, el bot se lo ejecuta a sí mismo con sus argumentos.
-        _ruta_v21 = _pre_rutear_comando(texto_transcrito,
-                                        update.effective_user.id)  # 31.41
-        if not _ruta_v21:
-            _ruta_v21 = await _rutear_semantico_embeddings(texto_transcrito)  # FASE 31.24
-        if _ruta_v21:
-            _cmd_v21, _args_v21 = _ruta_v21
-            try:
-                if await ejecutar_comando_desde_intencion(_cmd_v21, _args_v21, update, context):
-                    logger.info(f"🧭 FASE 31.21 (voz): '{texto_transcrito[:50]}' → "
-                                f"/{_cmd_v21} {_args_v21}")
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                    registrar_servicio_usado(user_id, 'voz_comando')
-                    return
-            except Exception as _e_v21:
-                logger.debug(f"FASE 31.21 pre-router voz: {_e_v21}")
-        
         intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
         texto_para_busqueda = intencion_voz['query_mejorada']
         
@@ -6310,11 +3559,6 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
                 intencion_voz['comando'], intencion_voz['args'], update, context
             )
             if ejecutado:
-                # FASE 31.24: el fraseo real del usuario se guarda como
-                # ejemplo → la Capa 1.7 aprende automáticamente
-                asyncio.create_task(asyncio.to_thread(
-                    _intencion_guardar_ejemplo_sync,
-                    intencion_voz['comando'], texto_transcrito))
                 try:
                     await msg.delete()
                 except:
@@ -6366,27 +3610,10 @@ Confianza RAG: {rag_conf}
 
 {user.first_name} pregunta (mensaje de voz): {texto_transcrito}"""
 
-        # FASE 31.17: MEMORIA POR USUARIO también en audio (bloque vacío si
-        # el servicio no está disponible → prompt idéntico al actual)
-        try:
-            _mem_blk_317v = await memoria_contexto(user_id, texto_transcrito)
-            if _mem_blk_317v:
-                prompt += "\n\n" + _mem_blk_317v
-        except Exception:
-            pass
-
-        # FASE 31.14: (a) si el AUDIO pregunta por un libro de la biblioteca →
-        # análisis profundo con Nemotron sobre el texto real del libro;
-        # (b) cascada COMPLETA de 7 LLMs en thread aparte (antes: solo
-        # Groq→Gemini con llamadas síncronas que bloqueaban el event loop
-        # y dejaban a los demás usuarios esperando).
-        respuesta_texto = None
-        try:
-            respuesta_texto = await intentar_respuesta_libro(texto_transcrito, user.first_name)
-        except Exception as _e_lib14v:
-            logger.debug(f"FASE 31.14 voz: intento libro falló: {_e_lib14v}")
+        respuesta_texto = llamar_groq(prompt, max_tokens=1000, temperature=0.65)
+        
         if not respuesta_texto:
-            respuesta_texto = await asyncio.to_thread(ejecutar_cascada_llm, prompt, 1000, 0.65)
+            respuesta_texto = llamar_gemini_texto(prompt, max_tokens=700, temperature=0.65)
         
         if not respuesta_texto:
             respuesta_texto = (f"Recibi tu mensaje: \"{texto_transcrito}\". "
@@ -6418,7 +3645,6 @@ Confianza RAG: {rag_conf}
             # No es crítico - ya se envió la respuesta en texto
         
         # Registrar uso del servicio
-        memoria_registrar(user_id, texto_transcrito, respuesta_texto, user.first_name)  # FASE 31.17
         registrar_servicio_usado(user_id, 'voz')
         
         # Guardar mensaje en historial si es grupo
@@ -7868,27 +5094,6 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         from urllib.parse import urlparse
         path = urlparse(self.path).path
-        
-        # FASE 31.40: PROXY del webhook — Telegram postea a /<TOKEN> en el
-        # PORT público; se reenvía al servidor interno de PTB y se
-        # devuelve su respuesta. GET / sigue dando 200 (health de Render).
-        if TOKEN_BOT and path == f'/{TOKEN_BOT}':
-            try:
-                _n = int(self.headers.get('Content-Length', 0) or 0)
-                _body = self.rfile.read(_n) if _n else b''
-                _st, _resp = _reenviar_a_webhook_interno(
-                    path, _body, self.headers.get('Content-Type'))
-                self.send_response(_st)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(_resp or b'')
-            except Exception as _e_px:
-                logger.warning(f"FASE 31.40: proxy webhook falló: {_e_px}")
-                try:
-                    self.send_response(502); self.end_headers()
-                except Exception:
-                    pass
-            return
         
         # FASE 15: API toggle feature
         if path == '/api/feature':
@@ -9548,21 +6753,6 @@ cargarDashboard();
 </body></html>"""
 
 
-def _reenviar_a_webhook_interno(path, body, content_type):
-    """FASE 31.40: reenvía un POST de Telegram al webhook interno de PTB.
-    Devuelve (status, cuerpo_respuesta_bytes)."""
-    import http.client
-    _p = int(os.environ.get('WEBHOOK_PORT_INTERNO', '8081'))
-    conn = http.client.HTTPConnection('127.0.0.1', _p, timeout=25)
-    try:
-        conn.request('POST', path, body=body,
-                     headers={'Content-Type': content_type or 'application/json'})
-        r = conn.getresponse()
-        return r.status, r.read()
-    finally:
-        conn.close()
-
-
 def run_keepalive_server():
     port = int(os.environ.get('PORT', 10000))
     server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
@@ -11158,34 +8348,16 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                     "tip": "Se abre embebida en Telegram (chat privado) para mejor experiencia.",
                 },
                 {
-                    "name": "/finanzas [consulta]",
-                    "desc": "Asesoría financiera basada en la biblioteca",
-                    "keywords": "finanzas asesoria consejo inversion ahorro deuda credito libros biblioteca educacion financiera",
-                    "definicion": "Asistente de educación financiera GRATUITO que responde tus consultas apoyándose en la biblioteca de más de 280 libros de finanzas, inversión y economía indexados en el sistema. Cita los conceptos de las obras cuando corresponde.",
+                    "name": "/clima",
+                    "desc": "Pronóstico del tiempo (7 días)",
+                    "definicion": "Pronóstico meteorológico diario y semanal para cualquier comuna o ciudad: temperatura mínima y máxima, viento, humedad y probabilidad de lluvia. Incluye un dashboard HTML visual con iconos según el clima (sol, nubes, lluvia, nieve) y gráfico de evolución de temperaturas.",
                     "ejemplos": [
-                        ("/finanzas cómo empezar a invertir", "Consejos de inversión inicial basados en la biblioteca"),
-                        ("/finanzas cómo salir de deudas", "Estrategias de desendeudamiento"),
-                        ("/finanzas qué es el interés compuesto", "Explicación con fundamento bibliográfico"),
-                        ("/finanzas fondo de emergencia", "Cuánto ahorrar y dónde mantenerlo"),
-                        ("/finanzas APV conviene", "Análisis del Ahorro Previsional Voluntario"),
+                        ("/clima", "Pronóstico de Santiago (por defecto)"),
+                        ("/clima Valparaíso", "Pronóstico de Valparaíso"),
+                        ("/clima Puente Alto", "Pronóstico de una comuna"),
+                        ("/clima Puerto Montt", "Pronóstico del sur de Chile"),
                     ],
-                    "bot_response": "<b>💰 Asistente Financiero · Cofradía</b>\n━━━━━━━━━━━━━━━━━━━━\n\nBasado en la biblioteca de la Cofradía:\n\nEl interés compuesto es el crecimiento exponencial que se produce cuando los intereses generados se reinvierten y a su vez generan nuevos intereses...\n\n<em>📚 Fuentes: biblioteca financiera de la Cofradía</em>",
-                    "tip": "Es gratuito e ilimitado. Para indicadores en vivo usa /indicadores; para simulaciones, /calculadora.",
-                },
-                {
-                    "name": "/clima [ciudad]",
-                    "desc": "Pronóstico del tiempo a 7 días",
-                    "keywords": "clima tiempo pronostico temperatura lluvia viento ciudad meteorologia semana",
-                    "definicion": "Pronóstico meteorológico de 7 días para cualquier ciudad de Chile o del mundo: temperaturas máxima y mínima, probabilidad de lluvia, viento y condiciones generales por día. Si no indicas ciudad, usa Santiago por defecto.",
-                    "ejemplos": [
-                        ("/clima", "Pronóstico de Santiago (7 días)"),
-                        ("/clima Valparaíso", "Pronóstico para Valparaíso"),
-                        ("/clima Punta Arenas", "Clima en el extremo sur"),
-                        ("/clima Madrid", "También funciona con ciudades del extranjero"),
-                        ("/clima Concepción", "Planificar la semana en el Biobío"),
-                    ],
-                    "bot_response": "<b>🌤️ Pronóstico · Santiago</b>\n━━━━━━━━━━━━━━━━━━━━\n\n<b>Hoy:</b> ☀️ Despejado · 8°/24°C\n<b>Mañana:</b> 🌤️ Parcial · 9°/25°C\n<b>Jueves:</b> ☁️ Nublado · 10°/21°C\n<b>Viernes:</b> 🌧️ Lluvia 70% · 8°/15°C\n\n<em>Fuente: servicio meteorológico · Actualizado hace minutos</em>",
-                    "tip": "Ideal antes de agendar eventos presenciales de la Cofradía o viajes de trabajo.",
+                    "tip": "El fondo del dashboard cambia según el clima del día: dorado con sol, azul tormenta con lluvia.",
                 },
             ],
         },
@@ -11452,31 +8624,6 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                     "tip": "Revisa el pronóstico mensual cada lunes para anticipar problemas de cash flow.",
                 },
                 {
-                    "name": "/renovar [modo]",
-                    "desc": "Renovación silenciosa de suscripciones (exclusivo admin)",
-                    "keywords": "renovar renovacion suscripcion extender dias silenciosa vencimiento usuarios",
-                    "definicion": "Renueva suscripciones SIN COSTO y SIN notificar al usuario (silencioso). Acepta usuario individual (ID o @username), lote 'vence_pronto' (los que vencen en 30 días) o 'todos' los activos. IMPORTANTE: este comando está OCULTO del menú de usuarios; si un usuario lo escribe (tras recibir el aviso automático de vencimiento a 30/15/7/3/1 días), verá los planes de pago con los datos de transferencia — nunca tu panel de renovación.",
-                    "ejemplos": [
-                        ("/renovar 123456789 90", "Renovar 1 usuario por 90 días (silencioso)"),
-                        ("/renovar @jperez 180", "Renovar por username por 180 días"),
-                        ("/renovar vence_pronto 90", "Renovar a todos los que vencen en 30 días"),
-                        ("/renovar todos 365", "Renovar a TODOS los activos por 1 año"),
-                        ("/renovar", "Ver ayuda de modos disponibles"),
-                    ],
-                    "tip": "También disponible con el botón 🔄 Renovar del Panel de Control. El usuario renovado no recibe ninguna notificación.",
-                },
-                {
-                    "name": "/activar [código]",
-                    "desc": "Activar código de días (comando oculto a usuarios)",
-                    "keywords": "activar codigo dias canjear activacion regalo",
-                    "definicion": "Canjea un código de activación generado con /generar_codigo y suma los días correspondientes a la cuenta. Los usuarios pueden usarlo pero NO lo ven en su menú /ayuda: solo lo conocen cuando tú les entregas un código directamente (regalos, promociones, compensaciones).",
-                    "ejemplos": [
-                        ("/activar COF-A1B2C3", "Canjear un código de 30 días"),
-                        ("/generar_codigo", "Primero: generar el código a entregar"),
-                    ],
-                    "tip": "Flujo típico: /generar_codigo → envías el código al usuario por privado → él escribe /activar CÓDIGO.",
-                },
-                {
                     "name": "/pipeline todos",
                     "desc": "Pipeline CRM consolidado",
                     "definicion": "Vista consolidada del pipeline CRM de todos los cofrades. Muestra el monto total bruto y forecast ponderado por etapa de toda la red.",
@@ -11502,6 +8649,15 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                         ("/reporte_ejecutivo", "Generar reporte ejecutivo HTML"),
                     ],
                     "tip": "Ideal para enviar a inversionistas, board o como evidencia ante auditorías.",
+                },
+                {
+                    "name": "/saldos",
+                    "desc": "Saldos de APIs y servicios de pago",
+                    "definicion": "Panel exclusivo del administrador: saldo real, deuda, estado operativo y link directo de pago de cada servicio externo (motores de IA, voz, empleos, base de datos, hosting). Incluye reporte automático semanal los lunes con alertas anticipadas de saldo bajo y pagos por vencer.",
+                    "ejemplos": [
+                        ("/saldos", "Ver saldos y links de pago de todos los servicios"),
+                    ],
+                    "tip": "Configura PAGOS_MENSUALES en el servidor para recibir avisos días antes de cada cobro.",
                 },
                 {
                     "name": "/dashboard_admin",
@@ -12375,17 +9531,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🆔 ADMIN IDENTIDAD
 /verificar - Marca usuario como identidad verificada (responder a mensaje, o /verificar @user, /verificar 123456)
 
-🔄 ADMIN RENOVACIÓN SILENCIOSA
+🔄 ADMIN RENOVACIÓN Y ACCESOS
 /renovar 123456 90 - Renueva 1 usuario por 90 días (silencioso, no notifica)
 /renovar @username 180 - Renueva por username
 /renovar vence_pronto 90 - Renueva a TODOS los que vencen en 30 días
 /renovar todos 365 - Renueva a TODOS los activos
 (También disponible desde Panel de Control con botón 🔄 Renovar)
-ℹ️ Si un USUARIO escribe /renovar (tras el aviso automático de
-vencimiento a 30/15/7/3/1 días), ve los PLANES DE PAGO con datos
-de transferencia. Ambos comandos están OCULTOS del /ayuda de usuarios.
-/activar [código] - Activar código de días (los usuarios lo usan
-solo cuando tú les entregas un código con /generar_codigo)
+/activar [código] - Activar código de acceso (oculto a usuarios; lo reciben en su invitación)
 /cobros_admin - Panel de cobros
 /pagos_pendientes - Ver pagos pendientes
 /vencimientos - Suscripciones por vencer
@@ -12407,6 +9559,7 @@ solo cuando tú les entregas un código con /generar_codigo)
 
 📊 REPORTES ADMIN
 /reporte_ejecutivo - Dashboard ejecutivo HTML
+/saldos - Saldos de APIs + links de pago (reporte automático lunes 9:30)
 /web_tarjeta - Tarjeta web publica (todos)
 
 💾 BACKUP BD (diario auto 03:00 AM)
@@ -12621,21 +9774,19 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 **MI CUENTA**
 
 {emoji} **Estado:** Activa - {estado}
-📅 **Días restantes:** {dias} días  💡 _¡Participa y gana Coins!_
+📅 **Días restantes:** {dias} días
 
 ⚠️ Tu suscripción está por vencer.
 💳 Usa /renovar para continuar disfrutando del bot.
-{_mensaje_invitacion_coins(markdown=True)}
 """, parse_mode='Markdown')
         else:
             await update.message.reply_text(f"""
 👤 **MI CUENTA**
 
 {emoji} **Estado:** Activa - {estado}
-📅 **Días restantes:** {dias} días  💡 _¡Participa y gana Coins!_
+📅 **Días restantes:** {dias} días
 
 🚀 ¡Disfruta todos los servicios del bot!
-{_mensaje_invitacion_coins(markdown=True)}
 """, parse_mode='Markdown')
     else:
         await update.message.reply_text("""
@@ -12648,46 +9799,19 @@ async def mi_cuenta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_chat_privado
-async def _renovar_mostrar_planes_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31: Flujo de renovación para USUARIOS (no-admin).
-    
-    Se invoca cuando un usuario escribe /renovar — típicamente porque recibió
-    el aviso automático de vencimiento (30/15/7/3/1 días antes). Muestra los
-    planes con botones; el callback plan_{dias} (ya registrado) entrega los
-    datos de transferencia y activa el flujo de comprobante con Gemini Vision.
-    
-    NOTA: este comando está OCULTO del menú /ayuda por estrategia comercial;
-    el usuario solo lo conoce a través del aviso de vencimiento.
-    """
-    dias_rest = obtener_dias_restantes(update.effective_user.id)
+async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /renovar - Renovar suscripción (SOLO EN PRIVADO)"""
     precios = obtener_precios()
     keyboard = [
         [InlineKeyboardButton(f"💎 {nombre} ({dias}d) - {formato_clp(precio)}", callback_data=f"plan_{dias}")]
         for dias, precio, nombre in precios
     ]
     
-    encabezado = "💳 <b>RENOVAR SUSCRIPCIÓN</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    if dias_rest <= 0:
-        encabezado += "⚠️ Tu suscripción se encuentra <b>vencida</b>.\n\n"
-    elif dias_rest <= 30:
-        encabezado += f"⏳ Tu suscripción vence en <b>{dias_rest} día{'s' if dias_rest != 1 else ''}</b>.\n\n"
-    encabezado += "Selecciona el plan que deseas renovar:\n"
-    # FASE 31.27: equivalencia en Coins junto al precio de cada plan
-    def _fmt_coins(n):
-        return f"{n:,}".replace(',', '.')
-    for _d, _p, _n in precios:
-        _coins_eq = int(round(COINS_RENOVACION_30D * _d / 30))
-        encabezado += (f"\n  💎 <b>{_n}</b> ({_d}d) — {formato_clp(_p)} "
-                       f"≈ <b>{_fmt_coins(_coins_eq)} Coins</b>")
-    encabezado += "\n"
-    # FASE 31.18/31.27: invitación a renovar GRATIS con Cofradía Coins
-    encabezado += "\n" + _mensaje_invitacion_coins()
-    
-    await update.message.reply_text(
-        encabezado,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    await update.message.reply_text("""
+💳 **RENOVAR SUSCRIPCIÓN**
+
+Selecciona tu plan:
+""", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 
 @solo_chat_privado
@@ -15305,29 +12429,6 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     
-    # FASE 31.42: PASE VIP — si el bot le hizo una re-pregunta a ESTE usuario
-    # (slot pendiente), su siguiente mensaje ES la respuesta y entra SIN
-    # necesidad de decir 'Bot' ("finanzas" a secas basta).
-    if user_id in _SLOT_PENDIENTE and not mensaje.startswith('/'):
-        import time as _t42
-        _s42 = _SLOT_PENDIENTE.get(user_id) or {}
-        if (_t42.time() - _s42.get('ts', 0) <= _SLOT_TTL
-                and _es_respuesta_de_area(mensaje)):  # FASE 31.44
-            del _SLOT_PENDIENTE[user_id]
-            _area42 = _limpiar_area_slot(mensaje)
-            if _area42:
-                logger.info(f"🎯 FASE 31.42: slot grupal consumido → "
-                            f"/{_s42.get('cmd','buscar_apoyo')} '{_area42}'")
-                try:
-                    await ejecutar_comando_desde_intencion(
-                        _s42.get('cmd', 'buscar_apoyo'), _area42,
-                        update, context)
-                except Exception as _e42:
-                    logger.warning(f"FASE 31.42 slot grupal: {_e42}")
-                return
-        else:
-            del _SLOT_PENDIENTE[user_id]  # expirado
-    
     try:
         bot_username = context.bot.username.lower()
     except:
@@ -15368,54 +12469,8 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         pregunta_lower = pregunta.lower()
         
-        # ══════════════════════════════════════════════════════════════
-        # FASE 31.19b: AUTO-ROUTER también en el GRUPO (caso real: en
-        # privado ya funcionaba, pero en el grupo respondía estadísticas
-        # del bot o texto genérico). Mismas 2 capas que el privado:
-        # ══════════════════════════════════════════════════════════════
-        # Capa 1: comando determinístico → el bot se lo ejecuta a sí mismo
-        _ruta_g19 = _pre_rutear_comando(pregunta,
-                                        update.effective_user.id)  # 31.41
-        if not _ruta_g19:
-            _ruta_g19 = await _rutear_semantico_embeddings(pregunta)  # FASE 31.24
-        if _ruta_g19:
-            _cmd_g19, _args_g19 = _ruta_g19
-            try:
-                # FASE 31.19c: ejecutar PRIMERO; borrar "Procesando..." solo
-                # tras el éxito (antes se borraba antes → si el comando
-                # fallaba, el flujo seguía con msg muerto → crash general)
-                if await ejecutar_comando_desde_intencion(_cmd_g19, _args_g19, update, context):
-                    logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → "
-                                f"/{_cmd_g19} {_args_g19}")
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                    return
-                logger.info(f"🧭 FASE 31.19c (grupo): /{_cmd_g19} no ejecutó — "
-                            f"continuando con capas siguientes")
-            except Exception as _e_g19:
-                logger.debug(f"FASE 31.19b pre-router grupo: {_e_g19}")
-        # Capa 2: router SQL conversacional (participación, conteos, perfiles)
-        try:
-            _sql_g19 = await _intentar_responder_con_sql(pregunta, user_name)
-            if _sql_g19:
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                await update.message.reply_text(_sql_g19, parse_mode='HTML')
-                logger.info(f"🧭 FASE 31.19b (grupo): '{pregunta[:50]}' → router SQL")
-                return
-        except Exception as _e_gsql:
-            logger.debug(f"FASE 31.19b router SQL grupo: {_e_gsql}")
-        
         # Detectar preguntas sobre estadísticas del bot
-        # FASE 31.19b: acotado a CONTEOS explícitos — antes disparaba con la
-        # sola palabra 'usuarios'/'miembros' y secuestraba preguntas como
-        # "¿quiénes son los usuarios que más participan?" (caso real).
-        # Los conteos conversacionales ya los resuelve el router SQL de arriba.
-        if any(palabra in pregunta_lower for palabra in ['cuántos registrado', 'cuantos registrado', 'usuarios registrados', 'cuántos suscrito', 'cuantos suscrito', 'estadísticas del bot', 'estadisticas del bot']):
+        if any(palabra in pregunta_lower for palabra in ['cuántos', 'cuantos', 'registrado', 'usuarios', 'integrantes', 'miembros', 'suscrito']):
             # Consultar base de datos
             conn = get_db_connection()
             if conn:
@@ -15474,9 +12529,6 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 intencion_mencion['comando'], intencion_mencion['args'], update, context
             )
             if ejecutado:
-                asyncio.create_task(asyncio.to_thread(  # FASE 31.24: aprender
-                    _intencion_guardar_ejemplo_sync,
-                    intencion_mencion['comando'], pregunta))
                 await msg.delete()
                 return
         
@@ -15484,16 +12536,7 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # FASE 9 (revertido): limit_rag=25 mantiene cobertura completa de respuestas
         # NO reducir — se prefiere respuesta exhaustiva. La velocidad se mejora por
         # otros lados (cache RAG, normalización SQL, paralelización TTS).
-        # FASE 31.3: en hilo + timeout (antes bloqueaba TODO el bot)
-        try:
-            resultados_unificados = await asyncio.wait_for(
-                asyncio.to_thread(busqueda_unificada, pregunta_mejorada, 10, 25),
-                timeout=15.0)
-        except Exception as _e_bu_m:
-            logger.warning(f"FASE 31.3 mención búsqueda timeout/err: {_e_bu_m}")
-            resultados_unificados = {'historial': [], 'rag': [], 'fuentes_usadas': [],
-                                     'rag_score_max': 0.0, 'rag_confianza': 'ninguna',
-                                     'rag_tematica': 'desconocida'}
+        resultados_unificados = busqueda_unificada(pregunta_mejorada, limit_historial=10, limit_rag=25)
         contexto_completo = formatear_contexto_unificado(resultados_unificados, pregunta_mejorada)
         fuentes = ', '.join(resultados_unificados.get('fuentes_usadas', []))
         rag_conf = resultados_unificados.get('rag_confianza', 'ninguna')
@@ -15547,29 +12590,18 @@ PREGUNTA DE {user_name}: "{pregunta}"
 CONTEXTO ENCONTRADO (fuentes: {fuentes}):
 {contexto_completo if contexto_completo else "(Sin contexto relevante en documentos indexados)"}"""
 
-        # FASE 31.17: MEMORIA POR USUARIO también en el grupo (misma garantía:
-        # bloque vacío = prompt idéntico al actual)
-        try:
-            _mem_blk_317g = await memoria_contexto(update.effective_user.id, pregunta)
-            if _mem_blk_317g:
-                prompt += "\n\n" + _mem_blk_317g
-        except Exception:
-            pass
-
-        # FASE 19: cascada de LLMs — FASE 31.14: dos mejoras clave:
-        # (a) Si la pregunta es sobre un LIBRO de la biblioteca → análisis
-        #     PROFUNDO con Nemotron 3 Super sobre 120K chars del texto real
-        #     (antes: solo ~30 chunks recuperados por similitud).
-        # (b) La cascada completa de 7 LLMs corre en asyncio.to_thread →
-        #     NO bloquea el event loop: el bot atiende a varios usuarios
-        #     en paralelo mientras espera al LLM.
-        respuesta = None
-        try:
-            respuesta = await intentar_respuesta_libro(pregunta, user_name)
-        except Exception as _e_lib14:
-            logger.debug(f"FASE 31.14: intento libro (grupo) falló: {_e_lib14}")
+        # FASE 19: cascada de 4 LLMs con logs detallados para diagnóstico
+        # Orden: Groq (rápido) → Gemini (gratis) → GLM/Z.AI (gratis) → DeepSeek (5M tokens free)
+        respuesta = llamar_groq(prompt, max_tokens=1000, temperature=0.5)
         if not respuesta:
-            respuesta = await asyncio.to_thread(ejecutar_cascada_llm, prompt, 1000, 0.5)
+            logger.warning(f"⚠️ Groq falló para '{user_name}' — fallback Gemini")
+            respuesta = llamar_gemini_texto(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ Gemini falló — fallback GLM (Z.AI)")
+            respuesta = llamar_glm5(prompt, max_tokens=1000, temperature=0.5)
+        if not respuesta:
+            logger.warning(f"⚠️ GLM falló — fallback DeepSeek")
+            respuesta = llamar_deepseek(prompt, max_tokens=1000, temperature=0.5)
         
         # FASE 19 FIX CRÍTICO: si los 4 LLMs fallan, intentar prompt SIMPLIFICADO
         # (suele superar rate-limits porque pesa menos)
@@ -15581,11 +12613,12 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
                     f"Responde brevemente en español (máximo 2 párrafos), profesional y cordial. "
                     f"Si conoces el tema, explícalo con tu conocimiento general. Sin asteriscos."
                 )
+                respuesta = llamar_groq(prompt_minimo, max_tokens=500, temperature=0.6)
                 # FASE 25: respetar orden — DeepSeek (pago) SIEMPRE al final
-                # FASE 31.14: cascada completa (sin Gemini) en thread aparte
-                # para no bloquear el event loop
-                respuesta = await asyncio.to_thread(
-                    ejecutar_cascada_llm, prompt_minimo, 500, 0.6, False)
+                if not respuesta:
+                    respuesta = llamar_glm5(prompt_minimo, max_tokens=500, temperature=0.6)
+                if not respuesta:
+                    respuesta = llamar_deepseek(prompt_minimo, max_tokens=500, temperature=0.6)
             except Exception as _e_simple:
                 logger.warning(f"Intento simplificado falló: {_e_simple}")
         
@@ -15622,7 +12655,7 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             # Ahora: enviar texto → lanzar TTS en background → enviar botones inmediatamente
             async def _tts_paralelo():
                 try:
-                    audio_path = await generar_audio_tts(respuesta_limpia[:3000], f"/tmp/mencion_{update.effective_user.id}.mp3")
+                    audio_path = await generar_audio_tts(respuesta_limpia[:1500], f"/tmp/mencion_{update.effective_user.id}.mp3")
                     if audio_path and os.path.exists(audio_path):
                         with open(audio_path, 'rb') as af:
                             await update.message.reply_voice(voice=af)
@@ -15638,8 +12671,6 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             
             # Mejora 4: Botones de feedback (instantáneo, no espera TTS)
             try:
-                memoria_registrar(update.effective_user.id, pregunta, respuesta_limpia,
-                                  update.effective_user.first_name)  # FASE 31.17
                 await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('mencion'))
             except Exception:
                 pass
@@ -16241,10 +13272,7 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       /renovar vence_pronto 90       → renueva a los que vencen en próximos 30d, por 90d
     """
     if update.effective_user.id != OWNER_ID:
-        # FASE 31: Los usuarios que escriben /renovar (típicamente tras recibir
-        # el aviso automático de vencimiento) ven los PLANES DE PAGO, no un rechazo.
-        # El comando permanece OCULTO del menú /ayuda de usuarios.
-        await _renovar_mostrar_planes_usuario(update, context)
+        await update.message.reply_text("❌ Solo el administrador principal puede renovar suscripciones.")
         return
     
     if not context.args:
@@ -16724,7 +13752,7 @@ async def resumen_usuario_comando(update: Update, context: ContextTypes.DEFAULT_
         # Suscripción
         dias = obtener_dias_restantes(uid)
         if dias > 0:
-            mensaje += f"\n⏰ Suscripción: {dias} días restantes · 💡 ¡Participa y gana Coins!"
+            mensaje += f"\n⏰ Suscripción: {dias} días restantes"
         
         await update.message.reply_text(mensaje)
     except Exception as e:
@@ -17032,34 +14060,8 @@ gauge('g4',{nuevos_7d},{max(nuevos_7d*3,30)},'Nuevos 7d',green);
 
 @requiere_suscripcion
 async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /top_usuarios - Ranking de participación.
-    FASE 31.28: acepta período opcional en días (/top_usuarios 30) — el
-    auto-router lo alimenta cuando el usuario dice 'último mes', 'semana', etc."""
+    """Comando /top_usuarios - Ranking de participación"""
     try:
-        # Período solicitado (validado a int; '' o inválido = histórico total)
-        dias = 0
-        try:
-            if context.args and str(context.args[0]).strip().isdigit():
-                dias = min(int(context.args[0]), 3650)
-            elif not context.args:
-                # FASE 31.30 — DEFENSA EN PROFUNDIDAD: si NINGUNA capa pasó
-                # args (motor LLM, rutas antiguas, mención en grupo, etc.),
-                # inferir el período directamente de la pregunta original
-                # del usuario. "/top_usuarios" tipeado no trae período → 0.
-                _txt_orig = ''
-                try:
-                    _txt_orig = (update.message.text or
-                                 update.message.caption or '')
-                except Exception:
-                    _txt_orig = ''
-                _per_inf = _extraer_periodo_pr(_txt_orig)
-                if _per_inf:
-                    dias = int(_per_inf)
-                    logger.info(f"⏰ FASE 31.30: período inferido del mensaje "
-                                f"original → {dias} días")
-        except Exception:
-            dias = 0
-
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Error conectando a la base de datos")
@@ -17067,16 +14069,16 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
         
         c = conn.cursor()
         
-        _sel = """SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
-                        COUNT(*) as msgs FROM mensajes """
         if DATABASE_URL:
-            _where = f"WHERE fecha >= NOW() - INTERVAL '{dias} days' " if dias else ""
-            c.execute(_sel + _where + "GROUP BY user_id ORDER BY msgs DESC LIMIT 15")
+            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = c.fetchall()
             top = [((r['nombre_completo'] or 'Usuario').strip(), r['msgs']) for r in top]
         else:
-            _where = f"WHERE fecha >= datetime('now', '-{dias} days') " if dias else ""
-            c.execute(_sel + _where + "GROUP BY user_id ORDER BY msgs DESC LIMIT 15")
+            c.execute("""SELECT COALESCE(MAX(CASE WHEN first_name NOT IN ('Group','Grupo','Channel','Canal','') AND first_name IS NOT NULL THEN first_name ELSE NULL END) || ' ' || COALESCE(MAX(NULLIF(last_name, '')), ''), MAX(first_name), 'Usuario') as nombre_completo, 
+                        COUNT(*) as msgs FROM mensajes 
+                        GROUP BY user_id ORDER BY msgs DESC LIMIT 15""")
             top = [(r[0].strip() if isinstance(r, tuple) else (r['nombre_completo'] or 'Usuario').strip(), 
                     r[1] if isinstance(r, tuple) else r['msgs']) for r in c.fetchall()]
         
@@ -17086,12 +14088,7 @@ async def top_usuarios_comando(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 No hay suficientes datos aún.")
             return
         
-        logger.info(f"📊 /top_usuarios ejecutado: dias={dias} · "
-                    f"args={context.args} · "
-                    f"msg='{(getattr(update.message, 'text', '') or '')[:60]}'")
-        _etiqueta = {1: " (HOY)", 7: " (ÚLTIMOS 7 DÍAS)", 30: " (ÚLTIMOS 30 DÍAS)"}
-        _suf = _etiqueta.get(dias, f" (ÚLTIMOS {dias} DÍAS)" if dias else "")
-        mensaje = f"🏆 TOP USUARIOS MAS ACTIVOS{_suf}\n\n"
+        mensaje = "🏆 TOP USUARIOS MAS ACTIVOS\n\n"
         medallas = ['🥇', '🥈', '🥉'] + ['🏅'] * 12
         
         for i, (nombre, msgs) in enumerate(top):
@@ -17392,7 +14389,7 @@ async def mi_perfil_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if dias >= 99999:
                 mensaje += f"\n⏰ Suscripción: ♾️ Sin límite (Owner)\n"
             else:
-                mensaje += f"\n⏰ Suscripción: ✅ Activa · 💡 ¡Participa y gana Coins!\n"
+                mensaje += f"\n⏰ Suscripción: ✅ Activa\n"
         
         # Cofradía Coins
         mensaje += f"\n🪙 COFRADÍA COINS\n"
@@ -17865,307 +14862,6 @@ async def dotacion_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== COMANDO BUSCAR PROFESIONAL (GOOGLE DRIVE) ====================
 
 @requiere_suscripcion
-def _buscar_en_tarjetas_bd(query: str) -> str:
-    """FASE 31.23: búsqueda compacta en tarjetas_profesional (BD) — fuente
-    complementaria del Excel de Drive. Equivalencias + tolerancia a acentos."""
-    try:
-        import unicodedata as _u23
-        _q = (query or '').lower().strip()
-        if len(_q) < 3:
-            return ''
-        terminos = {_q} | {t for t in _q.split() if len(t) >= 4}
-        _equiv = {'recursos humanos': {'rrhh', 'gestion de personas', 'gestión de personas'},
-                  'rrhh': {'recursos humanos'},
-                  'legal': {'abogado', 'derecho', 'jurídico', 'juridico'}}
-        for k, vs in _equiv.items():
-            if k in _q:
-                terminos |= vs
-        for t in list(terminos):
-            terminos.add(''.join(ch for ch in _u23.normalize('NFKD', t)
-                                 if not _u23.combining(ch)))
-        conn = get_db_connection()
-        if not conn:
-            return ''
-        c = conn.cursor()
-        vistos, filas = set(), []
-        for t in list(terminos)[:12]:
-            like = f"%{t}%"
-            ph = "%s" if DATABASE_URL else "?"
-            try:
-                c.execute(f"""SELECT nombre_completo, profesion, empresa, servicios,
-                              telefono, email FROM tarjetas_profesional
-                              WHERE LOWER(COALESCE(profesion,'')) LIKE {ph}
-                              OR LOWER(COALESCE(servicios,'')) LIKE {ph}
-                              OR LOWER(COALESCE(empresa,'')) LIKE {ph} LIMIT 6""",
-                          (like, like, like))
-                for r in c.fetchall():
-                    fila = dict(r) if DATABASE_URL else dict(zip(
-                        ['nombre_completo', 'profesion', 'empresa', 'servicios',
-                         'telefono', 'email'], r))
-                    clave = (fila.get('nombre_completo') or '').lower()
-                    if clave and clave not in vistos:
-                        vistos.add(clave)
-                        filas.append(fila)
-            except Exception:
-                if DATABASE_URL:
-                    conn.rollback()
-        conn.close()
-        if not filas:
-            return ''
-        lineas = []
-        for f in filas[:6]:
-            contacto = " · ".join(x for x in [f.get('telefono') or '',
-                                              f.get('email') or ''] if x)
-            lineas.append(
-                f"👤 <b>{f.get('nombre_completo', '?')}</b>\n"
-                f"   💼 {f.get('profesion') or 'Sin profesión registrada'}"
-                + (f" — {f['empresa']}" if f.get('empresa') else "")
-                + (f"\n   📞 {contacto}" if contacto else ""))
-        return "\n\n".join(lineas)
-    except Exception as e:
-        logger.debug(f"_buscar_en_tarjetas_bd: {e}")
-        return ''
-
-
-# ════════════════════════════════════════════════════════════════════════
-# FASE 31.25: REGISTRO UNIVERSAL DE MOTORES DE BÚSQUEDA (plug-in)
-# Pedido de Germán: que futuros repositorios y ERPs "se acoplen
-# automáticamente" a todas las búsquedas del bot.
-#
-# CONTRATO DE MOTOR: dict con
-#   nombre      → identificador único
-#   descripcion → qué aporta
-#   categoria   → 'profesionales' | 'conocimiento' | 'finanzas' | 'general'
-#   disponible  → callable() → bool (detecta credenciales/tabla/API viva)
-#   buscar      → callable(query:str) → str | None  (SÍNCRONA; None = sin datos)
-#   timeout     → segundos máximos para este motor
-#
-# CÓMO ACOPLAR UN ERP FUTURO — DOS VÍAS:
-#   A) Cero código: definir en Render las variables
-#        ERP_<NOMBRE>_URL   (endpoint REST que reciba ?q=<consulta>)
-#        ERP_<NOMBRE>_KEY   (opcional, va como Bearer)
-#        ERP_<NOMBRE>_CAT   (opcional, categoria; default 'general')
-#      El auto-descubridor lo registra al arrancar.
-#   B) Una línea: registrar_motor_busqueda({...}) junto a los demás.
-# Todos los motores registrados participan EN PARALELO, con timeout y
-# aislamiento de fallas: si uno cae, los demás responden igual.
-# ════════════════════════════════════════════════════════════════════════
-REGISTRO_MOTORES_BUSQUEDA = []
-
-
-def registrar_motor_busqueda(motor: dict):
-    """Acopla un motor al bus universal de búsqueda (idempotente por nombre)."""
-    try:
-        if not motor.get('nombre') or not callable(motor.get('buscar')):
-            return False
-        if any(m['nombre'] == motor['nombre'] for m in REGISTRO_MOTORES_BUSQUEDA):
-            return False
-        motor.setdefault('categoria', 'general')
-        motor.setdefault('timeout', 12)
-        motor.setdefault('disponible', lambda: True)
-        motor.setdefault('descripcion', '')
-        REGISTRO_MOTORES_BUSQUEDA.append(motor)
-        return True
-    except Exception:
-        return False
-
-
-async def ejecutar_motores_busqueda(query: str, categoria: str = None,
-                                    excluir: set = None,
-                                    timeout_total: int = 20) -> list:
-    """Ejecuta EN PARALELO todos los motores disponibles (de la categoría si
-    se indica) y devuelve [(nombre, descripcion, resultado_str), ...] de los
-    que aportaron datos. Falla-aislado: un motor caído no afecta al resto."""
-    excluir = excluir or set()
-    candidatos = []
-    for m in REGISTRO_MOTORES_BUSQUEDA:
-        try:
-            if m['nombre'] in excluir:
-                continue
-            if categoria and m['categoria'] not in (categoria, 'general'):
-                continue
-            # FASE 31.26: disponible() NO se llama aquí (podría tocar BD/red
-            # y congelaría el event loop) — se evalúa dentro del hilo del motor
-            candidatos.append(m)
-        except Exception:
-            continue
-    if not candidatos:
-        return []
-
-    async def _correr(m):
-        try:
-            # FASE 31.26: disponibilidad en hilo aparte, tope 2s
-            disp = await asyncio.wait_for(
-                asyncio.to_thread(m['disponible']), timeout=2)
-            if not disp:
-                return None
-            r = await asyncio.wait_for(
-                asyncio.to_thread(m['buscar'], query),
-                timeout=min(m['timeout'], timeout_total))
-            if r and isinstance(r, str) and r.strip():
-                return (m['nombre'], m['descripcion'], r.strip())
-        except Exception as e:
-            logger.debug(f"Motor '{m['nombre']}' falló: {e}")
-        return None
-
-    resultados = await asyncio.gather(*[_correr(m) for m in candidatos])
-    return [r for r in resultados if r]
-
-
-def _motor_drive_excel_buscar(query: str):
-    """Adaptador: Excel maestro 'BD Grupo Laboral' de Google Drive."""
-    try:
-        r = buscar_profesionales(query)
-        if not r or r.startswith('❌') or 'no se encontr' in r.lower():
-            return None
-        return r
-    except Exception:
-        return None
-
-
-def _motor_socios_disponible():
-    """Detección lazy (cacheada) de la tabla socios_cofradia importada."""
-    global _SOCIOS_TABLA_OK
-    try:
-        return _SOCIOS_TABLA_OK
-    except NameError:
-        pass
-    ok = False
-    try:
-        if DATABASE_URL:
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute("SELECT 1 FROM socios_cofradia LIMIT 1")
-            ok = True
-            conn.close()
-    except Exception:
-        ok = False
-    globals()['_SOCIOS_TABLA_OK'] = ok
-    return ok
-
-
-def _motor_socios_buscar(query: str):
-    """Tabla socios_cofradia (importación futura del Excel a la BD)."""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        like = f"%{(query or '').lower()}%"
-        c.execute("""SELECT nombre_completo, profesion, empresa, telefono, email
-                     FROM socios_cofradia
-                     WHERE LOWER(COALESCE(profesion,'')) LIKE %s
-                     OR LOWER(COALESCE(servicios,'')) LIKE %s
-                     OR LOWER(COALESCE(empresa,'')) LIKE %s LIMIT 6""",
-                  (like, like, like))
-        filas = c.fetchall()
-        conn.close()
-        if not filas:
-            return None
-        return "\n\n".join(
-            f"👤 <b>{f['nombre_completo']}</b>\n   💼 {f.get('profesion') or '—'}"
-            + (f" — {f['empresa']}" if f.get('empresa') else "")
-            for f in filas)
-    except Exception:
-        return None
-
-
-def _crear_motor_erp_generico(nombre: str, url: str, key: str, categoria: str):
-    """Fábrica de motores REST genéricos (auto-descubiertos por env vars)."""
-    def _buscar(query: str):
-        try:
-            headers = {'Authorization': f'Bearer {key}'} if key else {}
-            r = requests.get(url, params={'q': query}, headers=headers,
-                             timeout=(5, 10))
-            if r.status_code != 200:
-                return None
-            try:
-                data = r.json()
-                items = data.get('resultados') or data.get('results') or []
-                if items:
-                    return "\n".join(
-                        f"• {it.get('titulo') or it.get('title', '?')}: "
-                        f"{str(it.get('detalle') or it.get('detail', ''))[:150]}"
-                        for it in items[:6])
-                return None
-            except ValueError:
-                txt = (r.text or '').strip()
-                return txt[:1200] if txt else None
-        except Exception:
-            return None
-    return {
-        'nombre': f'erp_{nombre.lower()}',
-        'descripcion': f'ERP externo {nombre} (auto-descubierto)',
-        'categoria': categoria,
-        'disponible': lambda: True,
-        'buscar': _buscar,
-        'timeout': 12,
-    }
-
-
-def _autoregistrar_motores():
-    """Registra los motores nativos + auto-descubre ERPs por variables
-    ERP_<NOMBRE>_URL / ERP_<NOMBRE>_KEY / ERP_<NOMBRE>_CAT en Render."""
-    registrar_motor_busqueda({
-        'nombre': 'drive_excel_profesionales',
-        'descripcion': 'Excel maestro "BD Grupo Laboral" (Google Drive)',
-        'categoria': 'profesionales',
-        'disponible': lambda: bool(os.environ.get('GOOGLE_DRIVE_CREDS')),
-        'buscar': _motor_drive_excel_buscar,
-        'timeout': 15,
-    })
-    registrar_motor_busqueda({
-        'nombre': 'tarjetas_bd',
-        'descripcion': 'Tarjetas profesionales (base de datos)',
-        'categoria': 'profesionales',
-        'disponible': lambda: bool(DATABASE_URL),
-        'buscar': _buscar_en_tarjetas_bd,
-        'timeout': 8,
-    })
-    registrar_motor_busqueda({
-        'nombre': 'socios_cofradia',
-        'descripcion': 'Padrón de socios importado (BD)',
-        'categoria': 'profesionales',
-        'disponible': _motor_socios_disponible,
-        'buscar': _motor_socios_buscar,
-        'timeout': 8,
-    })
-    # Auto-descubrimiento de ERPs: ERP_MIERP_URL → motor 'erp_mierp'
-    try:
-        for var, val in os.environ.items():
-            if var.startswith('ERP_') and var.endswith('_URL') and val:
-                nombre = var[4:-4]
-                key = os.environ.get(f'ERP_{nombre}_KEY', '')
-                cat = os.environ.get(f'ERP_{nombre}_CAT', 'general')
-                if registrar_motor_busqueda(
-                        _crear_motor_erp_generico(nombre, val, key, cat)):
-                    logger.info(f"🔌 Motor ERP auto-acoplado: erp_{nombre.lower()} "
-                                f"(categoría {cat})")
-    except Exception as e:
-        logger.debug(f"autoregistro ERP: {e}")
-
-
-_autoregistrar_motores()
-
-
-async def motores_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.25: /motores (admin) — estado del bus universal de búsqueda."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Comando exclusivo del administrador.")
-        return
-    lineas = [f"🔌 <b>MOTORES DE BÚSQUEDA ACOPLADOS</b>", "━" * 25, ""]
-    for m in REGISTRO_MOTORES_BUSQUEDA:
-        try:
-            estado = "🟢" if m['disponible']() else "⚪"
-        except Exception:
-            estado = "🔴"
-        lineas.append(f"{estado} <b>{m['nombre']}</b> [{m['categoria']}]")
-        lineas.append(f"   {m['descripcion']}")
-    lineas.append("")
-    lineas.append("➕ <b>Acoplar un ERP sin código:</b> define en Render")
-    lineas.append("   ERP_&lt;NOMBRE&gt;_URL (+ _KEY y _CAT opcionales)")
-    lineas.append("   y reinicia — se registra solo.")
-    await update.message.reply_text("\n".join(lineas), parse_mode='HTML')
-
-
 async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /buscar_profesional - Buscar en base de datos de Google Drive"""
     if not context.args:
@@ -18181,25 +14877,8 @@ async def buscar_profesional_comando(update: Update, context: ContextTypes.DEFAU
     query = ' '.join(context.args)
     msg = await update.message.reply_text(f"🔍 Buscando profesionales: {query}...")
     
-    # FASE 31.25: BUS UNIVERSAL — consulta EN PARALELO todos los motores de
-    # la categoría 'profesionales' (Excel Drive + tarjetas BD + padrón de
-    # socios + cualquier ERP futuro auto-acoplado). Falla-aislado.
-    try:
-        bloques = await ejecutar_motores_busqueda(query, categoria='profesionales')
-        if bloques:
-            partes_r = []
-            for _nom, _desc, _res in bloques:
-                partes_r.append(f"📚 <b>Fuente: {_desc}</b>\n\n{_res}")
-            resultado = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(partes_r)
-        else:
-            resultado = (
-                f"❌ No encontré profesionales para '<b>{query}</b>' en ninguna "
-                f"de las fuentes acopladas.\n\n"
-                f"💡 Prueba con otros términos, o invita a los expertos del "
-                f"área a crear su tarjeta con /mi_tarjeta (+15 coins).")
-    except Exception as _e_bus:
-        logger.warning(f"FASE 31.25 bus profesionales: {_e_bus}")
-        resultado = buscar_profesionales(query)  # respaldo: vía clásica
+    # Buscar en Google Drive
+    resultado = buscar_profesionales(query)
     
     await msg.delete()
     await enviar_mensaje_largo(update, resultado)
@@ -21851,171 +18530,6 @@ async def rag_status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 @requiere_suscripcion
-async def analizar_libro_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """FASE 31.13: Comando /analizar_libro — análisis PROFUNDO de un libro
-    COMPLETO de la biblioteca RAG usando NVIDIA Nemotron 3 Super (1M contexto).
-
-    A diferencia de /rag_consulta (que recupera ~30 chunks relevantes), este
-    comando envía TODOS los chunks del libro de una sola pasada al modelo,
-    aprovechando su ventana de 1 millón de tokens. Produce: resumen ejecutivo,
-    tesis central, estructura, ideas clave y aplicabilidad para la Cofradía.
-
-    Exclusivo del administrador: cada análisis consume 1 request grande del
-    tier gratuito de OpenRouter (~50/día sin créditos).
-    Uso: /analizar_libro [título o parte del título]
-    """
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Comando exclusivo del administrador."); return
-
-    if not OPENROUTER_API_KEY:
-        await update.message.reply_text(
-            "⚠️ OPENROUTER_API_KEY no configurada.\n\n"
-            "Crea una cuenta gratis en openrouter.ai, genera una API key "
-            "y agrégala como variable de entorno en Render."
-        )
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /analizar_libro [título del libro]\n\n"
-            "Ejemplos:\n"
-            "  /analizar_libro Milei\n"
-            "  /analizar_libro arte de la guerra\n\n"
-            "Analiza el libro COMPLETO con IA de contexto 1M tokens "
-            "(NVIDIA Nemotron 3 Super). Usa /rag_status para ver los "
-            "libros indexados en la biblioteca."
-        )
-        return
-
-    titulo_buscado = ' '.join(context.args)
-    msg = await update.message.reply_text(f"📚 Buscando '{titulo_buscado}' en la biblioteca RAG...")
-
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await msg.edit_text("❌ Sin conexión a la base de datos.")
-            return
-        c = conn.cursor()
-
-        # 1. Localizar la fuente (source) que mejor coincide con el título
-        if DATABASE_URL:
-            c.execute("""SELECT source, COUNT(*) as total FROM rag_chunks
-                         WHERE source ILIKE %s
-                         GROUP BY source ORDER BY total DESC LIMIT 1""",
-                      (f'%{titulo_buscado}%',))
-        else:
-            c.execute("""SELECT source, COUNT(*) as total FROM rag_chunks
-                         WHERE source LIKE ?
-                         GROUP BY source ORDER BY total DESC LIMIT 1""",
-                      (f'%{titulo_buscado}%',))
-        fila = c.fetchone()
-
-        if not fila:
-            conn.close()
-            await msg.edit_text(
-                f"🔍 No encontré ningún libro que coincida con '{titulo_buscado}'.\n\n"
-                "💡 Usa /rag_status para ver los documentos indexados."
-            )
-            return
-
-        source = fila['source'] if DATABASE_URL else fila[0]
-        total_chunks = int(fila['total'] if DATABASE_URL else fila[1])
-
-        await msg.edit_text(
-            f"📖 Libro encontrado: {source.replace('PDF:', '')}\n"
-            f"📦 {total_chunks} fragmentos — cargando texto completo..."
-        )
-
-        # 2. Traer TODOS los chunks del libro en orden de indexación
-        if DATABASE_URL:
-            c.execute("""SELECT chunk_text FROM rag_chunks
-                         WHERE source = %s ORDER BY id""", (source,))
-        else:
-            c.execute("""SELECT chunk_text FROM rag_chunks
-                         WHERE source = ? ORDER BY id""", (source,))
-        filas = c.fetchall()
-        conn.close()
-
-        partes = []
-        for f in filas:
-            txt = f['chunk_text'] if DATABASE_URL else f[0]
-            if txt:
-                partes.append(txt)
-        texto_libro = '\n'.join(partes)
-
-        # Límite prudente: ~600K chars ≈ 150-200K tokens. Muy por debajo del
-        # 1M de contexto de Nemotron, pero suficiente para libros completos
-        # y conservador con la estabilidad del endpoint gratuito.
-        LIMITE_CHARS = 600_000
-        truncado = False
-        if len(texto_libro) > LIMITE_CHARS:
-            texto_libro = texto_libro[:LIMITE_CHARS]
-            truncado = True
-
-        await msg.edit_text(
-            f"🧠 Analizando '{source.replace('PDF:', '')}' con Nemotron 3 Super "
-            f"(1M contexto)...\n"
-            f"📊 {len(texto_libro):,} caracteres{' (truncado a 600K)' if truncado else ''} "
-            f"— esto puede tomar 1-3 minutos."
-        )
-
-        prompt_analisis = (
-            f"Analiza en profundidad el siguiente libro COMPLETO de la biblioteca "
-            f"de la Cofradía de Networking (comunidad profesional chilena de "
-            f"oficiales de la Armada).\n\n"
-            f"TÍTULO/FUENTE: {source.replace('PDF:', '')}\n\n"
-            f"Entrega tu análisis en español, SIN asteriscos ni Markdown, con "
-            f"esta estructura:\n"
-            f"1. RESUMEN EJECUTIVO (2-3 párrafos)\n"
-            f"2. TESIS CENTRAL del autor\n"
-            f"3. ESTRUCTURA Y TEMAS PRINCIPALES (por secciones o capítulos)\n"
-            f"4. IDEAS CLAVE Y CITAS RELEVANTES (5-8 ideas, parafraseadas)\n"
-            f"5. APLICABILIDAD PARA LA COFRADÍA (networking, liderazgo, "
-            f"desarrollo profesional de oficiales navales)\n"
-            f"6. VALORACIÓN CRÍTICA (fortalezas y debilidades de la obra)\n\n"
-            f"TEXTO COMPLETO DEL LIBRO:\n{texto_libro}"
-        )
-
-        # 3. Nemotron en thread aparte para no bloquear el event loop
-        #    (requests es síncrono y el análisis puede tomar minutos)
-        respuesta = await asyncio.to_thread(llamar_nemotron, prompt_analisis, 4000, 0.4)
-
-        # 4. Fallback: si Nemotron falla, intentar router automático con
-        #    versión reducida del libro (100K chars caben en cualquier modelo)
-        if not respuesta:
-            logger.warning("Nemotron falló en /analizar_libro — fallback router free con texto reducido")
-            await msg.edit_text("⚠️ Nemotron no respondió — reintentando con motor alternativo (texto reducido)...")
-            prompt_reducido = prompt_analisis[:100_000]
-            respuesta = await asyncio.to_thread(llamar_openrouter_free, prompt_reducido, 3000, 0.4)
-
-        await msg.delete()
-
-        if respuesta:
-            encabezado = (
-                f"📚 ANÁLISIS COMPLETO — {source.replace('PDF:', '')}\n"
-                f"🤖 Motor: Nemotron 3 Super (contexto 1M) via OpenRouter\n"
-                f"📦 Fragmentos analizados: {total_chunks}\n"
-                f"{'⚠️ Texto truncado a 600K caracteres' + chr(10) if truncado else ''}"
-                f"{'━' * 30}\n\n"
-            )
-            await enviar_mensaje_largo(update, encabezado + respuesta.replace('*', ''))
-        else:
-            await update.message.reply_text(
-                "❌ No fue posible completar el análisis.\n\n"
-                "Posibles causas: rate limit del tier gratuito de OpenRouter "
-                "agotado (~50 req/día sin créditos) o modelo temporalmente "
-                "saturado. Intenta más tarde o usa /rag_consulta para "
-                "consultas puntuales sobre el libro."
-            )
-
-    except Exception as e:
-        logger.error(f"Error en /analizar_libro: {e}")
-        try:
-            await msg.edit_text(f"❌ Error analizando el libro: {str(e)[:200]}")
-        except Exception:
-            pass
-
-
 async def rag_consulta_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /rag_consulta - Consulta UNIFICADA al sistema de conocimiento con IA"""
     if not context.args:
@@ -24031,7 +20545,7 @@ def _fase6_fuzzy_match_simple(query_word, target_word, max_dist=2):
     return prev[n] <= max_dist
 
 
-def buscar_rag(query, limit=5, original=None):
+def buscar_rag(query, limit=5):
     """
     Búsqueda RAG en CASCADA:
     Fase 0 — pgvector + Gemini embeddings (búsqueda SEMÁNTICA REAL) ← NUEVO FASE 29
@@ -24047,11 +20561,7 @@ def buscar_rag(query, limit=5, original=None):
     try:
         # FASE 6: Cache lookup ANTES de cualquier query SQL — instant hit en queries repetidas
         import unicodedata as _uni_cache
-        # FASE 31.7b: la clave de caché se computa sobre la pregunta ORIGINAL
-        # del usuario (si viaja). La reescrita del LLM cambia en cada corrida
-        # → claves distintas para la MISMA pregunta → el flip-flop de Germán.
-        _base_cache = original if (original and original.strip()) else query
-        _query_norm_cache = _uni_cache.normalize('NFKD', (_base_cache or '').lower().strip())
+        _query_norm_cache = _uni_cache.normalize('NFKD', (query or '').lower().strip())
         _query_norm_cache = ''.join(ch for ch in _query_norm_cache if not _uni_cache.combining(ch))
         _query_norm_cache = ' '.join(_query_norm_cache.split()[:10])  # primeras 10 palabras
         if _query_norm_cache:
@@ -24067,477 +20577,80 @@ def buscar_rag(query, limit=5, original=None):
         c = conn.cursor()
         
         # ═══════════════════════════════════════════════════════════════════
-        # FASE 31 (FIX CRÍTICO "CASO MILEI") — REORDEN DE PRECEDENCIA:
-        #
-        # ANTES: pgvector GLOBAL corría PRIMERO. Una pregunta como
-        # "de qué trata el libro de Milei sobre la inflación" traía chunks
-        # genéricos sobre inflación de OTROS documentos (sim ≥ 0.65) y
-        # retornaba SIN llegar nunca al match por nombre de documento.
-        # Resultado: el bot divagaba con fragmentos del libro equivocado.
-        #
-        # AHORA (orden correcto de un RAG profesional):
-        #   PASO A — Match por NOMBRE DE DOCUMENTO (in-memory, <5ms).
-        #   PASO B — Si hay documento(s): pgvector RESTRINGIDO a esos
-        #            documentos → ranking semántico DENTRO del libro
-        #            (los chunks sobre "inflación" del libro de Milei
-        #            quedan primeros). Fallback: chunks en orden.
-        #   PASO C — Solo si NO hay match de nombre: pgvector GLOBAL
-        #            (comportamiento FASE 29 original).
+
         # ═══════════════════════════════════════════════════════════════════
-        import unicodedata
-        def normalizar(texto):
-            texto = unicodedata.normalize('NFKD', texto.lower())
-            return ''.join(ch for ch in texto if not unicodedata.combining(ch))
-        
-        STOPWORDS = {'de', 'la', 'el', 'en', 'los', 'las', 'del', 'al', 'un', 'una',
-                    'por', 'con', 'para', 'que', 'es', 'se', 'no', 'su', 'lo', 'como',
-                    'mas', 'pero', 'sus', 'le', 'ya', 'este', 'si', 'ha', 'son',
-                    'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre',
-                    'trata', 'libro', 'libros', 'sobre', 'acerca', 'habla', 'dice',
-                    'cuéntame', 'cuentame', 'cual', 'cuál', 'qué', 'que',
-                    'respecto', 'segun', 'según', 'autor', 'escribio', 'escribió',
-                    'a', 'y', 'o', 'e', 'u', 'the', 'of', 'and', 'to', 'in'}
-        
-        query_norm = normalizar(query)
-        
-        # Extraer términos relevantes — priorizar palabras largas (nombres propios, títulos)
-        todas_palabras = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
-        # FASE 31.2: NOMBRES PROPIOS PRIMERO. En "el libro de Milei de la
-        # inflación", ordenar solo por longitud ponía "inflacion" y
-        # "consiste" antes que "milei" → el autor quedaba fuera del top-2
-        # del matching por contenido. Un token capitalizado a mitad de
-        # oración es un nombre propio → máxima prioridad de búsqueda.
-        nombres_propios_q = set()
+        # FASE 31.1 — TITLE-FIRST GUARD (corrige caso real "libro de Milei")
+        # PROBLEMA: pgvector podía devolver ≥3 chunks "buenos" de OTROS libros
+        # del mismo tema y retornar temprano, sin ejecutar jamás el match por
+        # TÍTULO. Luego el pre-filtro veía que el nombre propio no estaba en
+        # esos sources y vaciaba todo → MODO B → alucinación de nombres.
+        # SOLUCIÓN: si algún término específico del query aparece en el NOMBRE
+        # de un documento, ese documento MANDA: se retornan sus mejores chunks
+        # (rankeados por términos del query) con score 55 (auto-relevante),
+        # ANTES de cualquier búsqueda vectorial.
+        # ═══════════════════════════════════════════════════════════════════
         try:
-            _toks_raw = query.split()
-            for _i, _tk in enumerate(_toks_raw):
-                _lp = _tk.strip('¿?¡!.,;:()"\'«»')
-                if (len(_lp) >= 3 and _lp[0].isupper()
-                        and _i > 0
-                        and not _toks_raw[_i-1].rstrip().endswith(('.', '?', '!', ':'))):
-                    _lpn = normalizar(_lp)
-                    if _lpn not in STOPWORDS:
-                        nombres_propios_q.add(_lpn)
-        except Exception:
-            pass
-        _resto = [p for p in set(todas_palabras) if p not in nombres_propios_q]
-        palabras_clave = (sorted(nombres_propios_q, key=len, reverse=True)
-                          + sorted(_resto, key=len, reverse=True))
-        
-        if not palabras_clave:
-            conn.close()
-            return [], 0.0
-        
-        # ═══════════════════════════════════════════════════
-        # PASO A — MATCH POR NOMBRE DE DOCUMENTO (antes que pgvector)
-        # FIX FASE 9: normalización bidireccional de tildes en Python
-        # (resuelve "inflacion"↔"inflación" en nombres de archivo).
-        # ═══════════════════════════════════════════════════
-        docs_fase1 = []    # sources encontrados por nombre
-        chunks_fase1 = []  # (texto, score, source) con score alto
-        
-        # ═══════════════════════════════════════════════════
-        # FASE 31.3 — PASO A0: MEMORIA DE APRENDIZAJE (botón "Útil")
-        # Si un usuario marcó "Útil" una respuesta, la asociación
-        # término→documentos quedó guardada en rag_aprendizaje. Antes de
-        # cualquier matching, consultamos esa memoria: es la señal más
-        # confiable (validada por humanos) y la más rápida (tabla diminuta).
-        # ═══════════════════════════════════════════════════
-        try:
-            # FASE 31.8 BLINDAJE A0:
-            # (a) Si la pregunta ORIGINAL trae un título entre comillas, la
-            #     evidencia explícita del usuario MANDA sobre lo aprendido →
-            #     A0 se salta y decide el matching por frases.
-            # (b) votos >= 2: un solo voto (posible auto-guardado erróneo de
-            #     versiones previas) ya NO puede dictar los documentos. El
-            #     veneno "inflación→feriados+Cardalda" queda inerte.
-            _tiene_comillas_a0 = any(_q in f"{original or ''}{query}"
-                                     for _q in ('"', '\u201c', '\u00ab'))
-            _terms_a0 = ([] if _tiene_comillas_a0
-                         else [p for p in palabras_clave[:3] if len(p) >= 4])
-            if _tiene_comillas_a0:
-                logger.info("🛡️ FASE 31.8: título entre comillas → A0 cede al matching por frases")
-            for _t_a0 in _terms_a0:
-                if DATABASE_URL:
-                    c.execute("""SELECT docs FROM rag_aprendizaje
-                                 WHERE votos >= 2 AND terminos ILIKE %s
-                                 ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
-                else:
-                    c.execute("""SELECT docs FROM rag_aprendizaje
-                                 WHERE votos >= 2 AND LOWER(terminos) LIKE ?
-                                 ORDER BY votos DESC LIMIT 1""", (f'%{_t_a0}%',))
-                _row_a0 = c.fetchone()
-                if _row_a0:
-                    _docs_raw = (_row_a0['docs'] if DATABASE_URL else _row_a0[0]) or ''
-                    for _d in _docs_raw.split('||'):
-                        if _d and _d not in docs_fase1:
-                            docs_fase1.append(_d)
-                    if docs_fase1:
-                        logger.info(f"🧠 FASE 31.3 A0-APRENDIZAJE: '{_t_a0}' → "
-                                    f"{docs_fase1} (validado por usuarios)")
-                        break
-        except Exception as _e_a0:
-            logger.debug(f"A0 aprendizaje (tabla puede no existir aún): {_e_a0}")
-            # FASE 31.4 CRÍTICO: en PostgreSQL una consulta fallida ABORTA la
-            # transacción y TODAS las consultas siguientes de buscar_rag
-            # (nombres, A3, ¡pgvector!) morirían en cascada → "libro no está
-            # en la biblioteca" aunque sí esté. Rollback inmediato lo sana.
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        
-        try:
-            c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
-            todos_sources_db = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
-            sources_normalizados = [(normalizar(s), s) for s in todos_sources_db if s]
-            logger.info(f"🔎 RAG: {len(sources_normalizados)} sources cargados para matching normalizado")
-        except Exception as _e_load:
-            logger.warning(f"Error cargando sources: {_e_load}")
-            sources_normalizados = []
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        
-        # ═══ FASE 31.7 MATCH 0 — FRASES (el fix del caso "El fin de la inflación") ═══
-        # ANTES: "lista" (de "Lista los puntos...") matcheaba por substring el
-        # doc "feriados...lista completa", y "fin" matcheaba "FINanciera" de
-        # van horne → pgvector se restringía a los libros EQUIVOCADOS con
-        # "confianza alta". AHORA: primero se buscan FRASES del query (título
-        # entre comillas o n-gramas de 3-6 palabras) dentro del nombre del
-        # doc. Una frase que calza es evidencia fortísima y EXCLUYENTE.
-        # FASE 31.7b: los términos genéricos se definen ANTES del MATCH 0
-        # porque también vetan FRASES compuestas solo de genéricos
-        # ("lista completa" venía en la reescrita del LLM y matcheaba el
-        # doc de feriados; "de forma educada" matcheó el libro de Cardalda).
-        _GENERICAS_NOMBRE = {'lista', 'libro', 'libros', 'completa', 'completo',
-                             'guia', 'guía', 'manual', 'curso', 'texto', 'tema',
-                             'temas', 'punto', 'puntos', 'resumen', 'capitulo',
-                             'fin', 'introduccion', 'principales', 'basico',
-                             'basica', 'general', 'nueva', 'nuevo', 'web',
-                             'pdf', 'chile', 'chileno', 'chilena', 'forma',
-                             'educada', 'facil', 'practica', 'practico',
-                             # FASE 31.8: verbos de petición y muletillas que
-                             # NO identifican ningún documento
-                             'dame', 'dime', 'quiero', 'necesito', 'muestrame',
-                             'entregame', 'indicame', 'ayudame', 'cuales',
-                             'sirve', 'sirven', 'favor', 'gracias', 'ahora',
-                             'hacer', 'saber', 'conocer', 'explica',
-                             'explicame', 'detalla', 'detallame', 'describe',
-                             'contenido', 'informacion', 'detalle', 'detalles'}
-
-        def _frase_valida(fr):
-            """Una frase solo cuenta si aporta ≥1 token con CONTENIDO real
-            (≥4 letras, ni stopword ni genérico). 'lista completa' → NO;
-            'el fin de la inflacion' → SÍ (inflacion)."""
-            for _t in fr.split():
-                if len(_t) >= 4 and _t not in STOPWORDS and _t not in _GENERICAS_NOMBRE:
-                    return True
-            return False
-
-        try:
-            _frases_q = []
-            # (a) texto entre comillas = título literal → máxima prioridad.
-            # FASE 31.7b: se lee de la pregunta ORIGINAL del usuario (la
-            # reescrita del LLM ELIMINA las comillas → el título nunca
-            # llegaba a este matching).
-            _texto_frases = f"{original or ''} {query}"
-            for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{6,80})["\u201d\u00bb\u2019\']', _texto_frases):
-                _frases_q.append(normalizar(_m))
-            # (b) n-gramas de 6→3 palabras de la ORIGINAL primero, luego la reescrita
-            _orig_norm = normalizar(original) if original else ''
-            for _fuente_ng in (_orig_norm, query_norm):
-                if not _fuente_ng:
-                    continue
-                _tq = [w for w in _fuente_ng.split() if len(w) > 1]
-                for _n in (6, 5, 4, 3):
-                    for _i in range(len(_tq) - _n + 1):
-                        _frases_q.append(' '.join(_tq[_i:_i + _n]))
-            _vistos_f = set()
-            for _fr in _frases_q:
-                if len(_fr) < 8 or _fr in _vistos_f or not _frase_valida(_fr):
-                    continue
-                _vistos_f.add(_fr)
-                for src_norm, src_orig in sources_normalizados:
-                    if _fr in src_norm and src_orig not in docs_fase1:
-                        docs_fase1.append(src_orig)
-                        logger.info(f"🎯 FASE 31.7 MATCH-FRASE: '{_fr}' → '{src_orig}'")
-                if docs_fase1:
-                    break  # la frase más larga que calza manda; no diluir
-        except Exception as _e_fr:
-            logger.debug(f"match frase: {_e_fr}")
-
-        # ═══ FASE 31.8 MATCH 0.5 — FRASE EN CONTENIDO ═══
-        # Si la frase fuerte (título entre comillas o n-grama con contenido)
-        # NO calza con ningún NOMBRE de archivo (el PDF puede llamarse
-        # "milei_2023.pdf" o tener el nombre con tildes/guiones distintos),
-        # se busca la frase DENTRO del texto de los chunks: un libro menciona
-        # su propio título decenas de veces (portada, encabezados, prólogo).
-        # Usa las frases CRUDAS (con tildes) porque chunk_text las conserva.
-        if not docs_fase1:
-            try:
-                _frases_raw = []
-                # (a) comillas de la pregunta ORIGINAL (crudas, prioridad)
-                for _m in re.findall(r'["\u201c\u00ab\u2018\']([^"\u201d\u00bb\u2019\']{10,80})["\u201d\u00bb\u2019\']', _texto_frases):
-                    _frases_raw.append(_m.strip().lower())
-                # (b) n-gramas crudos 6→4 de la ORIGINAL con contenido real
-                if original:
-                    _tor = [w.strip('¿?¡!.,;:()[]"\'\u00ab\u00bb\u201c\u201d\u2018\u2019')
-                            for w in original.lower().split()]
-                    _tor = [w for w in _tor if len(w) > 1]
-                    for _n in (6, 5, 4):
-                        for _i in range(len(_tor) - _n + 1):
-                            _ng_raw = ' '.join(_tor[_i:_i + _n])
-                            if len(_ng_raw) >= 14 and _frase_valida(normalizar(_ng_raw)):
-                                _frases_raw.append(_ng_raw)
-                _vistas_fc = set()
-                _intentos_fc = 0
-                try:
-                    if DATABASE_URL:
-                        c.execute("SET LOCAL statement_timeout = 4000")
-                except Exception:
-                    pass
-                for _fr_raw in _frases_raw:
-                    if _fr_raw in _vistas_fc or _intentos_fc >= 3:
-                        continue
-                    _vistas_fc.add(_fr_raw)
-                    _intentos_fc += 1
-                    try:
-                        if DATABASE_URL:
-                            c.execute("""SELECT source, COUNT(*) AS n FROM rag_chunks
-                                         WHERE chunk_text ILIKE %s AND source IS NOT NULL
-                                         GROUP BY source ORDER BY n DESC LIMIT 2""",
-                                      (f'%{_fr_raw}%',))
-                        else:
-                            c.execute("""SELECT source, COUNT(*) AS n FROM rag_chunks
-                                         WHERE LOWER(chunk_text) LIKE ? AND source IS NOT NULL
-                                         GROUP BY source ORDER BY n DESC LIMIT 2""",
-                                      (f'%{_fr_raw}%',))
-                        for _row_fc in (c.fetchall() or []):
-                            _src_fc = _row_fc['source'] if DATABASE_URL else _row_fc[0]
-                            if _src_fc and _src_fc not in docs_fase1:
-                                docs_fase1.append(_src_fc)
-                                logger.info(f"🎯 FASE 31.8 FRASE-CONTENIDO: "
-                                            f"«{_fr_raw[:50]}» → '{_src_fc}'")
-                    except Exception as _e_fc1:
-                        logger.debug(f"frase-contenido «{_fr_raw[:30]}»: {_e_fc1}")
-                        try:
-                            conn.rollback()  # FASE 31.4: jamás abortar la transacción
-                        except Exception:
-                            pass
-                    if docs_fase1:
-                        break  # la primera frase que identifica documento MANDA
-                try:
-                    if DATABASE_URL:
-                        c.execute("SET LOCAL statement_timeout = DEFAULT")
-                except Exception:
-                    pass
-            except Exception as _e_fc:
-                logger.debug(f"match frase-contenido: {_e_fc}")
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-
-        # MATCH 1: palabra clave en el nombre del doc — AHORA con LÍMITE DE
-        # PALABRA (no substring: "fin" ya no matchea "FINanciera") y VETO de
-        # términos genéricos que producían falsos positivos.
-        if not docs_fase1:
-            _palabras_m1 = list(palabras_clave)
-            if original:  # FASE 31.7b: sumar términos de la pregunta original
-                for _w in (normalizar(original)).split():
-                    if len(_w) >= 4 and _w not in STOPWORDS and _w not in _palabras_m1:
-                        _palabras_m1.append(_w)
-            for palabra in _palabras_m1:
-                if len(palabra) < 4 or palabra in _GENERICAS_NOMBRE:
-                    continue
-                _patron_wb = re.compile(r'(?<![a-z0-9])' + re.escape(palabra) + r'(?![a-z0-9])')
-                for src_norm, src_orig in sources_normalizados:
-                    if src_orig in docs_fase1:
-                        continue
-                    if _patron_wb.search(src_norm):
-                        docs_fase1.append(src_orig)
-                        logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
-        
-        # MATCH 2 (fuzzy reactivo): solo si el exacto no encontró nada
-        if not docs_fase1:
-            palabras_largas_fuzzy = [p for p in palabras_clave if len(p) >= 5][:3]
-            if palabras_largas_fuzzy and sources_normalizados:
-                for palabra in palabras_largas_fuzzy:
-                    for src_norm, src_orig in sources_normalizados[:200]:
-                        if src_orig in docs_fase1:
-                            continue
-                        for token_src in src_norm.split():
-                            if len(token_src) >= 5 and _fase6_fuzzy_match_simple(palabra, token_src, max_dist=2):
-                                docs_fase1.append(src_orig)
-                                logger.info(f"🎯 FASE 6 FUZZY: '{palabra}' ≈ '{token_src}' → '{src_orig}'")
-                                break
-                        if src_orig in docs_fase1:
-                            break
-        
-        # MATCH 3 (FASE 31.1 — por CONTENIDO): si el nombre del archivo no
-        # contiene el término (p.ej. el libro de Milei se llama "El fin de
-        # la inflación.pdf" SIN el apellido), identificar el documento por
-        # FRECUENCIA del término dentro de sus chunks: un libro DE un autor
-        # lo menciona decenas de veces (portada, prólogo, biografía).
-        # Solo se ejecuta si A1+A2 fallaron; 1 query SQL por término (máx 2).
-        if not docs_fase1:
-            # FASE 31.2: nombres propios primero; umbral bajado a 2 menciones
-            _np_orden = [p for p in palabras_clave if p in nombres_propios_q and len(p) >= 4]
-            _otros_orden = [p for p in palabras_clave if p not in nombres_propios_q and len(p) >= 5]
-            terminos_contenido = (_np_orden + _otros_orden)[:3]
-            # FASE 31.3 VELOCIDAD: el COUNT(*)+GROUP BY anterior escaneaba
-            # la tabla COMPLETA (decenas de miles de chunks) por cada término
-            # → minutos en Supabase. Ahora: (a) statement_timeout 4s como
-            # tope duro, (b) keywords primero (columna pequeña), (c) LIMIT 80
-            # que DETIENE el escaneo apenas encuentra coincidencias, y el
-            # conteo por documento se hace en Python sobre esa muestra.
-            from collections import Counter as _Cnt_a3
-            try:
-                if DATABASE_URL:
-                    c.execute("SET LOCAL statement_timeout = 4000")
-            except Exception:
-                pass
-            for palabra in terminos_contenido:
-                try:
-                    patron_like = f"%{palabra}%"
-                    filas_a3 = []
-                    # FASE 31.4: metadata::text agregado (título/autor suelen
-                    # vivir ahí); rollback por intento para que una columna
-                    # inexistente jamás aborte la transacción de las demás.
-                    _cols_a3 = (('keywords', 'metadata::text', 'chunk_text')
-                                if DATABASE_URL else
-                                ('keywords', 'metadata', 'chunk_text'))
-                    for col_a3 in _cols_a3:
-                        try:
-                            if DATABASE_URL:
-                                c.execute(
-                                    f"""SELECT source FROM rag_chunks
-                                        WHERE {col_a3} ILIKE %s AND source IS NOT NULL
-                                        LIMIT 80""", (patron_like,))
-                            else:
-                                c.execute(
-                                    f"""SELECT source FROM rag_chunks
-                                        WHERE LOWER({col_a3}) LIKE ? AND source IS NOT NULL
-                                        LIMIT 80""", (patron_like,))
-                            filas_a3 = [(r['source'] if DATABASE_URL else r[0])
-                                        for r in c.fetchall()]
-                        except Exception as _e_col:
-                            logger.warning(f"A3 col {col_a3}: {_e_col}")
-                            filas_a3 = []
-                            try:
-                                conn.rollback()
-                            except Exception:
-                                pass
-                        if filas_a3:
-                            break
-                    for src_c, cnt_c in _Cnt_a3(filas_a3).most_common(2):
-                        # Umbral: ≥2 menciones en la muestra = término central
-                        if src_c and cnt_c >= 2 and src_c not in docs_fase1:
-                            docs_fase1.append(src_c)
-                            logger.info(f"🎯 FASE 31 A3-CONTENIDO: '{palabra}' aparece "
-                                        f"{cnt_c}+ veces en '{src_c}' → documento identificado")
-                except Exception as _e_a3:
-                    logger.debug(f"A3 contenido '{palabra}' error: {_e_a3}")
-                if docs_fase1:
-                    break  # con un documento identificado basta
-            if not docs_fase1 and terminos_contenido:
-                # FASE 31.4 DIAGNÓSTICO: si ni nombre ni contenido matchean,
-                # loggear los títulos más parecidos → el LOG dirá de una vez
-                # si el libro está indexado o no (y con qué nombre).
-                try:
-                    _frag = terminos_contenido[0][:4]
-                    _parecidos = [orig for nrm, orig in sources_normalizados
-                                  if _frag in nrm][:3]
-                    logger.warning(
-                        f"📚 FASE 31.4 SIN MATCH para {terminos_contenido} en "
-                        f"{len(sources_normalizados)} docs. "
-                        f"Títulos con '{_frag}': {_parecidos or 'NINGUNO'}")
-                except Exception:
-                    pass
-            try:
-                if DATABASE_URL:
-                    c.execute("SET LOCAL statement_timeout = DEFAULT")
-            except Exception:
-                pass
-
-        
-        # ═══════════════════════════════════════════════════
-        # PASO B — pgvector RESTRINGIDO al/los documento(s) matcheado(s)
-        # Ranking semántico DENTRO del libro: para "libro de Milei sobre
-        # inflación" ordena primero los pasajes del libro que hablan de
-        # inflación. Si pgvector no está disponible → fallback: chunks
-        # del documento en orden natural (comportamiento previo).
-        # ═══════════════════════════════════════════════════
-        if docs_fase1:
-            docs_foco = docs_fase1[:3]  # máximo 3 documentos
-            pgvec_in_doc_ok = False
-            
-            if DATABASE_URL:
-                try:
-                    query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
-                    if query_emb:
-                        pgvec_query = embedding_to_pgvector(query_emb)
+            import unicodedata as _u31, re as _r31
+            def _n31(t):
+                t = _u31.normalize('NFKD', (t or '').lower())
+                return ''.join(ch for ch in t if not _u31.combining(ch))
+            _STOP31 = {'de','la','el','en','los','las','del','al','un','una','por','con',
+                       'para','que','es','se','no','su','lo','como','mas','pero','sus',
+                       'sobre','trata','libro','libros','acerca','habla','dice','cual',
+                       'este','esta','autor','texto','obra','referente','respecto','tema',
+                       'the','of','and','to','in','cuentame','resumen','resume'}
+            _qn31 = _n31(query)
+            _terms31 = [w for w in _r31.findall(r'\b\w{4,}\b', _qn31) if w not in _STOP31]
+            if _terms31:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+                _srcs31 = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+                _docs31 = []
+                for _t in _terms31:
+                    for _s in _srcs31:
+                        if _s and _s not in _docs31 and _t in _n31(_s):
+                            _docs31.append(_s)
+                if _docs31:
+                    logger.info(f"🎯 FASE 31.1 TITLE-GUARD: {_terms31[:3]} → docs {_docs31[:2]}")
+                    _chunks31 = []
+                    for _src in _docs31[:2]:
                         c.execute(
-                            """SELECT chunk_text, source,
-                                      1 - (embedding <=> %s::vector) AS similitud
-                               FROM rag_chunks
-                               WHERE source = ANY(%s) AND embedding IS NOT NULL
-                               ORDER BY embedding <=> %s::vector
-                               LIMIT %s""",
-                            (pgvec_query, docs_foco, pgvec_query, max(limit, 12))
-                        )
-                        rows_doc = c.fetchall()
-                        for row in rows_doc:
-                            texto = row['chunk_text'] or ''
-                            source = row['source'] or ''
-                            sim = float(row['similitud'] or 0.0)
-                            # Score ≥ 50 garantiza tratamiento Fase 1 (auto-relevante)
-                            # + componente semántico para ordenar por afinidad al query
-                            chunks_fase1.append((texto, 50.0 + sim * 10.0, source))
-                        if len(chunks_fase1) >= 2:
-                            pgvec_in_doc_ok = True
-                            logger.info(
-                                f"🎯 FASE 31 pgvector-EN-DOC: {len(chunks_fase1)} chunks "
-                                f"rankeados semánticamente dentro de {docs_foco}"
-                            )
-                except Exception as _e_pgdoc:
-                    logger.debug(f"FASE 31 pgvector-en-doc falló (fallback a orden natural): {_e_pgdoc}")
-            
-            if not pgvec_in_doc_ok:
-                # Fallback: traer TODOS los chunks del documento en orden natural
-                chunks_fase1 = []
-                for src in docs_foco:
-                    try:
-                        if DATABASE_URL:
-                            c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
-                                     (src,))
-                        else:
-                            c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
-                                     (src,))
-                        filas_doc = c.fetchall()
-                        for fila in filas_doc:
-                            if DATABASE_URL:
-                                texto = fila['chunk_text'] or ''
-                                source = fila['source'] or ''
-                            else:
-                                texto, _, source = fila[0] or '', fila[1] or '', fila[2] or ''
-                            score = 50.0 + len(texto) / 100
-                            chunks_fase1.append((texto, score, source))
-                    except Exception as e:
-                        logger.debug(f"Error trayendo chunks de '{src}': {e}")
-        
+                            "SELECT chunk_text, source FROM rag_chunks WHERE source = %s ORDER BY id ASC"
+                            if DATABASE_URL else
+                            "SELECT chunk_text, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
+                            (_src,))
+                        for _f in c.fetchall():
+                            _tx = (_f['chunk_text'] if DATABASE_URL else _f[0]) or ''
+                            _so = (_f['source'] if DATABASE_URL else _f[1]) or ''
+                            if _tx:
+                                _txn = _n31(_tx)
+                                _hits = sum(1 for _t in _terms31 if _t in _txn)
+                                _chunks31.append((_hits, len(_tx), _tx, _so))
+                    if _chunks31:
+                        # Ranking: más términos del query primero; luego chunks
+                        # iniciales del libro (suelen contener tesis/resumen)
+                        _chunks31.sort(key=lambda x: (-x[0],))
+                        _top31 = [(t, s) for (_, _, t, s) in _chunks31[:max(limit, 8)]]
+                        conn.close()
+                        if _query_norm_cache:
+                            _fase6_cache_set(_query_norm_cache, (_top31, 55.0))
+                        logger.info(f"✅ FASE 31.1 TITLE-GUARD HIT: {len(_top31)} chunks de {_docs31[:2]} (score=55)")
+                        return _top31, 55.0
+        except Exception as _e31g:
+            logger.debug(f"FASE 31.1 title-guard (no fatal): {_e31g}")
+
+        # FASE 29 — FASE 0: BÚSQUEDA SEMÁNTICA REAL CON pgvector + Gemini
+        # Solo si: (1) PostgreSQL, (2) pgvector instalado, (3) hay embeddings
+        # Si encuentra ≥ 3 resultados con similitud ≥ 0.65, usa esos y termina.
+        # Si encuentra menos o de baja calidad, cae a fases 1-2 (keywords).
         # ═══════════════════════════════════════════════════════════════════
-        # PASO C — pgvector GLOBAL (FASE 29 original) — SOLO si no hubo
-        # match por nombre de documento. Evita que temas genéricos ahoguen
-        # a documentos específicamente mencionados por el usuario.
-        # ═══════════════════════════════════════════════════════════════════
-        if not docs_fase1 and DATABASE_URL and query and len(query.strip()) > 2:
+        if DATABASE_URL and query and len(query.strip()) > 2:
             try:
+                # Generar embedding de la query
                 query_emb = generar_embedding_gemini(query, tipo='RETRIEVAL_QUERY')
                 if query_emb:
                     pgvec_query = embedding_to_pgvector(query_emb)
+                    # Búsqueda por similitud coseno (operador <=> de pgvector)
+                    # Threshold: solo resultados con similitud > 0.55 (1 - 0.45 = 0.55)
                     c.execute(
                         """SELECT chunk_text, source, 
                                   1 - (embedding <=> %s::vector) AS similitud
@@ -24550,6 +20663,7 @@ def buscar_rag(query, limit=5, original=None):
                     rows_pgvec = c.fetchall()
                     
                     if rows_pgvec:
+                        # Filtrar por threshold de similitud mínima 0.55
                         resultados_pgvec = []
                         max_sim = 0.0
                         for row in rows_pgvec:
@@ -24564,17 +20678,142 @@ def buscar_rag(query, limit=5, original=None):
                                 break
                         
                         if len(resultados_pgvec) >= 3 and max_sim >= 0.65:
+                            # Resultados de alta calidad: usar SOLO pgvector
                             logger.info(f"🎯 FASE 29 pgvector HIT: {len(resultados_pgvec)} resultados, sim_max={max_sim:.3f}")
                             conn.close()
-                            if _query_norm_cache and len(resultados_pgvec) >= 2 and max_sim >= 0.55:
-                                _fase6_cache_set(_query_norm_cache, resultados_pgvec, max_sim)
+                            # Cachear y devolver
+                            if _query_norm_cache:
+                                _fase6_cache_set(_query_norm_cache, (resultados_pgvec, max_sim))
                             return resultados_pgvec, max_sim
                         elif resultados_pgvec:
+                            # Resultados parciales: continuar con keywords pero guardar como complemento
                             logger.info(f"FASE 29 pgvector PARCIAL: {len(resultados_pgvec)} resultados (sim_max={max_sim:.3f}), complementando con keywords...")
+                            # Continuar con las fases 1-2 (keywords) más abajo
                 else:
                     logger.debug("FASE 29: no se pudo generar embedding de la query, usando keywords")
             except Exception as _e_pgvec:
+                # Si pgvector falla (no instalado, sin embeddings, etc.) caer a keywords
                 logger.debug(f"FASE 29 pgvector falló (cayendo a keywords): {_e_pgvec}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # FASE 1 + 2 (ORIGINALES): Búsqueda por keywords (fallback robusto)
+        # ═══════════════════════════════════════════════════════════════════
+        import unicodedata
+        def normalizar(texto):
+            texto = unicodedata.normalize('NFKD', texto.lower())
+            return ''.join(ch for ch in texto if not unicodedata.combining(ch))
+        
+        STOPWORDS = {'de', 'la', 'el', 'en', 'los', 'las', 'del', 'al', 'un', 'una',
+                    'por', 'con', 'para', 'que', 'es', 'se', 'no', 'su', 'lo', 'como',
+                    'mas', 'pero', 'sus', 'le', 'ya', 'este', 'si', 'ha', 'son',
+                    'muy', 'hay', 'fue', 'ser', 'han', 'esta', 'tan', 'sin', 'sobre',
+                    'trata', 'libro', 'libros', 'sobre', 'acerca', 'habla', 'dice',
+                    'cuéntame', 'cuentame', 'cual', 'cuál', 'qué', 'que',
+                    'a', 'y', 'o', 'e', 'u', 'the', 'of', 'and', 'to', 'in'}
+        
+        query_norm = normalizar(query)
+        
+        # Extraer términos relevantes — priorizar palabras largas (nombres propios, títulos)
+        todas_palabras = [p for p in query_norm.split() if len(p) > 1 and p not in STOPWORDS]
+        # Palabras clave: las más largas y/o únicas (nombres propios suelen ser >= 4 letras)
+        palabras_clave = sorted(set(todas_palabras), key=len, reverse=True)
+        
+        if not palabras_clave:
+            conn.close()
+            return [], 0.0
+        
+        # ═══════════════════════════════════════════════════
+        # FASE 1: BÚSQUEDA POR NOMBRE DE DOCUMENTO
+        # Si alguna palabra clave aparece en el SOURCE (nombre del archivo),
+        # traer TODOS los chunks de ese documento — máxima prioridad
+        # ═══════════════════════════════════════════════════
+        docs_fase1 = []    # sources encontrados en fase 1
+        chunks_fase1 = []  # (texto, score, source) con score alto
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIX FASE 9 CRÍTICO: NORMALIZACIÓN BIDIRECCIONAL (tildes)
+        # ANTES: SQL `LOWER(source) LIKE '%inflacion%'` NO matcheaba
+        # source "El fin de la inflación.pdf" porque BD conserva la tilde.
+        # SOLUCION: pre-cargar TODOS los sources, normalizar EN PYTHON, y
+        # comparar en memoria — instantáneo (todos los sources caben en RAM).
+        # Esto resuelve el caso real del libro de Milei (inflación con tilde).
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            if DATABASE_URL:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            else:
+                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            todos_sources_db = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+            # Pre-normalizar TODOS los sources (sin tildes, lowercase): lista de tuples (norm, original)
+            sources_normalizados = [(normalizar(s), s) for s in todos_sources_db if s]
+            logger.info(f"🔎 RAG: {len(sources_normalizados)} sources cargados para matching normalizado")
+        except Exception as _e_load:
+            logger.warning(f"Error cargando sources: {_e_load}")
+            sources_normalizados = []
+        
+        # MATCH 1: Búsqueda exacta de cada palabra clave en sources NORMALIZADOS
+        for palabra in palabras_clave:
+            if len(palabra) < 3:
+                continue
+            for src_norm, src_orig in sources_normalizados:
+                if src_orig in docs_fase1:
+                    continue
+                # Match substring NORMALIZADO (sin tildes, lowercase) — resuelve "inflacion"↔"inflación"
+                if palabra in src_norm:
+                    docs_fase1.append(src_orig)
+                    logger.info(f"🎯 Fase 1 RAG: '{palabra}' → documento '{src_orig}' (match normalizado)")
+        
+        # FASE 6 OPTIMIZADA: Fuzzy fallback REACTIVO — solo si Fase 1 exact no encontró NADA
+        # y la palabra es de longitud razonable (>= 5 letras, candidata a nombre propio)
+        if not docs_fase1:
+            palabras_largas_fuzzy = [p for p in palabras_clave if len(p) >= 5][:3]
+            if palabras_largas_fuzzy:
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
+                    else:
+                        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL LIMIT 200")
+                    todos_sources = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+                    
+                    for palabra in palabras_largas_fuzzy:
+                        for src in todos_sources:
+                            if src in docs_fase1:
+                                continue
+                            src_norm = normalizar(src)
+                            for token_src in src_norm.split():
+                                if len(token_src) >= 5 and _fase6_fuzzy_match_simple(palabra, token_src, max_dist=2):
+                                    docs_fase1.append(src)
+                                    logger.info(f"🎯 FASE 6 FUZZY: '{palabra}' ≈ '{token_src}' → '{src}'")
+                                    break
+                            if src in docs_fase1:
+                                break
+                except Exception as _e_fuzzy:
+                    logger.debug(f"FASE 6 fuzzy fallo (no crítico): {_e_fuzzy}")
+        
+        if docs_fase1:
+            # Traer TODOS los chunks de los documentos encontrados en fase 1
+            for src in docs_fase1[:3]:  # Máximo 3 documentos en fase 1
+                try:
+                    if DATABASE_URL:
+                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = %s ORDER BY id ASC",
+                                 (src,))
+                    else:
+                        c.execute("SELECT chunk_text, keywords, source FROM rag_chunks WHERE source = ? ORDER BY id ASC",
+                                 (src,))
+                    filas_doc = c.fetchall()
+                    
+                    for fila in filas_doc:
+                        if DATABASE_URL:
+                            texto = fila['chunk_text'] or ''
+                            source = fila['source'] or ''
+                        else:
+                            texto, _, source = fila[0] or '', fila[1] or '', fila[2] or ''
+                        
+                        # Score altísimo para documentos de fase 1 — garantiza que sean top
+                        score = 50.0 + len(texto) / 100
+                        chunks_fase1.append((texto, score, source))
+                except Exception as e:
+                    logger.debug(f"Error trayendo chunks de '{src}': {e}")
         
         # ═══════════════════════════════════════════════════
         # FASE 2: BÚSQUEDA SEMÁNTICA GENERAL BALANCEADA
@@ -24811,16 +21050,9 @@ def buscar_rag(query, limit=5, original=None):
                 except Exception as _e_exp:
                     logger.debug(f"FASE 6 expansion fallo (no crítico): {_e_exp}")
         
-        # FASE 31.6 ANTI-ENVENENAMIENTO: solo cachear respuestas CON sustancia.
-        # Un resultado vacío o de score bajo NO se cachea → la próxima vez que
-        # el usuario repita la pregunta, el bot REINTENTA de verdad en lugar de
-        # servir un fracaso guardado. Esta era la causa del flip-flop: bien con
-        # "Mejorar", mal al repetir (se servía el vacío cacheado).
-        if _query_norm_cache and len(resultados) >= 2 and score_maximo >= 40:
+        # FASE 6: Guardar en caché LRU
+        if _query_norm_cache and len(resultados) > 0:
             _fase6_cache_set(_query_norm_cache, resultados, score_maximo)
-        elif _query_norm_cache:
-            # Purga cualquier entrada envenenada previa de esta misma query
-            _FASE6_CACHE.pop(_query_norm_cache, None)
         
         return resultados, score_maximo
         
@@ -24927,7 +21159,7 @@ NO agregues texto ni explicacion, SOLO los numeros."""
         return chunks_con_score[:top_k]
 
 
-def busqueda_unificada(query, limit_historial=10, limit_rag=25, original=None):
+def busqueda_unificada(query, limit_historial=10, limit_rag=25):
     """Busca en TODAS las fuentes de conocimiento simultáneamente.
     Incluye verificación de relevancia temática: si los docs no tratan el tema
     consultado, marca rag_confianza='irrelevante' para que el LLM use su conocimiento.
@@ -24941,55 +21173,18 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25, original=None):
         'rag_tematica': 'desconocida',   # 'relevante' | 'irrelevante' | 'desconocida'
     }
     
-    # ═══════════════════════════════════════════════════════════════
-    # FASE 31.2: MOTORES EN PARALELO (pedido de Germán)
-    # Antes: historial → RAG en SECUENCIA (los tiempos se sumaban).
-    # Ahora: ambos motores se lanzan A LA VEZ; el tiempo total es el del
-    # motor más lento, no la suma. Con timeouts por motor y degradación
-    # automática al modo secuencial clásico si el pool fallara.
-    # ═══════════════════════════════════════════════════════════════
-    from concurrent.futures import ThreadPoolExecutor as _TPE_bu
-    _hist_res, _rag_res, _rag_err = [], None, None
-
-    def _motor_historial():
-        return buscar_en_historial(query, limit=limit_historial) if limit_historial > 0 else []
-
-    def _motor_rag():
-        return buscar_rag(query, limit=limit_rag, original=original)
-
-    try:
-        with _TPE_bu(max_workers=2) as _pool_bu:
-            _f_h = _pool_bu.submit(_motor_historial)
-            _f_r = _pool_bu.submit(_motor_rag)
-            try:
-                _hist_res = _f_h.result(timeout=12) or []
-            except Exception as e:
-                logger.warning(f"Error buscando historial unificado: {e}")
-            try:
-                _rag_res = _f_r.result(timeout=25)
-            except Exception as e:
-                _rag_err = e
-    except Exception as _e_pool:
-        logger.warning(f"FASE 31.2 pool paralelo falló, modo secuencial: {_e_pool}")
-        try:
-            _hist_res = _motor_historial() or []
-        except Exception as e:
-            logger.warning(f"Error buscando historial unificado: {e}")
-        try:
-            _rag_res = _motor_rag()
-        except Exception as e:
-            _rag_err = e
-
     # 1. Historial del grupo (mensajes de usuarios)
-    if _hist_res:
-        resultados['historial'] = _hist_res
-        resultados['fuentes_usadas'].append(f"Historial ({len(_hist_res)} msgs)")
+    try:
+        historial = buscar_en_historial(query, limit=limit_historial)
+        if historial:
+            resultados['historial'] = historial
+            resultados['fuentes_usadas'].append(f"Historial ({len(historial)} msgs)")
+    except Exception as e:
+        logger.warning(f"Error buscando historial unificado: {e}")
     
     # 2. RAG (PDFs indexados + Excel indexado en BD)
     try:
-        if _rag_err is not None:
-            raise _rag_err
-        chunks_rag, score_max = _rag_res if _rag_res is not None else ([], 0.0)
+        chunks_rag, score_max = buscar_rag(query, limit=limit_rag)
         resultados['rag_score_max'] = score_max
         
         # ═══════════════════════════════════════════════════════════════
@@ -25223,137 +21418,6 @@ def formatear_contexto_unificado(resultados, query):
 # BÚSQUEDA MULTI-AGENTE PARALELA — 5 motores simultáneos
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════
-# FASE 31.7c — WEB → MARKDOWN LIMPIO (pedido de Germán)
-# Potencia el motor web: en vez de solo títulos+snippets de DuckDuckGo,
-# se descarga el CONTENIDO real de las mejores páginas como markdown
-# sin menús/publicidad/scripts.
-# MOTORES en cascada:
-#   1) crawl4ai — solo si está instalado (INCOMPATIBLE hoy: sus versiones
-#      con modo HTTP exigen httpx>=0.27 y python-telegram-bot 20.7 exige
-#      httpx~=0.25.2 → ResolutionImpossible en Render). Queda el intento
-#      por si en el futuro se actualiza PTB.
-#   2) TRAFILATURA — motor PRIMARIO real: librería de referencia para
-#      extracción de contenido web (la usan los pipelines de LLM), sin
-#      conflicto de dependencias. Verificada: 19.858 chars de contenido
-#      puro en la prueba, CERO navegación residual.
-#   3) requests + BeautifulSoup — respaldo final (pseudo-markdown).
-# ═══════════════════════════════════════════════════════════════════
-def _crawl4ai_markdown(url: str, max_chars: int = 3500, timeout: int = 12) -> str:
-    """Devuelve el contenido de una URL como markdown limpio ('' si falla).
-    Seguro para llamar desde hilos del ThreadPoolExecutor."""
-    if not url or not url.startswith('http'):
-        return ''
-    # ── Intento 1: crawl4ai (markdown de calidad, filtra boilerplate) ──
-    try:
-        import asyncio as _aio_c4
-        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
-        from crawl4ai.async_crawler_strategy import AsyncHTTPCrawlerStrategy
-
-        # FASE 31.7b: filtro de PODA — elimina menús, navegación, footers y
-        # publicidad del markdown (verificado con crawl4ai 0.9.0)
-        _cfg_kwargs = {'page_timeout': timeout * 1000, 'verbose': False}
-        try:
-            from crawl4ai.content_filter_strategy import PruningContentFilter
-            from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
-            _cfg_kwargs['markdown_generator'] = DefaultMarkdownGenerator(
-                content_filter=PruningContentFilter(threshold=0.45))
-        except Exception:
-            pass
-
-        async def _run():
-            strategy = AsyncHTTPCrawlerStrategy()
-            async with AsyncWebCrawler(crawler_strategy=strategy) as crawler:
-                r = await _aio_c4.wait_for(
-                    crawler.arun(url=url, config=CrawlerRunConfig(**_cfg_kwargs)),
-                    timeout=timeout + 3)
-                _mdo = getattr(r, 'markdown', None)
-                # Preferir fit_markdown (contenido podado) → raw → string plano
-                md = (getattr(_mdo, 'fit_markdown', None)
-                      or getattr(_mdo, 'raw_markdown', None)
-                      or (_mdo if isinstance(_mdo, str) else ''))
-                return (md or '').strip()
-
-        _loop_c4 = _aio_c4.new_event_loop()
-        try:
-            md = _loop_c4.run_until_complete(_run())
-        finally:
-            _loop_c4.close()
-        if md and len(md) > 120:
-            # FASE 31.7b: post-limpieza — fuera banners/sesión/líneas solo-link
-            _limpias = []
-            for _ln in md.split('\n'):
-                _s = _ln.strip()
-                if any(_b in _s for _b in ('Skip to content', 'You signed',
-                                           'Reload](', 'Toggle navigation',
-                                           'Sign in](', 'cookies', 'Cookies')):
-                    continue
-                # línea que es SOLO un link sin texto útil
-                if _s.startswith('[') and _s.endswith(')') and _s.count('](') == 1 \
-                        and len(_s.split('](')[0]) <= 4:
-                    continue
-                _limpias.append(_ln)
-            md = '\n'.join(_limpias).strip()
-            logger.info(f"🕷️ FASE 31.7 CRAWL4AI: {url[:60]} → {len(md)} chars markdown")
-            return md[:max_chars]
-    except ImportError:
-        logger.debug("crawl4ai no instalado — probando trafilatura")
-    except Exception as _e_c4:
-        logger.debug(f"crawl4ai {url[:50]}: {_e_c4}")
-    # ── Motor 2 (PRIMARIO real): TRAFILATURA — FASE 31.7c ──
-    # Descarga con requests (UA Chrome, evita bloqueos del fetcher nativo)
-    # y extrae SOLO el contenido principal como markdown.
-    try:
-        import trafilatura as _traf
-        _r_t = requests.get(url, timeout=timeout, headers={
-            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                           'AppleWebKit/537.36 (KHTML, like Gecko) '
-                           'Chrome/124.0.0.0 Safari/537.36'),
-            'Accept-Language': 'es-CL,es;q=0.9'})
-        if _r_t.status_code == 200 and _r_t.text:
-            md_t = _traf.extract(_r_t.text, output_format='markdown',
-                                 include_links=False, include_tables=True,
-                                 url=url)
-            if md_t and len(md_t) > 120:
-                logger.info(f"🕷️ FASE 31.7c TRAFILATURA: {url[:60]} → "
-                            f"{len(md_t)} chars markdown limpio")
-                return md_t.strip()[:max_chars]
-    except ImportError:
-        logger.debug("trafilatura no instalada — usando fallback BeautifulSoup")
-    except Exception as _e_tf:
-        logger.debug(f"trafilatura {url[:50]}: {_e_tf}")
-    # ── Fallback: requests + BeautifulSoup (pseudo-markdown) ──
-    try:
-        from bs4 import BeautifulSoup as _BS4f
-        r = requests.get(url, timeout=timeout, headers={
-            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                           'AppleWebKit/537.36 (KHTML, like Gecko) '
-                           'Chrome/124.0.0.0 Safari/537.36'),
-            'Accept-Language': 'es-CL,es;q=0.9'})
-        if r.status_code != 200:
-            return ''
-        soup = _BS4f(r.text, 'html.parser')
-        for tag in soup(['script', 'style', 'nav', 'header', 'footer',
-                         'aside', 'form', 'iframe', 'noscript']):
-            tag.decompose()
-        partes = []
-        for el in soup.find_all(['h1', 'h2', 'h3', 'p', 'li'])[:180]:
-            t = el.get_text(' ', strip=True)
-            if len(t) < 25:
-                continue
-            if el.name in ('h1', 'h2', 'h3'):
-                partes.append('#' * int(el.name[1]) + ' ' + t)
-            elif el.name == 'li':
-                partes.append('- ' + t)
-            else:
-                partes.append(t)
-        md = '\n\n'.join(partes).strip()
-        return md[:max_chars] if len(md) > 120 else ''
-    except Exception as _e_bs:
-        logger.debug(f"fallback BS4 {url[:50]}: {_e_bs}")
-        return ''
-
-
 def _scrape_ddg_sync(q: str, n: int = 5) -> list:
     """Scraping DuckDuckGo HTML sincrónico para uso en ThreadPoolExecutor."""
     try:
@@ -25380,301 +21444,14 @@ def _scrape_ddg_sync(q: str, n: int = 5) -> list:
             if not a_tag:
                 continue
             titulo = a_tag.get_text(strip=True)
-            # FASE 31.9: extraer también la URL real (decodificando uddg de DDG)
-            href = a_tag.get("href", "")
-            if "uddg=" in href or href.startswith("/l/"):
-                _qs = _up.parse_qs(_up.urlparse(href).query)
-                href = (_qs.get("uddg", [""])[0] or _qs.get("u", [""])[0] or href)
             snip_tag = div.select_one(".result__snippet")
             snippet = snip_tag.get_text(strip=True) if snip_tag else ""
             if titulo and len(titulo) > 3:
-                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350],
-                                   "url": href[:300]})
+                resultados.append({"titulo": titulo[:120], "snippet": snippet[:350]})
         return resultados
     except Exception as _e:
         logger.debug(f"DDG sync scrape: {_e}")
         return []
-
-
-# ═══════════════════════════════════════════════════════════════════
-# FASE 31.9 — BÚSQUEDA WEB PROFUNDA + RESPALDO EN CONOCIMIENTOS
-# (1) Cuando RAG + historial NO tienen la respuesta → buscar en Internet
-#     (DuckDuckGo + Trafilatura markdown) para que el usuario SIEMPRE
-#     reciba una respuesta completa.
-# (2) Si el usuario marca "Útil" una respuesta web → se respalda como
-#     markdown en rag_chunks (con embedding) y pasa a ser conocimiento
-#     permanente del bot.
-# (3) Archivos compartidos → referencia markdown (nombre, descripción,
-#     quién y cuándo) consultable por el RAG.
-# ═══════════════════════════════════════════════════════════════════
-def _consulta_requiere_web(pregunta: str) -> bool:
-    """FASE 31.10 (URGENTE Germán): detecta si la consulta del usuario
-    necesita información EN TIEMPO REAL de Internet (eventos en curso,
-    resultados, noticias, precios, o el usuario pide explícitamente buscar
-    en la web). El conocimiento interno del LLM llega hasta 2024 y NO puede
-    responder esto sin conectarse."""
-    try:
-        import re as _re10b
-        p = (pregunta or '').lower()
-        anio_actual = _ahora_chile().year
-        # a) Menciona el año actual o uno futuro → evento en curso
-        for m in _re10b.findall(r'\b(20\d{2})\b', p):
-            if int(m) >= anio_actual:
-                return True
-        # b) Señales léxicas de actualidad / petición explícita de web
-        _CLAVES = (
-            'hoy', 'ayer', 'ahora mismo', 'esta semana', 'este mes',
-            'este año', 'este ano', 'éste año', 'actual', 'reciente',
-            'última hora', 'ultima hora', 'últimas noticias', 'ultimas noticias',
-            'noticias de', 'en vivo', 'en curso', 'resultados de', 'resultado del',
-            'marcador', 'clasificad', 'clasificaron', 'avanzaron', 'avanzó', 'avanzo',
-            'eliminad', 'quién ganó', 'quien gano', 'quién va ganando', 'quien va ganando',
-            'precio del', 'precio de', 'cuánto vale', 'cuanto vale', 'cuánto cuesta',
-            'cuanto cuesta', 'valor del dólar', 'valor del dolar', 'cotización',
-            'cotizacion', 'tipo de cambio', 'busca en internet', 'buscar en internet',
-            'busca en google', 'buscar en google', 'busca en la web', 'consulta en internet',
-            'consultar en internet', 'información actualizada', 'informacion actualizada',
-        )
-        return any(k in p for k in _CLAVES)
-    except Exception:
-        return False
-
-
-def _generar_queries_busqueda(pregunta: str) -> list:
-    """FASE 31.10 (pedido de Germán): construye AUTOMÁTICAMENTE variantes de
-    búsqueda optimizadas (PROMPTS) a partir de la consulta natural del
-    usuario, para que el LOOP de búsqueda web sea eficiente y completo:
-      1) keywords + año actual (si la consulta es de tiempo real)
-      2) keywords puros (sin ruido conversacional ni stopwords)
-      3) consulta limpia original (respaldo)
-    Devuelve hasta 3 variantes ordenadas de mayor a menor precisión."""
-    import re as _re10
-    p = (pregunta or '').strip()
-    # 1. Quitar ruido conversacional dirigido al bot
-    _RUIDO = (r'\b(bot|hola|por favor|porfavor|debes|deberías|deberias|dime|dame|'
-              r'cuéntame|cuentame|quisiera saber|quiero saber|me puedes|puedes|'
-              r'podrías|podrias|necesito que|ayúdame con|ayudame con|'
-              r'busca(?:r)? en (?:internet|google|la web)|'
-              r'consulta(?:r)? en (?:internet|google|la web)|'
-              r'esfuérzate|esfuerzate|la información está disponible|'
-              r'la informacion esta disponible)\b')
-    limpio = _re10.sub(_RUIDO, ' ', p, flags=_re10.IGNORECASE)
-    limpio = _re10.sub(r'[¿?¡!"\']', ' ', limpio)
-    limpio = _re10.sub(r'\s+', ' ', limpio).strip()
-    # 2. Keywords: quitar stopwords que ensucian los buscadores
-    _STOP = {'cuales', 'cuáles', 'cual', 'cuál', 'son', 'los', 'las', 'que',
-             'qué', 'del', 'de', 'la', 'el', 'en', 'a', 'y', 'o', 'u', 'un',
-             'una', 'este', 'esta', 'éste', 'ésta', 'han', 'ha', 'se', 'al',
-             'para', 'por', 'con', 'como', 'cómo', 'es', 'fue', 'su', 'sus',
-             'lo', 'le', 'les', 'ya', 'más', 'mas', 'año', 'ano'}
-    palabras = [w for w in limpio.split() if w.lower() not in _STOP]
-    kw = ' '.join(palabras)[:90].strip()
-    ahora = _ahora_chile()
-    variantes = []
-    if kw:
-        if _consulta_requiere_web(p) and str(ahora.year) not in kw:
-            variantes.append(f"{kw} {ahora.year}")
-        variantes.append(kw)
-    if limpio and limpio[:90].lower() not in [v.lower() for v in variantes]:
-        variantes.append(limpio[:90])
-    if not variantes:
-        variantes = [p[:90] or 'noticias Chile']
-    # Deduplicar conservando el orden de precisión
-    vistos, salida = set(), []
-    for v in variantes:
-        if v.lower() not in vistos:
-            vistos.add(v.lower())
-            salida.append(v)
-    return salida[:3]
-
-
-def _busqueda_web_profunda(query: str, max_paginas: int = 3) -> dict:
-    """FASE 31.10 (pedido de Germán): motor web con PROMPTS y LOOPS
-    automáticos construidos desde la consulta del usuario.
-      LOOP 1: variantes de búsqueda (de mayor a menor precisión) →
-      LOOP 2: resultados DDG de cada variante → Trafilatura (markdown
-      limpio), exigiendo DOMINIOS DISTINTOS para diversidad de fuentes,
-      hasta reunir max_paginas fuentes con contenido real.
-    Respaldo: snippets DDG si ninguna página entrega contenido.
-    Devuelve {'items': [(markdown, 'WEB-LIVE:dominio')], 'urls': [...],
-    'markdown': str_completo} o items vacíos si no hay red/resultados."""
-    out = {'items': [], 'urls': [], 'markdown': ''}
-    try:
-        import urllib.parse as _up9
-        variantes = _generar_queries_busqueda(query)
-        partes_md, res_todos, dominios_vistos = [], [], set()
-        for _var in variantes:                      # ── LOOP de variantes ──
-            if len(out['items']) >= max_paginas:
-                break                               # objetivo cumplido
-            res = _scrape_ddg_sync(_var, n=5) or []
-            res_todos.extend(res)
-            for r in res:                           # ── LOOP de resultados ──
-                if len(out['items']) >= max_paginas:
-                    break
-                _u = r.get('url', '')
-                if not _u.startswith('http') or _u in out['urls']:
-                    continue
-                _dom = _up9.urlparse(_u).netloc.replace('www.', '')[:40]
-                if _dom in dominios_vistos:
-                    continue                        # diversidad de fuentes
-                md = _crawl4ai_markdown(_u, max_chars=2600, timeout=9)
-                if md and len(md) > 200:
-                    dominios_vistos.add(_dom)
-                    out['items'].append((md, f"WEB-LIVE:{_dom}"))
-                    out['urls'].append(_u)
-                    partes_md.append(f"### {r.get('titulo','')[:90]}\n"
-                                     f"Fuente: {_u}\n\n{md}")
-        # respaldo: si ninguna página dio contenido, usar los snippets DDG
-        if not out['items']:
-            _snips = "\n".join(f"- {r['titulo']}: {r['snippet']}"
-                                for r in res_todos[:6] if r.get('snippet'))
-            if len(_snips) > 120:
-                out['items'].append((_snips, "WEB-LIVE:duckduckgo"))
-                partes_md.append(_snips)
-        out['markdown'] = "\n\n".join(partes_md)[:9000]
-        if out['items']:
-            logger.info(f"🌐 FASE 31.10 WEB: {len(out['items'])} fuentes con "
-                        f"{len(variantes)} variantes para '{query[:50]}'")
-    except Exception as e:
-        logger.debug(f"web profunda: {e}")
-    return out
-
-
-def _guardar_web_en_rag(pregunta: str, respuesta: str, web_md: str,
-                        urls: list) -> int:
-    """FASE 31.9: transforma una respuesta web validada como "Útil" en
-    conocimiento PERMANENTE: documento markdown → chunks con embedding en
-    rag_chunks. La próxima vez el bot responde desde su propia base."""
-    try:
-        from datetime import datetime as _dt9
-        _fecha = _dt9.now().strftime('%Y-%m-%d')
-        _titulo = ' '.join(pregunta.split()[:8])[:70]
-        source = f"WEB:{_titulo} ({_fecha})"
-        doc_md = (f"# {pregunta.strip()[:200]}\n\n"
-                  f"*Conocimiento validado por la comunidad el {_fecha} "
-                  f"(botón Útil) — origen: búsqueda web en tiempo real.*\n\n"
-                  f"## Respuesta validada\n\n{(respuesta or '').strip()}\n\n"
-                  f"## Contenido de las fuentes\n\n{(web_md or '').strip()}\n\n"
-                  f"## Fuentes\n" + "\n".join(f"- {u}" for u in (urls or [])[:4]))
-        # chunks de ~900 chars (máx 6) con solape ligero
-        chunks, _i = [], 0
-        while _i < len(doc_md) and len(chunks) < 6:
-            chunks.append(doc_md[_i:_i + 900])
-            _i += 820
-        _kw = ' '.join(sorted({w.lower() for w in pregunta.split()
-                               if len(w) >= 4}))[:300]
-        conn = get_db_connection()
-        c = conn.cursor()
-        creados = 0
-        for idx, ch in enumerate(chunks):
-            metadata = json.dumps({'tipo': 'web_util', 'fecha': _fecha,
-                                   'urls': (urls or [])[:4],
-                                   'chunk_index': idx,
-                                   'total_chunks': len(chunks)})
-            if DATABASE_URL:
-                emb = generar_embedding_gemini(ch, tipo='RETRIEVAL_DOCUMENT')
-                if emb:
-                    try:
-                        c.execute("""INSERT INTO rag_chunks
-                                     (source, chunk_text, metadata, keywords, embedding)
-                                     VALUES (%s, %s, %s, %s, %s::vector)""",
-                                  (source, ch, metadata, _kw,
-                                   embedding_to_pgvector(emb)))
-                    except Exception:
-                        conn.rollback()
-                        c.execute("""INSERT INTO rag_chunks
-                                     (source, chunk_text, metadata, keywords)
-                                     VALUES (%s, %s, %s, %s)""",
-                                  (source, ch, metadata, _kw))
-                else:
-                    c.execute("""INSERT INTO rag_chunks
-                                 (source, chunk_text, metadata, keywords)
-                                 VALUES (%s, %s, %s, %s)""",
-                              (source, ch, metadata, _kw))
-            else:
-                c.execute("""INSERT INTO rag_chunks
-                             (source, chunk_text, metadata, keywords)
-                             VALUES (?, ?, ?, ?)""",
-                          (source, ch, metadata, _kw))
-            creados += 1
-        conn.commit()
-        conn.close()
-        logger.info(f"💾 FASE 31.9 RESPALDO WEB→RAG: '{source}' "
-                    f"({creados} chunks markdown)")
-        return creados
-    except Exception as e:
-        logger.error(f"guardar web en rag: {e}")
-        return 0
-
-
-async def registrar_archivo_compartido(update, context):
-    """FASE 31.9: cuando un usuario comparte un archivo, NO se respalda el
-    archivo — se registra una REFERENCIA markdown (nombre, descripción,
-    quién y fecha) consultable por el RAG: "¿quién compartió X?"."""
-    try:
-        m = update.effective_message
-        doc = m.document if m else None
-        if not doc or not doc.file_name:
-            return
-        filename = doc.file_name
-        # Los PDF en privado ya tienen su propio flujo de indexación completa
-        if (update.effective_chat and update.effective_chat.type == 'private'
-                and filename.lower().endswith('.pdf')):
-            return
-        u = update.effective_user
-        quien = (f"{u.first_name or ''} {u.last_name or ''}".strip()
-                 or (u.username or 'desconocido')) if u else 'desconocido'
-        from datetime import datetime as _dtA
-        fecha = _dtA.now().strftime('%d-%m-%Y %H:%M')
-        descripcion = (m.caption or '').strip() or 'sin descripción'
-        ref_md = (f"## Archivo compartido: {filename}\n"
-                  f"- **Descripción del usuario**: {descripcion[:500]}\n"
-                  f"- **Compartido por**: {quien}\n"
-                  f"- **Fecha**: {fecha}\n"
-                  f"- **Formato**: {(filename.rsplit('.', 1)[-1] if '.' in filename else '?').upper()}")
-        _kw = ' '.join(sorted({w.lower() for w in
-                               f"{filename.replace('.', ' ').replace('_', ' ').replace('-', ' ')} {descripcion}".split()
-                               if len(w) >= 4}))[:300]
-        metadata = json.dumps({'tipo': 'referencia_archivo',
-                               'filename': filename, 'usuario': quien,
-                               'fecha': fecha})
-
-        def _insertar_ref():
-            conn = get_db_connection()
-            c = conn.cursor()
-            source = "REF:archivos compartidos por la comunidad"
-            if DATABASE_URL:
-                emb = generar_embedding_gemini(ref_md, tipo='RETRIEVAL_DOCUMENT')
-                if emb:
-                    try:
-                        c.execute("""INSERT INTO rag_chunks
-                                     (source, chunk_text, metadata, keywords, embedding)
-                                     VALUES (%s, %s, %s, %s, %s::vector)""",
-                                  (source, ref_md, metadata, _kw,
-                                   embedding_to_pgvector(emb)))
-                    except Exception:
-                        conn.rollback()
-                        c.execute("""INSERT INTO rag_chunks
-                                     (source, chunk_text, metadata, keywords)
-                                     VALUES (%s, %s, %s, %s)""",
-                                  (source, ref_md, metadata, _kw))
-                else:
-                    c.execute("""INSERT INTO rag_chunks
-                                 (source, chunk_text, metadata, keywords)
-                                 VALUES (%s, %s, %s, %s)""",
-                              (source, ref_md, metadata, _kw))
-            else:
-                c.execute("""INSERT INTO rag_chunks
-                             (source, chunk_text, metadata, keywords)
-                             VALUES (?, ?, ?, ?)""",
-                          (source, ref_md, metadata, _kw))
-            conn.commit()
-            conn.close()
-
-        await asyncio.to_thread(_insertar_ref)
-        logger.info(f"📎 FASE 31.9 REFERENCIA: '{filename}' de {quien} registrada")
-    except Exception as e:
-        logger.debug(f"registrar archivo compartido: {e}")
 
 
 def busqueda_multiagente_paralela(query: str, *, limit_rag: int = 20,
@@ -26625,53 +22402,48 @@ _FASE5_FRASES_DOMINGO = [
     "⚓ Después del descanso, el viento siempre vuelve a las velas.",
 ]
 
-# Curiosidades para el mensaje de mediodía.
-# FASE 31: ampliado de 14 → 34 y diversificado (naval, economía, ciencia,
-# historia universal, tecnología, psicología, liderazgo, biografías) para
-# reflejar la amplitud de la biblioteca de 280+ libros. Cuando el RAG está
-# disponible, enviar_curiosidad_mediodia PREFIERE extraer un dato real de un
-# libro; esta lista es el fallback siempre-funcional.
+# Curiosidades histórico-navales y económicas para el mensaje de mediodía
 _FASE5_CURIOSIDADES = [
-    # -- Naval / historico chileno --
     "🌊 SABÍAS QUE... la Armada de Chile es la 4ta más antigua de América (1817), fundada por Manuel Blanco Encalada.",
-    "⚓ DATO HISTÓRICO: el combate naval de Iquique (21 mayo 1879) inmortalizó el heroísmo de Arturo Prat.",
-    "🚢 DATO CURIOSO: el Buque Escuela Esmeralda recorre más de 60.000 millas náuticas en cada crucero anual de instrucción.",
-    "⛵ NAVAL: Bernardo O'Higgins ordenó la creación de la Primera Escuadra Nacional el 9 de octubre de 1818.",
-    "⚓ NAVAL: el escudo de la Armada incluye un cóndor, símbolo del territorio nacional, posado sobre un ancla.",
-    "🌊 DATO CURIOSO: el hundimiento de la Esmeralda en 1879 marcó el inicio del heroísmo naval chileno.",
-    # -- Economia / finanzas --
-    "💰 CURIOSIDAD ECONÓMICA: Chile produce cerca del 27% del cobre mundial, siendo el mayor productor del planeta.",
+    "⚓ DATO HISTÓRICO: el combate naval de Iquique (21 mayo 1879) inspiró la frase \"al abordaje, muchachos\" de Arturo Prat.",
+    "💰 CURIOSIDAD ECONÓMICA: Chile produce el 27% del cobre mundial, lo que lo hace el mayor productor del planeta.",
     "📊 SABÍAS QUE... la UF (Unidad de Fomento) fue creada en 1967 para proteger el ahorro de la inflación.",
-    "💵 ECONOMÍA: el peso chileno se introdujo en 1975, reemplazando al escudo.",
-    "📈 FINANZAS: el IPSA reúne las 30 empresas más líquidas de la Bolsa de Santiago.",
+    "🚢 DATO CURIOSO: el Buque Escuela Esmeralda recorre más de 60.000 millas náuticas en cada crucero anual de instrucción.",
+    "💵 ECONOMÍA: el peso chileno se introdujo en 1975, reemplazando al escudo. Antes existió el peso antiguo (hasta 1959).",
+    "⛵ NAVAL: Bernardo O'Higgins ordenó la creación de la Primera Escuadra Nacional el 9 de octubre de 1818.",
+    "📈 FINANZAS: el IPSA (Índice de Precios Selectivo de Acciones) reúne las 30 empresas más líquidas de la Bolsa de Santiago.",
+    "🌎 SABÍAS QUE... Chile tiene la costa continental más larga de Sudamérica: 4.270 km de Arica a Magallanes.",
     "🪙 HISTORIA MONETARIA: el primer billete chileno se emitió en 1840 por el Banco de Arcos y Cía.",
-    "💼 EMPRENDIMIENTO: en Chile hay más de 1,2 millones de PYMEs que generan cerca del 65% del empleo formal.",
+    "⚓ NAVAL: el escudo de la Armada incluye un cóndor, símbolo del territorio nacional, posado sobre un ancla.",
+    "💼 EMPRENDIMIENTO: en Chile hay más de 1,2 millones de PYMEs que generan el 65% del empleo formal.",
     "📊 SABÍAS QUE... los fondos de AFP en Chile administran cerca de USD 170.000 millones, ~50% del PIB.",
-    "🧠 FINANZAS CONDUCTUALES: el \"sesgo de aversión a la pérdida\" hace que perder $100 duela más que la alegría de ganar $100.",
-    "💡 INVERSIÓN: la \"regla del 72\" estima en cuántos años se duplica una inversión: 72 dividido por la tasa anual de retorno.",
-    "📉 DATO: la inflación del 10% anual reduce a la mitad el poder de compra del dinero en poco más de 7 años.",
-    # -- Ciencia / naturaleza --
-    "🔬 CIENCIA: el cuerpo humano tiene cerca de 37 billones de células, cada una con instrucciones para cooperar con las demás.",
-    "🌌 ASTRONOMÍA: la luz del Sol tarda unos 8 minutos y 20 segundos en llegar a la Tierra.",
-    "🧬 BIOLOGÍA: compartimos cerca del 60% de nuestros genes con un plátano — la vida usa un lenguaje químico común.",
-    "🌎 GEOGRAFÍA: Chile tiene la costa continental más larga de Sudamérica: unos 4.270 km de Arica a Magallanes.",
-    "🧊 NATURALEZA: la Antártica chilena concentra reservas de agua dulce equivalentes a décadas de consumo mundial.",
-    # -- Historia universal --
-    "🏛️ HISTORIA: la Biblioteca de Alejandría buscó reunir TODO el conocimiento humano; su pérdida retrasó siglos a la ciencia.",
-    "📜 HISTORIA: la imprenta de Gutenberg (1440) democratizó el saber y encendió el Renacimiento europeo.",
-    "🗺️ HISTORIA: Magallanes zarpó con 5 naves en 1519; solo una completó la primera vuelta al mundo tres años después.",
-    "⚔️ ESTRATEGIA: \"El arte de la guerra\" de Sun Tzu, escrito hace 2.500 años, sigue enseñándose en escuelas de negocios.",
-    # -- Tecnologia / innovacion --
-    "💻 TECNOLOGÍA: el primer \"bug\" informático (1947) fue literalmente una polilla atrapada en un relé de computadora.",
-    "🚀 INNOVACIÓN: Internet nació como ARPANET en 1969 con solo 4 computadoras conectadas.",
-    "🤖 IA: el término \"inteligencia artificial\" se acuñó en la conferencia de Dartmouth en 1956.",
-    "📱 DATO: hoy un smartphone tiene más poder de cómputo que toda la NASA cuando llevó al hombre a la Luna.",
-    # -- Liderazgo / psicologia / habitos --
-    "🎯 HÁBITOS: se estima que cerca del 40% de nuestras acciones diarias son hábitos, no decisiones conscientes.",
-    "🧠 PSICOLOGÍA: la \"regla de las 10.000 horas\" popularizó la idea de que la maestría exige práctica deliberada sostenida.",
-    "👥 LIDERAZGO: los grandes líderes escuchan más de lo que hablan — la empatía precede a la influencia.",
-    "⏳ PRODUCTIVIDAD: el \"principio de Pareto\" sugiere que el 80% de los resultados proviene del 20% de los esfuerzos.",
-    "🌱 CRECIMIENTO: la \"mentalidad de crecimiento\" de Carol Dweck muestra que el talento se cultiva, no solo se hereda.",
+    "🌊 DATO CURIOSO: el hundimiento de la Esmeralda en 1879 marcó el inicio del heroísmo naval chileno.",
+    "🧠 PSICOLOGÍA ECONÓMICA: según Kahneman, el dolor de perder $100 se siente el doble que el placer de ganarlos — por eso vendemos acciones ganadoras muy pronto.",
+    "⚔️ ESTRATEGIA: Sun Tzu escribió hace 2.500 años que \"la suprema excelencia es vencer sin combatir\" — hoy es la base de la negociación moderna.",
+    "🚢 NAVAL MUNDIAL: el Canal de Panamá ahorra 13.000 km de navegación entre Nueva York y San Francisco — antes se rodeaba el Cabo de Hornos chileno.",
+    "💡 MANAGEMENT: Peter Drucker acuñó \"lo que no se mide, no se gestiona\" — la frase más citada en directorios del mundo.",
+    "📈 INTERÉS COMPUESTO: $100.000 invertidos al 10% anual se convierten en $1.744.940 en 30 años. Einstein lo llamó \"la octava maravilla\".",
+    "🌊 GEOGRAFÍA: la fosa de Atacama alcanza 8.065 m de profundidad — si metieras el Everest, aún faltarían casi 800 m para asomar.",
+    "🤝 NEGOCIACIÓN: el ex-negociador del FBI Chris Voss recomienda la \"empatía táctica\": repetir las últimas 3 palabras del otro multiplica la cooperación.",
+    "⚓ HISTORIA: el piloto Pardo rescató en 1916 a los 22 náufragos de Shackleton en la Antártica con la escampavía Yelcho — hazaña naval chilena mundial.",
+    "💰 HISTORIA MONETARIA: el papel moneda nació en China en el siglo VII; Marco Polo lo describió y en Europa nadie le creyó.",
+    "🧭 LIDERAZGO: los equipos de alto rendimiento comparten un rasgo medible según Google (Proyecto Aristóteles): la seguridad psicológica.",
+    "📊 SABÍAS QUE... el término \"economía\" viene del griego oikonomía: administración de la casa. Aristóteles ya la estudiaba en el 350 a.C.",
+    "🚀 INNOVACIÓN: Kodak inventó la cámara digital en 1975... y la guardó en un cajón por proteger el negocio del rollo. Quebró en 2012.",
+    "🏛️ ESTOICISMO: Marco Aurelio, el hombre más poderoso del mundo, escribía cada noche recordatorios de humildad — hoy son el best-seller \"Meditaciones\".",
+    "💵 SABÍAS QUE... Warren Buffett compró su primera acción a los 11 años y aún se arrepiente de haber \"empezado tarde\".",
+    "🌎 COMERCIO: el 90% del comercio mundial viaja por mar — sin marinos mercantes, los supermercados quedarían vacíos en semanas.",
+    "🧠 HÁBITOS: según James Clear, mejorar 1% cada día te hace 37 veces mejor en un año — la matemática de los hábitos atómicos.",
+    "📉 CRISIS: en la hiperinflación alemana de 1923 los precios se duplicaban cada 3,7 días; la gente cobraba dos veces al día para alcanzar a comprar.",
+    "⚓ NAVAL: la Escuela Naval Arturo Prat (1818) es una de las academias navales más antiguas del continente americano.",
+    "💼 PARETO: el 80% de tus resultados proviene del 20% de tus acciones — identificar ese 20% es la esencia de la productividad.",
+    "🔬 CIENCIA: el GPS debe corregir la relatividad de Einstein a diario; sin ese ajuste, acumularía 10 km de error por día.",
+    "🏦 BANCA: el banco más antiguo del mundo aún operativo es el Monte dei Paschi di Siena (Italia, 1472) — 20 años antes de la llegada de Colón a América.",
+    "📖 LECTURA: los CEOs de Fortune 500 leen en promedio 4-5 libros al mes; el estadounidense promedio, menos de 1 al año.",
+    "🌐 SABÍAS QUE... el estrecho de Magallanes fue la principal ruta interoceánica del mundo por casi 400 años, hasta el Canal de Panamá (1914).",
+    "💳 FINANZAS CONDUCTUALES: pagar en efectivo activa las mismas zonas cerebrales que el dolor físico — por eso con tarjeta gastamos hasta 30% más.",
+    "🎯 METAS: un estudio de Harvard mostró que el 3% que escribe sus metas gana, décadas después, más que el 97% restante combinado.",
+    "⚡ ENERGÍA: el desierto de Atacama tiene la mayor radiación solar del planeta — Chile podría exportar energía al mundo vía hidrógeno verde.",
 ]
 
 # Tips económicos rotativos para el insight de tarde
@@ -26683,6 +22455,13 @@ _FASE5_TIPS = [
     "📊 TIP APV: aporta voluntariamente al APV régimen A — recuperas el 15% como bonificación fiscal directa.",
     "🛡️ TIP SEGUROS: revisa anualmente tus pólizas. Cambian las coberturas y las primas, y casi siempre puedes mejorar.",
     "💳 TIP CRÉDITO: si tienes deuda con tasa >20%, prioriza pagarla antes de invertir — ningún instrumento te paga eso.",
+    "🎯 TIP PRODUCTIVIDAD: la regla de los 2 minutos — si una tarea toma menos de 2 minutos, hazla AHORA; encadenarla a \"después\" cuesta el triple.",
+    "🤝 TIP NETWORKING: da antes de pedir. Comparte un contacto, un dato o una oportunidad — la reciprocidad es la ley más poderosa de las redes.",
+    "📖 TIP APRENDIZAJE: enseñar lo que aprendes (técnica Feynman) fija el conocimiento 3 veces más que releer.",
+    "💼 TIP CARRERA: negocia tu sueldo SIEMPRE con datos de mercado; el primer número que se dice ancla toda la conversación.",
+    "🧠 TIP DECISIONES: para decisiones importantes usa la regla 10/10/10 — ¿cómo lo verás en 10 minutos, 10 meses y 10 años?",
+    "💰 TIP INVERSIÓN: el tiempo EN el mercado gana al timing DEL mercado; perderte los 10 mejores días de una década reduce tu retorno a la mitad.",
+    "📋 TIP REUNIONES: toda reunión sin agenda escrita y sin dueño de acuerdos es un ladrón de tiempo disfrazado de trabajo.",
 ]
 
 
@@ -26741,121 +22520,31 @@ async def enviar_saludo_matutino(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ FASE 5 saludo matutino error: {e}")
 
 
-def _curiosidad_desde_rag_sync():
-    """FASE 31: Destila un dato curioso REAL a partir de un libro aleatorio de
-    la biblioteca (rag_chunks). Devuelve un string listo para publicar o None
-    si algo falla (para que el llamador use el fallback estático).
-
-    Es SÍNCRONA a propósito: se ejecuta dentro de run_in_executor con timeout,
-    porque hace I/O de BD + llamada LLM que no deben bloquear el event loop.
-    """
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return None
-        c = conn.cursor()
-        # 1. Elegir un libro (source) aleatorio que tenga chunks sustanciosos
-        if DATABASE_URL:
-            c.execute("""
-                SELECT source, chunk_text
-                FROM rag_chunks
-                WHERE LENGTH(chunk_text) > 400
-                ORDER BY RANDOM()
-                LIMIT 1
-            """)
-        else:
-            c.execute("""
-                SELECT source, chunk_text
-                FROM rag_chunks
-                WHERE LENGTH(chunk_text) > 400
-                ORDER BY RANDOM()
-                LIMIT 1
-            """)
-        fila = c.fetchone()
-        conn.close()
-        if not fila:
-            return None
-        source = fila['source'] if DATABASE_URL else fila[0]
-        chunk = fila['chunk_text'] if DATABASE_URL else fila[1]
-        if not chunk or len(chunk) < 200:
-            return None
-
-        # 2. Limpiar el nombre del libro para citarlo (quita prefijo "PDF:" y extensión)
-        libro = str(source or "").replace("PDF:", "").replace(".pdf", "").strip()
-        if not libro:
-            libro = "la biblioteca de la Cofradía"
-
-        # 3. Pedir a Groq que DESTILE un dato curioso fiel al fragmento
-        prompt = (
-            "Eres un divulgador experto. A partir del SIGUIENTE FRAGMENTO de un "
-            "libro, redacta UN (1) dato curioso, interesante y verídico en "
-            "español, de máximo 45 palabras, apto para un grupo profesional.\n\n"
-            "REGLAS ESTRICTAS:\n"
-            "- Básate SOLO en la información del fragmento. NO inventes cifras, "
-            "fechas ni nombres que no estén.\n"
-            "- Si el fragmento no contiene ningún dato interesante y concreto, "
-            "responde EXACTAMENTE: SIN_DATO\n"
-            "- No uses comillas ni cites textualmente; parafrasea con tus palabras.\n"
-            "- Empieza directamente con el dato (sin '¿Sabías que...' ni preámbulos).\n\n"
-            f"FRAGMENTO:\n{chunk[:1500]}"
-        )
-        respuesta = llamar_groq(prompt, max_tokens=120, temperature=0.3)
-        if not respuesta:
-            return None
-        respuesta = respuesta.strip().strip('"').strip()
-        # Validaciones anti-alucinación / anti-basura
-        if "SIN_DATO" in respuesta.upper() or len(respuesta) < 25:
-            return None
-        if len(respuesta) > 400:  # demasiado largo = probablemente divagó
-            respuesta = respuesta[:400].rsplit(" ", 1)[0] + "…"
-
-        return f"📚 SABÍAS QUE... {respuesta}\n\n🔎 Fuente: «{libro}» (biblioteca de la Cofradía)"
-    except Exception as e:
-        logger.debug(f"_curiosidad_desde_rag_sync fallo: {e}")
-        return None
-
-
 async def enviar_curiosidad_mediodia(context: ContextTypes.DEFAULT_TYPE):
-    """FASE 5 + 31 — Curiosidad de mediodía (13:00).
-    Días PARES (del año): intenta destilar un dato REAL de un libro aleatorio
-    de la biblioteca de 280+ libros (con timeout y fallback).
-    Días IMPARES o si el RAG falla: usa la lista estática ampliada (34 datos),
-    rotando de forma determinística por día del año."""
+    """FASE 5 — Curiosidad de mediodía (13:00) con dato histórico-naval o económico.
+    Rotación: 14 curiosidades distintas, secuencial por día del año (no aleatoria)."""
     if not COFRADIA_GROUP_ID:
         return
     try:
         ahora_cl = _ahora_chile()
-        yday = ahora_cl.timetuple().tm_yday
-        curiosidad = None
-
-        # Días pares → intentar biblioteca RAG (fuente de variedad casi infinita)
-        if yday % 2 == 0:
+        # Rotacion deterministica por dia del año
+        idx = (ahora_cl.timetuple().tm_yday) % len(_FASE5_CURIOSIDADES)
+        curiosidad = _FASE5_CURIOSIDADES[idx]
+        # FASE 31.1: en días IMPARES el dato sale de la BIBLIOTECA RAG (280+ libros).
+        # Si por cualquier razón falla, se usa la lista clásica sin interrumpir.
+        if ahora_cl.timetuple().tm_yday % 2 == 1:
             try:
-                loop = asyncio.get_event_loop()
-                curiosidad = await asyncio.wait_for(
-                    loop.run_in_executor(None, _curiosidad_desde_rag_sync),
-                    timeout=15.0
-                )
-                if curiosidad:
-                    logger.info("🍽️ FASE 31 curiosidad mediodia: dato extraído de biblioteca RAG")
-            except asyncio.TimeoutError:
-                logger.warning("🍽️ Curiosidad RAG timeout (15s), usando lista estática")
-                curiosidad = None
-            except Exception as _e_rag:
-                logger.debug(f"Curiosidad RAG error: {_e_rag}")
-                curiosidad = None
-
-        # Fallback (días impares o si RAG falló): lista estática ampliada
-        if not curiosidad:
-            idx = yday % len(_FASE5_CURIOSIDADES)
-            curiosidad = _FASE5_CURIOSIDADES[idx]
-            logger.info(f"🍽️ FASE 5 curiosidad mediodia (lista estática idx={idx})")
-
+                _cur_bib = await _curiosidad_desde_biblioteca()
+                if _cur_bib:
+                    curiosidad = _cur_bib
+            except Exception:
+                pass
         msg = f"🔔 PAUSA DE MEDIODÍA — DATO INTERESANTE\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         msg += f"{curiosidad}\n\n"
         msg += f"💬 ¿Conoces algún otro dato curioso? ¡Compártelo en el grupo!"
         await context.bot.send_message(chat_id=COFRADIA_GROUP_ID, text=msg)
+        logger.info(f"🍽️ FASE 5 curiosidad mediodia enviada (idx={idx})")
     except Exception as e:
         logger.error(f"❌ FASE 5 curiosidad mediodia error: {e}")
 
@@ -26881,111 +22570,6 @@ async def enviar_insight_tarde(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🌇 FASE 5 insight tarde enviado (idx={idx})")
     except Exception as e:
         logger.error(f"❌ FASE 5 insight tarde error: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# FASE 31 — AVISOS AUTOMÁTICOS DE VENCIMIENTO DE SUSCRIPCIÓN
-# Requisito de Germán: los usuarios NO ven /renovar en el menú; solo lo
-# conocen cuando el bot les envía el aviso previo al vencimiento, repetido
-# en varias ocasiones a medida que se acerca la fecha (30/15/7/3/1 días).
-# El manual HTML ya prometía estos avisos ("30, 15 y 7 días antes") —
-# esta función los hace realidad.
-# ═══════════════════════════════════════════════════════════════════════════
-_AVISOS_VENCIMIENTO_DIAS = (30, 15, 7, 3, 1)
-
-async def avisos_vencimiento_diario(context: ContextTypes.DEFAULT_TYPE):
-    """Job diario 10:30 Chile: DM privado a cada usuario cuya suscripción
-    vence exactamente en 30, 15, 7, 3 o 1 día(s). Urgencia creciente.
-    Excluye al OWNER y suscripciones perpetuas (>= 2099). Al finalizar,
-    envía un resumen al OWNER si hubo avisos."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            logger.error("❌ Avisos vencimiento: sin conexión a BD")
-            return
-        c = conn.cursor()
-        c.execute(
-            "SELECT user_id, first_name, fecha_expiracion FROM suscripciones "
-            "WHERE fecha_expiracion IS NOT NULL"
-        )
-        filas = c.fetchall()
-        conn.close()
-        
-        ahora = datetime.now()
-        enviados = []
-        for fila in filas:
-            try:
-                uid = fila['user_id'] if DATABASE_URL else fila[0]
-                nombre = (fila['first_name'] if DATABASE_URL else fila[1]) or 'Cofrade'
-                fexp = fila['fecha_expiracion'] if DATABASE_URL else fila[2]
-                if uid == OWNER_ID or not fexp:
-                    continue
-                if isinstance(fexp, str):
-                    try:
-                        fexp = datetime.strptime(fexp[:19], "%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        continue
-                if fexp.year >= 2099:
-                    continue  # suscripción perpetua/ilimitada
-                dias = (fexp.date() - ahora.date()).days
-                if dias not in _AVISOS_VENCIMIENTO_DIAS:
-                    continue
-                
-                fecha_str = fexp.strftime('%d/%m/%Y')
-                if dias == 30:
-                    titulo = "🔔 Aviso de renovación"
-                    cuerpo = (f"tu suscripción a Cofradía Premium vence en 30 días "
-                              f"(el {fecha_str}). Tienes tiempo de sobra, pero te lo "
-                              f"anticipamos para que lo agendes con calma.")
-                elif dias == 15:
-                    titulo = "🔔 Recordatorio de renovación"
-                    cuerpo = (f"quedan 15 días para el vencimiento de tu suscripción "
-                              f"(el {fecha_str}). Renovar toma menos de 2 minutos.")
-                elif dias == 7:
-                    titulo = "⚠️ Tu suscripción vence en 1 semana"
-                    cuerpo = (f"tu acceso a Cofradía Premium vence el {fecha_str} "
-                              f"(en 7 días). Te recomendamos renovar ahora para no "
-                              f"perder tus beneficios, historial y tarjeta profesional.")
-                elif dias == 3:
-                    titulo = "🚨 Vencimiento en 3 días"
-                    cuerpo = (f"tu suscripción vence el {fecha_str}. Si no renuevas, "
-                              f"perderás acceso a los servicios premium de la Cofradía.")
-                else:  # 1 día
-                    titulo = "🚨 ÚLTIMO AVISO — vence mañana"
-                    cuerpo = (f"tu suscripción vence MAÑANA ({fecha_str}). Renueva hoy "
-                              f"para mantener tu acceso sin interrupciones.")
-                
-                mensaje = (
-                    f"{titulo}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"Hola {nombre}, {cuerpo}\n\n"
-                    f"👉 Escribe /renovar aquí mismo para ver los planes y "
-                    f"renovar con transferencia (recibirás confirmación al instante "
-                    f"tras validar tu comprobante).\n"
-                    f"👉 /mi_cuenta para revisar el estado de tu suscripción.\n\n"
-                    f"⚓ Cofradía Premium"
-                )
-                await context.bot.send_message(chat_id=uid, text=mensaje)
-                enviados.append((nombre, uid, dias))
-                logger.info(f"🔔 Aviso vencimiento enviado a {nombre} ({uid}): {dias} días")
-            except Exception as _e_dm:
-                # Usuario bloqueó al bot o chat inexistente — continuar con el resto
-                logger.debug(f"Aviso vencimiento no entregado a {uid}: {_e_dm}")
-        
-        if enviados:
-            try:
-                resumen = "🔔 <b>Avisos de vencimiento enviados hoy</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                for nombre, uid, dias in enviados[:30]:
-                    resumen += f"• {nombre} (ID {uid}) — vence en {dias} día(s)\n"
-                if len(enviados) > 30:
-                    resumen += f"… y {len(enviados) - 30} más.\n"
-                resumen += f"\nTotal: {len(enviados)} aviso(s)."
-                await context.bot.send_message(chat_id=OWNER_ID, text=resumen, parse_mode='HTML')
-            except Exception:
-                pass
-        logger.info(f"🔔 Job avisos_vencimiento completado: {len(enviados)} enviados")
-    except Exception as e:
-        logger.error(f"❌ Error en avisos_vencimiento_diario: {e}")
 
 
 async def enviar_resumen_nocturno(context: ContextTypes.DEFAULT_TYPE):
@@ -28905,7 +24489,7 @@ async def asistir_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             
             await update.message.reply_text(f"✅ Asistencia confirmada a \"{titulo}\"\n\n📅 Te recordaremos 24h antes.")
-            otorgar_coins(user.id, 20, f'Asistir evento: {titulo}')  # FASE 31.35: user_id no existía (NameError) — los +20 coins por asistir JAMÁS se entregaban
+            otorgar_coins(user_id, 20, f'Asistir evento: {titulo}')
     except ValueError:
         await update.message.reply_text("❌ Uso: /asistir [número ID]")
     except Exception as e:
@@ -31432,12 +27016,12 @@ async def eliminar_solicitud_comando(update: Update, context: ContextTypes.DEFAU
 CATALOGO_COMANDOS_INTENCION = {
     # Búsqueda y consultas
     'buscar_profesional': 'Buscar cofrades por profesión, área o habilidad',
-    'buscar_apoyo': 'QUIÉNES de la cofradía están en búsqueda laboral/desempleados/cesantes (lista de personas, por área)',
+    'buscar_apoyo': 'Buscar cofrades en búsqueda laboral activa',
     'buscar_especialista_sec': 'Buscar especialistas registrados en la SEC',
     'buscar_ia': 'Búsqueda IA en historial y documentos del grupo',
     'buscar_web': 'Buscar información actualizada en Internet',
     'rag_consulta': 'Consultar libros, PDFs y documentos indexados',
-    'empleo': 'OFERTAS de empleo publicadas en portales externos (Computrabajo etc.) para postular',
+    'empleo': 'Buscar oportunidades de empleo',
     # Perfil y directorio
     'mi_tarjeta': 'Ver o actualizar tarjeta profesional propia',
     'directorio': 'Ver directorio completo de cofrades',
@@ -31543,8 +27127,7 @@ def llamar_groq_rapido(prompt: str, max_tokens: int = 300, temperature: float = 
             {"role": "user", "content": prompt}
         ],
         "max_tokens": max_tokens,
-        "temperature": temperature,
-        "frequency_penalty": 0.4
+        "temperature": temperature
     }
     
     try:
@@ -31690,55 +27273,6 @@ RESPONDE SOLO EL JSON, sin bloques de código:
         if not query_mejorada or len(query_mejorada.strip()) < 5:
             query_mejorada = mensaje
         
-        # ═══════════════════════════════════════════════════════════════════
-        # FASE 31.2 — GUARDIA ANTI-CORRUPCIÓN DE NOMBRES PROPIOS (CRÍTICO)
-        # Bug real detectado: el LLM reescritor transformó "libro de Milei
-        # sobre la inflación" en una consulta sobre "Martín Vizcarra... en
-        # Chile" → el RAG buscó a la persona equivocada y toda la respuesta
-        # se corrompió. Regla determinística: la reescritura DEBE conservar
-        # TODOS los nombres propios del mensaje original y NO puede
-        # introducir nombres propios nuevos. Si viola cualquiera de las dos
-        # condiciones → se descarta y se usa el mensaje original tal cual.
-        # ═══════════════════════════════════════════════════════════════════
-        try:
-            import unicodedata as _ud_np
-            def _np_norm(t):
-                t = _ud_np.normalize('NFKD', t.lower())
-                return ''.join(c for c in t if not _ud_np.combining(c))
-            _COMUNES_CAP = {'el', 'la', 'los', 'las', 'un', 'una', 'de', 'en',
-                            'y', 'o', 'que', 'como', 'cuando', 'donde', 'por',
-                            'para', 'segun', 'sobre', 'chile', 'cofradia',
-                            'bot', 'telegram', 'hola', 'gracias'}
-            def _nombres_propios(texto):
-                # Palabras capitalizadas que NO inician oración → nombres propios
-                nombres = set()
-                tokens = texto.split()
-                for i, tk in enumerate(tokens):
-                    limpio = tk.strip('¿?¡!.,;:()"\'«»')
-                    if len(limpio) < 3 or not limpio[0].isupper():
-                        continue
-                    if i == 0 or tokens[i-1].rstrip().endswith(('.', '?', '!', ':')):
-                        continue  # inicio de oración: capital no confiable
-                    if _np_norm(limpio) in _COMUNES_CAP:
-                        continue
-                    nombres.add(_np_norm(limpio))
-                return nombres
-            
-            np_orig = _nombres_propios(mensaje)
-            np_mejor = _nombres_propios(query_mejorada)
-            q_mej_norm = _np_norm(query_mejorada)
-            
-            perdidos = {n for n in np_orig if n not in q_mej_norm}
-            inventados = np_mejor - np_orig
-            if perdidos or inventados:
-                logger.warning(
-                    f"🛡️ FASE 31.2 GUARDIA NOMBRES: reescritura descartada — "
-                    f"perdidos={perdidos or '∅'} inventados={inventados or '∅'} | "
-                    f"original='{mensaje[:60]}' | corrupta='{query_mejorada[:60]}'")
-                query_mejorada = mensaje
-        except Exception as _e_np:
-            logger.debug(f"Guardia nombres propios: {_e_np}")
-        
         comando = datos.get('comando')
         if comando and comando not in CATALOGO_COMANDOS_INTENCION:
             comando = None  # Ignorar comandos inventados
@@ -31791,55 +27325,6 @@ def _intencion_default(mensaje: str, tipo: str = 'consulta') -> dict:
     }
 
 
-# FASE 31.23: mapa ejecutable a nivel módulo — whitelist del matcher
-# semántico y única fuente de verdad de comandos auto-ejecutables
-_MAPA_COMANDOS_EJECUTABLES = {
-    'buscar_profesional': 'buscar_profesional_comando',
-    'buscar_apoyo': 'buscar_apoyo_comando',
-    'buscar_especialista_sec': 'buscar_especialista_sec_comando',
-    'buscar_ia': 'buscar_ia_comando',
-    'rag_consulta': 'rag_consulta_comando',
-    'empleo': 'empleo_comando',
-    'mi_tarjeta': 'mi_tarjeta_comando',
-    'directorio': 'directorio_comando',
-    'conectar': 'conectar_comando',
-    'mi_perfil': 'mi_perfil_comando',
-    'mi_cuenta': 'mi_cuenta_comando',
-    'eventos': 'eventos_comando',
-    'anuncios': 'anuncios_comando',
-    'consultas': 'consultas_comando',
-    'consultar': 'consultar_comando',
-    'recomendar': 'recomendar_comando',
-    'publicar': 'publicar_comando',
-    'resumen': 'resumen_comando',
-    'resumen_semanal': 'resumen_semanal_comando',
-    'resumen_mes': 'resumen_mes_comando',
-    'estadisticas': 'estadisticas_comando',
-    'graficos': 'graficos_comando',
-    'top_usuarios': 'top_usuarios_comando',
-    'top10': 'top10_comando',
-    'sismos': 'sismos_comando',  # FASE 31.19
-    'indicadores': 'indicadores_comando',  # FASE 31.19
-    'clima': 'clima_comando',  # FASE 31.20
-    'economia': 'economia_comando',  # FASE 31.20
-    'dotacion': 'dotacion_comando',
-    'cumpleanos_mes': 'cumpleanos_mes_comando',
-    'generar_cv': 'generar_cv_comando',
-    'entrevista': 'entrevista_comando',
-    'analisis_linkedin': 'analisis_linkedin_comando',
-    'finanzas': 'finanzas_comando',
-    'mentor': 'mentor_comando',
-    'mi_dashboard': 'mi_dashboard_comando',
-    'agente': 'agente_networking_comando',
-    'match': 'match_networking_comando',
-    'briefing': 'briefing_networking_comando',
-    'mi_agenda': 'mi_agenda_comando',
-    'mis_tareas': 'mis_tareas_comando',
-    'mis_coins': 'mis_coins_comando',
-    'ayuda': 'ayuda',
-}
-
-
 async def ejecutar_comando_desde_intencion(
     comando: str, args: str, update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -31849,23 +27334,48 @@ async def ejecutar_comando_desde_intencion(
     El usuario NO ve ningún mensaje previo - el comando simplemente "sucede".
     """
     try:
-        # FASE 31.41: /buscar_apoyo exige área — si la pregunta natural no
-        # la trae, el bot RE-PREGUNTA y recuerda el turno pendiente (el
-        # próximo mensaje del usuario será el área; ver _pre_rutear_comando)
-        if comando == 'buscar_apoyo' and not (args or '').strip():
-            import time as _t41b
-            _SLOT_PENDIENTE[update.effective_user.id] = {
-                'cmd': 'buscar_apoyo', 'ts': _t41b.time()}
-            await update.message.reply_text(
-                "👥 ¡Claro! Tenemos cofrades en búsqueda laboral activa.\n\n"
-                "🎯 ¿En qué *área o profesión* necesitas consultar?\n"
-                "_(ej: logística, TI, finanzas, gerencia, operaciones)_\n\n"
-                "✍️ Respóndeme aquí mismo con el área y te muestro la lista.",
-                parse_mode='Markdown')
-            return True
-
         # Mapa de comandos a funciones
-        MAPA_FUNCIONES = _MAPA_COMANDOS_EJECUTABLES  # FASE 31.23
+        MAPA_FUNCIONES = {
+            'buscar_profesional': 'buscar_profesional_comando',
+            'buscar_apoyo': 'buscar_apoyo_comando',
+            'buscar_especialista_sec': 'buscar_especialista_sec_comando',
+            'buscar_ia': 'buscar_ia_comando',
+            'rag_consulta': 'rag_consulta_comando',
+            'empleo': 'empleo_comando',
+            'mi_tarjeta': 'mi_tarjeta_comando',
+            'directorio': 'directorio_comando',
+            'conectar': 'conectar_comando',
+            'mi_perfil': 'mi_perfil_comando',
+            'mi_cuenta': 'mi_cuenta_comando',
+            'eventos': 'eventos_comando',
+            'anuncios': 'anuncios_comando',
+            'consultas': 'consultas_comando',
+            'consultar': 'consultar_comando',
+            'recomendar': 'recomendar_comando',
+            'publicar': 'publicar_comando',
+            'resumen': 'resumen_comando',
+            'resumen_semanal': 'resumen_semanal_comando',
+            'resumen_mes': 'resumen_mes_comando',
+            'estadisticas': 'estadisticas_comando',
+            'graficos': 'graficos_comando',
+            'top_usuarios': 'top_usuarios_comando',
+            'top10': 'top10_comando',
+            'dotacion': 'dotacion_comando',
+            'cumpleanos_mes': 'cumpleanos_mes_comando',
+            'generar_cv': 'generar_cv_comando',
+            'entrevista': 'entrevista_comando',
+            'analisis_linkedin': 'analisis_linkedin_comando',
+            'finanzas': 'finanzas_comando',
+            'mentor': 'mentor_comando',
+            'mi_dashboard': 'mi_dashboard_comando',
+            'agente': 'agente_networking_comando',
+            'match': 'match_networking_comando',
+            'briefing': 'briefing_networking_comando',
+            'mi_agenda': 'mi_agenda_comando',
+            'mis_tareas': 'mis_tareas_comando',
+            'mis_coins': 'mis_coins_comando',
+            'ayuda': 'ayuda',
+        }
         
         nombre_func = MAPA_FUNCIONES.get(comando)
         if not nombre_func:
@@ -31878,12 +27388,7 @@ async def ejecutar_comando_desde_intencion(
             return False
         
         # Inyectar argumentos y ejecutar
-        # FASE 31.19c: normalizar args — los llamadores históricos pasan str,
-        # el auto-router pasaba lista → AttributeError silencioso en .strip()
         args_originales = context.args
-        if isinstance(args, (list, tuple)):
-            args = ' '.join(str(a) for a in args)
-        args = args or ''
         context.args = args.split() if args.strip() else []
         
         try:
@@ -36809,19 +32314,6 @@ async def buscar_web_comando(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"[{i}] {r['titulo']}\n{r['snippet']}"
                 for i, r in enumerate(res[:5], 1)
             ])
-            # FASE 31.7 CRAWL4AI: sumar el CONTENIDO REAL de las 2 mejores
-            # páginas (markdown limpio) → el resumen deja de depender solo
-            # de snippets de 400 chars y entrega datos concretos.
-            try:
-                _mds = []
-                for _r in res[:2]:
-                    _md = _crawl4ai_markdown(_r.get('url', ''), max_chars=2200, timeout=9)
-                    if _md:
-                        _mds.append(f"── {_r['titulo'][:80]} ──\n{_md}")
-                if _mds:
-                    ctx += "\n\nCONTENIDO COMPLETO DE LAS PÁGINAS (markdown):\n" + "\n\n".join(_mds)
-            except Exception as _e_enr:
-                logger.debug(f"enriquecimiento crawl4ai: {_e_enr}")
             try:
                 rg = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -37099,7 +32591,6 @@ SERVICIOS_PAGO_URLS = {
     'groq':       'https://console.groq.com/settings/billing',
     'gemini':     'https://aistudio.google.com/apikey',
     'glm':        'https://z.ai',
-    'openrouter': 'https://openrouter.ai/settings/keys',  # FASE 31.13
     'google_tts': 'https://console.cloud.google.com/billing',
     'rapidapi':   'https://rapidapi.com/developer/billing',
     'supabase':   'https://supabase.com/dashboard',
@@ -37134,7 +32625,7 @@ def consultar_saldos_apis() -> list:
                 'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
                 'saldo': f'${saldo:.2f} USD', 'deuda': 'Prepago — sin deuda',
                 'estado': estado, 'url': SERVICIOS_PAGO_URLS['deepseek'],
-                'nota': 'Único LLM pagado (4° de la cascada)'})
+                'nota': 'Único LLM pagado (último de la cascada)'})
         else:
             servicios.append({
                 'nombre': 'DeepSeek (LLM de respaldo)', 'emoji': '🧠',
@@ -37191,27 +32682,6 @@ def consultar_saldos_apis() -> list:
             'url': SERVICIOS_PAGO_URLS['glm'], 'nota': '3° de la cascada'})
     except Exception as _e31:
         logger.debug(f'Saldos: GLM {_e31}')
-
-    # ── 4b. OpenRouter (GRATIS — niveles 5°-7° + análisis de libros) ─────
-    # FASE 31.13: Nex-N2-Pro (5°), GPT-OSS-120B (6°), router automático (7°)
-    # y Nemotron 3 Super 1M ctx (/analizar_libro). Todo con una sola API key.
-    try:
-        estado = '⚪ Sin configurar'
-        if OPENROUTER_API_KEY:
-            try:
-                r = requests.get('https://openrouter.ai/api/v1/key',
-                                 headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
-                                 timeout=8)
-                estado = '🟢 Operativo' if r.status_code == 200 else f'🟡 Respuesta {r.status_code}'
-            except Exception:
-                estado = '🔴 Sin respuesta'
-        servicios.append({
-            'nombre': 'OpenRouter (LLMs gratuitos)', 'emoji': '🛰️',
-            'saldo': 'Tier free (~50 req/día)', 'deuda': '$0',
-            'estado': estado, 'url': SERVICIOS_PAGO_URLS['openrouter'],
-            'nota': 'Nex-N2 (5°) + GPT-OSS (6°) + router auto (7°) + Nemotron 1M (/analizar_libro)'})
-    except Exception as _e31:
-        logger.debug(f'Saldos: OpenRouter {_e31}')
 
     # ── 5. Google Cloud TTS (voz del bot) ────────────────────────────────
     try:
@@ -37422,6 +32892,150 @@ async def job_saldos_semanal(context):
         logger.warning(f'Job saldos semanal: {e}')
 
 
+def _titulos_biblioteca_relacionados(pregunta: str, max_titulos: int = 4) -> list:
+    """FASE 31.1: Títulos de la biblioteca cuyo nombre contiene algún término
+    de la pregunta (normalizado sin tildes). Para que MODO B pueda sugerir
+    libros reales en vez de divagar con conocimiento general."""
+    try:
+        import unicodedata as _u31b, re as _r31b
+        def _n(t):
+            t = _u31b.normalize('NFKD', (t or '').lower())
+            return ''.join(ch for ch in t if not _u31b.combining(ch))
+        stop = {'de','la','el','en','los','las','del','al','un','una','por','con','para',
+                'que','es','se','no','su','lo','como','sobre','trata','libro','libros',
+                'acerca','habla','dice','autor','tema','referente','respecto','cual'}
+        terms = [w for w in _r31b.findall(r'\b\w{4,}\b', _n(pregunta)) if w not in stop]
+        if not terms:
+            return []
+        conn = get_db_connection()
+        if not conn:
+            return []
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+        srcs = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+        conn.close()
+        encontrados = []
+        for s in srcs:
+            sn = _n(s)
+            if any(t in sn for t in terms):
+                limpio = s.replace('PDF:', '').replace('EXCEL:', '').strip()
+                limpio = _r31b.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', limpio, flags=_r31b.IGNORECASE)
+                limpio = limpio.replace('_', ' ').strip()
+                if limpio and limpio not in encontrados:
+                    encontrados.append(limpio)
+            if len(encontrados) >= max_titulos:
+                break
+        return encontrados
+    except Exception as _e:
+        logger.debug(f"_titulos_biblioteca: {_e}")
+        return []
+
+
+
+async def job_avisos_vencimiento(context):
+    """FASE 31.1: Aviso AUTOMÁTICO de renovación al usuario.
+    Corre diario (10:00 Chile). Si a una suscripción activa le quedan
+    exactamente 30, 15, 7, 3 o 1 días, envía mensaje privado con /renovar.
+    (Cumple la política: /renovar oculto del manual; el usuario lo conoce
+    solo por estos avisos previos al vencimiento). Excluye vitalicias (≥2099)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        c.execute("SELECT user_id, fecha_expiracion FROM suscripciones "
+                  "WHERE estado = 'activo' AND fecha_expiracion IS NOT NULL")
+        filas = c.fetchall()
+        conn.close()
+        hoy = _ahora_chile().date()
+        avisados = 0
+        for f in filas:
+            uid = f['user_id'] if DATABASE_URL else f[0]
+            fexp = f['fecha_expiracion'] if DATABASE_URL else f[1]
+            if not uid or not fexp or uid == OWNER_ID:
+                continue
+            try:
+                if isinstance(fexp, str):
+                    fexp_d = datetime.strptime(fexp[:10], '%Y-%m-%d').date()
+                elif hasattr(fexp, 'date'):
+                    fexp_d = fexp.date()
+                else:
+                    fexp_d = fexp
+                if fexp_d.year >= 2099:
+                    continue  # suscripción vitalicia
+                dias = (fexp_d - hoy).days
+            except Exception:
+                continue
+            if dias in (30, 15, 7, 3, 1):
+                urgencia = '🔴' if dias <= 3 else ('🟡' if dias <= 7 else '🟢')
+                try:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=(f"{urgencia} RECORDATORIO DE RENOVACIÓN\n"
+                              f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                              f"Tu suscripción a la Cofradía vence en "
+                              f"{'1 día' if dias == 1 else f'{dias} días'} "
+                              f"({fexp_d.strftime('%d-%m-%Y')}).\n\n"
+                              f"💳 Usa /renovar para continuar con todos los "
+                              f"servicios sin interrupción.\n\n"
+                              f"⚓ Cofradía de Networking"))
+                    avisados += 1
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass  # usuario bloqueó al bot
+        if avisados:
+            logger.info(f"⏰ FASE 31.1: {avisados} avisos de vencimiento enviados")
+    except Exception as e:
+        logger.warning(f"Job avisos vencimiento: {e}")
+
+
+async def _curiosidad_desde_biblioteca():
+    """FASE 31.1: Extrae un DATO CURIOSO real desde un libro aleatorio de la
+    biblioteca RAG (280+ obras). Devuelve texto listo o None si falla."""
+    try:
+        def _chunk_random():
+            conn = get_db_connection()
+            if not conn:
+                return None, None
+            c = conn.cursor()
+            c.execute("SELECT chunk_text, source FROM rag_chunks "
+                      "WHERE LENGTH(chunk_text) > 400 ORDER BY RANDOM() LIMIT 1")
+            row = c.fetchone()
+            conn.close()
+            if not row:
+                return None, None
+            tx = row['chunk_text'] if DATABASE_URL else row[0]
+            so = row['source'] if DATABASE_URL else row[1]
+            return tx, so
+        loop = asyncio.get_event_loop()
+        chunk, source = await asyncio.wait_for(
+            loop.run_in_executor(None, _chunk_random), timeout=8.0)
+        if not chunk:
+            return None
+        import re as _rcb
+        titulo = (source or 'Biblioteca Cofradía').replace('PDF:', '').replace('EXCEL:', '')
+        titulo = _rcb.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', titulo, flags=_rcb.IGNORECASE)
+        titulo = titulo.replace('_', ' ').strip()
+        prompt = (
+            "Del siguiente fragmento de un libro, extrae UN dato curioso, idea "
+            "poderosa o hecho poco conocido. Redáctalo en máximo 55 palabras, "
+            "tono divulgativo y fiel al texto (sin inventar nada que no esté). "
+            "Empieza directamente con el dato, sin preámbulos.\n\n"
+            f"FRAGMENTO:\n{chunk[:1500]}"
+        )
+        dato = await asyncio.wait_for(
+            loop.run_in_executor(None, llamar_groq, prompt, 220, 0.35), timeout=12.0)
+        if dato and len(dato.strip()) > 30:
+            dato = dato.strip().replace('*', '')
+            return (f"📚 DE NUESTRA BIBLIOTECA (280+ libros)...\n{dato}\n\n"
+                    f"📖 Fuente: \"{titulo}\" — disponible vía /rag_consulta")
+        return None
+    except Exception as _e:
+        logger.debug(f"Curiosidad biblioteca: {_e}")
+        return None
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # FASE 31-B: PRONÓSTICO DEL TIEMPO — /clima [comuna o ciudad]
 # Fuente: Open-Meteo (gratuita, sin API key, datos oficiales de modelos
@@ -37472,8 +33086,6 @@ _TEMAS_CLIMA = {
     'lluvia':   {'grad': 'linear-gradient(160deg,#0f2027 0%,#203a43 55%,#2c5364 100%)', 'acc': '#4fc3f7'},
     'nieve':    {'grad': 'linear-gradient(160deg,#274060 0%,#5c7999 55%,#cfe8ef 100%)', 'acc': '#e0f7fa'},
     'tormenta': {'grad': 'linear-gradient(160deg,#0b0b2b 0%,#3a1c71 55%,#928dab 100%)', 'acc': '#c792ea'},
-    # FASE 31.2: cielo NOCTURNO (se aplica de noche sobre sol/nublado)
-    'noche':    {'grad': 'linear-gradient(160deg,#050814 0%,#0d1b3e 50%,#1b2a5e 100%)', 'acc': '#9db4ff'},
 }
 
 
@@ -37485,1106 +33097,195 @@ def _wmo_info(codigo):
         return ('🌡️', 'Variable', 'nublado')
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FASE 31.1 — GEOCODING ROBUSTO DEL CLIMA
-# Problema reportado: "/clima santiago" y "/clima las condes" devolvían
-# "No encontré la localidad" porque dependía de UNA sola fuente externa
-# (Open-Meteo geocoding) sin fallback. Solución (estándar 3 fuentes):
-#   1) Diccionario LOCAL de ~90 comunas/ciudades chilenas (instantáneo,
-#      nunca falla, cubre el 95% de las consultas de la Cofradía).
-#   2) Open-Meteo geocoding (con filtro de país si el usuario lo indica).
-#   3) Nominatim/OpenStreetMap como respaldo.
-# NUEVO: país opcional al final → "/clima santiago chile", "/clima la reina chile".
-# ═══════════════════════════════════════════════════════════════════════════
-_CIUDADES_CHILE = {
-    # Gran Santiago (comunas)
-    'santiago': (-33.4489, -70.6693, 'Región Metropolitana'),
-    'las condes': (-33.4167, -70.5833, 'Región Metropolitana'),
-    'providencia': (-33.4314, -70.6093, 'Región Metropolitana'),
-    'vitacura': (-33.3900, -70.6000, 'Región Metropolitana'),
-    'lo barnechea': (-33.3500, -70.5180, 'Región Metropolitana'),
-    'la reina': (-33.4500, -70.5500, 'Región Metropolitana'),
-    'nunoa': (-33.4569, -70.5975, 'Región Metropolitana'),
-    'la florida': (-33.5500, -70.5700, 'Región Metropolitana'),
-    'penalolen': (-33.4800, -70.5400, 'Región Metropolitana'),
-    'macul': (-33.4900, -70.6000, 'Región Metropolitana'),
-    'san joaquin': (-33.4930, -70.6280, 'Región Metropolitana'),
-    'san miguel': (-33.5000, -70.6500, 'Región Metropolitana'),
-    'la cisterna': (-33.5300, -70.6600, 'Región Metropolitana'),
-    'el bosque': (-33.5600, -70.6750, 'Región Metropolitana'),
-    'la granja': (-33.5380, -70.6250, 'Región Metropolitana'),
-    'san ramon': (-33.5400, -70.6420, 'Región Metropolitana'),
-    'la pintana': (-33.5800, -70.6300, 'Región Metropolitana'),
-    'puente alto': (-33.6100, -70.5800, 'Región Metropolitana'),
-    'san bernardo': (-33.6000, -70.7000, 'Región Metropolitana'),
-    'maipu': (-33.5100, -70.7600, 'Región Metropolitana'),
-    'cerrillos': (-33.5000, -70.7100, 'Región Metropolitana'),
-    'estacion central': (-33.4600, -70.7000, 'Región Metropolitana'),
-    'pedro aguirre cerda': (-33.4850, -70.6750, 'Región Metropolitana'),
-    'lo espejo': (-33.5200, -70.6900, 'Región Metropolitana'),
-    'quinta normal': (-33.4400, -70.7000, 'Región Metropolitana'),
-    'lo prado': (-33.4440, -70.7250, 'Región Metropolitana'),
-    'pudahuel': (-33.4400, -70.7500, 'Región Metropolitana'),
-    'cerro navia': (-33.4230, -70.7350, 'Región Metropolitana'),
-    'renca': (-33.4000, -70.7200, 'Región Metropolitana'),
-    'quilicura': (-33.3600, -70.7300, 'Región Metropolitana'),
-    'huechuraba': (-33.3700, -70.6400, 'Región Metropolitana'),
-    'conchali': (-33.3800, -70.6800, 'Región Metropolitana'),
-    'independencia': (-33.4200, -70.6600, 'Región Metropolitana'),
-    'recoleta': (-33.4000, -70.6400, 'Región Metropolitana'),
-    'colina': (-33.2000, -70.6700, 'Región Metropolitana'),
-    'lampa': (-33.2860, -70.8760, 'Región Metropolitana'),
-    'padre hurtado': (-33.5730, -70.8090, 'Región Metropolitana'),
-    'penaflor': (-33.6060, -70.8760, 'Región Metropolitana'),
-    'talagante': (-33.6640, -70.9280, 'Región Metropolitana'),
-    'melipilla': (-33.6890, -71.2130, 'Región Metropolitana'),
-    'buin': (-33.7330, -70.7420, 'Región Metropolitana'),
-    'paine': (-33.8080, -70.7410, 'Región Metropolitana'),
-    # Norte
-    'arica': (-18.4783, -70.3126, 'Arica y Parinacota'),
-    'iquique': (-20.2141, -70.1524, 'Tarapacá'),
-    'antofagasta': (-23.6500, -70.4000, 'Antofagasta'),
-    'calama': (-22.4667, -68.9333, 'Antofagasta'),
-    'san pedro de atacama': (-22.9110, -68.2000, 'Antofagasta'),
-    'copiapo': (-27.3668, -70.3323, 'Atacama'),
-    'vallenar': (-28.5760, -70.7600, 'Atacama'),
-    'la serena': (-29.9027, -71.2519, 'Coquimbo'),
-    'coquimbo': (-29.9533, -71.3436, 'Coquimbo'),
-    'ovalle': (-30.6011, -71.1990, 'Coquimbo'),
-    # Centro
-    'valparaiso': (-33.0472, -71.6127, 'Valparaíso'),
-    'vina del mar': (-33.0246, -71.5518, 'Valparaíso'),
-    'concon': (-32.9200, -71.5100, 'Valparaíso'),
-    'quilpue': (-33.0470, -71.4420, 'Valparaíso'),
-    'villa alemana': (-33.0420, -71.3730, 'Valparaíso'),
-    'quillota': (-32.8800, -71.2470, 'Valparaíso'),
-    'san antonio': (-33.5930, -71.6210, 'Valparaíso'),
-    'los andes': (-32.8330, -70.5980, 'Valparaíso'),
-    'san felipe': (-32.7500, -70.7250, 'Valparaíso'),
-    'isla de pascua': (-27.1500, -109.4300, 'Valparaíso'),
-    'rapa nui': (-27.1500, -109.4300, 'Valparaíso'),
-    'rancagua': (-34.1708, -70.7444, 'O\'Higgins'),
-    'machali': (-34.1810, -70.6490, 'O\'Higgins'),
-    'san fernando': (-34.5850, -70.9890, 'O\'Higgins'),
-    'santa cruz': (-34.6390, -71.3650, 'O\'Higgins'),
-    'pichilemu': (-34.3930, -72.0000, 'O\'Higgins'),
-    'curico': (-34.9850, -71.2390, 'Maule'),
-    'talca': (-35.4264, -71.6554, 'Maule'),
-    'linares': (-35.8460, -71.5930, 'Maule'),
-    'constitucion': (-35.3330, -72.4160, 'Maule'),
-    'chillan': (-36.6067, -72.1034, 'Ñuble'),
-    # Sur
-    'concepcion': (-36.8270, -73.0503, 'Biobío'),
-    'talcahuano': (-36.7167, -73.1167, 'Biobío'),
-    'san pedro de la paz': (-36.8400, -73.1000, 'Biobío'),
-    'hualpen': (-36.7830, -73.0910, 'Biobío'),
-    'coronel': (-37.0330, -73.1580, 'Biobío'),
-    'lota': (-37.0890, -73.1580, 'Biobío'),
-    'los angeles': (-37.4707, -72.3517, 'Biobío'),
-    'temuco': (-38.7359, -72.5904, 'La Araucanía'),
-    'villarrica': (-39.2856, -72.2279, 'La Araucanía'),
-    'pucon': (-39.2708, -71.9772, 'La Araucanía'),
-    'valdivia': (-39.8142, -73.2459, 'Los Ríos'),
-    'osorno': (-40.5738, -73.1360, 'Los Lagos'),
-    'puerto varas': (-41.3195, -72.9854, 'Los Lagos'),
-    'frutillar': (-41.1260, -73.0630, 'Los Lagos'),
-    'puerto montt': (-41.4693, -72.9424, 'Los Lagos'),
-    'castro': (-42.4800, -73.7620, 'Los Lagos'),
-    'ancud': (-41.8710, -73.8280, 'Los Lagos'),
-    'chiloe': (-42.4800, -73.7620, 'Los Lagos'),
-    'coyhaique': (-45.5712, -72.0685, 'Aysén'),
-    'puerto aysen': (-45.4030, -72.6920, 'Aysén'),
-    'punta arenas': (-53.1638, -70.9171, 'Magallanes'),
-    'puerto natales': (-51.7290, -72.5060, 'Magallanes'),
-}
-
-_PAISES_CLIMA = {
-    'chile': 'CL', 'argentina': 'AR', 'peru': 'PE', 'bolivia': 'BO',
-    'brasil': 'BR', 'colombia': 'CO', 'ecuador': 'EC', 'uruguay': 'UY',
-    'paraguay': 'PY', 'venezuela': 'VE', 'mexico': 'MX', 'espana': 'ES',
-    'usa': 'US', 'eeuu': 'US', 'estados unidos': 'US', 'canada': 'CA',
-    'francia': 'FR', 'italia': 'IT', 'alemania': 'DE', 'portugal': 'PT',
-    'inglaterra': 'GB', 'reino unido': 'GB', 'china': 'CN', 'japon': 'JP',
-    'australia': 'AU', 'nueva zelanda': 'NZ', 'panama': 'PA',
-    'costa rica': 'CR', 'cuba': 'CU', 'republica dominicana': 'DO',
-}
-
-
-def _clima_normalizar(texto: str) -> str:
-    """Minúsculas sin tildes para matching de ciudades/países."""
-    import unicodedata as _ud
-    t = _ud.normalize('NFKD', (texto or '').lower().strip())
-    t = ''.join(ch for ch in t if not _ud.combining(ch))
-    return ' '.join(t.replace('ñ', 'n').split())
-
-
-def _clima_parsear_ciudad_pais(entrada: str):
-    """FASE 31.1: Separa "<ciudad> [país]" — el país al FINAL es opcional.
-    Ej: "santiago chile" → ("santiago", "CL"); "la reina chile" → ("la reina","CL");
-    "santiago" → ("santiago", None). Soporta países de 2 palabras."""
-    norm = _clima_normalizar(entrada)
-    tokens = norm.split()
-    if len(tokens) >= 3:
-        dos = ' '.join(tokens[-2:])
-        if dos in _PAISES_CLIMA:
-            return ' '.join(tokens[:-2]), _PAISES_CLIMA[dos]
-    if len(tokens) >= 2 and tokens[-1] in _PAISES_CLIMA:
-        return ' '.join(tokens[:-1]), _PAISES_CLIMA[tokens[-1]]
-    return norm, None
-
-
-def _clima_geocodificar(ciudad_norm: str, pais_iso):
-    """Cadena de 3 fuentes → (lat, lon, nombre, region, pais) o None.
-    1) Diccionario local chileno (si el país es CL o no se indicó).
-    2) Open-Meteo geocoding (filtrando por país si corresponde).
-    3) Nominatim/OSM como último respaldo."""
-    # ── Fuente 1: diccionario local Chile ──
-    if pais_iso in (None, 'CL') and ciudad_norm in _CIUDADES_CHILE:
-        lat, lon, region = _CIUDADES_CHILE[ciudad_norm]
-        nombre = ciudad_norm.title()
-        logger.info(f"🌤️ Clima geocoding LOCAL: '{ciudad_norm}' → {lat},{lon}")
-        return lat, lon, nombre, region, 'Chile'
-
-    headers = {'User-Agent': 'CofradiaBot/1.0 (contacto: admin)'}
-    # ── Fuente 2: Open-Meteo geocoding (2 intentos) ──
-    for intento in range(2):
-        try:
-            r = requests.get(
-                'https://geocoding-api.open-meteo.com/v1/search',
-                params={'name': ciudad_norm, 'count': 10,
-                        'language': 'es', 'format': 'json'},
-                headers=headers, timeout=8)
-            if r.status_code == 200:
-                res = (r.json() or {}).get('results') or []
-                if res:
-                    if pais_iso:
-                        res_f = [x for x in res if x.get('country_code') == pais_iso]
-                        lugar = res_f[0] if res_f else None
-                    else:
-                        lugar = next((x for x in res
-                                      if x.get('country_code') == 'CL'), res[0])
-                    if lugar:
-                        logger.info(f"🌤️ Clima geocoding Open-Meteo: '{ciudad_norm}' "
-                                    f"→ {lugar.get('name')} ({lugar.get('country_code')})")
-                        return (lugar['latitude'], lugar['longitude'],
-                                lugar.get('name', ciudad_norm.title()),
-                                lugar.get('admin1', ''), lugar.get('country', ''))
-                break  # respondió OK pero sin resultados válidos → probar fuente 3
-        except Exception as _e_g1:
-            logger.debug(f"Geocoding Open-Meteo intento {intento+1}: {_e_g1}")
-    # ── Fuente 3: Nominatim (OpenStreetMap) ──
-    try:
-        q = ciudad_norm + (f", {pais_iso}" if pais_iso else '')
-        r2 = requests.get(
-            'https://nominatim.openstreetmap.org/search',
-            params={'q': q, 'format': 'json', 'limit': 5,
-                    'accept-language': 'es',
-                    **({'countrycodes': pais_iso.lower()} if pais_iso else {})},
-            headers=headers, timeout=8)
-        if r2.status_code == 200:
-            res2 = r2.json() or []
-            if not pais_iso:  # preferir Chile
-                res_cl = [x for x in res2 if ', chile' in (x.get('display_name','')).lower()]
-                res2 = res_cl or res2
-            if res2:
-                lug = res2[0]
-                partes = [p.strip() for p in (lug.get('display_name') or '').split(',')]
-                logger.info(f"🌤️ Clima geocoding Nominatim: '{ciudad_norm}' → {partes[0] if partes else '?'}")
-                return (float(lug['lat']), float(lug['lon']),
-                        partes[0] if partes else ciudad_norm.title(),
-                        partes[1] if len(partes) > 2 else '',
-                        partes[-1] if partes else '')
-    except Exception as _e_g2:
-        logger.debug(f"Geocoding Nominatim: {_e_g2}")
-    return None
-
-
-def _clima_aqi_categoria(aqi):
-    """Categoría en español del índice de calidad del aire (US AQI)."""
-    try:
-        v = int(aqi)
-    except Exception:
-        return None, None
-    if v <= 50:    return v, 'Buena 🟢'
-    if v <= 100:   return v, 'Moderada 🟡'
-    if v <= 150:   return v, 'Regular 🟠'
-    if v <= 200:   return v, 'Mala 🔴'
-    if v <= 300:   return v, 'Muy mala 🟣'
-    return v, 'Peligrosa 🟤'
-
-
-def _icono_nocturno(codigo, emoji_dia):
-    """FASE 31.1: De noche, ☀️→🌙 y parcial→nube nocturna; lluvia/nieve/tormenta
-    conservan su icono (la meteorología manda)."""
-    try:
-        c = int(codigo)
-    except Exception:
-        return emoji_dia
-    if c in (0, 1):
-        return '🌙'
-    if c == 2:
-        return '☁️🌙'
-    if c == 3:
-        return '☁️'
-    return emoji_dia  # lluvia, nieve, niebla, tormenta: mismo icono
-
-
-_HTTP_HEADERS_CLIMA = {
-    'User-Agent': 'CofradiaBot/1.0 (Telegram community bot; contacto: admin@cofradia)',
-    'Accept': 'application/json',
-}
-
-_METNO_SYMBOL_MAP = {
-    'clearsky': ('☀️', 'Despejado', 'sol'),
-    'fair': ('🌤️', 'Mayormente despejado', 'sol'),
-    'partlycloudy': ('⛅', 'Parcialmente nublado', 'nublado'),
-    'cloudy': ('☁️', 'Nublado', 'nublado'),
-    'fog': ('🌫️', 'Niebla', 'nublado'),
-    'lightrain': ('🌦️', 'Lluvia ligera', 'lluvia'),
-    'lightrainshowers': ('🌦️', 'Chubascos ligeros', 'lluvia'),
-    'rain': ('🌧️', 'Lluvia', 'lluvia'),
-    'rainshowers': ('🌧️', 'Chubascos', 'lluvia'),
-    'heavyrain': ('🌧️', 'Lluvia intensa', 'lluvia'),
-    'heavyrainshowers': ('🌧️', 'Chubascos intensos', 'lluvia'),
-    'sleet': ('🌨️', 'Aguanieve', 'nieve'),
-    'snow': ('❄️', 'Nieve', 'nieve'),
-    'lightsnow': ('🌨️', 'Nieve ligera', 'nieve'),
-    'heavysnow': ('❄️', 'Nieve intensa', 'nieve'),
-    'thunderstorm': ('⛈️', 'Tormenta eléctrica', 'tormenta'),
-}
-
-
-def _svg_lluvia_clima(size='1em'):
-    """FASE 31.11 (fix Germán): ícono SVG propio de lluvia para el DASHBOARD,
-    con las gotas en CELESTE CLARO (#8fd8ff) para que se vean nítidas sobre el
-    fondo — reemplaza el emoji 🌧️/🌦️/⛈️ cuyas gotas (color del sistema) se
-    veían demasiado oscuras. 'size' en 'em' hereda el tamaño del slot donde va
-    (misma escala que tenía el emoji). Solo se usa en el HTML del clima; los
-    mensajes de texto de Telegram siguen usando emoji."""
-    nube = '#eaf0f6'
-    gota = '#8fd8ff'
-    return (
-        f'<svg viewBox="0 0 64 64" width="{size}" height="{size}" '
-        f'style="vertical-align:-0.15em;display:inline-block" '
-        f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="lluvia">'
-        f'<g fill="{nube}">'
-        f'<circle cx="24" cy="27" r="11"/>'
-        f'<circle cx="38" cy="23" r="13"/>'
-        f'<circle cx="46" cy="30" r="10"/>'
-        f'<rect x="18" y="29" width="30" height="12" rx="6"/>'
-        f'</g>'
-        f'<g stroke="{gota}" stroke-width="4.5" stroke-linecap="round">'
-        f'<line x1="25" y1="46" x2="22" y2="55"/>'
-        f'<line x1="34" y1="46" x2="31" y2="55"/>'
-        f'<line x1="43" y1="46" x2="40" y2="55"/>'
-        f'</g></svg>'
-    )
-
-
-def _icono_clima_dash(emoji, size='1em'):
-    """FASE 31.11 (fix Germán): en el dashboard, si el emoji es de LLUVIA lo
-    reemplaza por el SVG con gotas celeste-claro; cualquier otro icono (sol,
-    nube, luna, nieve, niebla, tormenta seca) se devuelve tal cual."""
-    try:
-        if emoji and any(r in emoji for r in ('🌧', '🌦', '⛈')):
-            return _svg_lluvia_clima(size)
-    except Exception:
-        pass
-    return emoji
-
-
-def _clima_fuente_openmeteo(lat, lon):
-    """FUENTE PRIMARIA de datos meteorológicos (Open-Meteo) con User-Agent
-    y 2 intentos. Devuelve estructura intermedia común o None.
-    Loggea el status HTTP para diagnóstico en Render."""
-    for intento in range(2):
-        try:
-            r = requests.get(
-                'https://api.open-meteo.com/v1/forecast',
-                params={
-                    'latitude': lat, 'longitude': lon,
-                    'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
-                             'wind_speed_10m_max,precipitation_probability_max,'
-                             'sunrise,sunset',
-                    'hourly': 'temperature_2m,relative_humidity_2m,weather_code',
-                    'current': 'temperature_2m,relative_humidity_2m,'
-                               'wind_speed_10m,weather_code,apparent_temperature',
-                    'timezone': 'auto', 'forecast_days': 7,
-                }, headers=_HTTP_HEADERS_CLIMA, timeout=10)
-            if r.status_code == 200:
-                met = r.json()
-                daily = met.get('daily', {}) or {}
-                hourly = met.get('hourly', {}) or {}
-                cur = met.get('current', {}) or {}
-                if not daily.get('time'):
-                    logger.warning('Clima Open-Meteo: respuesta 200 sin daily.time')
-                    return None
-                codigos = daily.get('weather_code') or [3] * 7
-                infos = [_wmo_info(cd) for cd in codigos]
-                emoji_c, desc_c, tema_c = _wmo_info(cur.get('weather_code', 3))
-                logger.info('🌤️ Clima datos: Open-Meteo OK')
-                return {
-                    'fuente': 'Open-Meteo',
-                    'cur': {
-                        'temp': cur.get('temperature_2m', 0),
-                        'sensacion': cur.get('apparent_temperature',
-                                             cur.get('temperature_2m', 0)),
-                        'humedad': cur.get('relative_humidity_2m', 0),
-                        'viento': cur.get('wind_speed_10m', 0),
-                        'code': cur.get('weather_code', 3),
-                        'emoji': emoji_c, 'desc': desc_c, 'tema': tema_c,
-                        'time_local': cur.get('time') or '',
-                    },
-                    'fechas': daily.get('time', [])[:7],
-                    'tmin': daily.get('temperature_2m_min') or [0] * 7,
-                    'tmax': daily.get('temperature_2m_max') or [0] * 7,
-                    'viento_max': daily.get('wind_speed_10m_max') or [0] * 7,
-                    'prob_lluvia': daily.get('precipitation_probability_max') or [0] * 7,
-                    'infos_dia': infos,
-                    'sunrise0': (daily.get('sunrise') or [''])[0],
-                    'sunset0': (daily.get('sunset') or [''])[0],
-                    'h_temp': hourly.get('temperature_2m') or [],
-                    'h_hum': hourly.get('relative_humidity_2m') or [],
-                    'h_code': hourly.get('weather_code') or [],
-                    'h_time': hourly.get('time') or [],
-                    'sunrise_arr': daily.get('sunrise') or [],
-                    'sunset_arr': daily.get('sunset') or [],
-                }
-            logger.warning(f'Clima Open-Meteo status={r.status_code} '
-                           f'(intento {intento+1}) body={r.text[:120]}')
-            if r.status_code in (429, 500, 502, 503):
-                import time as _t; _t.sleep(1.2)
-                continue
-            return None
-        except Exception as e:
-            logger.warning(f'Clima Open-Meteo intento {intento+1}: {e}')
-    return None
-
-
-def _es_noche_solar(lat, lon, dt_utc):
-    """FASE 31.8 (fix Germán): ¿es de noche en (lat,lon) a la hora dt_utc?
-    Cálculo astronómico real (elevación solar, aprox. NOAA) — reemplaza la
-    ventana fija 07-20 que marcaba "día" a las 20:30 en invierno chileno.
-    Válido para cualquier latitud/longitud y época del año, sin APIs."""
-    try:
-        import math
-        n = dt_utc.timetuple().tm_yday
-        frac_h = dt_utc.hour + dt_utc.minute / 60.0
-        decl = -23.44 * math.cos(math.radians(360.0 / 365.0 * (n + 10)))
-        h_solar = (frac_h + lon / 15.0) % 24
-        ang_h = 15.0 * (h_solar - 12.0)
-        elev = math.degrees(math.asin(
-            math.sin(math.radians(lat)) * math.sin(math.radians(decl)) +
-            math.cos(math.radians(lat)) * math.cos(math.radians(decl)) *
-            math.cos(math.radians(ang_h))))
-        return elev < -0.833  # bajo el horizonte (incluye refracción)
-    except Exception:
-        return False
-
-
-def _calcular_amanecer_ocaso(lat, lon, dt_utc, off_h):
-    """FASE 31.11 (fix Germán): amanecer/ocaso APROXIMADOS (astronomía, aprox.
-    NOAA) para cuando la fuente activa NO los entrega — p.ej. met.no, que sí da
-    temperaturas pero no la salida/puesta del sol → las tarjetas mostraban "—".
-    Devuelve (sunrise_iso, sunset_iso) en HORA LOCAL con formato
-    'YYYY-MM-DDTHH:MM' — el mismo de Open-Meteo, compatible con _hhmm() y con la
-    comparación de es_noche. Sin llamadas a APIs. Precisión ~±8 min (solo se usa
-    como respaldo; cuando Open-Meteo responde, se usan sus valores exactos)."""
-    try:
-        import math
-        from datetime import timedelta as _td
-        n = dt_utc.timetuple().tm_yday
-        decl = -23.44 * math.cos(math.radians(360.0 / 365.0 * (n + 10)))
-        lat_r, decl_r = math.radians(lat), math.radians(decl)
-        cos_h = ((math.sin(math.radians(-0.833)) -
-                  math.sin(lat_r) * math.sin(decl_r)) /
-                 (math.cos(lat_r) * math.cos(decl_r)))
-        if cos_h >= 1 or cos_h <= -1:
-            return '', ''            # noche/día polar → sin orto u ocaso definidos
-        H = math.degrees(math.acos(cos_h)) / 15.0     # semiarco diurno, en horas
-        conv = (-lon / 15.0) + off_h                   # hora solar → reloj local
-        sr = (12.0 - H + conv) % 24
-        ss = (12.0 + H + conv) % 24
-        fecha = (dt_utc + _td(hours=off_h)).strftime('%Y-%m-%d')
-
-        def _fmt(h):
-            hh = int(h) % 24
-            mm = int(round((h - int(h)) * 60))
-            if mm == 60:
-                hh, mm = (hh + 1) % 24, 0
-            return f'{fecha}T{hh:02d}:{mm:02d}'
-
-        return _fmt(sr), _fmt(ss)
-    except Exception:
-        return '', ''
-
-
-def _clima_horas_pasadas_hoy(lat, lon):
-    """FASE 31.8 (fix Germán): temperaturas horarias REALES de HOY (00:00 en
-    adelante) desde el Historical Forecast API de Open-Meteo — subdominio con
-    límite de peticiones INDEPENDIENTE del principal. Se usa solo cuando la
-    fuente activa es met.no (que no entrega horas pasadas → la curva salía
-    plana). Devuelve (fecha_local, {hora: temp}, offset_utc_seg)."""
-    try:
-        r = requests.get(
-            'https://historical-forecast-api.open-meteo.com/v1/forecast',
-            params={'latitude': lat, 'longitude': lon,
-                    'hourly': 'temperature_2m',
-                    'timezone': 'auto', 'past_days': 0, 'forecast_days': 1},
-            headers=_HTTP_HEADERS_CLIMA, timeout=8)
-        if r.status_code != 200:
-            logger.warning(f'Clima horas pasadas status={r.status_code}')
-            return None, {}, None
-        j = r.json() or {}
-        hh = j.get('hourly') or {}
-        tiempos, temps = hh.get('time') or [], hh.get('temperature_2m') or []
-        off = j.get('utc_offset_seconds')
-        mapa, fecha = {}, None
-        for t, v in zip(tiempos, temps):
-            if v is None or 'T' not in t:
-                continue
-            if fecha is None:
-                fecha = t.split('T')[0]
-            if t.split('T')[0] == fecha:
-                mapa[int(t.split('T')[1][:2])] = v
-        return fecha, mapa, off
-    except Exception as e:
-        logger.warning(f'Clima horas pasadas: {e}')
-        return None, {}, None
-
-
-def _clima_fuente_metno(lat, lon):
-    """FUENTE DE RESPALDO: met.no (Instituto Meteorológico de Noruega).
-    Gratuita, sin API key, altísima disponibilidad; exige User-Agent.
-    Serie horaria → se derivan mín/máx diarios y las 24 h por día.
-    Se usa SOLO si Open-Meteo falla (p.ej. límite por IP en Render)."""
-    try:
-        r = requests.get(
-            'https://api.met.no/weatherapi/locationforecast/2.0/compact',
-            params={'lat': round(lat, 4), 'lon': round(lon, 4)},
-            headers=_HTTP_HEADERS_CLIMA, timeout=10)
-        if r.status_code != 200:
-            logger.warning(f'Clima met.no status={r.status_code}')
-            return None
-        ts = ((r.json() or {}).get('properties') or {}).get('timeseries') or []
-        if not ts:
-            return None
-        # FASE 31.8 (fix Germán): offset UTC REAL de la zona horaria + horas
-        # pasadas de HOY desde Open-Meteo Historical (subdominio con límite
-        # independiente). Antes: off_h = round(lon/15) daba UTC-5 para Chile
-        # (real: UTC-4) → la hora local quedaba corrida 1 hora y el fondo
-        # nocturno no se activaba a tiempo.
-        fecha_hoy_om, horas_hoy_om, off_seg = _clima_horas_pasadas_hoy(lat, lon)
-        off_h = (off_seg / 3600.0) if off_seg is not None else round(lon / 15.0)
-        from datetime import timedelta as _td
-        por_dia = {}
-        for punto in ts:
-            try:
-                t_utc = datetime.strptime(punto['time'][:19], '%Y-%m-%dT%H:%M:%S')
-                t_loc = t_utc + _td(hours=off_h)
-                det = ((punto.get('data') or {}).get('instant') or {}).get('details') or {}
-                n1 = ((punto.get('data') or {}).get('next_1_hours') or {})
-                n6 = ((punto.get('data') or {}).get('next_6_hours') or {})
-                sym = ((n1.get('summary') or n6.get('summary') or {})
-                       .get('symbol_code') or '')
-                precip = ((n1.get('details') or {}).get('precipitation_amount')
-                          or (n6.get('details') or {}).get('precipitation_amount') or 0)
-                clave = t_loc.strftime('%Y-%m-%d')
-                d = por_dia.setdefault(clave, {'temps': {}, 'hums': [], 'winds': [],
-                                               'precip': 0.0, 'syms': []})
-                temp = det.get('air_temperature')
-                if temp is not None:
-                    d['temps'][t_loc.hour] = temp
-                if det.get('relative_humidity') is not None:
-                    d['hums'].append(det['relative_humidity'])
-                if det.get('wind_speed') is not None:
-                    d['winds'].append(det['wind_speed'] * 3.6)
-                d['precip'] += float(precip or 0)
-                if sym:
-                    d['syms'].append(sym.split('_')[0])
-            except Exception:
-                continue
-        claves = sorted(por_dia.keys())[:7]
-        if len(claves) < 2:
-            return None
-        # FASE 31.8 (fix Germán): fusionar las horas pasadas REALES de hoy.
-        # met.no solo entrega desde la hora actual; sin esto la curva de
-        # "Hoy" salía incompleta. Los valores de met.no (más frescos) tienen
-        # prioridad; el histórico solo rellena las horas que faltan.
-        if fecha_hoy_om and fecha_hoy_om in por_dia:
-            _t_hoy = por_dia[fecha_hoy_om]['temps']
-            for _h, _v in (horas_hoy_om or {}).items():
-                _t_hoy.setdefault(_h, _v)
-        fechas, tmin, tmax, vmax, prob, infos = [], [], [], [], [], []
-        h_temp_total, h_hum_total = [], []
-        for k in claves:
-            d = por_dia[k]
-            vals = list(d['temps'].values())
-            if not vals:
-                continue
-            fechas.append(k)
-            tmin.append(min(vals)); tmax.append(max(vals))
-            vmax.append(max(d['winds']) if d['winds'] else 0)
-            p = d['precip']
-            prob.append(80 if p > 2 else (50 if p > 0.2 else 10))
-            sym = max(set(d['syms']), key=d['syms'].count) if d['syms'] else 'cloudy'
-            infos.append(_METNO_SYMBOL_MAP.get(sym, ('☁️', 'Nublado', 'nublado')))
-            # 24 horas con interpolación simple de huecos INTERIORES.
-            # FASE 31.8 (fix Germán): se ELIMINÓ el back-fill plano (mostraba
-            # una línea horizontal sin variaciones). Las horas pasadas de HOY
-            # ahora llegan con valores REALES vía _clima_horas_pasadas_hoy.
-            horas = []
-            prev = None
-            for h in range(24):
-                v = d['temps'].get(h)
-                if v is None and prev is not None:
-                    # buscar siguiente conocido para interpolar
-                    sig = next((d['temps'][x] for x in range(h + 1, 24)
-                                if x in d['temps']), prev)
-                    v = (prev + sig) / 2
-                horas.append(round(v) if v is not None else None)
-                prev = v if v is not None else prev
-            h_temp_total.extend(horas)
-            h_hum_total.extend([round(sum(d['hums']) / len(d['hums']))
-                                if d['hums'] else None] * 24)
-        if not fechas:
-            return None
-        pr = ts[0]['data']['instant']['details']
-        sym0 = ''
-        try:
-            sym0 = (ts[0]['data'].get('next_1_hours', {})
-                    .get('summary', {}).get('symbol_code', '')).split('_')[0]
-        except Exception:
-            pass
-        emoji_c, desc_c, tema_c = _METNO_SYMBOL_MAP.get(sym0, ('☁️', 'Nublado', 'nublado'))
-        hora_loc = (datetime.utcnow() + _td(hours=off_h))
-        # FASE 31.11 (fix Germán): met.no no entrega salida/puesta de sol →
-        # las calculamos (astronomía) con el offset UTC real ya disponible,
-        # para que las tarjetas «Amanecer/Ocaso» dejen de mostrar "—".
-        _sr_iso, _ss_iso = _calcular_amanecer_ocaso(
-            lat, lon, datetime.utcnow(), off_h)
-        logger.info('🌤️ Clima datos: met.no (respaldo) OK')
-        return {
-            'fuente': 'met.no',
-            'cur': {
-                'temp': pr.get('air_temperature', 0),
-                'sensacion': pr.get('air_temperature', 0),
-                'humedad': pr.get('relative_humidity', 0),
-                'viento': (pr.get('wind_speed', 0) or 0) * 3.6,
-                'code': 0 if tema_c == 'sol' else (2 if tema_c == 'nublado' else 61),
-                'emoji': emoji_c, 'desc': desc_c, 'tema': tema_c,
-                'time_local': hora_loc.strftime('%Y-%m-%dT%H:%M'),
-            },
-            'fechas': fechas, 'tmin': tmin, 'tmax': tmax,
-            'viento_max': vmax, 'prob_lluvia': prob, 'infos_dia': infos,
-            'sunrise0': _sr_iso, 'sunset0': _ss_iso,
-            'h_temp': h_temp_total, 'h_hum': h_hum_total,
-            'hora_local_num': hora_loc.hour,
-        }
-    except Exception as e:
-        logger.warning(f'Clima met.no: {e}')
-        return None
-
-
-def _icono_hora_clima(code, hora, sr_h=7, ss_h=20):
-    """FASE 31.6: emoji para el gráfico horario según código WMO y si es
-    de día o de noche (amanecer/ocaso reales del día). Grafica cuándo
-    empieza/termina la lluvia, cuándo anochece, etc."""
-    try:
-        c = int(code)
-    except Exception:
-        c = 3
-    noche = hora < sr_h or hora >= ss_h
-    if c >= 95:
-        return '⛈️'
-    if c in (71, 73, 75, 77, 85, 86):
-        return '❄️'
-    if c in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
-        return '🌧️'
-    if c in (45, 48):
-        return '🌫️'
-    if noche:
-        return '🌙' if c <= 1 else '☁️'
-    if c == 0:
-        return '☀️'
-    if c == 1:
-        return '🌤️'
-    if c == 2:
-        return '⛅'
-    return '☁️'
-
-
 def _obtener_clima_ciudad(ciudad: str):
-    """FASE 31.2: Geocodifica (3 fuentes, país opcional) y obtiene el
-    pronóstico con CADENA DE RESPALDO de datos (Open-Meteo → met.no).
-    Retorna:
-      dict     → datos listos para render
-      'NOGEO'  → la localidad no existe en ninguna fuente
-      'NODATA' → localidad OK pero los servicios meteorológicos no
-                 respondieron (mensaje honesto al usuario, no engañoso)."""
+    """FASE 31: Geocodifica la ciudad (preferencia Chile) y obtiene pronóstico
+    de 7 días desde Open-Meteo. Retorna dict listo para render, o None."""
     try:
-        ciudad_norm, pais_iso = _clima_parsear_ciudad_pais(ciudad)
-        geo = _clima_geocodificar(ciudad_norm, pais_iso)
-        if not geo:
-            return 'NOGEO'
-        lat, lon, nombre, region, pais = geo
+        import urllib.parse as _up_cl
+        # ── 1. Geocoding (preferir resultados de Chile) ──────────────────
+        r_geo = requests.get(
+            'https://geocoding-api.open-meteo.com/v1/search',
+            params={'name': ciudad, 'count': 5, 'language': 'es', 'format': 'json'},
+            timeout=10)
+        if r_geo.status_code != 200:
+            return None
+        resultados = (r_geo.json() or {}).get('results') or []
+        if not resultados:
+            return None
+        lugar = next((x for x in resultados if x.get('country_code') == 'CL'),
+                     resultados[0])
+        lat, lon = lugar['latitude'], lugar['longitude']
 
-        met = _clima_fuente_openmeteo(lat, lon)
-        if not met:
-            met = _clima_fuente_metno(lat, lon)
-        if not met:
-            logger.error(f'Clima: SIN DATOS para {nombre} ({lat},{lon}) '
-                         f'— ambas fuentes fallaron')
-            return 'NODATA'
+        # ── 2. Pronóstico 7 días + condición actual ──────────────────────
+        r_met = requests.get(
+            'https://api.open-meteo.com/v1/forecast',
+            params={
+                'latitude': lat, 'longitude': lon,
+                'daily': 'weather_code,temperature_2m_max,temperature_2m_min,'
+                         'wind_speed_10m_max,precipitation_probability_max',
+                'hourly': 'relative_humidity_2m',
+                'current': 'temperature_2m,relative_humidity_2m,'
+                           'wind_speed_10m,weather_code,apparent_temperature',
+                'timezone': 'auto', 'forecast_days': 7,
+            }, timeout=12)
+        if r_met.status_code != 200:
+            return None
+        met = r_met.json()
+        daily = met.get('daily', {})
+        hourly_hum = (met.get('hourly', {}) or {}).get('relative_humidity_2m') or []
+        cur = met.get('current', {}) or {}
 
-        # ── Calidad del aire (best-effort, 5s, jamás bloquea) ──
-        aqi_val, aqi_cat = None, None
-        try:
-            r_aq = requests.get(
-                'https://air-quality-api.open-meteo.com/v1/air-quality',
-                params={'latitude': lat, 'longitude': lon,
-                        'current': 'us_aqi', 'timezone': 'auto'},
-                headers=_HTTP_HEADERS_CLIMA, timeout=5)
-            if r_aq.status_code == 200:
-                aqi_raw = ((r_aq.json() or {}).get('current') or {}).get('us_aqi')
-                aqi_val, aqi_cat = _clima_aqi_categoria(aqi_raw)
-        except Exception as _e_aq:
-            logger.debug(f'Clima AQI: {_e_aq}')
-
-        # ── ¿Es de noche AHORA? ──
-        es_noche = False
-        try:
-            if met.get('sunrise0') and met.get('sunset0'):
-                t_now = met['cur'].get('time_local') or ''
-                es_noche = not (met['sunrise0'] <= t_now <= met['sunset0'])
-            else:
-                # FASE 31.8 (fix Germán): la ventana fija 07-20 marcaba "día"
-                # a las 20:30 en invierno. Ahora: elevación solar real según
-                # lat/lon y fecha — el fondo azul se activa con el ocaso.
-                es_noche = _es_noche_solar(lat, lon, datetime.utcnow())
-        except Exception:
-            pass
-
+        fechas = daily.get('time', [])
         dias = []
-        h_temp, h_hum = met['h_temp'], met['h_hum']
-        h_code = met.get('h_code') or []
-        for i, fstr in enumerate(met['fechas'][:7]):
+        for i, fstr in enumerate(fechas[:7]):
             try:
                 fdt = datetime.strptime(fstr, '%Y-%m-%d')
                 nombre_dia = 'Hoy' if i == 0 else _DIAS_ES[fdt.weekday()]
                 fecha_fmt = f'{fdt.day} {_MESES_ES[fdt.month][:3]}'
             except Exception:
                 nombre_dia, fecha_fmt = fstr, fstr
-            bloque_h = [x for x in h_hum[i * 24:(i + 1) * 24] if x is not None]
-            humedad = round(sum(bloque_h) / len(bloque_h)) if bloque_h else None
-            temps_horas = [round(x) if x is not None else None
-                           for x in h_temp[i * 24:(i + 1) * 24]]
-            # FASE 31.6: código WMO por hora → icono de clima sobre el gráfico
-            codes_horas = [int(x) if x is not None else 3
-                           for x in h_code[i * 24:(i + 1) * 24]] if h_code else []
-            # Amanecer/ocaso DEL DÍA (para pintar luna de noche); fallback 07-20
-            def _hint(arr, idx, defecto):
-                try:
-                    v = (arr or [])[idx]
-                    return int(v.split('T')[1][:2]) if v and 'T' in v else defecto
-                except Exception:
-                    return defecto
-            sr_h = _hint(met.get('sunrise_arr'), i, 7)
-            ss_h = _hint(met.get('sunset_arr'), i, 20)
-            if codes_horas:
-                iconos_horas = [_icono_hora_clima(codes_horas[h] if h < len(codes_horas) else 3,
-                                                  h, sr_h, ss_h) for h in range(24)]
-            else:  # respaldo met.no sin códigos horarios: día/noche con código diario
-                cod_dia = 0 if (met['infos_dia'][i][2] if i < len(met['infos_dia']) else 'nublado') == 'sol' else 3
-                iconos_horas = [_icono_hora_clima(cod_dia, h, sr_h, ss_h) for h in range(24)]
-            emoji, desc, tema = met['infos_dia'][i] if i < len(met['infos_dia']) else ('☁️', 'Variable', 'nublado')
+            # Humedad promedio del día (24 valores horarios por día)
+            bloque = hourly_hum[i * 24:(i + 1) * 24]
+            humedad = round(sum(bloque) / len(bloque)) if bloque else None
+            emoji, desc, tema = _wmo_info((daily.get('weather_code') or [3] * 7)[i])
             dias.append({
                 'nombre': nombre_dia, 'fecha': fecha_fmt,
-                'tmin': round(met['tmin'][i]), 'tmax': round(met['tmax'][i]),
-                'viento': round(met['viento_max'][i]),
-                'lluvia': met['prob_lluvia'][i],
+                'tmin': round((daily.get('temperature_2m_min') or [0] * 7)[i]),
+                'tmax': round((daily.get('temperature_2m_max') or [0] * 7)[i]),
+                'viento': round((daily.get('wind_speed_10m_max') or [0] * 7)[i]),
+                'lluvia': (daily.get('precipitation_probability_max') or [0] * 7)[i],
                 'humedad': humedad if humedad is not None else '—',
                 'emoji': emoji, 'desc': desc, 'tema': tema,
-                'horas': temps_horas, 'codes': codes_horas,
-                'iconos': iconos_horas,
             })
-        if not dias:
-            return 'NODATA'
 
-        cur = met['cur']
-        emoji_hoy = cur['emoji']
-        if es_noche:
-            emoji_hoy = _icono_nocturno(cur.get('code', 3), emoji_hoy)
-
-        # FASE 31.6: crepúsculo (amanecer) y ocaso (atardecer) legibles "HH:MM"
-        def _hhmm(iso):
-            try:
-                return iso.split('T')[1][:5] if iso and 'T' in iso else '—'
-            except Exception:
-                return '—'
-        crepusculo = _hhmm(met.get('sunrise0', ''))
-        ocaso = _hhmm(met.get('sunset0', ''))
-        # Índice de la hora ACTUAL dentro de las 24h de "Hoy" (línea vertical)
-        hora_actual_idx = -1
-        try:
-            _tl = cur.get('time_local') or met.get('cur', {}).get('time_local') or ''
-            if 'T' in _tl:
-                hora_actual_idx = int(_tl.split('T')[1][:2])
-            else:
-                from datetime import datetime as _dtnow
-                hora_actual_idx = _dtnow.now().hour
-        except Exception:
-            hora_actual_idx = -1
-
+        emoji_hoy, desc_hoy, tema_hoy = _wmo_info(cur.get('weather_code', 3))
         return {
-            'ciudad': nombre, 'region': region, 'pais': pais,
-            'es_noche': es_noche,
-            'aqi': aqi_val, 'aqi_cat': aqi_cat,
-            'crepusculo': crepusculo, 'ocaso': ocaso,
-            'hora_actual_idx': hora_actual_idx,
-            'fuente': met.get('fuente', 'Open-Meteo'),
+            'ciudad': lugar.get('name', ciudad),
+            'region': lugar.get('admin1', ''),
+            'pais': lugar.get('country', ''),
             'actual': {
-                'temp': round(cur['temp']), 'sensacion': round(cur['sensacion']),
-                'humedad': round(cur['humedad']), 'viento': round(cur['viento']),
-                'emoji': emoji_hoy, 'desc': cur['desc'], 'tema': cur['tema'],
+                'temp': round(cur.get('temperature_2m', 0)),
+                'sensacion': round(cur.get('apparent_temperature',
+                                           cur.get('temperature_2m', 0))),
+                'humedad': round(cur.get('relative_humidity_2m', 0)),
+                'viento': round(cur.get('wind_speed_10m', 0)),
+                'emoji': emoji_hoy, 'desc': desc_hoy, 'tema': tema_hoy,
             },
             'dias': dias,
         }
+    except requests.Timeout:
+        logger.warning('Clima: timeout Open-Meteo')
+        return None
     except Exception as e:
-        logger.warning(f'Clima error general: {e}')
-        return 'NODATA'
+        logger.warning(f'Clima error: {e}')
+        return None
 
 
 _HTML_CLIMA_TEMPLATE = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pronóstico — __CIUDAD__</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif}
-html,body{width:100%;overflow-x:hidden}
-body{min-height:100vh;background:__GRADIENTE__;background-attachment:fixed;color:#fff;
- padding:clamp(14px,3vw,24px) clamp(10px,3vw,16px) 40px}
+body{min-height:100vh;background:__GRADIENTE__;background-attachment:fixed;color:#fff;padding:24px 16px 40px}
 .wrap{max-width:1080px;margin:0 auto}
-header{text-align:center;margin-bottom:clamp(16px,3vw,26px)}
-header h1{font-size:clamp(1.4rem,4.5vw,2.1rem);font-weight:800;letter-spacing:.5px;
- text-shadow:0 2px 12px rgba(0,0,0,.35)}
-header .sub{opacity:.85;margin-top:4px;font-size:clamp(.82rem,2.6vw,1rem)}
-.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
- gap:clamp(14px,3vw,34px);background:rgba(255,255,255,.10);
- backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
- border:1px solid rgba(255,255,255,.22);border-radius:26px;
- padding:clamp(18px,3.5vw,30px) clamp(16px,4vw,34px);
- box-shadow:0 14px 40px rgba(0,0,0,.30);margin-bottom:clamp(16px,3vw,26px)}
-.hero .icono{font-size:clamp(4rem,12vw,6.5rem);line-height:1;
- animation:flotar 3.4s ease-in-out infinite;filter:drop-shadow(0 8px 16px rgba(0,0,0,.35))}
+header{text-align:center;margin-bottom:26px}
+header h1{font-size:2.1rem;font-weight:800;letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.35)}
+header .sub{opacity:.85;margin-top:4px;font-size:1rem}
+.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:34px;
+ background:rgba(255,255,255,.10);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+ border:1px solid rgba(255,255,255,.22);border-radius:26px;padding:30px 34px;
+ box-shadow:0 14px 40px rgba(0,0,0,.30);margin-bottom:26px}
+.hero .icono{font-size:6.5rem;line-height:1;animation:flotar 3.4s ease-in-out infinite;
+ filter:drop-shadow(0 8px 16px rgba(0,0,0,.35))}
 @keyframes flotar{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
-.hero .temp{font-size:clamp(2.8rem,10vw,4.6rem);font-weight:800;line-height:1}
-.hero .desc{font-size:clamp(1rem,3vw,1.25rem);opacity:.92;margin-top:6px}
-.hero .mm{margin-top:8px;font-size:clamp(.85rem,2.6vw,1.02rem);opacity:.85}
-.hero .datos{display:grid;gap:clamp(8px,1.6vw,14px);width:100%;
- grid-template-columns:repeat(auto-fit,minmax(clamp(96px,15vw,132px),1fr))}
-.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:12px 10px;text-align:center;
- display:flex;flex-direction:column;justify-content:center;min-height:74px}
-.dato .v{font-size:clamp(1.1rem,3.2vw,1.4rem);font-weight:700;white-space:nowrap}
-.dato .l{font-size:.72rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
-h2.seccion{font-size:clamp(1rem,3vw,1.15rem);font-weight:700;opacity:.92;
- margin:6px 4px 14px;letter-spacing:.4px}
-.hint{font-size:.8rem;opacity:.7;margin:-8px 4px 12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(122px,1fr));gap:12px;margin-bottom:14px}
+.hero .temp{font-size:4.6rem;font-weight:800;line-height:1}
+.hero .desc{font-size:1.25rem;opacity:.92;margin-top:6px}
+.hero .mm{margin-top:8px;font-size:1.02rem;opacity:.85}
+.hero .datos{display:flex;gap:26px;flex-wrap:wrap}
+.dato{background:rgba(0,0,0,.22);border-radius:16px;padding:14px 20px;text-align:center;min-width:110px}
+.dato .v{font-size:1.5rem;font-weight:700}
+.dato .l{font-size:.8rem;opacity:.8;margin-top:3px;text-transform:uppercase;letter-spacing:.6px}
+h2.seccion{font-size:1.15rem;font-weight:700;opacity:.92;margin:6px 4px 14px;letter-spacing:.4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:14px;margin-bottom:28px}
 .card{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
- border:1px solid rgba(255,255,255,.20);border-radius:20px;padding:16px 10px;text-align:center;
- transition:transform .25s,box-shadow .25s,outline-color .2s;cursor:pointer;user-select:none}
+ border:1px solid rgba(255,255,255,.20);border-radius:20px;padding:16px 12px;text-align:center;
+ transition:transform .25s,box-shadow .25s}
 .card:hover{transform:translateY(-6px);box-shadow:0 14px 30px rgba(0,0,0,.35)}
 .card.hoy{outline:2px solid __ACCENT__;background:rgba(255,255,255,.17)}
-.card.activa{outline:3px solid #fff;background:rgba(255,255,255,.22)}
-.card .d{font-weight:700;font-size:.95rem}
-.card .f{font-size:.74rem;opacity:.75;margin-bottom:8px}
-.card .ic{font-size:clamp(2rem,6vw,2.6rem);margin:4px 0 6px;display:block}
-.card .tt{font-size:1.02rem;font-weight:700}
+.card .d{font-weight:700;font-size:.98rem}
+.card .f{font-size:.76rem;opacity:.75;margin-bottom:8px}
+.card .ic{font-size:2.6rem;margin:4px 0 6px;display:block}
+.card .tt{font-size:1.05rem;font-weight:700}
 .card .tt .min{opacity:.65;font-weight:500}
-.card .cd{font-size:.72rem;opacity:.85;margin-top:7px;line-height:1.55}
-.panel{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);
- border:1px solid rgba(255,255,255,.20);border-radius:22px;padding:clamp(12px,2.5vw,20px);
- box-shadow:0 10px 30px rgba(0,0,0,.25);margin-bottom:24px}
-#grafHoras{width:100%;height:clamp(240px,45vw,320px)}
-#grafico{width:100%;height:clamp(250px,48vw,340px)}
-#tituloHoras{font-size:clamp(.95rem,2.8vw,1.1rem);font-weight:700;margin-bottom:8px;
- display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-#tituloHoras .badge{background:rgba(0,0,0,.25);border-radius:10px;padding:3px 10px;
- font-size:.78rem;font-weight:600}
+.card .cd{font-size:.74rem;opacity:.85;margin-top:7px;line-height:1.55}
+.panel{background:rgba(255,255,255,.10);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.20);
+ border-radius:22px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+#grafico{width:100%;height:340px}
 footer{text-align:center;margin-top:26px;opacity:.75;font-size:.85rem;line-height:1.7}
-@media(orientation:landscape) and (max-height:500px){
- .hero{padding:14px 16px;gap:12px}.hero .icono{font-size:3.4rem}
- .hero .temp{font-size:2.4rem}#grafHoras,#grafico{height:220px}}
-/* ═══ FASE 31.6: botón de idioma premium (glassmorphism, fijo arriba-derecha) ═══ */
-#btnLang{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;
- z-index:999;cursor:pointer;display:inline-flex;align-items:center;gap:7px;
- background:linear-gradient(135deg,rgba(255,255,255,.22),rgba(255,255,255,.08));
- backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
- border:1px solid rgba(255,255,255,.45);color:#fff;font-weight:800;
- font-size:.88rem;letter-spacing:.3px;padding:9px 18px;border-radius:999px;
- box-shadow:0 6px 20px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.35);
- transition:transform .18s ease,box-shadow .2s ease,background .25s;
- font-family:inherit;text-shadow:0 1px 3px rgba(0,0,0,.3)}
-#btnLang:hover{background:linear-gradient(135deg,rgba(255,255,255,.34),rgba(255,255,255,.14));
- transform:translateY(-2px) scale(1.04);box-shadow:0 10px 26px rgba(0,0,0,.42)}
-#btnLang:active{transform:scale(.95)}
-#btnLang .flag{font-size:1.05rem;line-height:1}
+@media(max-width:640px){.hero{gap:18px;padding:24px 18px}.hero .temp{font-size:3.6rem}
+ .hero .icono{font-size:5rem}#grafico{height:280px}}
 </style></head><body><div class="wrap">
-<button id="btnLang" onclick="toggleIdioma()"><span class="flag">🇬🇧</span><span id="btnLangTxt">English</span></button>
 <header>
-  <h1 data-i18n="Pronóstico del Tiempo">🌎 Pronóstico del Tiempo</h1>
-  <div class="sub"><span data-i18n="__CIUDAD__ __REGION_PAIS__ · Actualizado:">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado:</span> __ACTUALIZADO__ <span data-i18n="(hora Chile)">(hora Chile)</span></div>
+  <h1>🌎 Pronóstico del Tiempo</h1>
+  <div class="sub">📍 __CIUDAD__ __REGION_PAIS__ · Actualizado: __ACTUALIZADO__ (hora Chile)</div>
 </header>
 
 <div class="hero">
   <div class="icono">__ICONO_HOY__</div>
   <div>
     <div class="temp">__TEMP_HOY__°</div>
-    <div class="desc" data-i18n-desc>__DESC_HOY__</div>
-    <div class="mm">⬇️ <span data-i18n="Mín">Mín</span> __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ <span data-i18n="Máx">Máx</span> __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ <span data-i18n="Sensación">Sensación</span> __SENSACION__°</div>
+    <div class="desc">__DESC_HOY__</div>
+    <div class="mm">⬇️ Mín __TMIN_HOY__° &nbsp;·&nbsp; ⬆️ Máx __TMAX_HOY__° &nbsp;·&nbsp; 🌡️ Sensación __SENSACION__°</div>
   </div>
   <div class="datos">
-    <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l" data-i18n="Humedad">Humedad</div></div>
-    <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l" data-i18n="km/h viento">km/h viento</div></div>
-    <div class="dato"><div class="v">__SVG_LLUVIA__ __LLUVIA_HOY__%</div><div class="l" data-i18n="Prob. lluvia">Prob. lluvia</div></div>
-    <div class="dato"><div class="v">🍃 __AQI_VAL__</div><div class="l"><span data-i18n="Calidad aire">Calidad aire</span> · <span data-i18n-cat>__AQI_CAT__</span></div></div>
-    <div class="dato"><div class="v">🌅 __CREPUSCULO__</div><div class="l" data-i18n="Amanecer">Amanecer</div></div>
-    <div class="dato"><div class="v">🌇 __OCASO__</div><div class="l" data-i18n="Ocaso">Ocaso</div></div>
+    <div class="dato"><div class="v">💧 __HUM_HOY__%</div><div class="l">Humedad</div></div>
+    <div class="dato"><div class="v">💨 __VIENTO_HOY__</div><div class="l">km/h viento</div></div>
+    <div class="dato"><div class="v">🌧️ __LLUVIA_HOY__%</div><div class="l">Prob. lluvia</div></div>
   </div>
 </div>
 
-<h2 class="seccion" data-i18n="📅 Próximos 7 días">📅 Próximos 7 días</h2>
-<div class="hint" data-i18n="👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)">👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)</div>
-<div class="grid" id="gridDias">__TARJETAS__</div>
+<h2 class="seccion">📅 Próximos 7 días</h2>
+<div class="grid">__TARJETAS__</div>
 
-<div class="panel">
-  <div id="tituloHoras"><span data-i18n="🕐 Temperatura por hora">🕐 Temperatura por hora</span> <span class="badge" id="badgeDia">Hoy</span></div>
-  <div id="grafHoras"></div>
-</div>
-
-<h2 class="seccion" data-i18n="📈 Evolución de temperaturas (7 días)">📈 Evolución de temperaturas (7 días)</h2>
+<h2 class="seccion">📈 Evolución de temperaturas</h2>
 <div class="panel"><div id="grafico"></div></div>
 
-<footer><span data-i18n="⚓ Cofradía de Networking — Servicio meteorológico del bot">⚓ Cofradía de Networking — Servicio meteorológico del bot</span><br>
-<span data-i18n="Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI">Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI</span></footer>
+<footer>⚓ Cofradía de Networking — Servicio meteorológico del bot<br>
+Datos: modelos meteorológicos internacionales (Open-Meteo)</footer>
 </div>
 <script>
-// ═══ FASE 31.6: TRADUCTOR ES↔EN del dashboard (cliente, instantáneo) ═══
-var I18N={
- "Pronóstico del Tiempo":"Weather Forecast",
- "__CIUDAD__ __REGION_PAIS__ · Actualizado:":"📍 __CIUDAD__ __REGION_PAIS__ · Updated:",
- "(hora Chile)":"(Chile time)",
- "Humedad":"Humidity","km/h viento":"km/h wind","Prob. lluvia":"Rain prob.",
- "Calidad aire":"Air quality","Sensación":"Feels like","Mín":"Min","Máx":"Max",
- "Amanecer":"Sunrise","Ocaso":"Sunset",
- "📅 Próximos 7 días":"📅 Next 7 days",
- "👆 Toca cualquier día para ver sus temperaturas hora a hora (00:00 – 23:00)":"👆 Tap any day to see its hour-by-hour temperatures (00:00 – 23:00)",
- "🕐 Temperatura por hora":"🕐 Hourly temperature",
- "📈 Evolución de temperaturas (7 días)":"📈 Temperature trend (7 days)",
- "⚓ Cofradía de Networking — Servicio meteorológico del bot":"⚓ Cofradía de Networking — Bot weather service",
- "Datos: modelos meteorológicos internacionales (Open-Meteo) · Calidad del aire: US AQI":"Data: international weather models (Open-Meteo) · Air quality: US AQI"
-};
-// Días de la semana y palabra "Hoy"
-var I18N_DIAS={"Hoy":"Today","Lunes":"Monday","Martes":"Tuesday","Miércoles":"Wednesday",
- "Jueves":"Thursday","Viernes":"Friday","Sábado":"Saturday","Domingo":"Sunday"};
-// Descripciones de clima (WMO) y categorías AQI
-var I18N_DESC={
- "Despejado":"Clear","Mayormente despejado":"Mostly clear","Parcialmente nublado":"Partly cloudy",
- "Nublado":"Cloudy","Niebla":"Fog","Niebla con escarcha":"Rime fog","Llovizna ligera":"Light drizzle",
- "Llovizna moderada":"Moderate drizzle","Llovizna intensa":"Dense drizzle","Llovizna helada":"Freezing drizzle",
- "Llovizna helada intensa":"Dense freezing drizzle","Lluvia ligera":"Light rain","Lluvia moderada":"Moderate rain",
- "Lluvia intensa":"Heavy rain","Lluvia helada":"Freezing rain","Lluvia helada intensa":"Heavy freezing rain",
- "Nieve ligera":"Light snow","Nieve moderada":"Moderate snow","Nieve intensa":"Heavy snow","Granos de nieve":"Snow grains",
- "Chubascos ligeros":"Light showers","Chubascos moderados":"Moderate showers","Chubascos violentos":"Violent showers",
- "Chubascos de nieve":"Snow showers","Chubascos de nieve fuertes":"Heavy snow showers","Tormenta eléctrica":"Thunderstorm",
- "Tormenta con granizo":"Thunderstorm w/ hail","Tormenta con granizo fuerte":"Severe thunderstorm w/ hail","Variable":"Variable",
- "Buena":"Good","Moderada":"Moderate","Dañina grupos sensibles":"Unhealthy (sensitive)","Dañina":"Unhealthy",
- "Muy dañina":"Very unhealthy","Peligrosa":"Hazardous"};
-var _idiomaEN=false;
-function _trad(txt,dic){var s=(txt||'').trim();return (dic[s]!==undefined)?dic[s]:txt;}
-function toggleIdioma(){
- _idiomaEN=!_idiomaEN;
- // 1) Textos con data-i18n
- document.querySelectorAll('[data-i18n]').forEach(function(el){
-   var orig=el.getAttribute('data-i18n');
-   el.textContent=_idiomaEN?_trad(orig,I18N):orig;
- });
- // 2) Descripción del clima actual (hero) — dinámica, vía I18N_DESC
- document.querySelectorAll('[data-i18n-desc]').forEach(function(el){
-   if(!el.getAttribute('data-orig'))el.setAttribute('data-orig',el.textContent);
-   var o=el.getAttribute('data-orig');
-   el.textContent=_idiomaEN?_trad(o,I18N_DESC):o;
- });
- // 2b) Categoría AQI — puede traer emoji al final → traducción por PREFIJO
- document.querySelectorAll('[data-i18n-cat]').forEach(function(el){
-   if(!el.getAttribute('data-orig'))el.setAttribute('data-orig',el.textContent);
-   var o=el.getAttribute('data-orig');
-   if(_idiomaEN){var t=o;
-     for(var k in I18N_DESC){if(o.indexOf(k)===0){t=I18N_DESC[k]+o.slice(k.length);break;}}
-     el.textContent=t;
-   }else{el.textContent=o;}
- });
- // 3) Tarjetas de días: nombre de día + descripción del clima
- document.querySelectorAll('#gridDias .card').forEach(function(card){
-   var dn=card.querySelector('.d'), cd=card.querySelector('.cd');
-   if(dn){if(!dn.getAttribute('data-orig'))dn.setAttribute('data-orig',dn.textContent);
-     var od=dn.getAttribute('data-orig');dn.textContent=_idiomaEN?_trad(od,I18N_DIAS):od;}
-   if(cd){var descEl=cd.childNodes[0];
-     if(descEl){if(!cd.getAttribute('data-origdesc'))cd.setAttribute('data-origdesc',descEl.textContent);
-       var odesc=cd.getAttribute('data-origdesc');descEl.textContent=_idiomaEN?_trad(odesc,I18N_DESC):odesc;}}
- });
- // 4) Badge del gráfico horario: re-pintar el día activo respeta el idioma
- try{var act=document.querySelector('#gridDias .card.activa');
-   var idx=0,cards=document.querySelectorAll('#gridDias .card');
-   for(var k=0;k<cards.length;k++){if(cards[k]===act){idx=k;break;}}
-   pintarHoras(idx);}catch(e){}
- // 4b) FASE 31.7: gráfico "Evolución de temperaturas (7 días)" — traducir
- // leyenda Máxima/Mínima y días del eje X (fix reportado por Germán)
- try{pintarSemana();}catch(e){}
- // 5) Botón
- document.getElementById('btnLang').innerHTML=_idiomaEN
-   ?'<span class="flag">🇪🇸</span><span id="btnLangTxt">Español</span>'
-   :'<span class="flag">🇬🇧</span><span id="btnLangTxt">English</span>';
-}
-var DATA_HORAS=__DATA_HORAS__;   // [{n:'Hoy 3 Jul', t:[24 temps], ic:[24 iconos]}, ...]
-var HORA_IDX=__HORA_IDX__;       // hora actual (índice 0-23) para la línea 📍
-var EJE_H=Array.from({length:24},function(_,h){return (h<10?'0':'')+h+':00'});
-
-var chH=echarts.init(document.getElementById('grafHoras'));
-function pintarHoras(idx){
-  var d=DATA_HORAS[idx]||DATA_HORAS[0];
-  var _bn=d.n;
-  if(typeof _idiomaEN!=='undefined' && _idiomaEN){
-    var _p=_bn.split(' ');_p[0]=_trad(_p[0],I18N_DIAS);_bn=_p.join(' ');}
-  document.getElementById('badgeDia').textContent=_bn;
-  var temps=d.t;
-  var vmax=Math.max.apply(null,temps.filter(function(x){return x!==null}));
-  var vmin=Math.min.apply(null,temps.filter(function(x){return x!==null}));
-  // FASE 31.6: iconos de clima por hora (fila superior) — ☀️⛅🌧️🌙❄️…
-  var iconos=(d.ic&&d.ic.length===24)?d.ic:EJE_H.map(function(){return ''});
-  // Marcadores de HORA ACTUAL (solo en "Hoy"): línea punteada + 📍
-  var esHoy=(idx===0)&&HORA_IDX>=0&&HORA_IDX<24;
-  var mlData=[
-    {type:'max',name:'Máx',label:{formatter:'⬆ {c}°',color:'#fff'},itemStyle:{color:'#ff8c42'}},
-    {type:'min',name:'Mín',label:{formatter:'⬇ {c}°',color:'#fff'},itemStyle:{color:'#4fc3f7'}}];
-  // FASE 31.7/31.8 (fix Germán): la etiqueta "Ahora" vive en el tope del
-  // gráfico. Si el pin 📍 cae en el punto de Máx/Mín o en el 20% SUPERIOR
-  // del rango, chocaba con la etiqueta y los pines ⬆/⬇ → ilegible. En esos
-  // casos se omite el 📍: la línea punteada roja + "Ahora" ya marcan la hora.
-  var _chocaPin=esHoy&&temps[HORA_IDX]!==null&&(
-    (temps[HORA_IDX]===vmax&&temps.indexOf(vmax)===HORA_IDX)||
-    (temps[HORA_IDX]===vmin&&temps.indexOf(vmin)===HORA_IDX)||
-    (vmax===vmin)||
-    ((vmax-vmin)>0&&((temps[HORA_IDX]-vmin)/(vmax-vmin))>0.8));
-  if(esHoy&&temps[HORA_IDX]!==null&&!_chocaPin){
-    mlData.push({coord:[HORA_IDX,temps[HORA_IDX]],
-      symbol:'pin',symbolSize:44,itemStyle:{color:'#e63946'},
-      label:{formatter:'📍',fontSize:15,color:'#fff'}});}
-  chH.setOption({
-    backgroundColor:'transparent',
-    tooltip:{trigger:'axis',formatter:function(p){var x=p[0];
-      var ic=iconos[x.dataIndex]||'';return ic+' '+x.axisValue+' → <b>'+x.data+'°C</b>'}},
-    grid:{left:'2%',right:'3%',bottom:'8%',top:'20%',containLabel:true},
-    xAxis:[
-      {type:'category',data:EJE_H,
-        axisLabel:{color:'#fff',fontSize:10,interval:2},
-        axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
-      {type:'category',position:'top',data:iconos,
-        axisLabel:{fontSize:13,interval:1,margin:6},
-        axisLine:{show:false},axisTick:{show:false}}
-    ],
-    yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
-      splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
-    series:[{name:'Temp',type:'line',smooth:true,data:temps,symbolSize:6,
-      xAxisIndex:0,
-      lineStyle:{width:3,color:'#ffd166'},itemStyle:{color:'#ffd166'},
-      areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
-        colorStops:[{offset:0,color:'rgba(255,209,102,.45)'},{offset:1,color:'rgba(255,209,102,0)'}]}},
-      markPoint:{data:mlData},
-      markLine:esHoy?{symbol:'none',silent:true,
-        lineStyle:{type:'dashed',width:2,color:'#e63946'},
-        label:{formatter:_idiomaEN?'Now':'Ahora',color:'#fff',fontWeight:'bold',
-          backgroundColor:'rgba(230,57,70,.85)',padding:[3,8],borderRadius:8},
-        data:[{xAxis:HORA_IDX}]}:undefined
-    }]},true);
-}
-document.querySelectorAll('#gridDias .card').forEach(function(card,i){
-  card.addEventListener('click',function(){
-    document.querySelectorAll('#gridDias .card').forEach(function(c){c.classList.remove('activa')});
-    card.classList.add('activa');
-    pintarHoras(i);
-    document.getElementById('grafHoras').scrollIntoView({behavior:'smooth',block:'nearest'});
-  });
-});
-pintarHoras(0);
-document.querySelectorAll('#gridDias .card')[0].classList.add('activa');
-
-// FASE 31.7 (fix Germán): el gráfico de 7 días ahora se pinta con una
-// función sensible al idioma — al pulsar el toggle ES↔EN se traducen la
-// leyenda (Máxima/Mínima → Max/Min) y los días/meses del eje X.
-var I18N_DIAS_AB={"Hoy":"Today","Lun":"Mon","Mar":"Tue","Mié":"Wed",
- "Jue":"Thu","Vie":"Fri","Sáb":"Sat","Dom":"Sun"};
-var I18N_MES_AB={"ene":"Jan","feb":"Feb","mar":"Mar","abr":"Apr","may":"May",
- "jun":"Jun","jul":"Jul","ago":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dic":"Dec"};
-var EJE_DIAS_ES=__EJE_DIAS__;
-// FASE 31.8 (pedido de Germán): icono del clima de cada día en el gráfico
-// de temperaturas Máx/Mín (se muestra sobre la etiqueta del día, eje X)
-var ICONOS_DIAS=__ICONOS_DIAS__;
-function _ejeDiasIdioma(){
-  if(!_idiomaEN)return EJE_DIAS_ES;
-  return EJE_DIAS_ES.map(function(s){var p=s.split(' ');
-    p[0]=I18N_DIAS_AB[p[0]]||p[0];
-    if(p.length>=3)p[2]=I18N_MES_AB[p[2]]||p[2];
-    return p.join(' ');});
-}
 var ch=echarts.init(document.getElementById('grafico'));
-function pintarSemana(){
- var nMax=_idiomaEN?'Max':'Máxima', nMin=_idiomaEN?'Min':'Mínima';
- ch.setOption({
+ch.setOption({
  backgroundColor:'transparent',
  tooltip:{trigger:'axis'},
- legend:{data:[nMax,nMin],textStyle:{color:'#fff'}},
+ legend:{data:['Máxima','Mínima'],textStyle:{color:'#fff'}},
  grid:{left:'4%',right:'4%',bottom:'6%',top:'14%',containLabel:true},
- xAxis:{type:'category',data:_ejeDiasIdioma(),
-  axisLabel:{color:'#fff',interval:0,lineHeight:17,
-   formatter:function(v,i){return (ICONOS_DIAS[i]||'')+'\\n'+v;}},
-  axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
+ xAxis:{type:'category',data:__EJE_DIAS__,
+  axisLabel:{color:'#fff'},axisLine:{lineStyle:{color:'rgba(255,255,255,.4)'}}},
  yAxis:{type:'value',axisLabel:{color:'#fff',formatter:'{value}°'},
   splitLine:{lineStyle:{color:'rgba(255,255,255,.15)'}}},
  series:[
-  {name:nMax,type:'line',smooth:true,data:__SERIE_MAX__,symbolSize:9,
+  {name:'Máxima',type:'line',smooth:true,data:__SERIE_MAX__,symbolSize:9,
    lineStyle:{width:4,color:'#ffb347'},itemStyle:{color:'#ffb347'},
    areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
     colorStops:[{offset:0,color:'rgba(255,179,71,.45)'},{offset:1,color:'rgba(255,179,71,0)'}]}},
    label:{show:true,color:'#fff',formatter:'{c}°'}},
-  {name:nMin,type:'line',smooth:true,data:__SERIE_MIN__,symbolSize:9,
+  {name:'Mínima',type:'line',smooth:true,data:__SERIE_MIN__,symbolSize:9,
    lineStyle:{width:4,color:'#4fc3f7'},itemStyle:{color:'#4fc3f7'},
    areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,
     colorStops:[{offset:0,color:'rgba(79,195,247,.40)'},{offset:1,color:'rgba(79,195,247,0)'}]}},
    label:{show:true,color:'#fff',formatter:'{c}°'}}
- ]},true);
-}
-pintarSemana();
-
-// FASE 31.1: responsive TOTAL — resize + rotación de pantalla en móviles
-function reajustar(){try{ch.resize();chH.resize()}catch(e){}}
-window.addEventListener('resize',reajustar);
-window.addEventListener('orientationchange',function(){setTimeout(reajustar,220)});
-if(screen&&screen.orientation&&screen.orientation.addEventListener){
-  screen.orientation.addEventListener('change',function(){setTimeout(reajustar,220)});}
+ ]});
+window.addEventListener('resize',function(){ch.resize()});
 </script></body></html>"""
 
 
 def _generar_html_clima(d: dict) -> str:
     """FASE 31: Renderiza el dashboard HTML del clima con tema dinámico."""
     act = d['actual']
-    # FASE 31.7 (acuerdo con Germán): el fondo del dashboard depende SOLO del
-    # momento del día — DÍA = gradiente celeste-amarillo · NOCHE = azul
-    # oscuro. Queda descartado el gradiente GRIS del tema 'nublado' (se veía
-    # muy mal). El resto de _TEMAS_CLIMA se conserva por compatibilidad.
-    tema = _TEMAS_CLIMA['noche'] if d.get('es_noche') else _TEMAS_CLIMA['sol']
+    tema = _TEMAS_CLIMA.get(act['tema'], _TEMAS_CLIMA['nublado'])
     dias = d['dias']
 
     tarjetas = []
@@ -38593,20 +33294,12 @@ def _generar_html_clima(d: dict) -> str:
             f'<div class="card{" hoy" if i == 0 else ""}">'
             f'<div class="d">{dia["nombre"]}</div>'
             f'<div class="f">{dia["fecha"]}</div>'
-            f'<span class="ic">{_icono_clima_dash(dia["emoji"], "1.35em")}</span>'
+            f'<span class="ic">{dia["emoji"]}</span>'
             f'<div class="tt">{dia["tmax"]}° <span class="min">/ {dia["tmin"]}°</span></div>'
             f'<div class="cd">{dia["desc"]}<br>💨 {dia["viento"]} km/h · 💧 {dia["humedad"]}%'
-            f'<br>{_svg_lluvia_clima("1em")} {dia["lluvia"]}%</div></div>')
+            f'<br>🌧️ {dia["lluvia"]}%</div></div>')
 
     region_pais = ', '.join(x for x in [d.get('region', ''), d.get('pais', '')] if x)
-    # FASE 31.1: datos horarios por día (para el gráfico clickeable) + AQI
-    data_horas = [
-        {'n': f'{x["nombre"]} {x["fecha"]}', 't': x.get('horas') or [],
-         'ic': x.get('iconos') or []}
-        for x in dias
-    ]
-    aqi_val = d.get('aqi')
-    aqi_cat = d.get('aqi_cat') or ''
     html = _HTML_CLIMA_TEMPLATE
     reemplazos = {
         '__CIUDAD__': d['ciudad'],
@@ -38614,8 +33307,7 @@ def _generar_html_clima(d: dict) -> str:
         '__ACTUALIZADO__': _ahora_chile().strftime('%d-%m-%Y %H:%M'),
         '__GRADIENTE__': tema['grad'],
         '__ACCENT__': tema['acc'],
-        '__ICONO_HOY__': _icono_clima_dash(act['emoji']),
-        '__SVG_LLUVIA__': _svg_lluvia_clima('1em'),
+        '__ICONO_HOY__': act['emoji'],
         '__TEMP_HOY__': str(act['temp']),
         '__DESC_HOY__': act['desc'],
         '__TMIN_HOY__': str(dias[0]['tmin']),
@@ -38624,15 +33316,8 @@ def _generar_html_clima(d: dict) -> str:
         '__HUM_HOY__': str(act['humedad']),
         '__VIENTO_HOY__': str(act['viento']),
         '__LLUVIA_HOY__': str(dias[0]['lluvia']),
-        '__AQI_VAL__': str(aqi_val) if aqi_val is not None else '—',
-        '__AQI_CAT__': aqi_cat if aqi_cat else 's/d',
-        '__CREPUSCULO__': d.get('crepusculo', '—'),
-        '__OCASO__': d.get('ocaso', '—'),
         '__TARJETAS__': ''.join(tarjetas),
-        '__DATA_HORAS__': json.dumps(data_horas, ensure_ascii=False),
-        '__HORA_IDX__': str(d.get('hora_actual_idx', -1)),
         '__EJE_DIAS__': json.dumps([x['nombre'][:3] + ' ' + x['fecha'] for x in dias]),
-        '__ICONOS_DIAS__': json.dumps([x['emoji'] for x in dias], ensure_ascii=False),
         '__SERIE_MAX__': json.dumps([x['tmax'] for x in dias]),
         '__SERIE_MIN__': json.dumps([x['tmin'] for x in dias]),
     }
@@ -38651,21 +33336,11 @@ async def clima_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         datos = await asyncio.wait_for(
             loop.run_in_executor(None, _obtener_clima_ciudad, ciudad), timeout=35)
-        if datos == 'NOGEO' or datos is None:
+        if not datos:
             await msg_espera.edit_text(
                 f'❌ No encontré la localidad "{ciudad}".\n\n'
                 '💡 Prueba con: /clima Providencia · /clima Valparaíso · '
-                '/clima Puerto Montt\n'
-                '🌍 Si el nombre existe en varios países, agrega el país al '
-                'final: /clima santiago chile · /clima la reina chile · '
-                '/clima cordoba argentina')
-            return
-        if datos == 'NODATA':
-            await msg_espera.edit_text(
-                f'⚠️ Encontré "{ciudad.title()}", pero el servicio meteorológico '
-                'no respondió en este momento.\n\n'
-                '🔄 Reintenta en 1-2 minutos — el sistema usará automáticamente '
-                'una fuente de respaldo.')
+                '/clima Puerto Montt')
             return
 
         act = datos['actual']
@@ -40745,8 +35420,6 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
         'total de miembros', 'total de cofrades', 'total de integrantes',
         'cantidad de integrantes', 'cantidad de miembros', 'cantidad de cofrades',
         'cuantos somos', 'cuantos hay', 'cuanta dotacion',
-        'cuantos usuarios', 'usuarios registrados', 'usuarios activos',
-        'cuantos registrados', 'total de usuarios',
         'tamano del grupo', 'tamano de la cofradia',
         'dotacion total', 'dotacion actual',
     ]
@@ -40768,40 +35441,7 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
     ]
     quiere_profesiones = any(p in msg_n for p in patrones_profesiones)
     
-    # ──────────────────────────────────────────────────────────────────
-    # PATRÓN 3 (FASE 31.19, caso real de Germán): "¿quiénes son los
-    # usuarios que más participan?" — el bot TENÍA estos datos (/top,
-    # /resumen_mes) pero respondía "no tengo esa información". Ahora
-    # responde con el ranking real extraído por SQL directo.
-    # ──────────────────────────────────────────────────────────────────
-    patrones_participacion = [
-        'mas participan', 'participan mas', 'mas activos', 'mas activo',
-        'usuarios mas activos', 'miembros mas activos', 'cofrades mas activos',
-        'quienes participan', 'quien participa mas', 'quien escribe mas',
-        'quien habla mas', 'quien publica mas', 'mayor participacion',
-        'ranking de participacion', 'ranking de usuarios', 'ranking de mensajes',
-        'top de usuarios', 'top usuarios', 'usuarios con mas mensajes',
-        'quienes son los que mas', 'los que mas escriben', 'los que mas aportan',
-    ]
-    quiere_participacion = any(p in msg_n for p in patrones_participacion)
-    
-    # ──────────────────────────────────────────────────────────────────
-    # PATRÓN 4 (FASE 31.22, caso real): "¿quiénes de Cofradía son expertos
-    # en Recursos Humanos?" — buscaba en la web teniendo el directorio
-    # profesional en la propia BD. Busca por especialidad en las tarjetas.
-    # ──────────────────────────────────────────────────────────────────
-    patrones_expertos = [
-        'expertos en', 'experto en', 'expertas en', 'experta en',
-        'especialistas en', 'especialista en', 'quien sabe de',
-        'quienes saben de', 'profesionales de', 'profesionales en',
-        'alguien que sepa de', 'quien se dedica a', 'quienes se dedican a',
-        'que cofrades saben de',
-    ]
-    quiere_expertos = any(p in msg_n for p in patrones_expertos)
-    especialidad_p4 = _extraer_especialidad_pr(mensaje) if quiere_expertos else ''
-    quiere_expertos = quiere_expertos and bool(especialidad_p4)
-    
-    if not quiere_conteo and not quiere_profesiones and not quiere_participacion and not quiere_expertos:
+    if not quiere_conteo and not quiere_profesiones:
         return None
     
     # ──────────────────────────────────────────────────────────────────
@@ -40870,137 +35510,6 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
                 )
             except Exception as e:
                 logger.warning(f"FASE 30: error conteo integrantes: {e}")
-        
-        # EXPERTOS POR ESPECIALIDAD (FASE 31.22)
-        if quiere_expertos:
-            try:
-                # Términos de búsqueda: frase completa + palabras significativas
-                # + equivalencias comunes (ej: recursos humanos ↔ rrhh)
-                _esp_low = especialidad_p4.lower()
-                terminos_p4 = {_esp_low}
-                for _tok in _esp_low.split():
-                    if len(_tok) >= 4:
-                        terminos_p4.add(_tok)
-                _equiv = {
-                    'recursos humanos': {'rrhh', 'gestion de personas',
-                                         'gestión de personas', 'people'},
-                    'rrhh': {'recursos humanos'},
-                    'tecnologia': {'informatica', 'informática', 'software'},
-                    'tecnología': {'informatica', 'informática', 'software'},
-                    'marketing': {'mercadeo', 'publicidad'},
-                    'finanzas': {'financiero', 'contabilidad'},
-                    'legal': {'abogado', 'juridico', 'jurídico', 'derecho'},
-                }
-                for _k, _vs in _equiv.items():
-                    if _k in _esp_low:
-                        terminos_p4.update(_vs)
-                # Variantes sin acentos + con acentos comunes (los datos de la
-                # BD pueden venir escritos de ambas formas)
-                import unicodedata as _u22
-                for _t in list(terminos_p4):
-                    _plano = ''.join(ch for ch in _u22.normalize('NFKD', _t)
-                                     if not _u22.combining(ch))
-                    terminos_p4.add(_plano)
-                terminos_p4 = set(list(terminos_p4)[:12])  # tope de consultas
-                
-                encontrados_p4, vistos_p4 = [], set()
-                
-                def _buscar_tabla_p4(tabla, cols_sel, cols_like):
-                    for _t in terminos_p4:
-                        like = f"%{_t}%"
-                        conds = " OR ".join(
-                            f"LOWER(COALESCE({col},'')) LIKE "
-                            + ("%s" if DATABASE_URL else "?") for col in cols_like)
-                        params = tuple([like] * len(cols_like))
-                        try:
-                            c.execute(f"SELECT {cols_sel} FROM {tabla} "
-                                      f"WHERE {conds} LIMIT 8", params)
-                            for r in c.fetchall():
-                                fila = (dict(r) if DATABASE_URL
-                                        else dict(zip(cols_sel.split(', '), r)))
-                                clave = (fila.get('nombre_completo') or '').lower()
-                                if clave and clave not in vistos_p4:
-                                    vistos_p4.add(clave)
-                                    encontrados_p4.append(fila)
-                        except Exception:
-                            conn.rollback() if DATABASE_URL else None
-                
-                _buscar_tabla_p4(
-                    'tarjetas_profesional',
-                    'nombre_completo, profesion, empresa, servicios, ciudad, telefono, email',
-                    ['profesion', 'servicios', 'empresa'])
-                # Tabla de socios importada desde el Excel maestro (si existe)
-                _buscar_tabla_p4(
-                    'socios_cofradia',
-                    'nombre_completo, profesion, empresa, servicios, ciudad, telefono, email',
-                    ['profesion', 'servicios', 'empresa'])
-                
-                if encontrados_p4:
-                    lineas_p4 = []
-                    for f in encontrados_p4[:8]:
-                        contacto = " · ".join(x for x in [
-                            f.get('telefono') or '', f.get('email') or ''] if x)
-                        lineas_p4.append(
-                            f"👤 <b>{f.get('nombre_completo','?')}</b>\n"
-                            f"   💼 {f.get('profesion') or 'Sin profesión registrada'}"
-                            + (f" — {f['empresa']}" if f.get('empresa') else "")
-                            + (f"\n   🛠️ {str(f['servicios'])[:90]}" if f.get('servicios') else "")
-                            + (f"\n   📞 {contacto}" if contacto else ""))
-                    partes.append(
-                        f"<b>🎯 Cofrades expertos en {especialidad_p4.title()}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(lineas_p4)
-                        + f"\n\n💡 Más resultados con /directorio {especialidad_p4}")
-                else:
-                    partes.append(
-                        f"<b>🎯 Expertos en {especialidad_p4.title()}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"Busqué en el directorio profesional y por ahora ningún "
-                        f"cofrade registra esa especialidad en su tarjeta.\n\n"
-                        f"💡 Prueba /directorio {especialidad_p4} con otros términos, "
-                        f"o invita a los expertos del área a crear su tarjeta "
-                        f"con /mi_tarjeta (¡ganan +15 coins!)")
-            except Exception as e:
-                logger.warning(f"FASE 31.22: error búsqueda expertos: {e}")
-        
-        # RANKING DE PARTICIPACIÓN (FASE 31.19)
-        if quiere_participacion:
-            try:
-                if DATABASE_URL:
-                    c.execute("""SELECT user_id, MAX(first_name) AS nombre, COUNT(*) AS n
-                                 FROM mensajes
-                                 WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'
-                                 GROUP BY user_id ORDER BY n DESC LIMIT 10""")
-                    ranking = [(r['nombre'] or f"Usuario {r['user_id']}", r['n'])
-                               for r in c.fetchall()]
-                    c.execute("""SELECT COUNT(*) AS t, COUNT(DISTINCT user_id) AS u
-                                 FROM mensajes
-                                 WHERE fecha >= CURRENT_DATE - INTERVAL '30 days'""")
-                    row = c.fetchone()
-                    tot_msgs, tot_users = (row['t'] or 0), (row['u'] or 0)
-                else:
-                    c.execute("""SELECT user_id, MAX(first_name) AS nombre, COUNT(*) AS n
-                                 FROM mensajes
-                                 WHERE fecha >= date('now', '-30 days')
-                                 GROUP BY user_id ORDER BY n DESC LIMIT 10""")
-                    ranking = [((r[1] or f"Usuario {r[0]}"), r[2]) for r in c.fetchall()]
-                    c.execute("""SELECT COUNT(*), COUNT(DISTINCT user_id) FROM mensajes
-                                 WHERE fecha >= date('now', '-30 days')""")
-                    row = c.fetchone()
-                    tot_msgs, tot_users = (row[0] or 0), (row[1] or 0)
-                
-                if ranking:
-                    medallas = ['🥇', '🥈', '🥉'] + ['▪️'] * 7
-                    lineas_rk = "\n".join(
-                        f"{medallas[i]} <b>{nom}</b>: {n} mensaje{'s' if n != 1 else ''}"
-                        for i, (nom, n) in enumerate(ranking))
-                    partes.append(
-                        f"<b>🏆 Usuarios más participativos (últimos 30 días)</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n\n{lineas_rk}\n\n"
-                        f"📊 Total del período: <b>{tot_msgs}</b> mensajes "
-                        f"de <b>{tot_users}</b> usuarios activos\n\n"
-                        f"💡 Más detalle con /top y /resumen_mes")
-            except Exception as e:
-                logger.warning(f"FASE 31.19: error ranking participación: {e}")
         
         # PROFESIONES MÁS RECURRENTES
         if quiere_profesiones:
@@ -41093,7 +35602,7 @@ async def _intentar_responder_con_sql(mensaje: str, user_name: str = "") -> str:
             return None
         
         # Construir respuesta final
-        resp = (f"Buenas noticias {prefijo.rstrip(', ')}, aquí los datos exactos de la base:\n\n" if prefijo else "")
+        resp = ("Buenas noticias " + prefijo + ", aquí los datos exactos de la base:\n\n" if prefijo else "")
         resp += "\n\n".join(partes)
         resp += "\n\n<em>📊 Datos obtenidos directamente de la base de datos.</em>"
         return resp
@@ -41133,22 +35642,13 @@ def main():
     except Exception as e:
         logger.warning(f"Empresas init: {e}")
     
-    # FASE 31.39: el keep-alive legacy y el webhook COMPITEN por el PORT
-    # ('Address already in use' → deploy Failed). En modo webhook, el
-    # propio webhook sirve el puerto (Render ve Live por él): keep-alive
-    # OMITIDO. En polling, todo sigue como siempre.
-    _modo_webhook_39 = (os.environ.get('USE_WEBHOOK', '0') == '1'
-                        and bool(os.environ.get('RENDER_EXTERNAL_URL')))
+    # Keep-alive SIEMPRE activo — servidor HTTP en PORT(10000) para Render
     keepalive_thread = threading.Thread(target=run_keepalive_server, daemon=True)
     keepalive_thread.start()
-    if _modo_webhook_39:
-        logger.info("🔁 FASE 31.40: keep-alive en PORT actúa como HEALTH+PROXY "
-                    "(GET / → 200 para Render · POST /<token> → webhook interno)")
-    else:
-        logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
-    # Auto-ping cada 5min — mantiene el servicio tibio en cualquier modo
+    # Auto-ping cada 4min — Render NUNCA duerme el bot
     ping_thread = threading.Thread(target=auto_ping, daemon=True)
     ping_thread.start()
+    logger.info("🏓 Keep-alive 24/7 activado — bot siempre despierto")
     
     if not TOKEN_BOT:
         logger.error("❌ TOKEN_BOT no configurado")
@@ -41157,71 +35657,12 @@ def main():
     # Crear aplicación
     async def post_init(app):
         """Eliminar webhook anterior + configurar comandos del menú + limpiar nombres vacíos"""
-        # FASE 31.26 — ANTI-CONGELAMIENTO:
-        # (a) Render (1 vCPU) da un pool default de solo 5 hilos; la cascada
-        #     LLM puede retener hilos hasta 180s → saturación → el bot deja
-        #     de responder "a ratos". Ampliamos a 24 hilos dedicados.
-        # (b) Monitor cardíaco: un job late cada 60s; si el latido llega
-        #     tarde, es que ALGO bloqueó el event loop → queda en el log.
-        try:
-            import concurrent.futures as _cf
-            asyncio.get_running_loop().set_default_executor(
-                _cf.ThreadPoolExecutor(max_workers=24,
-                                       thread_name_prefix='cofradia'))
-            logger.info("🧵 FASE 31.26: pool ampliado a 24 hilos (anti-saturación)")
-        except Exception as e:
-            logger.warning(f"FASE 31.26 executor: {e}")
-        # FASE 31.37: durante la gracia de deploy, silenciar los ERROR rojos
-        # que la librería imprime por su cuenta ante cada 409 del parto —
-        # queda UNA sola línea amable (⏳). Pasada la gracia, todo vuelve a
-        # loguearse fuerte (el detector 🧟 sigue intacto).
-        try:
-            import logging as _lg37
-
-            class _FiltroGraciaDeploy(_lg37.Filter):
-                def filter(self, record):
-                    try:
-                        if 'Conflict' in record.getMessage():
-                            _edad = (datetime.now() - _BOT_ARRANQUE).total_seconds()
-                            if _edad < 120:
-                                return False  # silenciar durante el parto
-                    except Exception:
-                        pass
-                    return True
-
-            _f37 = _FiltroGraciaDeploy()
-            _lg37.getLogger('telegram.ext.Updater').addFilter(_f37)
-            _lg37.getLogger('telegram.ext._updater').addFilter(_f37)
-            logger.info("🔇 FASE 31.37: ruido 409 del parto silenciado "
-                        "(solo queda la línea ⏳; post-gracia loguea todo)")
-        except Exception as e:
-            logger.warning(f"FASE 31.37 filtro: {e}")
-        try:
-            globals()['_ULTIMO_LATIDO'] = tiempo_real.time()
-
-            async def _job_latido(context):
-                ahora = tiempo_real.time()
-                previo = globals().get('_ULTIMO_LATIDO', ahora)
-                atraso = ahora - previo - 60
-                if atraso > 5:
-                    logger.warning(f"🫀 FASE 31.26: LOOP ESTUVO BLOQUEADO "
-                                   f"~{atraso:.0f}s (latido atrasado)")
-                globals()['_ULTIMO_LATIDO'] = ahora
-
-            app.job_queue.run_repeating(_job_latido, interval=60, first=30,
-                                        name='latido_loop')
-            logger.info("🫀 FASE 31.26: monitor cardíaco del loop activo (60s)")
-        except Exception as e:
-            logger.warning(f"FASE 31.26 latido: {e}")
         # PASO 1: Limpiar webhook para evitar Conflict en Render
-        # FASE 31.36: SOLO en modo polling (en modo webhook, borrarlo
-        # nos dejaría sordos — run_webhook lo registra él mismo)
-        if os.environ.get('USE_WEBHOOK', '0') != '1':
-            try:
-                await app.bot.delete_webhook(drop_pending_updates=True)
-                logger.info("🧹 Webhook anterior eliminado - sin conflictos")
-            except Exception as e:
-                logger.warning(f"Nota al limpiar webhook: {e}")
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("🧹 Webhook anterior eliminado - sin conflictos")
+        except Exception as e:
+            logger.warning(f"Nota al limpiar webhook: {e}")
         
         # PASO 2: Esperar un momento para que Telegram procese la eliminación
         await asyncio.sleep(2)
@@ -41377,11 +35818,7 @@ def main():
         else:
             logger.warning("⚠️ COFRADIA_GROUP_ID no configurado (grupo no verificado)")
     
-    # FASE 31.14: concurrent_updates(32) — PARALELISMO REAL. Sin esto, PTB 20.x
-    # procesa las actualizaciones EN SERIE: mientras el bot respondía a un
-    # usuario (5-40s de LLM), todos los demás esperaban en cola. Con 32 workers
-    # concurrentes, el bot atiende hasta 32 conversaciones simultáneas.
-    application = Application.builder().token(TOKEN_BOT).concurrent_updates(32).post_init(post_init).build()
+    application = Application.builder().token(TOKEN_BOT).post_init(post_init).build()
     
     # ── DIAGNÓSTICO: registra CADA update recibido (no interfiere con handlers) ──
     async def _diag_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41501,14 +35938,6 @@ def main():
     application.add_handler(CommandHandler("expertise", expertise_comando))
     application.add_handler(CommandHandler("rag_debug", rag_debug_comando))
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
-    application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
-    application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
-    application.add_handler(CommandHandler("version", version_comando))  # FASE 31.21: identidad de build
-    application.add_handler(CommandHandler("entrenar_intenciones", entrenar_intenciones_comando))  # FASE 31.24
-    application.add_handler(CommandHandler("motores", motores_comando))  # FASE 31.25: bus universal
-    application.add_handler(CommandHandler("diagnostico_ruteo", diagnostico_ruteo_comando))  # FASE 31.29
-    application.add_handler(CommandHandler("respaldos", respaldos_comando))  # FASE 31.18: buscador de respaldos
-    application.add_handler(CommandHandler("canjear_renovacion", canjear_renovacion_comando))  # FASE 31.18: coins→30 días
     application.add_handler(CommandHandler("rag_reindexar", rag_reindexar_comando))
     application.add_handler(CommandHandler("rag_reindexar_embeddings", rag_reindexar_embeddings_comando))  # FASE 29
     application.add_handler(CommandHandler("rag_reindexar_perfiles", rag_reindexar_perfiles_comando))  # FASE 30
@@ -41568,9 +35997,6 @@ def main():
     # Interceptores de emergencia: prioridad máxima, funciona en grupo Y privado
     application.add_handler(MessageHandler(filters.LOCATION, _emer_interceptar_gps), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _emer_interceptar_texto), group=-1)
-    # FASE 31.43: respuestas a re-preguntas del bot (slot-filling) — corre
-    # antes que los filtros de mención; 'finanzas' a secas ya basta
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _slot_interceptar_texto), group=-1)
     
     # v4.0 handlers: Coins, Premium, Trust
     application.add_handler(CommandHandler("finanzas", finanzas_comando))
@@ -41639,16 +36065,6 @@ def main():
     # Mejora 5: Analisis de imagenes en grupo (la funcion filtra por caption internamente)
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS, analizar_imagen_grupo))
     application.add_handler(MessageHandler(filters.Document.PDF & filters.ChatType.PRIVATE, recibir_documento_pdf))
-    # FASE 31.9: referencia markdown de TODO archivo compartido (grupo aparte
-    # para no interferir con los handlers existentes; los PDF privados los
-    # salta porque ya tienen indexación completa propia)
-    application.add_handler(MessageHandler(filters.Document.ALL, registrar_archivo_compartido), group=8)
-    # FASE 31.18: catastro de multimedia del grupo (audio→texto, fotos/videos/
-    # archivos→referencia). group=9: corre en paralelo, jamás interfiere.
-    application.add_handler(MessageHandler(
-        (filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE |
-         filters.PHOTO | filters.Document.ALL) & filters.ChatType.GROUPS,
-        respaldar_multimedia_grupo), group=9)
     
     # Handler de mensajes de voz (privado y grupo)
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, manejar_mensaje_voz))
@@ -41852,32 +36268,6 @@ def main():
         msg = await update.message.reply_text("🧠 Buscando en toda la base de conocimientos...")
         
         try:
-            # FASE 31.19: PRE-ROUTER determinístico — si la pregunta natural
-            # calza con un comando conocido, el bot SE LO EJECUTA A SÍ MISMO
-            # al instante (sin depender del criterio del LLM de intención).
-            _ruta_19 = _pre_rutear_comando(mensaje,
-                                           update.effective_user.id)  # 31.41
-            if not _ruta_19:
-                _ruta_19 = await _rutear_semantico_embeddings(mensaje)  # FASE 31.24
-            if _ruta_19:
-                _cmd_directo_19, _args_19 = _ruta_19
-                try:
-                    # FASE 31.19c: ejecutar PRIMERO, borrar msg tras el éxito
-                    ejecutado_19 = await ejecutar_comando_desde_intencion(
-                        _cmd_directo_19, _args_19, update, context)
-                    if ejecutado_19:
-                        logger.info(f"🧭 FASE 31.19: '{mensaje[:50]}' → "
-                                    f"/{_cmd_directo_19} {_args_19} (auto-router)")
-                        try:
-                            await msg.delete()  # limpia el "Buscando..."
-                        except Exception:
-                            pass
-                        return
-                    logger.info(f"🧭 FASE 31.19c: /{_cmd_directo_19} no ejecutó — "
-                                f"continuando con capas siguientes")
-                except Exception as _e_pr19:
-                    logger.debug(f"FASE 31.19 pre-router: {_e_pr19}")
-            
             # ===== MOTOR DE INTENCIÓN: Mejora silenciosa del mensaje =====
             intencion = mejorar_intencion(mensaje, user_name, user_id, canal='texto')
             query_para_busqueda = intencion['query_mejorada']
@@ -41889,9 +36279,6 @@ def main():
                     intencion['comando'], intencion['args'], update, context
                 )
                 if ejecutado:
-                    asyncio.create_task(asyncio.to_thread(  # FASE 31.24: aprender
-                        _intencion_guardar_ejemplo_sync,
-                        intencion['comando'], mensaje))
                     return  # El comando fue ejecutado, no necesitamos respuesta de IA
                 # Si falló la ejecución, continuar con flujo normal
             
@@ -41977,33 +36364,19 @@ def main():
             loop = asyncio.get_running_loop()
             
             async def _ejecutar_busqueda_con_timeout():
-                """Ejecuta las 3 búsquedas paralelas con timeout estricto (14s por motor)."""
-                # FASE 31.3 — CAUSA RAÍZ DE LOS 3 MINUTOS: el "with pool:"
-                # al salir ejecutaba shutdown(wait=True), que BLOQUEABA el
-                # event loop completo hasta que terminara cualquier búsqueda
-                # colgada (aunque el timeout de 10s ya hubiera disparado).
-                # Ahora: pool sin context-manager y shutdown(wait=False) →
-                # los timeouts mandan de verdad; hilos rezagados mueren solos
-                # (el A3 además tiene statement_timeout de 4s en la BD).
-                pool = _TPE_priv(max_workers=3)
-                try:
-                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40,
-                                             mensaje)  # FASE 31.7b: la pregunta ORIGINAL viaja junto a la reescrita
+                """Ejecuta las 3 búsquedas paralelas con timeout estricto de 10s total."""
+                with _TPE_priv(max_workers=3) as pool:
+                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
                     fut_tar_th = pool.submit(_buscar_tarjetas_priv, mensaje)
                     fut_ev_th = pool.submit(_buscar_eventos_priv)
                     
                     # Wrap each in asyncio
-                    fut_rag_aw = loop.run_in_executor(None, fut_rag_th.result, 14)
-                    fut_tar_aw = loop.run_in_executor(None, fut_tar_th.result, 14)
-                    fut_ev_aw = loop.run_in_executor(None, fut_ev_th.result, 14)
+                    fut_rag_aw = loop.run_in_executor(None, fut_rag_th.result, 10)
+                    fut_tar_aw = loop.run_in_executor(None, fut_tar_th.result, 10)
+                    fut_ev_aw = loop.run_in_executor(None, fut_ev_th.result, 10)
                     
                     results = await asyncio.gather(fut_rag_aw, fut_tar_aw, fut_ev_aw, return_exceptions=True)
                     return results
-                finally:
-                    try:
-                        pool.shutdown(wait=False, cancel_futures=True)
-                    except TypeError:
-                        pool.shutdown(wait=False)
             
             # Defaults vacíos por si cualquier búsqueda falla
             resultados_busq = {'historial': [], 'rag': [], 'fuentes_usadas': [],
@@ -42014,7 +36387,7 @@ def main():
             fnt_ev = []
             
             try:
-                resultados = await asyncio.wait_for(_ejecutar_busqueda_con_timeout(), timeout=18.0)  # FASE 31.7: 12→18s
+                resultados = await asyncio.wait_for(_ejecutar_busqueda_con_timeout(), timeout=12.0)
                 
                 # Resultado RAG
                 if not isinstance(resultados[0], Exception):
@@ -42049,74 +36422,6 @@ def main():
             rag_confianza = resultados_busq.get('rag_confianza', 'ninguna')
             rag_tematica = resultados_busq.get('rag_tematica', 'desconocida')
             rag_score = resultados_busq.get('rag_score_max', 0.0)
-
-            # ═══ FASE 31.9 — FALLBACK WEB AUTOMÁTICO (pedido de Germán) ═══
-            # Si el RAG vectorial NO tiene la información Y el historial de
-            # conversaciones tampoco → búsqueda profunda en Internet
-            # (DuckDuckGo + Trafilatura → markdown limpio) para que el
-            # usuario SIEMPRE reciba una respuesta completa y correcta.
-            _web_meta_39 = None
-            # ═══ FASE 31.10 (URGENTE Germán) — CAUSA RAÍZ del "no tengo
-            # acceso a internet": el fallback SOLO se disparaba con RAG == 0;
-            # bastaba UN fragmento irrelevante para que el bot respondiera
-            # desde su conocimiento 2024 (caso real: octavos del Mundial
-            # 2026). AHORA el bot busca en Internet cuando:
-            #   a) la consulta requiere información EN TIEMPO REAL
-            #      (detector _consulta_requiere_web), o
-            #   b) la base local NO tiene información RELEVANTE del tema.
-            _web_tiempo_real = False
-            try:
-                _web_tiempo_real = _consulta_requiere_web(mensaje)
-            except Exception:
-                pass
-            _docs_rel_pre = (
-                rag_tematica in ('relevante', 'posible') and
-                rag_confianza in ('alta', 'media') and
-                bool(resultados_busq.get('rag')))
-            if total_rag == 0 or _web_tiempo_real or not _docs_rel_pre:
-                try:
-                    try:
-                        await msg.edit_text(
-                            "🌐 Tu consulta requiere datos actualizados — "
-                            "buscando en Internet en tiempo real..."
-                            if _web_tiempo_real else
-                            "🌐 No está en mi base de conocimientos — "
-                            "buscando en Internet en tiempo real...")
-                    except Exception:
-                        pass
-                    _web_res = await asyncio.wait_for(
-                        asyncio.to_thread(_busqueda_web_profunda, mensaje),
-                        timeout=30.0)  # FASE 31.10: 24→30s (3 fuentes con loop)
-                    if _web_res and _web_res.get('items'):
-                        # Web PRIMERO (más fresca); se conservan hasta 6
-                        # fragmentos locales como contexto complementario
-                        resultados_busq['rag'] = (
-                            list(_web_res['items']) +
-                            list(resultados_busq.get('rag') or [])[:6])
-                        resultados_busq['rag_confianza'] = 'alta'
-                        # FASE 31.10: sin esto, docs_son_relevantes seguía en
-                        # False y el LLM recibía el prompt MODO B ("no tengo
-                        # info") AUNQUE el contexto web ya estaba inyectado
-                        resultados_busq['rag_tematica'] = 'relevante'
-                        rag_tematica = 'relevante'
-                        resultados_busq.setdefault('fuentes_usadas', []).append(
-                            f"Web en tiempo real ({len(_web_res['items'])} fuentes)")
-                        # Re-formatear el contexto con la información web
-                        contexto_completo = formatear_contexto_unificado(
-                            resultados_busq, query_para_busqueda)
-                        fuentes_usadas = resultados_busq.get('fuentes_usadas', [])
-                        fuentes_str = " | ".join(fuentes_usadas)
-                        total_rag = len(resultados_busq['rag'])
-                        rag_confianza = 'alta'
-                        _web_meta_39 = {'markdown': _web_res.get('markdown', ''),
-                                        'urls': _web_res.get('urls', [])}
-                        logger.info(f"🌐 FASE 31.10: contexto web inyectado "
-                                    f"({total_rag} fuentes, tiempo_real={_web_tiempo_real}) "
-                                    f"para '{mensaje[:50]}'")
-                except asyncio.TimeoutError:
-                    logger.info("🌐 FASE 31.10: búsqueda web excedió 30s — continúa sin web")
-                except Exception as _e_w9:
-                    logger.debug(f"fallback web: {_e_w9}")
             
             # Intent hint
             intent_hint = ""
@@ -42156,37 +36461,9 @@ def main():
                     pass
                 docs_str_chat = "\n".join(f'  • "{n}"' for n in nombres_docs_exactos_chat[:5]) if nombres_docs_exactos_chat else ""
                 
-                # FASE 31: si el hit fue por NOMBRE DE DOCUMENTO (score ≥ 45), el usuario
-                # preguntó por ese documento/libro ESPECÍFICO → foco absoluto en él.
-                regla_foco = ""
-                # ═══ FASE 31.10: si hay fuentes WEB-LIVE, el LLM debe saber
-                # la FECHA ACTUAL y que esos datos son más nuevos que su
-                # corte de entrenamiento — PROHIBIDO alegar falta de internet
-                regla_web = ""
-                if _web_meta_39:
-                    regla_web = (
-                        f"0-WEB. **FUENTES EN TIEMPO REAL** (fecha y hora actual: "
-                        f"{_ahora_chile().strftime('%d-%m-%Y %H:%M')} hora Chile): los fragmentos "
-                        f"marcados WEB-LIVE provienen de una búsqueda en Internet realizada HACE "
-                        f"SEGUNDOS. Son MÁS ACTUALIZADOS que tu conocimiento interno (corte 2024): "
-                        f"ante cualquier contradicción, PREVALECE la fuente web. PROHIBIDO decir que "
-                        f"no tienes acceso a internet o que tu información llega hasta 2024 — estás "
-                        f"respondiendo con datos en vivo. Menciona el dominio de la fuente al dar "
-                        f"datos clave (ej: 'según fifa.com...').\n"
-                    )
-                if rag_score >= 45.0 and nombres_docs_exactos_chat:
-                    doc_foco_str = '", "'.join(nombres_docs_exactos_chat[:2])
-                    regla_foco = (
-                        f"0. **DOCUMENTO FOCO**: el usuario pregunta específicamente por el documento "
-                        f"\"{doc_foco_str}\". Responde EXCLUSIVAMENTE con los fragmentos de ESE documento. "
-                        f"Empieza identificándolo por su nombre. IGNORA cualquier otra fuente, persona "
-                        f"homónima de la comunidad o conocimiento externo sobre el mismo tema.\n"
-                    )
-                
                 instruccion = (
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
                     f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
-                    f"{regla_web}{regla_foco}"
                     f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
                     f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
                     f"2. SINTETIZA los fragmentos en respuesta clara y fluida (150-300 palabras máximo).\n"
@@ -42201,7 +36478,10 @@ def main():
                     f"pregunta. Si un fragmento habla de otra plataforma o tema (ej: Discord, tutoriales web "
                     f"ajenos), IGNÓRALO por completo y NO lo menciones. Esta comunidad opera SOLO en Telegram.\n"
                     f"7. NO cierres con preguntas retóricas tipo '¿Te parece si exploramos...?'. Cierra con "
-                    f"una afirmación útil o un comando sugerido."
+                    f"una afirmación útil o un comando sugerido.\n"
+                    f"8. PROHIBIDO combinar, 'corregir' o expandir nombres de personas: usa la grafía "
+                    f"EXACTA de los fragmentos o del usuario; JAMÁS mezcles nombres de dos personas "
+                    f"distintas ni añadas nombres de pila que no estén escritos."
                 )
                 ctx_rag = contexto_completo[:7000]
                 fuentes_str_final = fuentes_str
@@ -42210,95 +36490,49 @@ def main():
                 # FASE 30: MODO B reescrito anti-delirio
                 # ANTES: forzaba al LLM a inventar diciendo "no menciones documentos, solo responde lo que sabes"
                 # AHORA: pide transparencia explícita y permite reconocer falta de información
-                instruccion = (
-                    "Los documentos indexados de la Cofradía NO contienen información específica sobre este tema. "
-                    "REGLAS ESTRICTAS ANTI-DELIRIO:\n"
-                    "1. SI la pregunta requiere DATOS ESPECÍFICOS de la Cofradía (nombres, cifras, eventos, "
-                    "miembros particulares), responde HONESTAMENTE: \"No tengo esa información específica "
-                    "en mi base de datos de la Cofradía\". NUNCA INVENTES nombres ni datos.\n"
-                    "2. SI la pregunta es de CONOCIMIENTO GENERAL (conceptos, teoría, definiciones), "
-                    "responde con tu conocimiento general (LLaMA 3.3, hasta 2024) y empieza diciendo: "
-                    "\"Aunque no tengo info específica de la Cofradía sobre esto, según mi conocimiento general...\"\n"
-                    "3. NUNCA inventes nombres de cofrades, documentos, eventos o cifras.\n"
-                    "4. SIEMPRE termina sugiriendo un comando útil (/cofrades, /buscar_ia, /economia, etc.) "
-                    "o pidiendo al usuario que use /capturar_conocimiento para que la información quede disponible."
-                )
-                # FASE 31 ANTI-HOMÓNIMOS: si la pregunta es sobre un LIBRO/DOCUMENTO/AUTOR
-                # que NO está en la biblioteca, (a) NO inyectar el directorio de tarjetas
-                # (evita confundir con miembros de apellido igual al autor, ej. "Milei"),
-                # (b) instruir respuesta explícita de "ese libro no está en la biblioteca".
+                # FASE 31.1: antes de responder con conocimiento general,
+                # verificar si la BIBLIOTECA tiene títulos relacionados con la
+                # pregunta (evita el caso "libro de Milei" respondido con
+                # biografías inventadas mientras el libro SÍ existía).
+                _titulos_rel = []
                 try:
-                    import re as _re_lib31
-                    _es_pregunta_libro = bool(_re_lib31.search(
-                        r'\b(libro|libros|documento|documentos|pdf|autor|autora|obra|texto|'
-                        r'biblioteca|capitulo|capítulo|escribio|escribió|publicó|publico|lei|leí)\b',
-                        (mensaje or '').lower()
-                    ))
+                    _titulos_rel = await asyncio.wait_for(
+                        loop.run_in_executor(None, _titulos_biblioteca_relacionados, mensaje),
+                        timeout=4.0)
                 except Exception:
-                    _es_pregunta_libro = False
-                if _es_pregunta_libro:
-                    contexto_tarjetas = ""   # bloquear directorio → cero homónimos
-                    # ═══ FASE 31.16 (BUG REAL reportado por Germán con "Milei"):
-                    # antes se ASUMÍA que el libro no estaba en la biblioteca
-                    # cada vez que el RAG vectorial fallaba, y se instruía al
-                    # LLM a NEGAR su existencia. Ahora se VERIFICA contra el
-                    # catálogo REAL de títulos (detectar_libro_en_pregunta):
-                    #   → SÍ está: inyectar extracto real del libro como contexto
-                    #   → NO está: responder con web/conocimiento general, sin
-                    #     callejones sin salida ("reformula tu pregunta")
-                    _libro_cat_316 = None
-                    try:
-                        _libro_cat_316 = await asyncio.to_thread(detectar_libro_en_pregunta, mensaje)
-                    except Exception:
-                        _libro_cat_316 = None
-                    if _libro_cat_316:
-                        _titulo_316 = _libro_cat_316.replace('PDF:', '')
-                        _extracto_316 = ''
-                        try:
-                            _extracto_316 = await asyncio.to_thread(
-                                cargar_libro_para_analisis, _libro_cat_316, 12_000)
-                        except Exception:
-                            _extracto_316 = ''
-                        if _extracto_316:
-                            logger.info(f"📚 FASE 31.16: RAG vectorial falló pero el libro "
-                                        f"'{_titulo_316}' SÍ está — inyectando extracto real")
-                            instruccion += (
-                                f"\n5. LIBRO EN BIBLIOTECA (VERIFICADO): el libro \"{_titulo_316}\" "
-                                f"SÍ está indexado en la biblioteca de la Cofradía y abajo tienes un "
-                                f"EXTRACTO REAL de su texto. Responde la pregunta usando ESE extracto, "
-                                f"citando ideas CONCRETAS del libro. Identifícalo por su nombre. "
-                                f"PROHIBIDO decir que no está en la biblioteca. PROHIBIDO confundir "
-                                f"con miembros de la comunidad de apellido similar al autor."
-                            )
-                            ctx_rag = (f"EXTRACTO REAL DEL LIBRO \"{_titulo_316}\" "
-                                       f"(biblioteca de la Cofradía):\n{_extracto_316}")
-                            fuentes_str_final = f"Biblioteca RAG: {_titulo_316}"
-                        else:
-                            instruccion += (
-                                f"\n5. El libro \"{_titulo_316}\" figura en la biblioteca pero su "
-                                f"texto no pudo cargarse ahora. Responde con tu mejor conocimiento "
-                                f"general verificable sobre la obra, indicando que el análisis "
-                                f"completo está disponible con /rag_consulta."
-                            )
-                            ctx_rag = ""
-                            fuentes_str_final = "Conocimiento propio + transparencia"
-                    else:
-                        instruccion += (
-                            "\n5. PREGUNTA SOBRE LIBRO/DOCUMENTO: ese material NO figura en el "
-                            "catálogo de la biblioteca de la Cofradía (verificado contra los títulos "
-                            "reales). Dilo brevemente, PERO responde igual la pregunta con la MEJOR "
-                            "información disponible (fragmentos WEB-LIVE si existen, o tu conocimiento "
-                            "general verificable sobre el autor/obra). PROHIBIDO limitarte a decir que "
-                            "no está o pedir que reformulen: entrega SIEMPRE una respuesta sustantiva. "
-                            "PROHIBIDO mencionar o confundir con miembros de la comunidad que tengan "
-                            "apellido similar al autor consultado."
-                        )
-                        ctx_rag = ""
-                        fuentes_str_final = "Conocimiento propio + transparencia"
-                else:
-                    ctx_rag = ""
-                    fuentes_str_final = "Conocimiento propio + transparencia"
-                logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica}, pregunta_libro={_es_pregunta_libro})")
+                    _titulos_rel = []
+                _bib_txt = ""
+                if _titulos_rel:
+                    _bib_txt = ("\n\nTÍTULOS REALES DISPONIBLES EN LA BIBLIOTECA "
+                                "(relacionados con la pregunta):\n" +
+                                "\n".join(f"  • {t}" for t in _titulos_rel))
+                instruccion = (
+                    "Los documentos indexados NO arrojaron fragmentos para esta consulta. "
+                    "REGLAS ESTRICTAS ANTI-DELIRIO (FASE 31.1):\n"
+                    "1. SI la pregunta requiere DATOS ESPECÍFICOS de la Cofradía (nombres, cifras, "
+                    "eventos, miembros), responde HONESTAMENTE: \"No tengo esa información específica "
+                    "en mi base de datos de la Cofradía\". NUNCA INVENTES nombres ni datos.\n"
+                    "2. **NOMBRES DE PERSONAS/AUTORES — PROHIBICIÓN ABSOLUTA**: usa EXACTAMENTE el "
+                    "nombre que escribió el usuario. JAMÁS lo 'corrijas', expandas, ni lo COMBINES con "
+                    "otra persona (ej.: si preguntan por 'Milei', NUNCA respondas 'Martín Vizcarra "
+                    "Milei' ni agregues nombres de pila no mencionados). Si no sabes el nombre "
+                    "completo, usa solo el que dio el usuario.\n"
+                    "3. SI la pregunta es sobre un LIBRO, DOCUMENTO o AUTOR: NO respondas con "
+                    "biografías ni datos de conocimiento general. Responde breve y honesto: indica que "
+                    "no encontraste fragmentos con esa palabra, y si hay TÍTULOS DISPONIBLES listados "
+                    "abajo, MENCIÓNALOS textualmente y sugiere: /rag_consulta [título o palabra clave]. "
+                    "Si no hay títulos listados, sugiere reformular con otra palabra clave.\n"
+                    "4. SI la pregunta es de CONOCIMIENTO GENERAL conceptual (definiciones, teoría, "
+                    "cómo funciona algo), responde con tu conocimiento empezando: \"Aunque no tengo "
+                    "info específica de la Cofradía sobre esto, según mi conocimiento general...\" — "
+                    "SIN citar títulos, autores ni cifras inventadas.\n"
+                    "5. Máximo 120 palabras. SIEMPRE cierra sugiriendo un comando útil "
+                    "(/rag_consulta, /buscar_ia, /capturar_conocimiento)."
+                )
+                ctx_rag = _bib_txt
+                fuentes_str_final = ("Biblioteca (títulos sugeridos) + transparencia"
+                                     if _titulos_rel else "Conocimiento propio + transparencia")
+                logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
             prompt = f"""Eres el asistente experto de la Cofradía Premium, comunidad profesional chilena.
@@ -42326,17 +36560,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             fuentes_str = fuentes_str_final
             
-            # FASE 31.17: MEMORIA POR USUARIO — inyecta perfil + recuerdos
-            # relevantes de ESTE usuario al prompt (personalización real).
-            # Si el servicio no está disponible, el bloque llega vacío y el
-            # prompt queda exactamente igual que antes.
-            try:
-                _mem_blk_317 = await memoria_contexto(user_id, mensaje)
-                if _mem_blk_317:
-                    prompt += "\n\n" + _mem_blk_317
-            except Exception:
-                pass
-            
             if msg:
                 try: await msg.edit_text("🧠 Generando respuesta...")
                 except: pass
@@ -42345,40 +36568,16 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             # FASE 30: temperature reducida de 0.7 a 0.3 para minimizar delirios
             respuesta = None
             
-            # FASE 31.14: si la pregunta es sobre un LIBRO que SÍ está en la
-            # biblioteca → análisis profundo con Nemotron (texto real, 120K chars).
-            # Si el libro no está indexado o los motores fallan, respuesta queda
-            # None y el flujo sigue con las capas normales (Groq → Gemini → ...).
-            # FASE 31.16-FIX: el flag se calcula AQUÍ localmente (antes se
-            # reutilizaba _es_pregunta_libro, que solo existía en la rama MODO B
-            # → UnboundLocalError cuando el RAG encontraba docs relevantes).
-            _es_preg_libro_14 = False
-            try:
-                _es_preg_libro_14 = bool(_PATRON_PREGUNTA_LIBRO.search((mensaje or '').lower()))
-            except Exception:
-                _es_preg_libro_14 = False
-            if _es_preg_libro_14:
-                try:
-                    if msg:
-                        try: await msg.edit_text("📚 Verificando si el libro está en la biblioteca...")
-                        except: pass
-                    respuesta = await intentar_respuesta_libro(mensaje, user_name)
-                except Exception as _e_lib14p:
-                    logger.debug(f"FASE 31.14 privado: intento libro falló: {_e_lib14p}")
-                    respuesta = None
-            
             # Capa 1: Groq (más rápido, ~3-5s típico)
-            # FASE 31.14: guard "if not respuesta" — no pisar el análisis de libro
-            if not respuesta:
-                try:
-                    respuesta = await asyncio.wait_for(
-                        loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
-                        timeout=15.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
-                except Exception as _e_gr:
-                    logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
+            try:
+                respuesta = await asyncio.wait_for(
+                    loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
+            except Exception as _e_gr:
+                logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
             
             # Capa 2: Gemini (rápido también)
             if not respuesta or len(respuesta.strip()) < 50:
@@ -42432,15 +36631,8 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             
             # FASE 30.1: envío final robusto (msg puede ser None si reply_text inicial falló)
             if respuesta:
-                respuesta = _cortar_degeneracion(respuesta)  # FASE 31.6 anti-bucle
-                respuesta = _decimales_a_coma(respuesta)  # FASE 31.9c decimales con coma
                 # Agregar footer con fuentes consultadas
                 footer = f"\n\n─────────────────\nFuentes consultadas: {fuentes_str}"
-                # FASE 31.9b: si la información vino de Internet, citar las
-                # URLs exactas al pie (credibilidad y verificabilidad)
-                if _web_meta_39 and _web_meta_39.get('urls'):
-                    footer += "\n" + "\n".join(
-                        f"🔗 {u}" for u in _web_meta_39['urls'][:3])
                 respuesta_completa = respuesta + footer
                 if msg:
                     try: await msg.delete()
@@ -42449,7 +36641,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 # Enviar tambien como audio (TTS) — async no bloqueante
                 try:
                     audio_priv = await asyncio.wait_for(
-                        generar_audio_tts(respuesta[:3000], f"/tmp/priv_{update.effective_user.id}.mp3"),
+                        generar_audio_tts(respuesta[:1500], f"/tmp/priv_{update.effective_user.id}.mp3"),
                         timeout=15.0
                     )
                     if audio_priv and os.path.exists(audio_priv):
@@ -42461,59 +36653,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
                 # Mejora 4: Botones de feedback
-                # FASE 31.3: guardar metadatos para que "Útil" entrene la
-                # memoria de aprendizaje y "Mejorar" regenere con otros criterios
-                try:
-                    _docs_meta = []
-                    try:
-                        for _it in (resultados_busq.get('rag') or [])[:8]:
-                            _s = _it[1] if isinstance(_it, (list, tuple)) and len(_it) > 1 else ''
-                            if _s and _s not in _docs_meta:
-                                _docs_meta.append(_s)
-                    except Exception:
-                        pass
-                    context.user_data['ultima_respuesta_meta'] = {
-                        'pregunta': mensaje[:400],
-                        'query': (query_para_busqueda or mensaje)[:400],
-                        'docs': _docs_meta[:5],
-                        'respuesta': respuesta[:1800],
-                        # FASE 31.9: si la respuesta vino de la web, guardar el
-                        # markdown para que el botón "Útil" lo respalde en RAG
-                        'web_md': (_web_meta_39 or {}).get('markdown', '')[:9000],
-                        'web_urls': (_web_meta_39 or {}).get('urls', [])[:4],
-                    }
-                    # ═══ FASE 31.7 AUTO-APRENDIZAJE: si la respuesta usó RAG con
-                    # alta confianza (≥10 fragmentos, ≤3 documentos = búsqueda
-                    # enfocada), grabar la asociación pregunta→docs SIN esperar
-                    # el clic en "Útil". Así el bot NO OLVIDA lo que ya
-                    # respondió bien: la próxima pregunta sobre el mismo tema
-                    # entra por A0-APRENDIZAJE directo al documento correcto.
-                    try:
-                        _n_frag = len(resultados_busq.get('rag') or [])
-                        # FASE 31.7b GUARDIA ANTI-VENENO: si la propia respuesta
-                        # declara que los docs NO contenían la información, esa
-                        # asociación pregunta→docs es BASURA y grabarla con +1
-                        # envenenaría A0 para siempre (feriados+Cardalda para
-                        # "inflación"). Solo se aprende de respuestas AFIRMATIVAS.
-                        _r_low = (respuesta or '').lower()
-                        _es_negativa = any(_neg in _r_low for _neg in (
-                            'no contienen informaci', 'no se encuentra en la biblioteca',
-                            'no mencionan', 'no aborda el tema', 'no abordan',
-                            'no hay informaci', 'no tengo informaci',
-                            'no puedo proporcionar', 'corresponden exclusivamente'))
-                        if (_docs_meta and _n_frag >= 10 and len(_docs_meta) <= 3
-                                and not _es_negativa):
-                            import asyncio as _aio_al
-                            _aio_al.get_event_loop().run_in_executor(
-                                None, _fb_guardar_aprendizaje,
-                                mensaje[:400], _docs_meta[:5], 1)
-                            logger.info(f"🧠 FASE 31.7 AUTO-APRENDIZAJE: "
-                                        f"{_docs_meta[:3]} (+1 automático)")
-                    except Exception as _e_al:
-                        logger.debug(f"auto-aprendizaje: {_e_al}")
-                except Exception as _e_meta:
-                    logger.debug(f"meta feedback: {_e_meta}")
-                memoria_registrar(user_id, mensaje, respuesta, user_name)  # FASE 31.17
                 try:
                     await update.message.reply_text("Te fue util esta respuesta?", reply_markup=_crear_botones_feedback('chat_privado'))
                 except Exception:
@@ -42617,21 +36756,6 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 name='fase5_insight_tarde'
             )
         logger.info("🌇 FASE 5: insight tarde programado para las 17:30 Chile (lun-vie)")
-        
-        # FASE 31: Avisos automáticos de vencimiento (30/15/7/3/1 días antes, 10:30 Chile)
-        if chile_tz:
-            job_queue.run_daily(
-                avisos_vencimiento_diario,
-                time=dt_time(hour=10, minute=30, second=0, tzinfo=chile_tz),
-                name='avisos_vencimiento'
-            )
-        else:
-            job_queue.run_daily(
-                avisos_vencimiento_diario,
-                time=dt_time(hour=14, minute=30, second=0),  # ~10:30 Chile si UTC
-                name='avisos_vencimiento'
-            )
-        logger.info("🔔 FASE 31: avisos de vencimiento programados para las 10:30 Chile (30/15/7/3/1 días)")
         
         # Resumen nocturno a las 20:00 hora Chile
         if chile_tz:
@@ -42740,6 +36864,17 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("💰 FASE 31: Reporte semanal de saldos programado: lunes 9:30 AM Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar reporte de saldos: {e}")
+        
+        # FASE 31.1: Avisos automáticos de vencimiento al usuario (30/15/7/3/1 días)
+        try:
+            job_queue.run_daily(
+                job_avisos_vencimiento,
+                time=dt_time(hour=13, minute=0),  # 13:00 UTC = 10:00 Chile
+                name='avisos_vencimiento'
+            )
+            logger.info("⏰ FASE 31.1: Avisos de vencimiento programados: diario 10:00 Chile")
+        except Exception as e:
+            logger.warning(f"No se pudo programar avisos de vencimiento: {e}")
         
         # Recordatorio de eventos: diario a las 10:00 AM Chile
         async def recordar_eventos_proximos(context):
@@ -43139,9 +37274,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 mensajes_pool = [
                     # Invitar a sumar marinos
                     "⚓ ¿Conoces cofrades que aún no están en el grupo?\n\n"
-                    "🎯 Invítalos a postular con el bot: " + COFRADIA_LINK_POSTULACION + "\n"
-                    "   (el bot les hace el test de ingreso y, aprobados, "
-                    "reciben el acceso)\n"
+                    "🎯 Invítalos con el link: " + COFRADIA_INVITE_LINK + "\n"
                     "💪 Mientras más seamos, más fuerte nuestra red!",
                     
                     # Recordar comandos útiles
@@ -43367,52 +37500,9 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         except Exception as e:
             logger.warning(f"No se pudo programar reporte ejecutivo auto: {e}")
         
-        # FASE 31.15: AGENTE SÍSMICO — monitor en tiempo real cada 5 minutos
-        # (run_repeating no requiere timezone; first=90s deja arrancar al bot)
-        try:
-            job_queue.run_repeating(
-                agente_monitor_sismos,
-                interval=SISMO_CHECK_INTERVALO_MIN * 60,
-                first=90,
-                name='agente_monitor_sismos')
-            logger.info(f"🌍 Agente Sísmico: monitor cada {SISMO_CHECK_INTERVALO_MIN} min "
-                        f"(alerta desde M{SISMO_MAGNITUD_MINIMA:.1f}) — texto + voz + HTML")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente sísmico: {e}")
-        
-        # FASE 31.17: MEMORIA — consolidación diaria de perfiles (08:45 UTC ≈
-        # madrugada Chile) + aprendizaje semanal domingo (13:00 UTC ≈ 09-10 Chile).
-        # Solo se programan si el servicio de memoria está disponible.
-        try:
-            if _MEMORIA_OK and MEMORIA_ACTIVA:
-                job_queue.run_daily(job_memoria_consolidar,
-                    time=dt_time(hour=8, minute=45, second=0),
-                    name='memoria_consolidar')
-                job_queue.run_daily(job_memoria_aprendizaje,
-                    time=dt_time(hour=13, minute=0, second=0),
-                    days=(6,),
-                    name='memoria_aprendizaje')
-                logger.info("🧠 Memoria FASE 31.17: consolidación diaria + aprendizaje semanal programados")
-            else:
-                logger.info("🧠 Memoria FASE 31.17: servicio no disponible — jobs omitidos (bot opera normal)")
-        except Exception as e:
-            logger.warning(f"No se pudo programar jobs de memoria: {e}")
-        
-        # FASE 31.18: AGENTE DE RESPALDO — consolidación clasificada cada 6 horas
-        try:
-            job_queue.run_repeating(
-                agente_respaldo_conversaciones,
-                interval=6 * 3600,
-                first=300,
-                name='agente_respaldo_conversaciones')
-            logger.info("🗄️ Agente de Respaldo: consolidación clasificada cada 6 horas")
-        except Exception as e:
-            logger.warning(f"No se pudo programar agente de respaldo: {e}")
-        
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
     logger.info("✅ Bot iniciado!")
-    logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDOS)} dominios")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
@@ -43442,131 +37532,16 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             return
         
         # Otros errores: loguear
-        # FASE 31.31: diagnóstico claro del secuestro por doble instancia
-        if 'Conflict' in str(error) and 'getUpdates' in str(error):
-            # FASE 31.34: PERÍODO DE GRACIA — durante los primeros 2 minutos
-            # tras el arranque, los 409 son el solapamiento NORMAL del deploy
-            # de Render (la instancia vieja muriendo mientras nace la nueva).
-            # Solo se considera zombie real si PERSISTE pasada la gracia.
-            _edad_proceso = (datetime.now() - _BOT_ARRANQUE).total_seconds()
-            if _edad_proceso < 120:
-                logger.warning(f"⏳ Solapamiento de deploy ({int(_edad_proceso)}s "
-                               f"de vida): 409 esperable el primer minuto — "
-                               f"la instancia anterior está terminando.")
-                return
-            _ult409 = globals().get('_ULT_AVISO_409', 0)
-            if tiempo_real.time() - _ult409 > 60:
-                globals()['_ULT_AVISO_409'] = tiempo_real.time()
-                logger.critical(
-                    "🧟 DOBLE INSTANCIA DETECTADA: otro proceso usa el MISMO "
-                    "token y se está robando los mensajes — ESTA instancia "
-                    "está sorda. Soluciones: (1) Render → Suspend y luego "
-                    "Resume del servicio; (2) cierra cualquier bot.py "
-                    "corriendo en tu PC; (3) si persiste, rota el token con "
-                    "@BotFather y actualiza TOKEN_BOT en Render.")
-            # FASE 31.32: ENVIAR sí funciona aunque otro proceso robe la
-            # recepción → alertar al owner EN TELEGRAM (freno: 10 min)
-            _ult409dm = globals().get('_ULT_DM_409', 0)
-            if tiempo_real.time() - _ult409dm > 600:
-                globals()['_ULT_DM_409'] = tiempo_real.time()
-                try:
-                    await context.bot.send_message(
-                        chat_id=OWNER_ID,
-                        text=(f"🧟 ALERTA: DOBLE INSTANCIA con el mismo token.\n"
-                              f"Esta instancia ({BOT_BUILD.split('·')[0].strip()}) "
-                              f"está SORDA: otro proceso se roba los mensajes.\n\n"
-                              f"🔧 Solución definitiva:\n"
-                              f"1) @BotFather → /mybots → tu bot → API Token "
-                              f"→ Revoke (token nuevo)\n"
-                              f"2) Render → Environment → TOKEN_BOT = token "
-                              f"nuevo → Save (redeploy automático)\n"
-                              f"3) La instancia pirata muere al instante, "
-                              f"donde sea que viva."))
-                except Exception:
-                    pass
-            return
         logger.error(f"Error no manejado: {error}\n{''.join(traceback.format_exception(type(error), error, error.__traceback__))[:500]}")
     
     application.add_error_handler(_global_error_handler)
     
     # POLLING
-    # ════════════════════════════════════════════════════════════════
-    # FASE 31.36: MODO DUAL DE TRANSPORTE (polling ↔ webhook)
-    # Los 409 Conflict son un fenómeno EXCLUSIVO del polling (dos
-    # procesos jalando getUpdates). Con WEBHOOK, Telegram EMPUJA los
-    # updates a nuestra URL: el solapamiento de deploy desaparece por
-    # diseño y cualquier instancia pirata queda muda para siempre.
-    # Activación (opt-in, reversible): en Render definir USE_WEBHOOK=1
-    # y cambiar el servicio de 'worker' a 'web service' (Render provee
-    # PORT y RENDER_EXTERNAL_URL automáticamente).
-    # ════════════════════════════════════════════════════════════════
-    _use_webhook = os.environ.get('USE_WEBHOOK', '0') == '1'
-    _url_publica = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
-    _puerto = int(os.environ.get('PORT', '10000'))
-    def _iniciar_salud_http(puerto):
-        """FASE 31.38: mini-servidor de salud. Si el servicio es Web
-        Service pero corremos en polling (fallback), Render necesita ver
-        un puerto abierto para marcar 'Live' — este hilo se lo da."""
-        try:
-            import http.server, socketserver, threading
-
-            class _Salud(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain')
-                    self.end_headers()
-                    self.wfile.write(f"OK · {BOT_BUILD}".encode())
-                def do_HEAD(self):
-                    self.send_response(200); self.end_headers()
-                def log_message(self, *a):
-                    pass
-
-            srv = socketserver.TCPServer(('0.0.0.0', puerto), _Salud)
-            threading.Thread(target=srv.serve_forever, daemon=True,
-                             name='salud_http').start()
-            logger.info(f"🩺 FASE 31.38: puerto de salud {puerto} abierto "
-                        f"(Render verá 'Live' aunque corramos en polling)")
-        except Exception as e:
-            logger.warning(f"FASE 31.38 salud http: {e}")
-
-    _correr_polling = True
-    if _use_webhook and _url_publica:
-        try:
-            _puerto_interno = int(os.environ.get('WEBHOOK_PORT_INTERNO', '8081'))
-            logger.info(f"📡 FASE 31.40: MODO WEBHOOK — PTB interno en "
-                        f"127.0.0.1:{_puerto_interno}; el keep-alive en "
-                        f"{_puerto} hace de health+proxy — adiós 409")
-            application.run_webhook(
-                listen='127.0.0.1',
-                port=_puerto_interno,
-                url_path=TOKEN_BOT,  # ruta secreta = el propio token
-                webhook_url=f"{_url_publica}/{TOKEN_BOT}",
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-                close_loop=False,
-            )
-            _correr_polling = False
-        except (RuntimeError, OSError) as _e_wh:
-            # FASE 31.38/31.39: extra faltante (RuntimeError) o puerto
-            # ocupado (OSError) → NO morimos: polling elegante y lo contamos
-            logger.critical(
-                f"📡 Webhook no disponible: {_e_wh}\n"
-                f"🔧 Causas típicas: (a) requirements sin "
-                f"python-telegram-bot[job-queue,webhooks]==20.7; "
-                f"(b) otro proceso ocupó el PORT. "
-                f"Mientras tanto: POLLING (el bot sigue vivo).")
-    elif _use_webhook and not _url_publica:
-        logger.warning("📡 USE_WEBHOOK=1 pero falta RENDER_EXTERNAL_URL "
-                       "(¿el servicio sigue como 'worker'?) — "
-                       "continuando en polling")
-    if _correr_polling:
-        # FASE 31.40: el keep-alive (health+proxy) ya sirve el PORT en
-        # todos los modos — no hace falta puerto de salud aparte
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False,
-        )
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False,
+    )
 
 
 if __name__ == '__main__':
