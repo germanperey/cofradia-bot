@@ -1321,6 +1321,7 @@ _VOICE_COMMAND_MAP = {
     'calculadora': 'calculadora', 'feriados': 'feriados',
     'eventos': 'eventos', 'directorio': 'directorio',
     'emergencia': 'emergencia', 'clima': 'clima', 'dashboard': 'mi_dashboard',
+    'sismos': 'sismos', 'sismo': 'sismos', 'temblor': 'sismos', 'temblores': 'sismos', 'terremoto': 'sismos',
     'reporte': 'reporte_ejecutivo',
 }
 
@@ -3226,6 +3227,7 @@ COMANDOS_VOZ = {
     'suite economica': 'calculadora',
     'feriados': 'feriados',
     'emergencia': 'emergencia', 'clima': 'clima',
+    'sismos': 'sismos', 'temblor': 'sismos', 'terremoto': 'sismos',
     'agente': 'agente',
     'networking': 'agente',
     'match': 'match',
@@ -3552,6 +3554,10 @@ async def manejar_mensaje_voz(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Primero mejorar la intención del mensaje transcrito (invisible para el usuario)
         intencion_voz = mejorar_intencion(texto_transcrito, user.first_name, user_id, canal='audio')
         texto_para_busqueda = intencion_voz['query_mejorada']
+        # FASE 31.3: preservar SIEMPRE las palabras textuales del usuario
+        # (la reescritura del LLM puede perder nombres propios exactos)
+        if texto_para_busqueda != texto_transcrito:
+            texto_para_busqueda = f"{texto_transcrito} {texto_para_busqueda}"
         
         # Si detectó un comando claro, ejecutarlo directamente
         if intencion_voz['ejecutar_comando'] and intencion_voz['comando']:
@@ -8359,6 +8365,16 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                     ],
                     "tip": "El fondo del dashboard cambia según el clima del día: dorado con sol, azul tormenta con lluvia.",
                 },
+                {
+                    "name": "/sismos",
+                    "desc": "Sismos en Chile + alertas automáticas",
+                    "definicion": "Muestra los últimos sismos registrados en Chile (magnitud, epicentro, profundidad y hora oficial del Centro Sismológico Nacional). Además, el grupo cuenta con un vigilante automático 24/7: ante un sismo de magnitud 6.0 o superior dispara la alarma sonora de emergencia con recomendaciones de seguridad en 1 a 5 minutos, y un monitor global avisa de huracanes, tsunamis y erupciones de nivel naranja o rojo en el mundo.",
+                    "ejemplos": [
+                        ("/sismos", "Ver los últimos sismos en Chile"),
+                        ("¿tembló?", "El bot entiende la pregunta natural y muestra los sismos"),
+                    ],
+                    "tip": "Los sismos no se pueden predecir; la alerta automática llega minutos después del evento — clave para réplicas, riesgo de tsunami y coordinar ayuda entre cofrades.",
+                },
             ],
         },
         # ═══ COINS ═══
@@ -9393,6 +9409,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🚨 EMERGENCIA
 /emergencia - Reportar emergencia (4 tipos) 🆘
+/sismos - Últimos sismos en Chile + alertas automáticas 🌎
 
 🤖 AGENTE DE NETWORKING
 /agente - Agente IA de networking
@@ -12521,6 +12538,9 @@ async def responder_mencion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # MOTOR DE INTENCIÓN: Mejorar query del grupo silenciosamente
         intencion_mencion = mejorar_intencion(pregunta, user_name, user_id, canal='grupo')
         pregunta_mejorada = intencion_mencion['query_mejorada']
+        # FASE 31.3: preservar SIEMPRE las palabras textuales del usuario
+        if pregunta_mejorada != pregunta:
+            pregunta_mejorada = f"{pregunta} {pregunta_mejorada}"
         
         # Si detectó un comando claro (tipo=='comando'), ejecutarlo directamente
         if (intencion_mencion['ejecutar_comando'] and intencion_mencion['comando'] 
@@ -20598,7 +20618,9 @@ def buscar_rag(query, limit=5):
                        'para','que','es','se','no','su','lo','como','mas','pero','sus',
                        'sobre','trata','libro','libros','acerca','habla','dice','cual',
                        'este','esta','autor','texto','obra','referente','respecto','tema',
-                       'the','of','and','to','in','cuentame','resumen','resume'}
+                       'the','of','and','to','in','cuentame','resumen','resume',
+                       'pregunte','pregunto','pregunta','preguntas','quiero',
+                       'saber','dime','sabes','conoces','javier'}
             _qn31 = _n31(query)
             _terms31 = [w for w in _r31.findall(r'\b\w{4,}\b', _qn31) if w not in _STOP31]
             if _terms31:
@@ -20637,6 +20659,10 @@ def buscar_rag(query, limit=5):
                         return _top31, 55.0
         except Exception as _e31g:
             logger.debug(f"FASE 31.1 title-guard (no fatal): {_e31g}")
+            try:
+                conn.rollback()  # FASE 31.3: no dejar la transacción PG abortada
+            except Exception:
+                pass
 
         # FASE 29 — FASE 0: BÚSQUEDA SEMÁNTICA REAL CON pgvector + Gemini
         # Solo si: (1) PostgreSQL, (2) pgvector instalado, (3) hay embeddings
@@ -27071,6 +27097,7 @@ CATALOGO_COMANDOS_INTENCION = {
     'emergencia': 'Reportar emergencia (4 tipos) con alerta a todos',
     # FASE 31
     'clima': 'Pronóstico del tiempo diario y semanal por ciudad',
+    'sismos': 'Últimos sismos en Chile y estado de las alertas sísmicas',
     'saldos': 'Saldos de APIs y servicios de pago (solo admin)',
     'ayuda': 'Ver todos los comandos disponibles',
 }
@@ -32893,39 +32920,104 @@ async def job_saldos_semanal(context):
 
 
 def _titulos_biblioteca_relacionados(pregunta: str, max_titulos: int = 4) -> list:
-    """FASE 31.1: Títulos de la biblioteca cuyo nombre contiene algún término
-    de la pregunta (normalizado sin tildes). Para que MODO B pueda sugerir
-    libros reales en vez de divagar con conocimiento general."""
+    """FASE 31.3 (mejora 31.1): Títulos REALES de la biblioteca relacionados
+    con la pregunta, buscados en 3 NIVELES de profundidad:
+      1) el término aparece en el TÍTULO del documento;
+      2) el término aparece en el CONTENIDO (chunks) → título del documento
+         (encuentra libros que HABLAN del tema aunque el título no lo diga);
+      3) sin coincidencias → los títulos con más contenido de la biblioteca,
+         para que MODO B siempre ofrezca material real (jamás inventado)."""
     try:
         import unicodedata as _u31b, re as _r31b
+
         def _n(t):
             t = _u31b.normalize('NFKD', (t or '').lower())
             return ''.join(ch for ch in t if not _u31b.combining(ch))
+
+        def _limpiar(s):
+            li = (s or '').replace('PDF:', '').replace('EXCEL:', '').strip()
+            li = _r31b.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', li, flags=_r31b.IGNORECASE)
+            return li.replace('_', ' ').strip()
+
         stop = {'de','la','el','en','los','las','del','al','un','una','por','con','para',
                 'que','es','se','no','su','lo','como','sobre','trata','libro','libros',
-                'acerca','habla','dice','autor','tema','referente','respecto','cual'}
+                'acerca','habla','dice','autor','tema','referente','respecto','cual',
+                'este','esta','texto','obra','cuentame','resumen','resume','javier',
+                'pregunte','pregunto','pregunta','preguntas','quiero','saber',
+                'dime','sabes','conoces'}
+        # Términos normalizados (sin tilde) para matchear TÍTULOS
         terms = [w for w in _r31b.findall(r'\b\w{4,}\b', _n(pregunta)) if w not in stop]
-        if not terms:
-            return []
+        # Términos CRUDOS (con tilde, minúscula) para matchear CONTENIDO real
+        terms_raw = [w for w in _r31b.findall(r'\b\w{4,}\b', (pregunta or '').lower())
+                     if _n(w) not in stop]
         conn = get_db_connection()
         if not conn:
             return []
         c = conn.cursor()
-        c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
-        srcs = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
-        conn.close()
         encontrados = []
-        for s in srcs:
-            sn = _n(s)
-            if any(t in sn for t in terms):
-                limpio = s.replace('PDF:', '').replace('EXCEL:', '').strip()
-                limpio = _r31b.sub(r'\.(pdf|docx?|txt|xlsx?)$', '', limpio, flags=_r31b.IGNORECASE)
-                limpio = limpio.replace('_', ' ').strip()
-                if limpio and limpio not in encontrados:
-                    encontrados.append(limpio)
-            if len(encontrados) >= max_titulos:
-                break
-        return encontrados
+
+        # ── NIVEL 1: coincidencia en el TÍTULO ──────────────────────────────
+        try:
+            c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source IS NOT NULL")
+            srcs = [(row['source'] if DATABASE_URL else row[0]) for row in c.fetchall()]
+            if terms:
+                for s in srcs:
+                    sn = _n(s)
+                    if any(t in sn for t in terms):
+                        li = _limpiar(s)
+                        if li and li not in encontrados:
+                            encontrados.append(li)
+                    if len(encontrados) >= max_titulos:
+                        break
+        except Exception as _e1:
+            logger.debug(f"_titulos_biblioteca N1: {_e1}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        # ── NIVEL 2: coincidencia en el CONTENIDO de los chunks ─────────────
+        if not encontrados and terms_raw:
+            try:
+                for t in sorted(set(terms_raw), key=len, reverse=True)[:2]:
+                    like = f'%{t}%'
+                    if DATABASE_URL:
+                        c.execute("SELECT source, COUNT(*) AS n FROM rag_chunks "
+                                  "WHERE chunk_text ILIKE %s AND source IS NOT NULL "
+                                  "GROUP BY source ORDER BY n DESC LIMIT %s",
+                                  (like, max_titulos))
+                    else:
+                        c.execute("SELECT source, COUNT(*) AS n FROM rag_chunks "
+                                  "WHERE LOWER(chunk_text) LIKE ? AND source IS NOT NULL "
+                                  "GROUP BY source ORDER BY n DESC LIMIT ?",
+                                  (like, max_titulos))
+                    for row in c.fetchall():
+                        li = _limpiar(row['source'] if DATABASE_URL else row[0])
+                        if li and li not in encontrados:
+                            encontrados.append(li)
+                    if encontrados:
+                        break
+            except Exception as _e2:
+                logger.debug(f"_titulos_biblioteca N2: {_e2}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+        # ── NIVEL 3: catálogo general (los documentos más completos) ────────
+        if not encontrados:
+            try:
+                c.execute("SELECT source, COUNT(*) AS n FROM rag_chunks "
+                          "WHERE source IS NOT NULL GROUP BY source "
+                          "ORDER BY n DESC LIMIT 4")
+                for row in c.fetchall():
+                    li = _limpiar(row['source'] if DATABASE_URL else row[0])
+                    if li and li not in encontrados:
+                        encontrados.append(li)
+            except Exception as _e3:
+                logger.debug(f"_titulos_biblioteca N3: {_e3}")
+        conn.close()
+        return encontrados[:max_titulos]
     except Exception as _e:
         logger.debug(f"_titulos_biblioteca: {_e}")
         return []
@@ -33033,6 +33125,389 @@ async def _curiosidad_desde_biblioteca():
     except Exception as _e:
         logger.debug(f"Curiosidad biblioteca: {_e}")
         return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 31.2 — SISTEMA DE ALERTAS DE SISMOS Y DESASTRES NATURALES
+# Fuentes verificadas (jul-2026):
+#   · GAEL (api.gael.cloud) → sismos Chile del CSN, refresco 5 min, sin key,
+#     rate-limit 9 req/10s (nuestro job consulta cada 3 min: holgadísimo)
+#   · USGS (earthquake.usgs.gov) → feed mundial M4.5+ última hora, ~1 min,
+#     aporta ID único, coordenadas y FLAG DE TSUNAMI; se filtra a Chile
+#   · GDACS (gdacs.org, ONU/Comisión Europea) → ciclones tropicales (integra
+#     NOAA), terremotos mayores, tsunamis y volcanes con niveles Verde/
+#     Naranja/Rojo e ID de evento. Los ciclones SÍ se anticipan con días.
+# HONESTIDAD CIENTÍFICA: los sismos NO pueden predecirse; la alerta llega
+# 1-5 min tras el evento (sirve para réplicas, tsunami y coordinar ayuda).
+# ═══════════════════════════════════════════════════════════════════════════
+
+SISMO_ALERTA_MAG = float(os.environ.get('SISMO_ALERTA_MAG', '6.0'))
+_URL_GAEL_SISMOS = "https://api.gael.cloud/general/public/sismos"
+_URL_USGS_SISMOS = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_hour.geojson"
+_URL_GDACS_EVENTOS = "https://www.gdacs.org/gdacsapi/api/Events/geteventlist/EVENTS4APP"
+# Bounding box Chile continental + insular cercano (lat_min, lat_max, lon_min, lon_max)
+_BBOX_CHILE_312 = (-56.8, -17.0, -76.5, -66.0)
+
+
+def _offset_horas_chile() -> int:
+    """Diferencia horaria Chile vs UTC (maneja horario de verano vía _ahora_chile)."""
+    try:
+        diff = _ahora_chile().replace(tzinfo=None) - datetime.utcnow()
+        return int(round(diff.total_seconds() / 3600.0))
+    except Exception:
+        return -4
+
+
+def _asegurar_tabla_alertas_desastres() -> bool:
+    """Crea la tabla de deduplicación de alertas si no existe."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS alertas_desastres ("
+            "id_evento TEXT PRIMARY KEY, tipo TEXT, magnitud REAL, "
+            "ts_evento REAL, ts_alerta REAL)")
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.debug(f"Tabla alertas_desastres: {e}")
+        return False
+
+
+def _alerta_ya_registrada(id_evento: str, ts_evento: float = None,
+                          magnitud: float = None) -> bool:
+    """True si el evento ya fue alertado (por ID exacto o por duplicado
+    temporal: mismo tipo SISMO a ±10 min con magnitud ±0.8 — así GAEL y
+    USGS no gatillan dos alarmas por el mismo terremoto)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        c.execute(f"SELECT 1 FROM alertas_desastres WHERE id_evento = {ph}",
+                  (id_evento,))
+        if c.fetchone():
+            conn.close()
+            return True
+        if ts_evento is not None and magnitud is not None:
+            c.execute(
+                f"SELECT 1 FROM alertas_desastres WHERE tipo = 'SISMO' "
+                f"AND ABS(ts_evento - {ph}) < 600 AND ABS(magnitud - {ph}) < 0.8",
+                (ts_evento, magnitud))
+            if c.fetchone():
+                conn.close()
+                return True
+        conn.close()
+        return False
+    except Exception:
+        return False
+
+
+def _registrar_alerta_desastre(id_evento: str, tipo: str,
+                               magnitud: float = None, ts_evento: float = None):
+    """Inserta el evento en la tabla de dedupe (ignora si ya existe)."""
+    try:
+        import time as _t312
+        conn = get_db_connection()
+        if not conn:
+            return
+        c = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        sql = (f"INSERT INTO alertas_desastres (id_evento, tipo, magnitud, "
+               f"ts_evento, ts_alerta) VALUES ({ph},{ph},{ph},{ph},{ph}) "
+               + ("ON CONFLICT (id_evento) DO NOTHING" if DATABASE_URL else ""))
+        if not DATABASE_URL:
+            sql = sql.replace("INSERT INTO", "INSERT OR IGNORE INTO")
+        c.execute(sql, (id_evento, tipo, magnitud, ts_evento, _t312.time()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Registrar alerta {id_evento}: {e}")
+
+
+def _fetch_sismos_gael() -> list:
+    """Sismos Chile desde GAEL/CSN. Retorna lista de dicts normalizados."""
+    out = []
+    try:
+        import hashlib as _h312, time as _t312
+        r = requests.get(_URL_GAEL_SISMOS, timeout=(5, 10))
+        if r.status_code != 200:
+            return out
+        off = _offset_horas_chile()
+        for s in r.json()[:20]:
+            try:
+                fecha_str = str(s.get('Fecha', ''))[:19]
+                mag = float(str(s.get('Magnitud', '0')).replace(',', '.'))
+                dt_cl = datetime.strptime(fecha_str, '%Y-%m-%d %H:%M:%S')
+                ts_utc = (dt_cl - timedelta(hours=off)).timestamp()
+                out.append({
+                    'id': 'GAEL-' + _h312.md5(
+                        (fecha_str + str(s.get('RefGeografica', ''))
+                         ).encode()).hexdigest()[:16],
+                    'magnitud': mag,
+                    'profundidad': str(s.get('Profundidad', '?')),
+                    'ref': str(s.get('RefGeografica', 'Chile')),
+                    'fecha_chile': fecha_str,
+                    'ts_evento': ts_utc,
+                    'tsunami': None,
+                    'fuente': 'CSN (Centro Sismológico Nacional)',
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"GAEL sismos: {e}")
+    return out
+
+
+def _fetch_sismos_usgs_chile() -> list:
+    """Sismos M4.5+ de la última hora (USGS mundial) filtrados a Chile.
+    Aporta el flag oficial de tsunami y sirve de respaldo si GAEL cae."""
+    out = []
+    try:
+        r = requests.get(_URL_USGS_SISMOS, timeout=(5, 10))
+        if r.status_code != 200:
+            return out
+        la0, la1, lo0, lo1 = _BBOX_CHILE_312
+        off = _offset_horas_chile()
+        for f in r.json().get('features', []):
+            try:
+                lon, lat = f['geometry']['coordinates'][0], f['geometry']['coordinates'][1]
+                if not (la0 <= lat <= la1 and lo0 <= lon <= lo1):
+                    continue
+                p = f.get('properties', {})
+                ts_utc = float(p.get('time', 0)) / 1000.0
+                dt_cl = datetime.utcfromtimestamp(ts_utc) + timedelta(hours=off)
+                prof = f['geometry']['coordinates'][2] if len(
+                    f['geometry']['coordinates']) > 2 else '?'
+                out.append({
+                    'id': 'USGS-' + str(f.get('id', '')),
+                    'magnitud': float(p.get('mag') or 0),
+                    'profundidad': str(round(float(prof))) if prof != '?' else '?',
+                    'ref': str(p.get('place', 'Chile')),
+                    'fecha_chile': dt_cl.strftime('%Y-%m-%d %H:%M:%S'),
+                    'ts_evento': ts_utc,
+                    'tsunami': int(p.get('tsunami', 0)),
+                    'fuente': 'USGS (Servicio Geológico de EE.UU.)',
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"USGS sismos: {e}")
+    return out
+
+
+def obtener_sismos_chile() -> tuple:
+    """Cascada FASE 31.2: GAEL primario → USGS fallback. → (lista, fuente)."""
+    sismos = _fetch_sismos_gael()
+    if sismos:
+        return sismos, sismos[0]['fuente']
+    sismos = _fetch_sismos_usgs_chile()
+    if sismos:
+        return sismos, sismos[0]['fuente']
+    return [], ''
+
+
+async def sismos_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.2 — /sismos: últimos sismos en Chile + estado del monitor."""
+    try:
+        msg = await update.message.reply_text('🌎 Consultando sismos recientes en Chile...')
+        loop = asyncio.get_event_loop()
+        sismos, fuente = await asyncio.wait_for(
+            loop.run_in_executor(None, obtener_sismos_chile), timeout=15.0)
+        if not sismos:
+            await msg.edit_text(
+                '⚠️ No pude obtener los sismos en este momento (CSN y USGS '
+                'no respondieron). Intenta de nuevo en unos minutos.')
+            return
+        lineas = ['🌎 ÚLTIMOS SISMOS EN CHILE',
+                  '━━━━━━━━━━━━━━━━━━━━━━━━━━', '']
+        for s in sismos[:8]:
+            m = s['magnitud']
+            emoji = '🔴' if m >= 6.0 else ('🟠' if m >= 5.0 else
+                                           ('🟡' if m >= 4.0 else '🟢'))
+            hora = s['fecha_chile'][11:16]
+            dia = s['fecha_chile'][8:10] + '-' + s['fecha_chile'][5:7]
+            lineas.append(f"{emoji} M {m:.1f} — {s['ref']}")
+            lineas.append(f"    🕐 {dia} {hora} hrs · prof. {s['profundidad']} km")
+        lineas.append('')
+        lineas.append(f'🚨 Alerta automática del grupo: sismos M ≥ {SISMO_ALERTA_MAG:.1f}')
+        lineas.append('   (alarma sonora + aviso en 1-5 min tras el evento)')
+        lineas.append('')
+        lineas.append('🔬 Los sismos no pueden predecirse con la ciencia actual; '
+                      'este monitor DETECTA y alerta en minutos, útil para '
+                      'réplicas, riesgo de tsunami y coordinar ayuda. Los '
+                      'ciclones y huracanes sí se anticipan con días (monitor '
+                      'global GDACS activo).')
+        lineas.append('')
+        lineas.append(f'📡 Fuente: {fuente} · vía monitoreo Cofradía')
+        await msg.edit_text('\n'.join(lineas))
+        registrar_conversacion(update.effective_user.id,
+                               update.effective_user.first_name or 'Usuario',
+                               '/sismos', 'Listado de sismos Chile', 'comando')
+    except Exception as e:
+        logger.error(f"Error /sismos: {e}")
+        try:
+            await update.message.reply_text('⚠️ Error consultando sismos. Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+async def job_monitor_sismos(context):
+    """FASE 31.2 — Vigilante sísmico (cada 3 min): GAEL + USGS.
+    Si detecta magnitud ≥ SISMO_ALERTA_MAG ocurrida en los últimos 30 min y
+    no alertada antes → ALARMA SONORA de emergencia + mensaje fijado + aviso
+    al OWNER. Eventos antiguos se registran en silencio (evita alertar
+    historial al primer arranque)."""
+    try:
+        import time as _t312
+        _asegurar_tabla_alertas_desastres()
+        loop = asyncio.get_event_loop()
+        listas = []
+        for fn in (_fetch_sismos_gael, _fetch_sismos_usgs_chile):
+            try:
+                listas.append(await asyncio.wait_for(
+                    loop.run_in_executor(None, fn), timeout=15.0))
+            except Exception:
+                listas.append([])
+        ahora = _t312.time()
+        for sismos in listas:
+            for s in sismos:
+                if s['magnitud'] < SISMO_ALERTA_MAG:
+                    continue
+                if _alerta_ya_registrada(s['id'], s['ts_evento'], s['magnitud']):
+                    continue
+                _registrar_alerta_desastre(s['id'], 'SISMO',
+                                           s['magnitud'], s['ts_evento'])
+                if ahora - s['ts_evento'] > 1800:
+                    logger.info(f"🌎 Sismo M{s['magnitud']} antiguo registrado sin alertar")
+                    continue
+                # ═══ ALERTA REAL ═══
+                logger.warning(f"🚨 SISMO M{s['magnitud']} — {s['ref']} → ALERTANDO")
+                linea_tsunami = ''
+                if s.get('tsunami'):
+                    linea_tsunami = ('\n🌊 ⚠️ EVALUACIÓN DE TSUNAMI EN CURSO — '
+                                     'si estás en la costa, dirígete YA a zona '
+                                     'alta y atiende a SHOA/SENAPRED.\n')
+                texto = (
+                    f"🔴🌎 ALERTA SÍSMICA AUTOMÁTICA\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📍 Epicentro: {s['ref']}\n"
+                    f"📏 Magnitud: {s['magnitud']:.1f} · Profundidad: {s['profundidad']} km\n"
+                    f"🕐 Hora: {s['fecha_chile'][11:16]} hrs ({s['fecha_chile'][8:10]}-{s['fecha_chile'][5:7]})\n"
+                    f"{linea_tsunami}\n"
+                    f"🛟 QUÉ HACER AHORA:\n"
+                    f"• Mantén la calma: agáchate, cúbrete y afírmate\n"
+                    f"• Aléjate de ventanas y objetos que puedan caer\n"
+                    f"• En la costa, si fue fuerte o largo: evacúa a zona alta "
+                    f"SIN esperar confirmación\n"
+                    f"• Corta el gas si hueles fugas · linterna, no velas\n"
+                    f"• Prepárate para réplicas · reporta tu estado en el grupo\n\n"
+                    f"📡 {s['fuente']} · Monitoreo automático Cofradía 24/7")
+                if COFRADIA_GROUP_ID:
+                    try:
+                        menciones = _obtener_menciones_emergencia(max_usuarios=60)
+                        await _alarma_sonora_emergencia(
+                            context, COFRADIA_GROUP_ID,
+                            f"SISMO MAGNITUD {s['magnitud']:.1f}",
+                            menciones=menciones, rafagas=3)
+                        _m = await context.bot.send_message(
+                            chat_id=COFRADIA_GROUP_ID, text=texto,
+                            disable_notification=False)
+                        try:
+                            await context.bot.pin_chat_message(
+                                chat_id=COFRADIA_GROUP_ID,
+                                message_id=_m.message_id,
+                                disable_notification=False)
+                        except Exception:
+                            pass
+                    except Exception as _eg:
+                        logger.warning(f"Alerta sismo grupo: {_eg}")
+                if OWNER_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=OWNER_ID,
+                            text=f"🚨 (Monitor) Alerta sísmica emitida al grupo:\n{texto[:400]}")
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.warning(f"Job monitor sismos: {e}")
+
+
+async def job_monitor_gdacs(context):
+    """FASE 31.2 — Vigilante global GDACS (cada 30 min): ciclones tropicales
+    (huracanes/tifones, datos NOAA — estos SÍ se anticipan con días),
+    terremotos mayores, tsunamis y volcanes con nivel Naranja o Rojo.
+    Aviso informativo al grupo; si es ROJO y afecta a Chile → alarma completa.
+    Nota: Chile no registra huracanes (aguas frías del Pacífico SE); el valor
+    es alertar a cofrades que viajan o tienen familia/negocios fuera."""
+    try:
+        _asegurar_tabla_alertas_desastres()
+        loop = asyncio.get_event_loop()
+        def _fetch():
+            r = requests.get(_URL_GDACS_EVENTOS, timeout=(5, 15))
+            return r.json() if r.status_code == 200 else {}
+        data = await asyncio.wait_for(loop.run_in_executor(None, _fetch),
+                                      timeout=20.0)
+        nombres = {'TC': ('🌀', 'CICLÓN TROPICAL'), 'EQ': ('🌎', 'TERREMOTO'),
+                   'TS': ('🌊', 'TSUNAMI'), 'VO': ('🌋', 'ERUPCIÓN VOLCÁNICA')}
+        for f in data.get('features', []):
+            p = f.get('properties', {})
+            tipo = p.get('eventtype', '')
+            nivel = p.get('alertlevel', 'Green')
+            if tipo not in nombres or nivel not in ('Orange', 'Red'):
+                continue
+            id_ev = f"GDACS-{tipo}-{p.get('eventid')}-{nivel}"
+            if _alerta_ya_registrada(id_ev):
+                continue
+            _registrar_alerta_desastre(id_ev, f'GDACS-{tipo}')
+            emoji_t, nombre_t = nombres[tipo]
+            emoji_n = '🔴' if nivel == 'Red' else '🟠'
+            sev = (p.get('severitydata') or {}).get('severitytext', '')
+            pais = p.get('country') or 'Zona oceánica'
+            nombre_ev = p.get('eventname') or p.get('name', '')
+            desde = str(p.get('fromdate', ''))[:10]
+            link = (p.get('url') or {}).get('report', 'https://www.gdacs.org')
+            es_chile = (p.get('iso3') == 'CHL' or 'Chile' in str(pais))
+            texto = (
+                f"{emoji_n}{emoji_t} ALERTA GLOBAL {nivel.upper()} — {nombre_t}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📛 Evento: {nombre_ev}\n"
+                f"🗺️ Zona: {pais}\n"
+                f"📊 Severidad: {sev}\n"
+                f"📅 Desde: {desde}\n\n"
+                f"🔗 Informe oficial: {link}\n"
+                f"📡 GDACS (ONU/Comisión Europea) · Monitoreo Cofradía\n\n"
+                f"💡 Si tienes familia, cofrades o negocios en la zona, "
+                f"compárteles esta alerta.")
+            if COFRADIA_GROUP_ID:
+                try:
+                    if es_chile and nivel == 'Red':
+                        menciones = _obtener_menciones_emergencia(max_usuarios=60)
+                        await _alarma_sonora_emergencia(
+                            context, COFRADIA_GROUP_ID,
+                            f"{nombre_t} EN CHILE", menciones=menciones,
+                            rafagas=3)
+                    _m = await context.bot.send_message(
+                        chat_id=COFRADIA_GROUP_ID, text=texto,
+                        disable_notification=(nivel != 'Red'))
+                    if es_chile:
+                        try:
+                            await context.bot.pin_chat_message(
+                                chat_id=COFRADIA_GROUP_ID,
+                                message_id=_m.message_id,
+                                disable_notification=False)
+                        except Exception:
+                            pass
+                    logger.info(f"🌐 GDACS {nivel} {tipo} alertado: {nombre_ev or pais}")
+                except Exception as _eg:
+                    logger.warning(f"Alerta GDACS grupo: {_eg}")
+    except Exception as e:
+        logger.warning(f"Job monitor GDACS: {e}")
+
 
 
 
@@ -35756,6 +36231,7 @@ def main():
             BotCommand("emergencia", "🚨 Reportar emergencia"),
             BotCommand("calculadora", "🧮 Suite Económica Pro"),
             BotCommand("clima", "🌤️ Pronóstico del tiempo (7 días)"),
+            BotCommand("sismos", "🌎 Sismos en Chile + alertas"),
             # === FASE 23: SISTEMA DE IDENTIDAD VISIBLE ===
             BotCommand("quien", "🆔 Identificar usuario (responde a mensaje o @user)"),
             BotCommand("cofrades", "👥 Lista todos los miembros con identidad"),
@@ -35789,6 +36265,7 @@ def main():
                     BotCommand("estadisticas", "Estadisticas del grupo"),
                     BotCommand("indicadores", "Indicadores economicos Chile"),
                     BotCommand("clima", "🌤️ Pronóstico del tiempo"),
+                    BotCommand("sismos", "🌎 Sismos en Chile"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
                     BotCommand("top10", "Top 10 Cofrades del mes"),
                     BotCommand("expertise", "Buscar expertos en un tema"),
@@ -35981,6 +36458,7 @@ def main():
     application.add_handler(CommandHandler("economia", economia_comando))
     # FASE 31: clima + saldos de APIs
     application.add_handler(CommandHandler("clima", clima_comando))
+    application.add_handler(CommandHandler("sismos", sismos_comando))
     application.add_handler(CommandHandler("saldos", saldos_comando))
     # Mejoras: nuevos comandos
     application.add_handler(CommandHandler("reporte_ejecutivo", reporte_ejecutivo_comando))
@@ -36366,7 +36844,7 @@ def main():
             async def _ejecutar_busqueda_con_timeout():
                 """Ejecuta las 3 búsquedas paralelas con timeout estricto de 10s total."""
                 with _TPE_priv(max_workers=3) as pool:
-                    fut_rag_th = pool.submit(busqueda_unificada, query_para_busqueda, 20, 40)
+                    fut_rag_th = pool.submit(busqueda_unificada, (f"{mensaje} {query_para_busqueda}" if query_para_busqueda != mensaje else mensaje), 20, 40)
                     fut_tar_th = pool.submit(_buscar_tarjetas_priv, mensaje)
                     fut_ev_th = pool.submit(_buscar_eventos_priv)
                     
@@ -36435,6 +36913,7 @@ def main():
                 desc_cmd = CATALOGO_COMANDOS_INTENCION.get(cmd_sugerido, '')
                 sugerencia_cmd = f"\nComando relacionado disponible: /{cmd_sugerido} — {desc_cmd}"
             
+            _respuesta_biblioteca31 = ''  # FASE 31.3: circuito determinista biblioteca
             # ── DECISIÓN DE MODO ─────────────────────────────────────────────
             docs_son_relevantes = (
                 rag_tematica in ('relevante', 'posible') and
@@ -36464,8 +36943,8 @@ def main():
                 instruccion = (
                     f"El sistema encontró {total_rag} fragmentos de documentos relevantes:\n{docs_str_chat}\n\n"
                     f"OBLIGATORIO (FASE 30 ANTI-DELIRIO):\n"
-                    f"1. RESPETA grafía exacta de nombres propios y términos del contexto. Si dice 'Milei', "
-                    f"NUNCA escribas 'Meli'. Si dice 'Friedman', no abrevies.\n"
+                    f"1. RESPETA grafía exacta de nombres propios y términos del contexto: cópialos "
+                    f"letra por letra desde los fragmentos, sin abreviar, completar ni alterar.\n"
                     f"2. SINTETIZA los fragmentos en respuesta clara y fluida (150-300 palabras máximo).\n"
                     f"3. **GROUNDING ESTRICTO**: SI los fragmentos NO contienen suficiente información para "
                     f"responder con precisión, DILO HONESTAMENTE: 'Los documentos mencionan [X], pero no "
@@ -36506,6 +36985,38 @@ def main():
                     _bib_txt = ("\n\nTÍTULOS REALES DISPONIBLES EN LA BIBLIOTECA "
                                 "(relacionados con la pregunta):\n" +
                                 "\n".join(f"  • {t}" for t in _titulos_rel))
+                # ═══ FASE 31.3: CIRCUITO DETERMINISTA PARA PREGUNTAS DE LIBRO ═══
+                # Sin fragmentos RAG y pregunta sobre libro/autor/documento →
+                # plantilla fija con títulos REALES de la biblioteca. El LLM NI
+                # SIQUIERA SE LLAMA, por lo que es IMPOSIBLE que invente o
+                # mezcle nombres (corrige definitivamente el caso 'Milei').
+                try:
+                    import unicodedata as _u313
+                    _pl313 = ''.join(ch for ch in _u313.normalize('NFKD', (mensaje or '').lower())
+                                     if not _u313.combining(ch))
+                    _gat313 = ('libro', 'autor', 'obra', 'se trata', 'escribi',
+                               'biblioteca', 'documento', 'pdf', 'capitulo', 'resumen')
+                    if any(g in _pl313 for g in _gat313):
+                        if _titulos_rel:
+                            _lst313 = "\n".join(f"📖 {t}" for t in _titulos_rel)
+                            _respuesta_biblioteca31 = (
+                                f"{user_name}, revisé la biblioteca completa (títulos y contenido) y no "
+                                f"encontré un documento que coincida exactamente con tu consulta.\n\n"
+                                f"Estos títulos REALES de nuestra biblioteca sí están relacionados con el tema:\n"
+                                f"{_lst313}\n\n"
+                                f"Para profundizar en cualquiera de ellos: /rag_consulta seguido del "
+                                f"título o de una palabra clave.\n"
+                                f"Y si tienes el documento que buscas, se puede sumar a la biblioteca "
+                                f"para toda la Cofradía.")
+                        else:
+                            _respuesta_biblioteca31 = (
+                                f"{user_name}, revisé la biblioteca completa (títulos y contenido) y no "
+                                f"tengo material sobre esa consulta específica.\n\n"
+                                f"Puedes intentar /rag_consulta con otra palabra clave, o si tienes el "
+                                f"documento, se puede agregar a la biblioteca para toda la Cofradía.")
+                        logger.info(f"📚 FASE 31.3: circuito determinista biblioteca → '{mensaje[:50]}'")
+                except Exception as _e313:
+                    logger.debug(f"FASE 31.3 circuito biblioteca: {_e313}")
                 instruccion = (
                     "Los documentos indexados NO arrojaron fragmentos para esta consulta. "
                     "REGLAS ESTRICTAS ANTI-DELIRIO (FASE 31.1):\n"
@@ -36514,9 +37025,9 @@ def main():
                     "en mi base de datos de la Cofradía\". NUNCA INVENTES nombres ni datos.\n"
                     "2. **NOMBRES DE PERSONAS/AUTORES — PROHIBICIÓN ABSOLUTA**: usa EXACTAMENTE el "
                     "nombre que escribió el usuario. JAMÁS lo 'corrijas', expandas, ni lo COMBINES con "
-                    "otra persona (ej.: si preguntan por 'Milei', NUNCA respondas 'Martín Vizcarra "
-                    "Milei' ni agregues nombres de pila no mencionados). Si no sabes el nombre "
-                    "completo, usa solo el que dio el usuario.\n"
+                    "otra persona, ni agregues nombres de pila o apellidos que el usuario no "
+                    "haya escrito, letra por letra. Si no sabes el nombre completo, usa "
+                    "SOLO el que dio el usuario.\n"
                     "3. SI la pregunta es sobre un LIBRO, DOCUMENTO o AUTOR: NO respondas con "
                     "biografías ni datos de conocimiento general. Responde breve y honesto: indica que "
                     "no encontraste fragmentos con esa palabra, y si hay TÍTULOS DISPONIBLES listados "
@@ -36530,8 +37041,10 @@ def main():
                     "(/rag_consulta, /buscar_ia, /capturar_conocimiento)."
                 )
                 ctx_rag = _bib_txt
-                fuentes_str_final = ("Biblioteca (títulos sugeridos) + transparencia"
-                                     if _titulos_rel else "Conocimiento propio + transparencia")
+                fuentes_str_final = ("Biblioteca (verificación real de títulos) + transparencia"
+                                     if _respuesta_biblioteca31 else
+                                     ("Biblioteca (títulos sugeridos) + transparencia"
+                                      if _titulos_rel else "Conocimiento propio + transparencia"))
                 logger.info(f"💬 Modo LLM (anti-delirio) para '{mensaje[:40]}' (rag_tematica={rag_tematica})")
             # ── FIN DECISIÓN ─────────────────────────────────────────────────
             
@@ -36546,7 +37059,8 @@ REGLAS GENERALES (FASE 30 ANTI-DELIRIO):
    conocimiento general verificable. NO inventes documentos, nombres, fechas, cifras o eventos.
 2. **TRANSPARENCIA**: Si te falta información, dilo. Mejor una respuesta corta y honesta
    que una larga inventada.
-3. **GRAFÍA EXACTA**: Respeta nombres propios (Germán con tilde, Milei con i-e-i).
+3. **GRAFÍA EXACTA**: Copia los nombres propios letra por letra, tal como los
+   escribió el usuario o aparecen en el contexto (tildes incluidas). No los alteres ni completes.
 4. **TONO**: Cálido y profesional, sin asteriscos ni markdown excesivo.
 5. **ESTRUCTURA**: introducción → desarrollo CON DATOS REALES O HONESTIDAD → cierre útil con comando sugerido.
 6. **DETECTOR DE PREGUNTAS FACTUALES**: si la pregunta es "cuántos X" o "qué profesiones hay",
@@ -36567,17 +37081,23 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             # FASE 30.1: Cada LLM con TIMEOUT ESTRICTO para que la respuesta total no exceda 15s
             # FASE 30: temperature reducida de 0.7 a 0.3 para minimizar delirios
             respuesta = None
+            # FASE 31.3: si el circuito determinista de biblioteca generó la
+            # respuesta, se usa directamente y NO se llama a ningún LLM.
+            if _respuesta_biblioteca31:
+                respuesta = _respuesta_biblioteca31
+                logger.info("📚 FASE 31.3: respuesta determinista (sin LLM) enviada")
             
             # Capa 1: Groq (más rápido, ~3-5s típico)
-            try:
-                respuesta = await asyncio.wait_for(
-                    loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
-                    timeout=15.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
-            except Exception as _e_gr:
-                logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
+            if not respuesta or len(respuesta.strip()) < 50:
+                try:
+                    respuesta = await asyncio.wait_for(
+                        loop.run_in_executor(None, llamar_groq, prompt, 1800, 0.3),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("FASE 30.1: Groq timeout 15s, intentando Gemini")
+                except Exception as _e_gr:
+                    logger.warning(f"FASE 30.1: Groq error: {_e_gr}")
             
             # Capa 2: Gemini (rápido también)
             if not respuesta or len(respuesta.strip()) < 50:
@@ -36875,6 +37395,30 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("⏰ FASE 31.1: Avisos de vencimiento programados: diario 10:00 Chile")
         except Exception as e:
             logger.warning(f"No se pudo programar avisos de vencimiento: {e}")
+        
+        # FASE 31.2: Vigilante sísmico Chile (GAEL/CSN + USGS) cada 3 min
+        try:
+            job_queue.run_repeating(
+                job_monitor_sismos,
+                interval=180,   # 3 minutos (GAEL refresca cada 5; rate-limit holgado)
+                first=90,
+                name='monitor_sismos'
+            )
+            logger.info(f"🌎 FASE 31.2: Monitor sísmico activo (alerta M ≥ {SISMO_ALERTA_MAG})")
+        except Exception as e:
+            logger.warning(f"No se pudo programar monitor de sismos: {e}")
+        
+        # FASE 31.2: Vigilante global GDACS (ciclones/terremotos/tsunamis) cada 30 min
+        try:
+            job_queue.run_repeating(
+                job_monitor_gdacs,
+                interval=1800,  # 30 minutos
+                first=300,
+                name='monitor_gdacs'
+            )
+            logger.info("🌐 FASE 31.2: Monitor global GDACS activo (Naranja/Rojo)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar monitor GDACS: {e}")
         
         # Recordatorio de eventos: diario a las 10:00 AM Chile
         async def recordar_eventos_proximos(context):
