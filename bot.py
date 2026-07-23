@@ -17256,9 +17256,9 @@ CONTEXTO ENCONTRADO (fuentes: {fuentes}):
             try:
                 await asyncio.wait_for(tts_task, timeout=25)
             except asyncio.TimeoutError:
-                logger.warning("TTS timeout 25s, continuando sin audio")
-            except Exception:
-                pass
+                logger.warning("🔇 [TTS OMITIDO] ruta=mención causa=timeout 25s")
+            except Exception as _tts_m:
+                logger.warning(f"🔇 [TTS OMITIDO] ruta=mención causa={_tts_m!r}")  # 31.56: antes moría en silencio
             
             registrar_servicio_usado(user_id, 'ia_mencion')
         else:
@@ -44161,9 +44161,9 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                             await update.message.reply_voice(voice=af)
                         os.remove(audio_priv)
                 except asyncio.TimeoutError:
-                    logger.warning("FASE 31.51: TTS timeout 40s, omitiendo audio")
+                    logger.warning("🔇 [TTS OMITIDO] ruta=privada causa=timeout 40s (respuesta muy larga o motores lentos)")
                 except Exception as _tts_p:
-                    logger.debug(f"TTS privado: {_tts_p}")
+                    logger.warning(f"🔇 [TTS OMITIDO] ruta=privada causa={_tts_p!r}")  # 31.56: visible en Render
                 # Mejora 4: Botones de feedback
                 # FASE 31.3: guardar metadatos para que "Útil" entrene la
                 # memoria de aprendizaje y "Mejorar" regenere con otros criterios
