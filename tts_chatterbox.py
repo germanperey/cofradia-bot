@@ -24,28 +24,28 @@ GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 # FASE 12 (USUARIO ELIGIÓ): Default Neural2-C masculina, la voz más natural y cálida
 # para Cofradía según pruebas comparativas del comando /test_tts.
 # Otras opciones disponibles cambiando GOOGLE_TTS_VOICE en Render:
-#   - es-US-Neural2-A: femenina latina natural
-#   - es-US-Neural2-C: MASCULINA cálida (default actual elegido por usuario) ✅
+#   - es-US-Neural2-A: femenina latina natural ✅ (v16: LA VOZ DE CATALINA — default oficial)
+#   - es-US-Neural2-C: masculina cálida (fue default en FASE 12; reemplazada por orden de Germán)
 #   - es-US-Neural2-B: masculina alternativa
 #   - es-ES-Neural2-D: femenina con acento España
 # IMPORTANTE: Studio voices NO existen en español todavía. Para máxima naturalidad
 # en español, Neural2 es la opción más alta. Wavenet sonaba más robótica.
-VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-C")
+VOICE_NAME     = os.getenv("GOOGLE_TTS_VOICE", "es-US-Neural2-A")  # v16: CATALINA (femenina latina)
 VOICE_LANGUAGE = os.getenv("GOOGLE_TTS_LANG", "es-US")
 # FASE 12: Parámetros ajustados a valores que Google TTS pronuncia con mayor naturalidad
 # Velocidad 1.0 = velocidad normal humana. 0.95 = ligeramente pausada (recomendado para naturalidad)
-SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.95"))
+SPEAKING_RATE  = float(os.getenv("GOOGLE_TTS_RATE",  "0.85"))  # v16: cadencia pausada estilo Catalina
 # Pitch 0 = neutral. Valores negativos = más grave; positivos = más agudo.
 # FASE 12 (USUARIO ELIGIÓ Neural2-C masculina): pitch 0.0 = tono natural masculino.
 # Si quieres ajustar, cambia GOOGLE_TTS_PITCH en Render:
 #   0.0 = natural (recomendado para Neural2-C)
 #   +1.0 a +2.0 = ligeramente más agudo (suaviza voz masculina)
 #   -1.0 a -2.0 = más grave (autoritario)
-PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "0.0"))
+PITCH          = float(os.getenv("GOOGLE_TTS_PITCH", "1.5"))  # v16: tono femenino cálido
 
 # FASE 7: SSML toggle ROBUSTO — acepta multiples valores afirmativos
 # Antes: solo "true" minusculas matcheaba. Ahora acepta: true/True/TRUE/1/yes/si/on
-_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "false").strip().lower()
+_ssml_raw = os.getenv("GOOGLE_TTS_SSML", "true").strip().lower()  # v16: pausas naturales POR DEFECTO
 USE_SSML = _ssml_raw in ("true", "1", "yes", "si", "on", "y", "s")
 
 # LOG INMEDIATO al cargar el modulo: visible al iniciar bot

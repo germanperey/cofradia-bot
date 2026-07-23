@@ -3290,22 +3290,39 @@ def obtener_fuentes_libros() -> list:
     if (_LIBROS_RAG_CACHE['ts'] and _LIBROS_RAG_CACHE['fuentes'] and
             (ahora - _LIBROS_RAG_CACHE['ts']).total_seconds() < 3600):
         return _LIBROS_RAG_CACHE['fuentes']
+    # FASE 31.52: blindaje anti-intermitencia — 2 intentos + catálogo de
+    # emergencia (stale). Diagnóstico Germán: la MISMA pregunta a veces caía
+    # a web porque la BD no respondió justo aquí y el catálogo quedaba [].
     fuentes = []
-    try:
-        conn = get_db_connection()
-        if conn:
-            c = conn.cursor()
-            if DATABASE_URL:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%%'")
-                fuentes = [r['source'] for r in c.fetchall()]
-            else:
-                c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%'")
-                fuentes = [r[0] for r in c.fetchall()]
-            conn.close()
-            _LIBROS_RAG_CACHE['ts'] = ahora
-            _LIBROS_RAG_CACHE['fuentes'] = fuentes
-    except Exception as e:
-        logger.debug(f"FASE 31.14: error listando fuentes de libros: {e}")
+    for _intento in (1, 2):
+        try:
+            conn = get_db_connection()
+            if conn:
+                c = conn.cursor()
+                if DATABASE_URL:
+                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%%'")
+                    fuentes = [r['source'] for r in c.fetchall()]
+                else:
+                    c.execute("SELECT DISTINCT source FROM rag_chunks WHERE source LIKE 'PDF:%'")
+                    fuentes = [r[0] for r in c.fetchall()]
+                conn.close()
+            if fuentes:
+                _LIBROS_RAG_CACHE['ts'] = ahora
+                _LIBROS_RAG_CACHE['fuentes'] = fuentes
+                return fuentes
+        except Exception as e:
+            logger.warning(f"📚 FASE 31.52: catálogo de libros intento {_intento} falló: {e}")
+            try:
+                conn.rollback(); conn.close()
+            except Exception:
+                pass
+    # Catálogo de emergencia: usar el último bueno aunque tenga >1 hora
+    if _LIBROS_RAG_CACHE.get('fuentes'):
+        logger.warning("📚 FASE 31.52: BD sin respuesta — usando catálogo de "
+                       "emergencia (stale) para no perder el MODO B")
+        return _LIBROS_RAG_CACHE['fuentes']
+    logger.warning("📚 FASE 31.52: SIN catálogo de libros este turno — el "
+                   "detector de MODO B quedará inactivo (revisar BD)")
     return fuentes
 
 
@@ -42904,7 +42921,6 @@ def main():
             BotCommand("agendar", "Agendar actividad con recordatorio automatico"),
             BotCommand("mi_agenda", "Ver tu agenda personal"),
             BotCommand("tarea", "Agregar tarea de networking"),
-            BotCommand("mis_tareas", "Ver tus tareas pendientes"),
             BotCommand("briefing", "Briefing diario de networking"),
             BotCommand("indicadores", "Indicadores economicos Chile con analisis IA"),
             BotCommand("economia", "Dashboard economico + simuladores + IA"),
