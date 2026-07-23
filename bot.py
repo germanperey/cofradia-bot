@@ -13056,11 +13056,11 @@ footer .gold { color: #c3a55a; font-weight: 600; }
                     "name": "/renovar [modo]",
                     "desc": "Renovación silenciosa de suscripciones (exclusivo admin)",
                     "keywords": "renovar renovacion suscripcion extender dias silenciosa vencimiento usuarios",
-                    "definicion": "Renueva suscripciones SIN COSTO y SIN notificar al usuario (silencioso). Acepta usuario individual (ID o @username), lote 'vence_pronto' (los que vencen en 30 días) o 'todos' los activos. IMPORTANTE: este comando está OCULTO del menú de usuarios; si un usuario lo escribe (tras recibir el aviso automático de vencimiento a 30/15/7/3/1 días), verá los planes de pago con los datos de transferencia — nunca tu panel de renovación.",
+                    "definicion": "Renueva suscripciones SIN COSTO y SIN notificar al usuario (silencioso). Acepta usuario individual (ID o @username), lote 'vence_pronto' (vencen a ±30 días, vencidos recientes incluidos; 3er argumento ajusta la ventana) o 'todos' los activos. IMPORTANTE: este comando está OCULTO del menú de usuarios; si un usuario lo escribe (tras recibir el aviso automático de vencimiento a 30/15/7/3/1 días), verá los planes de pago con los datos de transferencia — nunca tu panel de renovación.",
                     "ejemplos": [
                         ("/renovar 123456789 90", "Renovar 1 usuario por 90 días (silencioso)"),
                         ("/renovar @jperez 180", "Renovar por username por 180 días"),
-                        ("/renovar vence_pronto 90", "Renovar a todos los que vencen en 30 días"),
+                        ("/renovar vence_pronto 90", "Renovar (90d) a quienes vencen a ±30 días"),
                         ("/renovar todos 365", "Renovar a TODOS los activos por 1 año"),
                         ("/renovar", "Ver ayuda de modos disponibles"),
                     ],
@@ -13986,7 +13986,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 ADMIN RENOVACIÓN SILENCIOSA
 /renovar 123456 90 - Renueva 1 usuario por 90 días (silencioso, no notifica)
 /renovar @username 180 - Renueva por username
-/renovar vence_pronto 90 - Renueva a TODOS los que vencen en 30 días
+/renovar vence_pronto 90 - Renueva (90d) a quienes vencen a ±30 días (vencidos recientes incluidos; '90 60' = ventana ±60)
 /renovar todos 365 - Renueva a TODOS los activos
 (También disponible desde Panel de Control con botón 🔄 Renovar)
 ℹ️ Si un USUARIO escribe /renovar (tras el aviso automático de
@@ -17846,7 +17846,7 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       /renovar 1612694642 180        → renueva a usuario específico por 180 días
       /renovar @username             → renueva por username
       /renovar todos 365             → renueva a TODOS los activos por 365 días
-      /renovar vence_pronto 90       → renueva a los que vencen en próximos 30d, por 90d
+      /renovar vence_pronto 90       → renueva por 90d a quienes vencen a ±30d (incluye vencidos recientes)\n      /renovar vence_pronto 90 60    → ídem con ventana ±60 días
     """
     if update.effective_user.id != OWNER_ID:
         # FASE 31: Los usuarios que escriben /renovar (típicamente tras recibir
@@ -17862,7 +17862,8 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/renovar 1612694642</code> — Renueva 1 usuario por 90 días\n"
             "• <code>/renovar 1612694642 180</code> — Renueva 1 usuario por 180 días\n"
             "• <code>/renovar @username 90</code> — Renueva por username\n"
-            "• <code>/renovar vence_pronto 90</code> — Renueva a los que vencen en 30 días\n"
+            "• <code>/renovar vence_pronto 90</code> — Renueva (90d) a quienes vencen a ±30 días\n"
+            "• <code>/renovar vence_pronto 90 60</code> — Ídem, ventana ±60 días\n"
             "• <code>/renovar todos 365</code> — Renueva a TODOS los activos\n\n"
             "💡 La renovación es <b>silenciosa</b>: el usuario NO recibe notificación.",
             parse_mode='HTML'
@@ -17895,11 +17896,20 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
             modo_descripcion = f"todos los activos ({len(target_user_ids)} usuarios)"
         
         elif primer_arg.lower() == 'vence_pronto':
-            # Renovar a los que vencen en próximos 30 días
+            # FASE 31.55: ventana ±dias_buffer — incluye VENCIDOS RECIENTES (antes
+            # `> CURRENT_TIMESTAMP` excluía al que venció ayer → "No se encontraron
+            # usuarios" aunque hubiera socios que rescatar). 3er argumento opcional
+            # ajusta la ventana: /renovar vence_pronto 90 60 = renovar por 90d a
+            # quienes vencen a ±60 días. Vitalicios (>=2099) siguen excluidos.
             dias_buffer = 30
             if len(context.args) >= 2:
                 try:
                     dias_renovar = int(context.args[1])
+                except ValueError:
+                    pass
+            if len(context.args) >= 3:
+                try:
+                    dias_buffer = max(1, min(365, int(context.args[2])))
                 except ValueError:
                     pass
             
@@ -17909,25 +17919,72 @@ async def renovar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if DATABASE_URL:
                     c.execute("""
                         SELECT user_id FROM suscripciones 
-                        WHERE fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '%s days'
-                        AND fecha_expiracion > CURRENT_TIMESTAMP
+                        WHERE fecha_expiracion > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                        AND fecha_expiracion < CURRENT_TIMESTAMP + INTERVAL '%s days'
                         AND fecha_expiracion < '2099-01-01'
-                    """ % dias_buffer)
+                    """ % (dias_buffer, dias_buffer))
                 else:
-                    fecha_limite = (datetime.now() + timedelta(days=dias_buffer)).isoformat()
+                    f_desde = (datetime.now() - timedelta(days=dias_buffer)).isoformat()
+                    f_hasta = (datetime.now() + timedelta(days=dias_buffer)).isoformat()
                     c.execute("""
                         SELECT user_id FROM suscripciones 
-                        WHERE fecha_expiracion < ? AND fecha_expiracion > datetime('now')
+                        WHERE fecha_expiracion > ? AND fecha_expiracion < ?
                         AND fecha_expiracion < '2099-01-01'
-                    """, (fecha_limite,))
+                    """, (f_desde, f_hasta))
+                for row in c.fetchall():
+                    target_user_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
             except Exception as _e_q:
-                logger.warning(f"Query vence_pronto falló: {_e_q}")
-                c.execute("SELECT user_id FROM suscripciones WHERE estado = 'activo' OR estado IS NULL")
+                # FASE 31.55: ANTES el fallback renovaba a TODOS los activos en
+                # silencio (bomba). Ahora: se informa el error y se ABORTA la rama.
+                logger.warning(f"Query vence_pronto falló: {_e_q!r}")
+                conn.close()
+                await update.message.reply_text(
+                    f"❌ La consulta de vencimientos falló: <code>{str(_e_q)[:200]}</code>\n"
+                    f"No se renovó a nadie (protección anti-renovación-masiva).",
+                    parse_mode='HTML')
+                return
             
-            for row in c.fetchall():
-                target_user_ids.append(row[0] if isinstance(row, tuple) else row['user_id'])
+            if not target_user_ids:
+                # FASE 31.55: censo diagnóstico — explica POR QUÉ hay 0 candidatos.
+                censo_txt = ""
+                try:
+                    if DATABASE_URL:
+                        c.execute("""
+                            SELECT COUNT(*) AS total,
+                                   COUNT(*) FILTER (WHERE fecha_expiracion >= '2099-01-01') AS vitalicios,
+                                   COUNT(*) FILTER (WHERE fecha_expiracion <= CURRENT_TIMESTAMP - INTERVAL '%s days') AS vencidos_viejos,
+                                   COUNT(*) FILTER (WHERE fecha_expiracion >= CURRENT_TIMESTAMP + INTERVAL '%s days' AND fecha_expiracion < '2099-01-01') AS lejanos
+                            FROM suscripciones
+                        """ % (dias_buffer, dias_buffer))
+                    else:
+                        c.execute("""
+                            SELECT COUNT(*),
+                                   SUM(CASE WHEN fecha_expiracion >= '2099-01-01' THEN 1 ELSE 0 END),
+                                   SUM(CASE WHEN fecha_expiracion <= ? THEN 1 ELSE 0 END),
+                                   SUM(CASE WHEN fecha_expiracion >= ? AND fecha_expiracion < '2099-01-01' THEN 1 ELSE 0 END)
+                            FROM suscripciones
+                        """, (f_desde, f_hasta))
+                    fila = c.fetchone()
+                    if fila:
+                        if isinstance(fila, (tuple, list)):
+                            _tot, _vit, _vie, _lej = (fila[0] or 0), (fila[1] or 0), (fila[2] or 0), (fila[3] or 0)
+                        else:
+                            _tot, _vit = fila['total'] or 0, fila['vitalicios'] or 0
+                            _vie, _lej = fila['vencidos_viejos'] or 0, fila['lejanos'] or 0
+                        censo_txt = (f"\n📊 <b>Censo:</b> {_tot} suscripciones · {_vit} vitalicias (2099) · "
+                                     f"{_vie} vencidas hace más de {dias_buffer}d · {_lej} vencen a más de {dias_buffer}d.")
+                except Exception as _e_c:
+                    logger.debug(f"Censo vence_pronto: {_e_c!r}")
+                conn.close()
+                await update.message.reply_text(
+                    f"🔍 <b>0 socios</b> con vencimiento a ±{dias_buffer} días.{censo_txt}\n\n"
+                    f"💡 Amplía la ventana: <code>/renovar vence_pronto {dias_renovar} 90</code> (±90d) "
+                    f"o renueva directo: <code>/renovar &lt;user_id&gt; {dias_renovar}</code>",
+                    parse_mode='HTML')
+                return
+            
             conn.close()
-            modo_descripcion = f"{len(target_user_ids)} usuarios que vencían pronto"
+            modo_descripcion = f"{len(target_user_ids)} socios con vencimiento a ±{dias_buffer} días"
         
         elif primer_arg.isdigit():
             # User ID específico
