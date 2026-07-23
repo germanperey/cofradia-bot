@@ -567,7 +567,7 @@ async def _edge_tts_fallback(texto: str) -> Optional[bytes]:
         print("🔈 [TTS] Fallback: Catalina mejorada")
         return buf.getvalue()
     except Exception as e:
-        logger.error(f"edge-TTS falló: {e}")
+        logger.error(f"edge-TTS (Catalina) falló: {e!r}")  # v18.1: repr → tipo visible aunque el mensaje venga vacío
         return None
 
 
@@ -597,6 +597,7 @@ async def texto_a_voz(
         f_cache = CACHE_DIR / f"{_cache_key(texto_limpio)}.mp3"
         if f_cache.exists():
             print(f"🎵 [TTS] Audio desde caché ({f_cache.stat().st_size:,} bytes)")
+            logger.info(f"🎵 [TTS RESULT] CACHÉ → {f_cache.stat().st_size:,} bytes")  # v18.1: visible en Render
             print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return f_cache.read_bytes()
 
@@ -612,6 +613,7 @@ async def texto_a_voz(
             if USE_CACHE:
                 f_cache.write_bytes(audio)
             print(f"🎤 [TTS RESULT] ✅ CATALINA (es-CL) → {len(audio):,} bytes generados")
+            logger.info(f"🎤 [TTS RESULT] ✅ CATALINA (es-CL) → {len(audio):,} bytes")  # v18.1
             print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return audio
         print(f"🎤 [TTS RESULT] ⚠️ CATALINA FALLÓ → intentando Google TTS de respaldo")
@@ -623,6 +625,7 @@ async def texto_a_voz(
                 if USE_CACHE:
                     f_cache.write_bytes(audio)
                 print(f"🎤 [TTS RESULT] ✅ GOOGLE (respaldo) → {len(audio):,} bytes")
+                logger.info(f"🎤 [TTS RESULT] ✅ GOOGLE (respaldo {VOICE_NAME}) → {len(audio):,} bytes")  # v18.1
                 print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 return audio
         print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -636,10 +639,12 @@ async def texto_a_voz(
             if USE_CACHE:
                 f_cache.write_bytes(audio)
             print(f"🎤 [TTS RESULT] ✅ GOOGLE TTS → {len(audio):,} bytes generados")
+            logger.info(f"🎤 [TTS RESULT] ✅ GOOGLE TTS ({VOICE_NAME}) → {len(audio):,} bytes")  # v18.1
             print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return audio
         # Google TTS falló → fallback a edge-tts Catalina
         print(f"🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina")
+        logger.warning("🎤 [TTS RESULT] ⚠️ GOOGLE FALLÓ → cayendo a edge-tts Catalina")  # v18.1
         logger.warning(f"⚠️ Google TTS falló — usando edge-tts Catalina como fallback")
         result = await _edge_tts_fallback(texto_limpio)
         print(f"🎤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

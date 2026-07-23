@@ -257,7 +257,7 @@ def memoria_registrar(user_id, texto_usuario: str, respuesta_bot: str, nombre: s
 # FASE 31.21: IDENTIDAD DE BUILD — fin de la ambigüedad "¿qué versión corre?"
 # Verificable en vivo con /version. Actualizar el tag en cada entrega.
 # ════════════════════════════════════════════════════════════════════════
-BOT_BUILD = "FASE 31.44 · Slot blindado: pregunta nueva NUNCA se traga como área"
+BOT_BUILD = "FASE 31.54 · Radar+RJ89+IRG+MiGente+Catalina · memoria cascada-embeddings"
 _BOT_ARRANQUE = datetime.now()
 
 # FASE 20: DeepSeek API — Configuración de alertas de saldo
@@ -26764,7 +26764,7 @@ def busqueda_unificada(query, limit_historial=10, limit_rag=25, original=None):
                 f"RAG/Documentos ({len(chunks_rag)} fragmentos, confianza: {confianza_str})"
             )
     except Exception as e:
-        logger.warning(f"Error buscando RAG unificado: {e}")
+        logger.warning(f"Error buscando RAG unificado: {e!r}")  # 31.54: repr → tipo visible aunque str(e) sea vacío
     
     return resultados
 
@@ -43648,7 +43648,7 @@ def main():
                 if not isinstance(resultados[0], Exception):
                     resultados_busq = resultados[0] or resultados_busq
                 else:
-                    logger.warning(f"FASE 30.1: búsqueda RAG falló/timeout: {resultados[0]}")
+                    logger.warning(f"FASE 30.1: búsqueda RAG falló/timeout: {resultados[0]!r}")  # 31.54: repr → TimeoutError visible
                 
                 # Resultado tarjetas
                 if not isinstance(resultados[1], Exception):
@@ -45083,7 +45083,7 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
     logger.info("✅ Bot iniciado!")
-    logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDOS)} dominios")
+    logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDO)} dominios")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")

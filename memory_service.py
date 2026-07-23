@@ -70,6 +70,16 @@ GEMINI_EMBED_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
     "models/text-embedding-004:embedContent"
 )
+# FASE 31.54: Google retiró text-embedding-004 (HTTP 404 visto en producción
+# 2026-07-23). Cascada de 4 combos igual que bot.py FASE 31.40; el ganador se
+# cachea en la instancia. gemini-embedding-001 entrega 3072 dims por defecto →
+# se pide outputDimensionality=768 y se corta [:768] (la tabla es vector(768)).
+_EMB_COMBOS = (
+    ("v1beta", "text-embedding-004"),
+    ("v1",     "text-embedding-004"),
+    ("v1beta", "gemini-embedding-001"),
+    ("v1",     "gemini-embedding-001"),
+)
 
 _UNANSWERED_PATTERNS = (
     "no tengo informaci", "no se encuentra", "no cuento con",
@@ -119,22 +129,33 @@ class MemoryService:
 
     # ── embeddings (free: Gemini text-embedding-004, 768 dims) ───────────
     def _embed(self, text: str) -> list | None:
+        # FASE 31.54: cascada anti-404 (espejo de bot.py 31.40) + cache del combo.
         if not self.gemini_key or not text:
             return None
-        try:
-            r = requests.post(
-                f"{GEMINI_EMBED_URL}?key={self.gemini_key}",
-                json={
-                    "model": "models/text-embedding-004",
-                    "content": {"parts": [{"text": text[:8000]}]},
-                },
-                timeout=(5, 15),
-            )
-            if r.status_code == 200:
-                return r.json().get("embedding", {}).get("values")
-            logger.warning("Embedding failed: HTTP %s", r.status_code)
-        except Exception as exc:  # noqa: BLE001 — never break the bot for memory
-            logger.debug("Embedding error: %s", exc)
+        combos = ((getattr(self, "_emb_combo_ok", None),) if getattr(self, "_emb_combo_ok", None) else _EMB_COMBOS)
+        for combo in combos:
+            api_ver, modelo = combo
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/{api_ver}/"
+                    f"models/{modelo}:embedContent?key={self.gemini_key}",
+                    json={
+                        "model": f"models/{modelo}",
+                        "content": {"parts": [{"text": text[:8000]}]},
+                        "outputDimensionality": 768,
+                    },
+                    timeout=(5, 15),
+                )
+                if r.status_code == 200:
+                    vals = r.json().get("embedding", {}).get("values") or []
+                    if vals:
+                        if getattr(self, "_emb_combo_ok", None) != combo:
+                            self._emb_combo_ok = combo
+                            logger.info("🧬 FASE 31.54 memoria: embeddings vía %s/%s", api_ver, modelo)
+                        return vals[:768]
+                logger.warning("Embedding failed: HTTP %s (%s/%s)", r.status_code, api_ver, modelo)
+            except Exception as exc:  # noqa: BLE001 — never break the bot for memory
+                logger.debug("Embedding error (%s/%s): %r", api_ver, modelo, exc)
         return None
 
     @staticmethod
