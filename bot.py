@@ -4221,10 +4221,7 @@ async def mi_gente_agregar_comando(update: Update, context: ContextTypes.DEFAULT
                  'lugares con /mi_gente.')
         await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
         try:
-            registrar_conversacion(user_id,
-                                   update.effective_user.first_name or 'Usuario',
-                                   '/mi_gente_agregar',
-                                   f'Lugar protegido: {nombre_c}', 'comando')
+            registrar_servicio_usado(user_id, 'mi_gente_agregar')
         except Exception:
             pass
     except Exception as e:
@@ -4286,10 +4283,7 @@ async def mi_gente_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  '🗑️ Quitar: /mi_gente_borrar etiqueta')
         await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
         try:
-            registrar_conversacion(user_id,
-                                   update.effective_user.first_name or 'Usuario',
-                                   '/mi_gente', 'Estado lugares del corazón',
-                                   'comando')
+            registrar_servicio_usado(user_id, 'mi_gente_borrar')
         except Exception:
             pass
     except Exception as e:
@@ -4511,11 +4505,7 @@ async def riesgo_global_comando(update: Update, context: ContextTypes.DEFAULT_TY
         L.append('📡 NOAA/NHC · NWS · MET Norway · GDACS · USGS — Cofradía 24/7')
         await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
         try:
-            registrar_conversacion(update.effective_user.id,
-                                   update.effective_user.first_name or 'Usuario',
-                                   '/riesgo_global',
-                                   'Índice de riesgo global multiamenaza',
-                                   'comando')
+            registrar_servicio_usado(update.effective_user.id, 'riesgo_global')
         except Exception:
             pass
     except Exception as e:
@@ -4682,11 +4672,7 @@ async def pronostico_sismico_comando(update: Update, context: ContextTypes.DEFAU
         L.append('📡 Catálogo USGS · Modelo Reasenberg-Jones (1989) · Cofradía')
         await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
         try:
-            registrar_conversacion(update.effective_user.id,
-                                   update.effective_user.first_name or 'Usuario',
-                                   '/pronostico_sismico',
-                                   'Pronóstico probabilístico de réplicas',
-                                   'comando')
+            registrar_servicio_usado(update.effective_user.id, 'pronostico_sismico')
         except Exception:
             pass
     except Exception as e:
@@ -4904,10 +4890,7 @@ async def alertas_mundo_comando(update: Update, context: ContextTypes.DEFAULT_TY
         L.append('📡 NOAA/NHC · NWS · MET Norway · GDACS — Monitoreo Cofradía 24/7')
         await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
         try:
-            registrar_conversacion(update.effective_user.id,
-                                   update.effective_user.first_name or 'Usuario',
-                                   '/alertas_mundo', 'Radar global de alertas',
-                                   'comando')
+            registrar_servicio_usado(update.effective_user.id, 'alertas_mundo')
         except Exception:
             pass
     except Exception as e:
@@ -45140,7 +45123,10 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
         logger.info("═══ AGENTES AUTOMÁTICOS: TODOS PROGRAMADOS ═══")
     
     logger.info("✅ Bot iniciado!")
-    logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDO)} dominios")
+    try:
+        logger.info(f"🏷️ BUILD: {BOT_BUILD} | auto-router: {len(_PRE_RUTEO_COMANDOS)} dominios")
+    except Exception:  # 31.57: un banner cosmético JAMÁS debe tumbar el bot
+        logger.info(f"🏷️ BUILD: {BOT_BUILD}")
     
     # POLLING — keep-alive server en PORT(10000) mantiene Render despierto
     logger.info("🔄 Modo POLLING activo — keep-alive en PORT mantiene bot despierto 24/7")
