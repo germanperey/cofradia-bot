@@ -3414,6 +3414,10 @@ async def intentar_respuesta_libro(pregunta: str, user_name: str) -> str:
             f"nunca generalidades tipo 'el libro habla de eso'.\n"
             f"2. Comienza dirigiéndote a {user_name} por su nombre, cordial y "
             f"profesional.\n"
+            f"2b. OBLIGATORIO (FASE 31.51): en tu PRIMER párrafo menciona "
+            f"explícitamente el título del libro y su autor tal como "
+            f"aparece en la biblioteca: {titulo_limpio}. El lector debe "
+            f"saber de qué obra hablas sin mirar el pie de fuentes.\n"
             f"3. Máximo 3-4 párrafos, en español, SIN asteriscos ni Markdown.\n"
             f"4. Si la pregunta pide resumen o análisis general: entrega tesis "
             f"central, 3-4 ideas clave y una aplicación práctica para "
@@ -44077,14 +44081,14 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
                 try:
                     audio_priv = await asyncio.wait_for(
                         generar_audio_tts(respuesta[:3000], f"/tmp/priv_{update.effective_user.id}.mp3"),
-                        timeout=15.0
+                        timeout=40.0  # FASE 31.51: 15s cortaba el audio de respuestas largas (libros)
                     )
                     if audio_priv and os.path.exists(audio_priv):
                         with open(audio_priv, 'rb') as af:
                             await update.message.reply_voice(voice=af)
                         os.remove(audio_priv)
                 except asyncio.TimeoutError:
-                    logger.warning("FASE 30.1: TTS timeout 15s, omitiendo audio")
+                    logger.warning("FASE 31.51: TTS timeout 40s, omitiendo audio")
                 except Exception as _tts_p:
                     logger.debug(f"TTS privado: {_tts_p}")
                 # Mejora 4: Botones de feedback
