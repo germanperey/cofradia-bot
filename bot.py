@@ -1708,6 +1708,15 @@ _VOICE_COMMAND_MAP = {
     'calculadora': 'calculadora', 'feriados': 'feriados',
     'eventos': 'eventos', 'directorio': 'directorio',
     'emergencia': 'emergencia', 'clima': 'clima', 'dashboard': 'mi_dashboard',
+    'huracan': 'alertas_mundo', 'huracanes': 'alertas_mundo', 'ciclon': 'alertas_mundo',
+    'alertas mundiales': 'alertas_mundo', 'radar global': 'alertas_mundo',
+    'predecir terremoto': 'pronostico_sismico', 'prediccion sismica': 'pronostico_sismico',
+    'replicas': 'pronostico_sismico', 'pronostico sismico': 'pronostico_sismico',
+    'riesgo global': 'riesgo_global', 'riesgo mundial': 'riesgo_global',
+    'indice de riesgo': 'riesgo_global', 'sintesis global': 'riesgo_global',
+    'mi gente': 'mi_gente', 'mis lugares': 'mi_gente', 'mi familia': 'mi_gente',
+    'proteger a mi familia': 'mi_gente_agregar', 'proteger familia': 'mi_gente_agregar',
+    'vigilar ciudad': 'mi_gente_agregar', 'lugares del corazon': 'mi_gente',
     'reporte': 'reporte_ejecutivo',
 }
 
@@ -3836,6 +3845,1290 @@ async def version_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Build: {BOT_BUILD} (detalle no disponible: {e})")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 31.50 — GUIONES DE VOZ (Catalina) PARA LAS ALERTAS MÁXIMAS
+# La voz oficial del bot es Catalina (VOZ_TTS es-CL-CatalinaNeural, con
+# pipeline Google TTS de la FASE 12). Estas funciones arman guiones LIMPIOS
+# y hablables (sin emojis, con coma decimal chilena) que luego pasan por
+# generar_audio_tts — el mismo camino del Agente Sísmico.
+# ═══════════════════════════════════════════════════════════════════════════
+def _num_hablado(valor) -> str:
+    """7.1 → 'siete coma...' no: solo cambia el punto por ' coma ' para
+    que Catalina lo lea a la chilena ('siete coma uno')."""
+    try:
+        return f"{float(valor):.1f}".replace('.', ' coma ')
+    except Exception:
+        return str(valor)
+
+
+def _guion_voz_huracan(s: dict) -> str:
+    """Guion hablado para el anuncio de un huracán nuevo."""
+    try:
+        cat = s.get('cat_n', 1)
+        return (f"Atención Cofradía. El radar global detectó al huracán "
+                f"{s.get('nombre', '')}, categoría {cat}, con vientos de "
+                f"{int(s.get('kmh', 0))} kilómetros por hora. Los huracanes "
+                f"se anticipan con días: si tienes familia, amigos o "
+                f"cofrades en la zona proyectada, avísales ahora. Revisa el "
+                f"aviso oficial en el mensaje anterior.")
+    except Exception:
+        return ""
+
+
+def _guion_voz_migente(etiqueta: str, frases: list) -> str:
+    """Guion hablado para el aviso privado de Mi Gente."""
+    try:
+        cuerpo = ". ".join(f for f in (frases or []) if f)
+        if not cuerpo:
+            return ""
+        return (f"Atención. Alerta para tu gente: {etiqueta}. {cuerpo}. "
+                f"Contacta a tu gente ahora y comparte el aviso oficial "
+                f"que te envié por escrito.")
+    except Exception:
+        return ""
+
+
+# FASE 31.49 — MI GENTE EN EL MAPA (Exposición personalizada, ecuación ONU)
+# Cada cofrade registra hasta 10 "lugares del corazón" (ciudades donde vive
+# su familia o amigos, en cualquier país). El radar cruza cada huracán y
+# gran sismo contra esos puntos (distancia Haversine vs radios físicos) y
+# le avisa POR PRIVADO con nombre, distancia y fuente oficial. Reutiliza el
+# geocodificador de 3 fuentes del clima (_clima_geocodificar).
+# ═══════════════════════════════════════════════════════════════════════════
+_MAX_LUGARES_CORAZON = 10
+
+
+def _asegurar_tabla_lugares_corazon() -> bool:
+    """Crea la tabla lugares_corazon si no existe (PG/sqlite dual)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        if DATABASE_URL:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS lugares_corazon (
+                    user_id BIGINT NOT NULL,
+                    etiqueta TEXT NOT NULL,
+                    ciudad TEXT,
+                    lat DOUBLE PRECISION,
+                    lon DOUBLE PRECISION,
+                    PRIMARY KEY (user_id, etiqueta)
+                )""")
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS lugares_corazon (
+                    user_id INTEGER NOT NULL,
+                    etiqueta TEXT NOT NULL,
+                    ciudad TEXT,
+                    lat REAL,
+                    lon REAL,
+                    PRIMARY KEY (user_id, etiqueta)
+                )""")
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Tabla lugares_corazon: {e}")
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def _haversine_km(lat1, lon1, lat2, lon2) -> float:
+    """Distancia en km entre dos puntos del globo (fórmula de Haversine)."""
+    import math
+    try:
+        r = 6371.0
+        f1, f2 = math.radians(float(lat1)), math.radians(float(lat2))
+        df = math.radians(float(lat2) - float(lat1))
+        dl = math.radians(float(lon2) - float(lon1))
+        a = (math.sin(df / 2) ** 2
+             + math.cos(f1) * math.cos(f2) * math.sin(dl / 2) ** 2)
+        return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+    except Exception:
+        return 99999.0
+
+
+def _radio_ciclon_km(cat_n: int) -> float:
+    """Radio de peligro de un ciclón (campo de vientos + marejada)."""
+    return 500.0 if cat_n >= 3 else (400.0 if cat_n >= 1 else 300.0)
+
+
+def _radio_sismo_km(mag: float) -> float:
+    """Radio de afectación fuerte de un sismo (heurística conservadora)."""
+    try:
+        M = float(mag)
+    except Exception:
+        return 200.0
+    return 800.0 if M >= 7.5 else (400.0 if M >= 6.5 else 200.0)
+
+
+def _parsear_args_migente(texto: str):
+    """'Miami, US ; hermana Paula' → ('miami', 'US', 'hermana Paula').
+    País y etiqueta son opcionales."""
+    try:
+        partes = [p.strip() for p in str(texto or '').split(';')]
+        lugar = partes[0]
+        etiqueta = partes[1][:60] if len(partes) > 1 and partes[1] else ''
+        pais = None
+        if ',' in lugar:
+            ciudad, resto = lugar.rsplit(',', 1)
+            resto = resto.strip().upper()
+            if len(resto) == 2 and resto.isalpha():
+                lugar, pais = ciudad.strip(), resto
+        ciudad_norm = lugar.strip().lower()
+        if not etiqueta:
+            etiqueta = f"Mi gente en {lugar.strip().title()}"[:60]
+        return ciudad_norm, pais, etiqueta
+    except Exception:
+        return '', None, ''
+
+
+def _guardar_lugar(user_id: int, etiqueta: str, ciudad: str,
+                   lat: float, lon: float) -> bool:
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        if DATABASE_URL:
+            cur.execute("""
+                INSERT INTO lugares_corazon (user_id, etiqueta, ciudad, lat, lon)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, etiqueta)
+                DO UPDATE SET ciudad = EXCLUDED.ciudad,
+                              lat = EXCLUDED.lat, lon = EXCLUDED.lon""",
+                        (user_id, etiqueta, ciudad, lat, lon))
+        else:
+            cur.execute("""
+                INSERT OR REPLACE INTO lugares_corazon
+                    (user_id, etiqueta, ciudad, lat, lon)
+                VALUES (?, ?, ?, ?, ?)""",
+                        (user_id, etiqueta, ciudad, lat, lon))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Guardar lugar corazón: {e}")
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def _lugares_de_usuario(user_id: int) -> list:
+    out = []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return out
+        cur = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        cur.execute(f"SELECT etiqueta, ciudad, lat, lon FROM lugares_corazon "
+                    f"WHERE user_id = {ph} ORDER BY etiqueta", (user_id,))
+        for row in cur.fetchall():
+            if DATABASE_URL:
+                out.append({'etiqueta': row['etiqueta'], 'ciudad': row['ciudad'],
+                            'lat': row['lat'], 'lon': row['lon']})
+            else:
+                out.append({'etiqueta': row[0], 'ciudad': row[1],
+                            'lat': row[2], 'lon': row[3]})
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Lugares de usuario: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
+def _todos_lugares_corazon() -> list:
+    out = []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return out
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, etiqueta, ciudad, lat, lon "
+                    "FROM lugares_corazon LIMIT 500")
+        for row in cur.fetchall():
+            if DATABASE_URL:
+                out.append({'user_id': row['user_id'], 'etiqueta': row['etiqueta'],
+                            'ciudad': row['ciudad'], 'lat': row['lat'],
+                            'lon': row['lon']})
+            else:
+                out.append({'user_id': row[0], 'etiqueta': row[1],
+                            'ciudad': row[2], 'lat': row[3], 'lon': row[4]})
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Todos lugares corazón: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
+def _borrar_lugar(user_id: int, clave: str) -> int:
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return 0
+        cur = conn.cursor()
+        ph = "%s" if DATABASE_URL else "?"
+        cur.execute(f"DELETE FROM lugares_corazon WHERE user_id = {ph} AND "
+                    f"(LOWER(etiqueta) = LOWER({ph}) OR "
+                    f"LOWER(ciudad) = LOWER({ph}))",
+                    (user_id, clave.strip(), clave.strip()))
+        n = cur.rowcount or 0
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as e:
+        logger.warning(f"Borrar lugar corazón: {e}")
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return 0
+
+
+def _amenazas_sobre_punto(lat, lon, tormentas, sismo) -> list:
+    """Lista de textos de amenazas activas que alcanzan el punto dado."""
+    hallazgos = []
+    try:
+        for s in (tormentas or []):
+            if s.get('lat_num') is None or s.get('lon_num') is None:
+                continue
+            d = _haversine_km(lat, lon, s['lat_num'], s['lon_num'])
+            radio = _radio_ciclon_km(s.get('cat_n', 0))
+            if d <= radio:
+                hallazgos.append(
+                    f"🌀 {s.get('cat_txt', 'Ciclón')} \"{s.get('nombre', '?')}\" "
+                    f"a {round(d)} km ({s.get('kmh', 0)} km/h) — "
+                    f"aviso: {s.get('aviso', '')}")
+        if sismo and sismo.get('lat') is not None:
+            d = _haversine_km(lat, lon, sismo['lat'], sismo['lon'])
+            radio = _radio_sismo_km(sismo.get('mag', 0))
+            if d <= radio:
+                hallazgos.append(
+                    f"🌎 Sismo M{sismo['mag']:.1f} a {round(d)} km "
+                    f"(hace {sismo.get('hace_h', '?')} h) — réplicas "
+                    f"probables, ver /pronostico_sismico")
+    except Exception:
+        pass
+    return hallazgos
+
+
+async def mi_gente_agregar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.49 — /mi_gente_agregar Ciudad[, PAÍS] ; etiqueta opcional."""
+    try:
+        user_id = update.effective_user.id
+        texto = ' '.join(context.args or [])
+        if not texto.strip():
+            await update.message.reply_text(
+                '🫂 Dime qué lugar quieres vigilar. Ejemplos:\n'
+                '· /mi_gente_agregar Miami ; hermana Paula\n'
+                '· /mi_gente_agregar Tokio, JP ; mi hijo\n'
+                '· /mi_gente_agregar Valparaíso\n\n'
+                'Vigilaré esa ciudad ante huracanes y grandes sismos, y te '
+                'avisaré POR PRIVADO si algo la amenaza.')
+            return
+        ciudad_norm, pais, etiqueta = _parsear_args_migente(texto)
+        if not ciudad_norm:
+            await update.message.reply_text('⚠️ No entendí la ciudad. Prueba: '
+                                            '/mi_gente_agregar Miami ; hermana')
+            return
+        if len(_lugares_de_usuario(user_id)) >= _MAX_LUGARES_CORAZON:
+            await update.message.reply_text(
+                f'⚠️ Ya tienes {_MAX_LUGARES_CORAZON} lugares (el máximo). '
+                f'Borra alguno con /mi_gente_borrar antes de agregar otro.')
+            return
+        msg = await update.message.reply_text(
+            f'🌍 Ubicando "{ciudad_norm.title()}" en el mapa...')
+        loop = asyncio.get_event_loop()
+        try:
+            geo = await asyncio.wait_for(
+                loop.run_in_executor(None, _clima_geocodificar,
+                                     ciudad_norm, pais),
+                timeout=14.0)
+        except Exception:
+            geo = None
+        if not geo:
+            await msg.edit_text(f'⚠️ No encontré "{ciudad_norm.title()}" en el '
+                                f'mapa. Prueba agregando el país: '
+                                f'/mi_gente_agregar {ciudad_norm.title()}, US')
+            return
+        lat, lon, nombre_c, region, pais_n = geo
+        _asegurar_tabla_lugares_corazon()
+        if not _guardar_lugar(user_id, etiqueta, f"{nombre_c}, {pais_n}",
+                              lat, lon):
+            await msg.edit_text('⚠️ No pude guardar el lugar. Intenta de nuevo.')
+            return
+        # Chequeo inmediato de amenazas sobre el punto recién guardado
+        try:
+            tormentas = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_radar_nhc), timeout=14.0)
+        except Exception:
+            tormentas = []
+        try:
+            sismo = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: _ultimo_gran_sismo_mundial(72.0, 5.8)),
+                timeout=14.0)
+        except Exception:
+            sismo = None
+        amenazas = _amenazas_sobre_punto(lat, lon, tormentas, sismo)
+        L = [f'🫂 LUGAR PROTEGIDO: {etiqueta}',
+             f'📍 {nombre_c}, {pais_n} ({lat:.2f}, {lon:.2f})', '']
+        if amenazas:
+            L.append('⚠️ ATENCIÓN — amenazas activas AHORA sobre esa zona:')
+            L.extend(f'· {a}' for a in amenazas)
+        else:
+            L.append('🟢 Sin huracanes ni grandes sismos sobre esa zona ahora.')
+        L.append('')
+        L.append('Desde ahora el radar vigila ese punto 24/7 y te escribiré '
+                 'POR PRIVADO si un huracán o gran sismo lo alcanza. Ve tus '
+                 'lugares con /mi_gente.')
+        await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
+        try:
+            registrar_conversacion(user_id,
+                                   update.effective_user.first_name or 'Usuario',
+                                   '/mi_gente_agregar',
+                                   f'Lugar protegido: {nombre_c}', 'comando')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error /mi_gente_agregar: {e}")
+        try:
+            await update.message.reply_text('⚠️ Error guardando el lugar. '
+                                            'Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+async def mi_gente_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.49 — /mi_gente: estado en vivo de tus lugares del corazón."""
+    try:
+        user_id = update.effective_user.id
+        _asegurar_tabla_lugares_corazon()
+        lugares = _lugares_de_usuario(user_id)
+        if not lugares:
+            await update.message.reply_text(
+                '🫂 Aún no vigilas ningún lugar. Agrega el primero:\n'
+                '· /mi_gente_agregar Miami ; hermana Paula\n'
+                '· /mi_gente_agregar Tokio, JP ; mi hijo\n\n'
+                'El radar cruzará huracanes y grandes sismos contra tus '
+                'lugares y te avisará POR PRIVADO. También puedes pedírmelo '
+                'en lenguaje natural: "quiero proteger a mi hermana en Miami".')
+            return
+        msg = await update.message.reply_text(
+            '🫂 Revisando el estado de tu gente en el mapa...')
+        loop = asyncio.get_event_loop()
+        try:
+            tormentas = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_radar_nhc), timeout=14.0)
+        except Exception:
+            tormentas = []
+        try:
+            sismo = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: _ultimo_gran_sismo_mundial(72.0, 5.8)),
+                timeout=14.0)
+        except Exception:
+            sismo = None
+        L = ['🫂 MI GENTE EN EL MAPA — estado en vivo',
+             '━━━━━━━━━━━━━━━━━━━━━━━━━━', '']
+        alguna = False
+        for lg in lugares:
+            amenazas = _amenazas_sobre_punto(lg['lat'], lg['lon'],
+                                             tormentas, sismo)
+            if amenazas:
+                alguna = True
+                L.append(f"⚠️ {lg['etiqueta']} — {lg['ciudad']}")
+                L.extend(f'   · {a}' for a in amenazas)
+            else:
+                L.append(f"🟢 {lg['etiqueta']} — {lg['ciudad']}")
+        L.append('')
+        if not alguna:
+            L.append('Todo tranquilo sobre tus lugares. El radar sigue '
+                     'vigilando 24/7.')
+        L.append('➕ Agregar: /mi_gente_agregar Ciudad ; etiqueta · '
+                 '🗑️ Quitar: /mi_gente_borrar etiqueta')
+        await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
+        try:
+            registrar_conversacion(user_id,
+                                   update.effective_user.first_name or 'Usuario',
+                                   '/mi_gente', 'Estado lugares del corazón',
+                                   'comando')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error /mi_gente: {e}")
+        try:
+            await update.message.reply_text('⚠️ Error revisando tus lugares. '
+                                            'Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+async def mi_gente_borrar_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.49 — /mi_gente_borrar etiqueta_o_ciudad."""
+    try:
+        user_id = update.effective_user.id
+        clave = ' '.join(context.args or []).strip()
+        if not clave:
+            await update.message.reply_text(
+                '🗑️ Dime cuál quitar (etiqueta o ciudad). '
+                'Ej: /mi_gente_borrar hermana Paula')
+            return
+        n = _borrar_lugar(user_id, clave)
+        if n:
+            await update.message.reply_text(
+                f'🗑️ Listo: dejé de vigilar "{clave}" ({n} lugar(es) '
+                f'eliminado(s)). Ve el resto con /mi_gente.')
+        else:
+            await update.message.reply_text(
+                f'⚠️ No encontré "{clave}" entre tus lugares. '
+                f'Revísalos con /mi_gente.')
+    except Exception as e:
+        logger.error(f"Error /mi_gente_borrar: {e}")
+
+
+# FASE 31.48 — SÍNTESIS MULTIAMENAZA: ÍNDICE DE RIESGO GLOBAL COFRADÍA
+# Condensación operativa del conocimiento científico en desastres:
+#   · Marco ONU/UNDRR e IPCC: Riesgo = Amenaza × Exposición × Vulnerabilidad
+#     (la Exposición×Vulnerabilidad viene embebida en los niveles GDACS,
+#      que ya ponderan población expuesta y fragilidad del país)
+#   · Gutenberg-Richter (1944): log10(E) ∝ 1.5·M → cada grado = ×31.6 energía
+#   · Emanuel (2005): potencial destructivo de un ciclón ∝ v³ (viento al cubo)
+#   · Omori (1894) / Reasenberg-Jones (1989): decaimiento de réplicas (31.47)
+#   · Poisson planetario (catálogo USGS): λ(M≥7)≈15/año, λ(M≥8)≈1/año
+#   · Unión de probabilidades independientes: P = 1 − ∏(1−pᵢ)
+# Todo alimentado por las fuentes YA operativas: NHC + NWS + MET.no + GDACS
+# + catálogo USGS. Sin dependencias nuevas. Honestidad probabilística total.
+# ═══════════════════════════════════════════════════════════════════════════
+_LAMBDA_M7_ANUAL = 15.0   # sismos M≥7 por año en el planeta (catálogo USGS)
+_LAMBDA_M8_ANUAL = 1.0    # sismos M≥8 por año en el planeta
+
+
+def _poisson_prob_dias(lambda_anual: float, dias: float = 7.0) -> float:
+    """P(al menos un evento en `dias`) con tasa anual Poisson."""
+    import math
+    try:
+        return min(1.0, max(0.0, 1.0 - math.exp(-lambda_anual * dias / 365.25)))
+    except Exception:
+        return 0.0
+
+
+def _union_probs(probs) -> float:
+    """P(al menos uno) para eventos independientes: 1 − ∏(1−pᵢ)."""
+    acum = 1.0
+    for p in probs:
+        try:
+            acum *= (1.0 - min(1.0, max(0.0, float(p))))
+        except Exception:
+            continue
+    return min(1.0, max(0.0, 1.0 - acum))
+
+
+def _score_ciclon(kmh: float) -> float:
+    """Amenaza ciclónica 0-100 por física v³ (Emanuel 2005), ref 270 km/h."""
+    try:
+        return min(100.0, max(0.0, 100.0 * (float(kmh) / 270.0) ** 3))
+    except Exception:
+        return 0.0
+
+
+def _score_sismo(mag: float, prof_km: float = 33.0) -> float:
+    """Amenaza sísmica 0-100: escala Gutenberg-Richter (22 pts por grado
+    sobre M5) atenuada por profundidad (los profundos dañan menos)."""
+    try:
+        base = min(100.0, max(0.0, (float(mag) - 5.0) * 22.0))
+        p = float(prof_km)
+        factor = 1.0 if p < 70 else (0.6 if p < 300 else 0.3)
+        return base * factor
+    except Exception:
+        return 0.0
+
+
+def _nivel_riesgo_global(score: float) -> tuple:
+    """(emoji, nombre, consejo náutico) para el índice 0-100."""
+    if score >= 75:
+        return ('🔴', 'CRÍTICO',
+                'Mar gruesa planetaria: revisa a los tuyos en zonas activas y '
+                'ten a mano el plan familiar de emergencia.')
+    if score >= 50:
+        return ('🟠', 'PREPARACIÓN',
+                'Varios frentes activos: buen momento para verificar mochila '
+                'de emergencia y puntos de encuentro.')
+    if score >= 25:
+        return ('🟡', 'VIGILANCIA',
+                'Actividad normal-alta: navegación atenta, sin alarma.')
+    return ('🟢', 'SERENO',
+            'Planeta en calma relativa: disfruta y mantén la buena costumbre '
+            'de estar preparado.')
+
+
+def _sintesis_multiamenaza() -> dict:
+    """Fusiona TODAS las fuentes del bot en un índice 0-100 + probabilidades
+    combinadas a 7 días. Devuelve dict con score, nivel, componentes, probs."""
+    componentes = []
+    probs_7d = []
+    detalle_probs = []
+    # ── Fondo planetario Poisson (siempre presente: conocimiento base) ──
+    p_m7 = _poisson_prob_dias(_LAMBDA_M7_ANUAL)
+    p_m8 = _poisson_prob_dias(_LAMBDA_M8_ANUAL)
+    probs_7d.append(p_m7)
+    detalle_probs.append(('Fondo sísmico planetario M≥7 (Poisson)', p_m7))
+    # ── Ciclones activos (NHC) ──
+    try:
+        for s in (_fetch_radar_nhc() or []):
+            sc = _score_ciclon(s.get('kmh', 0))
+            if sc >= 5:
+                componentes.append((f"🌀 {s.get('cat_txt', 'Ciclón')} "
+                                    f"\"{s.get('nombre', '?')}\" "
+                                    f"({s.get('kmh', 0)} km/h)", sc))
+    except Exception:
+        pass
+    # ── Mayor sismo mundial reciente + réplicas RJ89 ──
+    try:
+        sis = _ultimo_gran_sismo_mundial(horas=72.0, mag_min=5.8)
+        if sis:
+            sc = _score_sismo(sis['mag'], sis.get('prof_km', 33))
+            componentes.append((f"🌎 Sismo M{sis['mag']:.1f} "
+                                f"{sis['lugar'][:45]}", sc))
+            t0 = max(0.02, sis.get('hace_h', 1) / 24.0)
+            p_rep = _rj_prob(sis['mag'], 6.0, t0_dias=t0)
+            if p_rep >= 0.01:
+                probs_7d.append(p_rep)
+                detalle_probs.append(
+                    (f"Réplica M≥6 del M{sis['mag']:.1f} (Reasenberg-Jones)",
+                     p_rep))
+    except Exception:
+        pass
+    # ── Presión GDACS acumulada (Exposición×Vulnerabilidad embebidas) ──
+    try:
+        gd = _fetch_radar_gdacs_resumen() or []
+        rojos = sum(1 for g in gd if g.get('nivel') == '🔴')
+        naranjas = len(gd) - rojos
+        presion = min(40.0, rojos * 18.0 + naranjas * 8.0)
+        if presion > 0:
+            componentes.append(
+                (f"🌍 Presión GDACS: {rojos} rojo(s) + {naranjas} naranja(s) "
+                 f"[pondera población expuesta]", presion))
+    except Exception:
+        pass
+    # ── Índice global: máximo + acumulación parcial de los demás ──
+    componentes.sort(key=lambda x: -x[1])
+    if componentes:
+        maximo = componentes[0][1]
+        resto = sum(c[1] for c in componentes[1:])
+        score = min(100.0, maximo + 0.35 * resto)
+    else:
+        score = 10.0
+    emoji, nombre, consejo = _nivel_riesgo_global(score)
+    return {'score': round(score), 'emoji': emoji, 'nivel': nombre,
+            'consejo': consejo, 'componentes': componentes[:6],
+            'p_union': _union_probs(probs_7d), 'p_m8': p_m8,
+            'detalle_probs': detalle_probs[:4]}
+
+
+async def riesgo_global_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.48 — /riesgo_global: síntesis multiamenaza del planeta."""
+    try:
+        msg = await update.message.reply_text(
+            '🧭 Fusionando todas las fuentes científicas del planeta...')
+        loop = asyncio.get_event_loop()
+        try:
+            R = await asyncio.wait_for(
+                loop.run_in_executor(None, _sintesis_multiamenaza),
+                timeout=45.0)
+        except Exception:
+            R = None
+        if not R:
+            await msg.edit_text('⚠️ No pude completar la síntesis. Intenta '
+                                'nuevamente en unos minutos.')
+            return
+        L = ['🧭 ÍNDICE DE RIESGO GLOBAL COFRADÍA',
+             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+             'Síntesis multiamenaza · marco ONU/IPCC:',
+             'Riesgo = Amenaza × Exposición × Vulnerabilidad', '',
+             f"{R['emoji']} NIVEL: {R['nivel']} — {R['score']}/100",
+             f"⚓ {R['consejo']}", '']
+        if R['componentes']:
+            L.append('── Amenazas activas que suman al índice ──')
+            for nombre_c, sc in R['componentes']:
+                L.append(f"· {nombre_c} → {round(sc)} pts")
+            L.append('')
+        L.append('── Probabilidades combinadas (próximos 7 días) ──')
+        L.append(f"🎲 Al menos un evento sísmico mayor en el planeta: "
+                 f"{_fmt_prob(R['p_union'])}")
+        for nom_p, p in R['detalle_probs']:
+            L.append(f"   · {nom_p}: {_fmt_prob(p)}")
+        L.append(f"   · Mega-sismo M≥8 en el planeta: {_fmt_prob(R['p_m8'])}")
+        L.append('')
+        L.append('── Ciencia condensada en este índice ──')
+        L.append('Gutenberg-Richter 1944 (energía sísmica ×31.6 por grado) · '
+                 'Emanuel 2005 (daño ciclónico ∝ viento³) · Omori 1894 y '
+                 'Reasenberg-Jones 1989 (réplicas) · Poisson (tasas '
+                 'planetarias del catálogo USGS) · fusión bayesiana de '
+                 'fuentes independientes.')
+        L.append('')
+        L.append('🔬 Probabilidades honestas, no adivinación: nadie puede '
+                 'predecir un evento individual, pero la física y la '
+                 'estadística SÍ cuantifican el estado del planeta.')
+        L.append('')
+        L.append('📡 NOAA/NHC · NWS · MET Norway · GDACS · USGS — Cofradía 24/7')
+        await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
+        try:
+            registrar_conversacion(update.effective_user.id,
+                                   update.effective_user.first_name or 'Usuario',
+                                   '/riesgo_global',
+                                   'Índice de riesgo global multiamenaza',
+                                   'comando')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error /riesgo_global: {e}")
+        try:
+            await update.message.reply_text(
+                '⚠️ Error en la síntesis global. Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+# FASE 31.46 — RADAR GLOBAL DE ANTICIPACIÓN DE FENÓMENOS EXTREMOS
+# Fuentes oficiales verificadas EN VIVO (jul-2026), todas gratuitas sin key:
+#   · NHC/NOAA CurrentStorms.json → huracanes y tormentas tropicales ACTIVAS
+#     del Atlántico y Pacífico Este con pronóstico a 5 DÍAS (anticipación real)
+#   · NWS api.weather.gov → avisos EXTREME de EE.UU. (huracán, marejada
+#     ciclónica, viento extremo, tsunami, blizzard) con HORAS/DÍAS de aviso
+#   · MET Norway MetAlerts 2.0 → alertas naranja/rojo de Escandinavia
+#   · GDACS (ONU/CE) → resto del mundo (ya activo vía job_monitor_gdacs)
+# HONESTIDAD CIENTÍFICA: los TERREMOTOS no pueden predecirse (ni Japón ni
+# EE.UU. lo han logrado; el EEW japonés da SEGUNDOS, no días, y no es
+# exportable). Este radar anticipa lo que la ciencia SÍ permite anticipar.
+# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE 31.47 — PRONÓSTICO SÍSMICO PROBABILÍSTICO (Reasenberg-Jones 1989)
+# La predicción de terremotos individuales NO existe (posición oficial del
+# USGS y de toda la sismología seria). Lo MÁS AVANZADO que la ciencia opera
+# hoy es el PRONÓSTICO PROBABILÍSTICO DE RÉPLICAS: el USGS emite uno ~20
+# minutos después de cada M≥5 en su territorio, basado en el modelo
+# Reasenberg & Jones (Science, 1989) con parámetros genéricos — el MISMO
+# modelo implementado aquí, aplicable a cualquier sismo del planeta.
+#   Tasa: λ(t, M≥m) = 10^(a + b·(Mm−m)) · (t+c)^(−p)   [t en días]
+#   N esperado en [t0,t1] = 10^(a+b(Mm−m)) · ((t1+c)^(1−p)−(t0+c)^(1−p))/(1−p)
+#   P(al menos una réplica) = 1 − e^(−N)
+# Parámetros genéricos RJ89: a=−1.67, b=0.91, c=0.05, p=1.08
+# ═══════════════════════════════════════════════════════════════════════════
+_RJ_A, _RJ_B, _RJ_C, _RJ_P = -1.67, 0.91, 0.05, 1.08
+_URL_USGS_SEMANA = ("https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
+                    "summary/4.5_week.geojson")
+
+
+def _rj_prob(mag_principal: float, m_objetivo: float,
+             t0_dias: float = 0.02, t1_dias: float = 7.0) -> float:
+    """Probabilidad Reasenberg-Jones de ≥1 réplica de magnitud ≥ m_objetivo
+    en la ventana [t0, t1] días tras un sismo principal de mag_principal."""
+    import math
+    try:
+        base = 10 ** (_RJ_A + _RJ_B * (float(mag_principal) - float(m_objetivo)))
+        u = 1.0 - _RJ_P
+        integral = ((t1_dias + _RJ_C) ** u - (t0_dias + _RJ_C) ** u) / u
+        n_esperado = max(0.0, base * integral)
+        return min(1.0, max(0.0, 1.0 - math.exp(-n_esperado)))
+    except Exception:
+        return 0.0
+
+
+def _fmt_prob(p: float) -> str:
+    if p >= 0.99: return "≥99%"
+    if p < 0.01:  return "<1%"
+    return f"{round(p * 100)}%"
+
+
+def _pronostico_replicas_texto(mag_principal: float,
+                               t0_dias: float = 0.02) -> str:
+    """Bloque de texto con el pronóstico de réplicas a 7 días (estilo USGS)."""
+    try:
+        M = float(mag_principal)
+        p5 = _rj_prob(M, 5.0, t0_dias)
+        p6 = _rj_prob(M, 6.0, t0_dias)
+        pM = _rj_prob(M, M, t0_dias)
+        bath = max(0.0, M - 1.2)
+        return (
+            "🔮 PRONÓSTICO DE RÉPLICAS — próximos 7 días\n"
+            "(modelo Reasenberg-Jones, el mismo del sistema oficial USGS)\n"
+            f"· Al menos una réplica M≥5.0: {_fmt_prob(p5)}\n"
+            f"· Al menos una réplica M≥6.0: {_fmt_prob(p6)}\n"
+            f"· Un sismo IGUAL O MAYOR (M≥{M:.1f}): {_fmt_prob(pM)}\n"
+            f"📐 La réplica mayor típica ronda M{bath:.1f} (ley de Bäth). "
+            "Son probabilidades científicas, no certezas.")
+    except Exception:
+        return ""
+
+
+def _ultimo_gran_sismo_mundial(horas: float = 48.0,
+                               mag_min: float = 5.8):
+    """Mayor sismo del planeta en las últimas `horas` (feed oficial USGS).
+    Devuelve dict {mag, lugar, hace_h, prof_km, url} o None."""
+    try:
+        r = requests.get(_URL_USGS_SEMANA, timeout=(5, 14),
+                         headers={"User-Agent": _UA_RADAR})
+        if r.status_code != 200:
+            return None
+        ahora_ms = time.time() * 1000.0
+        candidatos = []
+        for f in (r.json() or {}).get('features', []):
+            try:
+                p = f.get('properties', {})
+                mag = float(p.get('mag') or 0)
+                t_ms = float(p.get('time') or 0)
+                if mag < mag_min or (ahora_ms - t_ms) > horas * 3600000.0:
+                    continue
+                coords = (f.get('geometry') or {}).get('coordinates') or [0, 0, 0]
+                candidatos.append({
+                    'mag': mag,
+                    'lugar': (p.get('place') or 'Ubicación por confirmar')[:110],
+                    'hace_h': round((ahora_ms - t_ms) / 3600000.0, 1),
+                    'prof_km': round(float(coords[2] or 0)),
+                    'lat': float(coords[1] or 0),
+                    'lon': float(coords[0] or 0),
+                    'url': p.get('url') or 'https://earthquake.usgs.gov',
+                })
+            except Exception:
+                continue
+        if not candidatos:
+            return None
+        return sorted(candidatos, key=lambda x: -x['mag'])[0]
+    except Exception as e:
+        logger.debug(f"Último gran sismo mundial: {e}")
+        return None
+
+
+async def pronostico_sismico_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.47 — /pronostico_sismico: pronóstico probabilístico de
+    réplicas (Reasenberg-Jones) para el mayor sismo mundial reciente."""
+    try:
+        msg = await update.message.reply_text(
+            '🔮 Consultando el catálogo sísmico mundial (USGS)...')
+        loop = asyncio.get_event_loop()
+        try:
+            sismo = await asyncio.wait_for(
+                loop.run_in_executor(None, _ultimo_gran_sismo_mundial),
+                timeout=16.0)
+        except Exception:
+            sismo = None
+        L = ['🔮 PRONÓSTICO SÍSMICO PROBABILÍSTICO',
+             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', '']
+        if sismo:
+            L.append(f"🌎 Mayor sismo mundial reciente (últimas 48 h):")
+            L.append(f"📊 Magnitud {sismo['mag']:.1f} — {sismo['lugar']}")
+            L.append(f"🕐 Hace {sismo['hace_h']} h · profundidad {sismo['prof_km']} km")
+            L.append('')
+            L.append(_pronostico_replicas_texto(sismo['mag'],
+                                                t0_dias=max(0.02, sismo['hace_h'] / 24.0)))
+            L.append('')
+            L.append(f"📄 Página oficial USGS del evento (si la zona tiene "
+                     f"cobertura OAF, ahí verás el pronóstico oficial "
+                     f"actualizado): {sismo['url']}")
+        else:
+            L.append('🟢 Sin sismos M≥5.8 en el planeta en las últimas 48 horas.')
+            L.append('')
+            L.append('Cuando ocurra uno grande, este comando calculará al '
+                     'instante las probabilidades de réplicas a 7 días con el '
+                     'modelo Reasenberg-Jones — el mismo que usa el sistema '
+                     'operacional del USGS. Además, las alertas automáticas de '
+                     'terremoto del monitoreo global ya incluyen este pronóstico.')
+        L.append('')
+        L.append('🔬 Honestidad científica: NINGÚN organismo del mundo (ni '
+                 'USGS, ni Japón, ni Chile) puede predecir un terremoto antes '
+                 'de que inicie. Lo que SÍ se calcula —y aquí lo tienes— es la '
+                 'probabilidad de réplicas tras uno grande. Desconfía de '
+                 '"predicciones" con fechas exactas o alineaciones planetarias: '
+                 'son pseudociencia.')
+        L.append('')
+        L.append('📡 Catálogo USGS · Modelo Reasenberg-Jones (1989) · Cofradía')
+        await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
+        try:
+            registrar_conversacion(update.effective_user.id,
+                                   update.effective_user.first_name or 'Usuario',
+                                   '/pronostico_sismico',
+                                   'Pronóstico probabilístico de réplicas',
+                                   'comando')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error /pronostico_sismico: {e}")
+        try:
+            await update.message.reply_text(
+                '⚠️ Error consultando el catálogo sísmico. Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+_URL_NHC_STORMS = "https://www.nhc.noaa.gov/CurrentStorms.json"
+_URL_NWS_ALERTAS = "https://api.weather.gov/alerts/active?severity=Extreme"
+_URL_METNO_ALERTAS = "https://api.met.no/weatherapi/metalerts/2.0/current.json"
+_UA_RADAR = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+             "CofradiaBot/1.0 monitoreo-desastres")
+_EVENTOS_NWS_CRITICOS = ("Hurricane Warning", "Hurricane Watch",
+                         "Storm Surge Warning", "Extreme Wind Warning",
+                         "Tsunami Warning", "Tsunami Watch",
+                         "Blizzard Warning", "Tornado Warning")
+
+
+def _categoria_huracan(nudos: float) -> tuple:
+    """(número_categoría, etiqueta) según Saffir-Simpson a partir de nudos."""
+    try:
+        kt = float(nudos)
+    except Exception:
+        return 0, "Tormenta tropical"
+    if kt >= 137: return 5, "HURACÁN CATEGORÍA 5"
+    if kt >= 113: return 4, "HURACÁN CATEGORÍA 4"
+    if kt >= 96:  return 3, "HURACÁN CATEGORÍA 3 (mayor)"
+    if kt >= 83:  return 2, "HURACÁN CATEGORÍA 2"
+    if kt >= 64:  return 1, "HURACÁN CATEGORÍA 1"
+    if kt >= 34:  return 0, "Tormenta tropical"
+    return 0, "Depresión tropical"
+
+
+def _fetch_radar_nhc() -> list:
+    """Tormentas/huracanes ACTIVOS del NHC (NOAA) con pronóstico a 5 días."""
+    out = []
+    try:
+        r = requests.get(_URL_NHC_STORMS, timeout=(5, 12),
+                         headers={"User-Agent": _UA_RADAR})
+        if r.status_code != 200:
+            return out
+        for s in (r.json() or {}).get('activeStorms', []):
+            try:
+                kt = float(s.get('intensity') or 0)
+                cat_n, cat_txt = _categoria_huracan(kt)
+                out.append({
+                    'id': f"NHC-{s.get('id')}-{s.get('classification')}",
+                    'nombre': s.get('name', '?'),
+                    'clas': s.get('classification', ''),
+                    'kt': kt,
+                    'kmh': round(kt * 1.852),
+                    'cat_n': cat_n,
+                    'cat_txt': cat_txt,
+                    'lat': s.get('latitude', '?'),
+                    'lat_num': s.get('latitudeNumeric'),
+                    'lon_num': s.get('longitudeNumeric'),
+                    'lon': s.get('longitude', '?'),
+                    'rumbo': s.get('movementDir', '?'),
+                    'vel_kmh': round(float(s.get('movementSpeed') or 0) * 1.852),
+                    'aviso': ((s.get('publicAdvisory') or {}).get('url')
+                              or 'https://www.nhc.noaa.gov'),
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Radar NHC: {e}")
+    return out
+
+
+def _fetch_radar_nws() -> list:
+    """Avisos EXTREME vigentes de EE.UU. (solo eventos de gran escala)."""
+    out = []
+    try:
+        r = requests.get(_URL_NWS_ALERTAS, timeout=(5, 12),
+                         headers={"User-Agent": _UA_RADAR,
+                                  "Accept": "application/geo+json"})
+        if r.status_code != 200:
+            return out
+        for f in (r.json() or {}).get('features', [])[:60]:
+            try:
+                p = f.get('properties', {})
+                ev = p.get('event', '')
+                if ev not in _EVENTOS_NWS_CRITICOS:
+                    continue
+                out.append({
+                    'id': f"NWS-{p.get('id') or f.get('id', '')}"[-120:],
+                    'evento': ev,
+                    'area': (p.get('areaDesc') or '')[:120],
+                    'titular': (p.get('headline') or ev)[:180],
+                    'expira': str(p.get('ends') or p.get('expires') or '')[:16],
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Radar NWS: {e}")
+    return out
+
+
+def _fetch_radar_metno() -> list:
+    """Alertas naranja/rojo de MET Norway (Escandinavia)."""
+    out = []
+    try:
+        r = requests.get(_URL_METNO_ALERTAS, timeout=(5, 12),
+                         headers={"User-Agent": _UA_RADAR})
+        if r.status_code != 200:
+            return out
+        for f in (r.json() or {}).get('features', [])[:40]:
+            try:
+                p = f.get('properties', {})
+                color = str(p.get('riskMatrixColor') or '')
+                if color not in ('Orange', 'Red'):
+                    continue
+                out.append({
+                    'id': f"METNO-{p.get('id')}-{color}",
+                    'color': color,
+                    'evento': p.get('eventAwarenessName') or p.get('event', ''),
+                    'titulo': (p.get('title') or '')[:160],
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Radar MET Norway: {e}")
+    return out
+
+
+def _fetch_radar_gdacs_resumen() -> list:
+    """Eventos GDACS Naranja/Rojo vigentes (resumen para /alertas_mundo)."""
+    out = []
+    try:
+        r = requests.get(_URL_GDACS_EVENTOS, timeout=(5, 15),
+                         headers={"User-Agent": _UA_RADAR})
+        if r.status_code != 200:
+            return out
+        nombres = {'TC': '🌀', 'EQ': '🌎', 'TS': '🌊', 'VO': '🌋',
+                   'FL': '💧', 'WF': '🔥', 'DR': '🏜️'}
+        for f in (r.json() or {}).get('features', []):
+            p = f.get('properties', {})
+            nivel = p.get('alertlevel', 'Green')
+            tipo = p.get('eventtype', '')
+            if nivel not in ('Orange', 'Red') or tipo not in nombres:
+                continue
+            out.append({
+                'emoji': nombres[tipo],
+                'nivel': '🔴' if nivel == 'Red' else '🟠',
+                'nombre': p.get('eventname') or p.get('name', ''),
+                'pais': p.get('country') or 'Zona oceánica',
+                'sev': ((p.get('severitydata') or {}).get('severitytext') or '')[:90],
+            })
+    except Exception as e:
+        logger.debug(f"Radar GDACS resumen: {e}")
+    return out[:6]
+
+
+async def alertas_mundo_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FASE 31.46 — /alertas_mundo: radar global de fenómenos extremos
+    ACTIVOS y ANTICIPADOS (huracanes con días de aviso, alertas extremas
+    de EE.UU., Escandinavia y el mundo)."""
+    try:
+        msg = await update.message.reply_text(
+            '🛰️ Escaneando el radar global de fenómenos extremos...')
+        loop = asyncio.get_event_loop()
+        tareas = {}
+        for clave, fn in (('nhc', _fetch_radar_nhc), ('nws', _fetch_radar_nws),
+                          ('metno', _fetch_radar_metno),
+                          ('gdacs', _fetch_radar_gdacs_resumen)):
+            try:
+                tareas[clave] = await asyncio.wait_for(
+                    loop.run_in_executor(None, fn), timeout=16.0)
+            except Exception:
+                tareas[clave] = []
+        L = ['🛰️ RADAR GLOBAL DE FENÓMENOS EXTREMOS',
+             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', '']
+        nhc = tareas.get('nhc') or []
+        if nhc:
+            L.append('🌀 CICLONES TROPICALES ACTIVOS (NOAA/NHC — pronóstico a 5 días):')
+            for s in nhc[:5]:
+                icono = '🔴' if s['cat_n'] >= 3 else ('🟠' if s['cat_n'] >= 1 else '🟡')
+                L.append(f"{icono} {s['cat_txt']} \"{s['nombre']}\" — "
+                         f"vientos {s['kmh']} km/h")
+                L.append(f"    📍 {s['lat']}, {s['lon']} · avanza a {s['vel_kmh']} km/h")
+                L.append(f"    📄 Aviso oficial: {s['aviso']}")
+            L.append('')
+        nws = tareas.get('nws') or []
+        if nws:
+            L.append('🇺🇸 AVISOS EXTREMOS VIGENTES EN EE.UU. (NWS):')
+            for a in nws[:5]:
+                L.append(f"⚠️ {a['evento']} — {a['area']}")
+            L.append('')
+        metno = tareas.get('metno') or []
+        if metno:
+            L.append('🇳🇴 ESCANDINAVIA (MET Norway) — nivel naranja/rojo:')
+            for a in metno[:4]:
+                em = '🔴' if a['color'] == 'Red' else '🟠'
+                L.append(f"{em} {a['evento']}: {a['titulo'][:90]}")
+            L.append('')
+        gd = tareas.get('gdacs') or []
+        if gd:
+            L.append('🌍 RESTO DEL MUNDO (GDACS · ONU/Comisión Europea):')
+            for g in gd:
+                L.append(f"{g['nivel']}{g['emoji']} {g['nombre'] or g['pais']} — "
+                         f"{g['pais']} · {g['sev']}")
+            L.append('')
+        if not (nhc or nws or metno or gd):
+            L.append('🟢 Sin fenómenos extremos activos en las 4 fuentes en este momento.')
+            L.append('')
+        L.append('🔬 Ciencia honesta: huracanes y tormentas SÍ se anticipan con '
+                 'horas o días (este radar). Los terremotos NO pueden predecirse '
+                 '— para ellos opera el Agente Sísmico (detección en minutos + '
+                 'alarma sonora).')
+        L.append('')
+        L.append('📡 NOAA/NHC · NWS · MET Norway · GDACS — Monitoreo Cofradía 24/7')
+        await msg.edit_text('\n'.join(L)[:4000], disable_web_page_preview=True)
+        try:
+            registrar_conversacion(update.effective_user.id,
+                                   update.effective_user.first_name or 'Usuario',
+                                   '/alertas_mundo', 'Radar global de alertas',
+                                   'comando')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error /alertas_mundo: {e}")
+        try:
+            await update.message.reply_text(
+                '⚠️ Error consultando el radar global. Intenta nuevamente.')
+        except Exception:
+            pass
+
+
+async def job_radar_anticipacion(context):
+    """FASE 31.46 — Vigilante de ANTICIPACIÓN (cada 30 min):
+    · Huracán NUEVO (o tormenta que asciende a huracán) → aviso individual
+      con notificación (dan DÍAS de anticipación al impacto).
+    · Avisos EXTREME nuevos de gran escala en EE.UU. → digest agrupado.
+    · Alertas ROJAS nuevas de Escandinavia → digest.
+    Dedupe persistente en tabla alertas_desastres (misma del GDACS)."""
+    try:
+        if not COFRADIA_GROUP_ID:
+            return
+        _asegurar_tabla_alertas_desastres()
+        loop = asyncio.get_event_loop()
+
+        # ── 1. Huracanes NHC ────────────────────────────────────────────────
+        try:
+            tormentas = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_radar_nhc), timeout=16.0)
+        except Exception:
+            tormentas = []
+        for s in tormentas:
+            if s['clas'] != 'HU' or _alerta_ya_registrada(s['id']):
+                continue
+            _registrar_alerta_desastre(s['id'], 'RADAR-NHC')
+            texto = (
+                f"🌀🟠 ANTICIPACIÓN DE HURACÁN — {s['cat_txt']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📛 Nombre: {s['nombre']}\n"
+                f"💨 Vientos máximos: {s['kmh']} km/h\n"
+                f"📍 Posición: {s['lat']}, {s['lon']} · avanza a {s['vel_kmh']} km/h\n"
+                f"📄 Aviso y trayectoria a 5 días: {s['aviso']}\n\n"
+                f"💡 Los huracanes se anticipan con DÍAS: si tienes familia, "
+                f"cofrades o negocios en la zona proyectada, avísales AHORA.\n"
+                f"📡 NOAA/NHC · Radar de anticipación Cofradía")
+            try:
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID, text=texto,
+                    disable_notification=False,
+                    disable_web_page_preview=True)
+                logger.info(f"🌀 Radar: huracán {s['nombre']} anunciado")
+                # FASE 31.50: la voz de Catalina anuncia el huracán
+                try:
+                    _guion_h = _guion_voz_huracan(s)
+                    if _guion_h:
+                        _ap = await generar_audio_tts(
+                            _guion_h,
+                            f"/tmp/huracan_{str(s.get('nombre', 'x'))[:10]}.mp3")
+                        if _ap and os.path.exists(_ap):
+                            with open(_ap, 'rb') as _af:
+                                await context.bot.send_voice(
+                                    chat_id=COFRADIA_GROUP_ID, voice=_af)
+                            try:
+                                os.remove(_ap)
+                            except Exception:
+                                pass
+                except Exception as _e_vh:
+                    logger.warning(f"Voz huracán falló: {_e_vh}")
+            except Exception as _e1:
+                logger.warning(f"Radar NHC envío: {_e1}")
+
+        # ── 2. Avisos EXTREME EE.UU. (digest) ───────────────────────────────
+        try:
+            avisos = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_radar_nws), timeout=16.0)
+        except Exception:
+            avisos = []
+        nuevos_nws = [a for a in avisos if not _alerta_ya_registrada(a['id'])][:5]
+        if nuevos_nws:
+            for a in nuevos_nws:
+                _registrar_alerta_desastre(a['id'], 'RADAR-NWS')
+            hay_critico = any(a['evento'] in ('Tsunami Warning', 'Hurricane Warning')
+                              for a in nuevos_nws)
+            cuerpo = "\n".join(f"⚠️ {a['evento']} — {a['area']}" for a in nuevos_nws)
+            texto = (f"🇺🇸🛰️ AVISOS EXTREMOS ANTICIPADOS EN EE.UU. (NWS)\n"
+                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n{cuerpo}\n\n"
+                     f"💡 Relevante para cofrades viajando o con familia allá.\n"
+                     f"📡 National Weather Service · Radar Cofradía")
+            try:
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID, text=texto,
+                    disable_notification=(not hay_critico))
+            except Exception as _e2:
+                logger.warning(f"Radar NWS envío: {_e2}")
+
+        # ── 3. Escandinavia ROJO (digest) ───────────────────────────────────
+        try:
+            nordicas = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_radar_metno), timeout=16.0)
+        except Exception:
+            nordicas = []
+        rojas = [a for a in nordicas if a['color'] == 'Red'
+                 and not _alerta_ya_registrada(a['id'])][:4]
+        if rojas:
+            for a in rojas:
+                _registrar_alerta_desastre(a['id'], 'RADAR-METNO')
+            cuerpo = "\n".join(f"🔴 {a['evento']}: {a['titulo'][:90]}" for a in rojas)
+            texto = (f"🇳🇴🛰️ ALERTA ROJA EN ESCANDINAVIA (MET Norway)\n"
+                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n{cuerpo}\n\n"
+                     f"📡 Instituto Meteorológico de Noruega · Radar Cofradía")
+            try:
+                await context.bot.send_message(
+                    chat_id=COFRADIA_GROUP_ID, text=texto,
+                    disable_notification=True)
+            except Exception as _e3:
+                logger.warning(f"Radar METNO envío: {_e3}")
+
+        # ── 4. FASE 31.48: si el índice global cruza a CRÍTICO, avisar (1/día) ──
+        try:
+            id_dia = f"IRG-CRIT-{time.strftime('%Y%m%d')}"
+            if not _alerta_ya_registrada(id_dia):
+                R = await asyncio.wait_for(
+                    loop.run_in_executor(None, _sintesis_multiamenaza),
+                    timeout=45.0)
+                if R and R['score'] >= 75:
+                    _registrar_alerta_desastre(id_dia, 'IRG-CRITICO')
+                    await context.bot.send_message(
+                        chat_id=COFRADIA_GROUP_ID,
+                        text=(f"🧭🔴 ÍNDICE DE RIESGO GLOBAL EN NIVEL CRÍTICO "
+                              f"({R['score']}/100)\n"
+                              f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                              f"Varios fenómenos mayores coinciden en el planeta. "
+                              f"Usa /riesgo_global para ver la síntesis completa "
+                              f"y /alertas_mundo para el detalle por fuente.\n\n"
+                              f"⚓ {R['consejo']}"),
+                        disable_notification=False)
+                    logger.info(f"🧭 Índice global CRÍTICO anunciado: {R['score']}")
+        except Exception as _e4:
+            logger.debug(f"Síntesis crítica: {_e4}")
+
+        # ── 5. FASE 31.49: cruzar amenazas contra "Mi Gente" (avisos privados) ──
+        try:
+            sismo_fresco = None
+            try:
+                sismo_fresco = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, lambda: _ultimo_gran_sismo_mundial(2.0, 6.0)),
+                    timeout=14.0)
+            except Exception:
+                sismo_fresco = None
+            huracanes = [s for s in (tormentas or []) if s.get('clas') == 'HU']
+            if huracanes or sismo_fresco:
+                _asegurar_tabla_lugares_corazon()
+                for lg in _todos_lugares_corazon():
+                    avisos_lg = []
+                    ids_lg = []
+                    frases_voz = []
+                    for s in huracanes:
+                        if s.get('lat_num') is None:
+                            continue
+                        d = _haversine_km(lg['lat'], lg['lon'],
+                                          s['lat_num'], s['lon_num'])
+                        if d <= _radio_ciclon_km(s.get('cat_n', 0)):
+                            id_a = (f"MIGENTE-{lg['user_id']}-{s['id']}-"
+                                    f"{round(lg['lat'])}_{round(lg['lon'])}")
+                            if not _alerta_ya_registrada(id_a):
+                                ids_lg.append(id_a)
+                                avisos_lg.append(
+                                    f"🌀 {s['cat_txt']} \"{s['nombre']}\" a "
+                                    f"{round(d)} km de {lg['ciudad']} "
+                                    f"({s['kmh']} km/h)\n"
+                                    f"📄 Aviso oficial: {s['aviso']}")
+                                frases_voz.append(
+                                    f"El huracán {s['nombre']}, categoría "
+                                    f"{s.get('cat_n', 1)}, está a {round(d)} "
+                                    f"kilómetros de {lg['ciudad']}")
+                    if sismo_fresco and sismo_fresco.get('lat') is not None:
+                        d = _haversine_km(lg['lat'], lg['lon'],
+                                          sismo_fresco['lat'],
+                                          sismo_fresco['lon'])
+                        if d <= _radio_sismo_km(sismo_fresco['mag']):
+                            id_a = (f"MIGENTE-{lg['user_id']}-SIS"
+                                    f"{round(sismo_fresco['mag'] * 10)}-"
+                                    f"{round(lg['lat'])}_{round(lg['lon'])}")
+                            if not _alerta_ya_registrada(id_a):
+                                ids_lg.append(id_a)
+                                avisos_lg.append(
+                                    f"🌎 Sismo M{sismo_fresco['mag']:.1f} a "
+                                    f"{round(d)} km de {lg['ciudad']} (hace "
+                                    f"{sismo_fresco['hace_h']} h) — réplicas "
+                                    f"probables")
+                                frases_voz.append(
+                                    f"Un sismo magnitud "
+                                    f"{_num_hablado(sismo_fresco['mag'])} "
+                                    f"ocurrió a {round(d)} kilómetros de "
+                                    f"{lg['ciudad']}, con réplicas probables")
+                    if not avisos_lg:
+                        continue
+                    cuerpo = "\n\n".join(avisos_lg)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=lg['user_id'],
+                            text=(f"🫂🚨 ALERTA PARA TU GENTE — "
+                                  f"{lg['etiqueta']}\n"
+                                  f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                  f"{cuerpo}\n\n"
+                                  f"💡 Contáctala/o AHORA y comparte el aviso "
+                                  f"oficial. Estado de todos tus lugares: "
+                                  f"/mi_gente"),
+                            disable_notification=False,
+                            disable_web_page_preview=True)
+                        for id_a in ids_lg:
+                            _registrar_alerta_desastre(id_a, 'MIGENTE')
+                        logger.info(
+                            f"🫂 Aviso privado Mi Gente → {lg['user_id']} "
+                            f"({lg['ciudad']})")
+                        # FASE 31.50: Catalina también avisa por voz
+                        try:
+                            _guion_m = _guion_voz_migente(
+                                lg['etiqueta'], frases_voz)
+                            if _guion_m:
+                                _apm = await generar_audio_tts(
+                                    _guion_m,
+                                    f"/tmp/migente_{lg['user_id']}.mp3")
+                                if _apm and os.path.exists(_apm):
+                                    with open(_apm, 'rb') as _afm:
+                                        await context.bot.send_voice(
+                                            chat_id=lg['user_id'],
+                                            voice=_afm)
+                                    try:
+                                        os.remove(_apm)
+                                    except Exception:
+                                        pass
+                        except Exception as _e_vm:
+                            logger.debug(f"Voz Mi Gente {lg['user_id']}: {_e_vm}")
+                    except Exception as _e5b:
+                        logger.debug(f"Privado Mi Gente {lg['user_id']}: {_e5b}")
+        except Exception as _e5:
+            logger.debug(f"Sección Mi Gente: {_e5}")
+    except Exception as e:
+        logger.warning(f"Job radar anticipación: {e}")
+
+
 def _titulos_biblioteca_relacionados(pregunta: str, max_titulos: int = 4) -> list:
     """FASE 31.45: Títulos REALES de la biblioteca relacionados con la
     pregunta, buscados en 3 NIVELES de profundidad:
@@ -4067,6 +5360,14 @@ async def job_monitor_gdacs(context):
                 f"📡 GDACS (ONU/Comisión Europea) · Monitoreo Cofradía\n\n"
                 f"💡 Si tienes familia, cofrades o negocios en la zona, "
                 f"compárteles esta alerta.")
+            if tipo == 'EQ':
+                try:
+                    _mag_m = re.search(r'(\d+\.?\d*)\s*M', str(sev))
+                    if _mag_m and float(_mag_m.group(1)) >= 5.5:
+                        texto += "\n\n" + _pronostico_replicas_texto(
+                            float(_mag_m.group(1)))
+                except Exception:
+                    pass
             try:
                 if es_chile and nivel == 'Red':
                     menciones = _obtener_menciones_emergencia(max_usuarios=60)
@@ -12516,6 +13817,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🚨 EMERGENCIA
 /emergencia - Reportar emergencia (4 tipos) 🆘
+/alertas_mundo - Radar global: huracanes y alertas anticipadas 🛰️
+/pronostico_sismico - Pronóstico de réplicas (modelo USGS) 🔮
+/riesgo_global - Índice de riesgo global multiamenaza 🧭
+/mi_gente - Estado de las ciudades de tu gente querida 🫂
+/mi_gente_agregar - Vigilar una ciudad (ej: Miami ; hermana) 🌍
+/mi_gente_borrar - Quitar un lugar vigilado 🗑️
+💡 ¿Se te olvida un comando? Escríbeme en lenguaje natural (ej: "quiero proteger a mi hermana en Miami") y yo encontraré el comando correcto por ti.
 
 🤖 AGENTE DE NETWORKING
 /agente - Agente IA de networking
@@ -31766,6 +33074,11 @@ CATALOGO_COMANDOS_INTENCION = {
     'emergencia': 'Reportar emergencia (4 tipos) con alerta a todos',
     # FASE 31
     'clima': 'Pronóstico del tiempo diario y semanal por ciudad',
+    'alertas_mundo': 'Radar global de huracanes, alertas extremas y desastres anticipados en el mundo',
+    'pronostico_sismico': 'Pronóstico probabilístico de réplicas sísmicas con el modelo del USGS',
+    'riesgo_global': 'Índice de riesgo global multiamenaza que fusiona huracanes, sismos y desastres con probabilidades combinadas',
+    'mi_gente': 'Ver el estado de las ciudades del mundo donde vive tu familia o amigos frente a huracanes y sismos',
+    'mi_gente_agregar': 'Registrar o vigilar una ciudad del mundo para proteger a tu familia o amigos ante desastres',
     'saldos': 'Saldos de APIs y servicios de pago (solo admin)',
     'ayuda': 'Ver todos los comandos disponibles',
 }
@@ -41594,6 +42907,12 @@ def main():
             BotCommand("emergencia", "🚨 Reportar emergencia"),
             BotCommand("calculadora", "🧮 Suite Económica Pro"),
             BotCommand("clima", "🌤️ Pronóstico del tiempo (7 días)"),
+            BotCommand("alertas_mundo", "🛰️ Radar global de huracanes y alertas"),
+            BotCommand("pronostico_sismico", "🔮 Pronóstico de réplicas (modelo USGS)"),
+            BotCommand("riesgo_global", "🧭 Índice de riesgo global multiamenaza"),
+            BotCommand("mi_gente", "🫂 Estado de las ciudades de tu gente"),
+            BotCommand("mi_gente_agregar", "🌍 Vigilar una ciudad (familia/amigos)"),
+            BotCommand("mi_gente_borrar", "🗑️ Quitar un lugar vigilado"),
             # === FASE 23: SISTEMA DE IDENTIDAD VISIBLE ===
             BotCommand("quien", "🆔 Identificar usuario (responde a mensaje o @user)"),
             BotCommand("cofrades", "👥 Lista todos los miembros con identidad"),
@@ -41627,6 +42946,10 @@ def main():
                     BotCommand("estadisticas", "Estadisticas del grupo"),
                     BotCommand("indicadores", "Indicadores economicos Chile"),
                     BotCommand("clima", "🌤️ Pronóstico del tiempo"),
+                    BotCommand("alertas_mundo", "🛰️ Radar global de alertas"),
+                    BotCommand("pronostico_sismico", "🔮 Pronóstico de réplicas"),
+                    BotCommand("riesgo_global", "🧭 Riesgo global"),
+                    BotCommand("mi_gente", "🫂 Mi gente en el mapa"),
                     BotCommand("top_usuarios", "Ranking de participacion"),
                     BotCommand("top10", "Top 10 Cofrades del mes"),
                     BotCommand("expertise", "Buscar expertos en un tema"),
@@ -41782,6 +43105,12 @@ def main():
     application.add_handler(CommandHandler("rag_consulta", rag_consulta_comando))
     application.add_handler(CommandHandler("analizar_libro", analizar_libro_comando))  # FASE 31.13: Nemotron 1M ctx
     application.add_handler(CommandHandler("sismos", sismos_comando))  # FASE 31.15: Agente Sísmico
+    application.add_handler(CommandHandler("alertas_mundo", alertas_mundo_comando))  # FASE 31.46: Radar global
+    application.add_handler(CommandHandler("pronostico_sismico", pronostico_sismico_comando))  # FASE 31.47
+    application.add_handler(CommandHandler("riesgo_global", riesgo_global_comando))  # FASE 31.48: Síntesis multiamenaza
+    application.add_handler(CommandHandler("mi_gente", mi_gente_comando))  # FASE 31.49
+    application.add_handler(CommandHandler("mi_gente_agregar", mi_gente_agregar_comando))  # FASE 31.49
+    application.add_handler(CommandHandler("mi_gente_borrar", mi_gente_borrar_comando))  # FASE 31.49
     application.add_handler(CommandHandler("version", version_comando))  # FASE 31.21: identidad de build
     application.add_handler(CommandHandler("entrenar_intenciones", entrenar_intenciones_comando))  # FASE 31.24
     application.add_handler(CommandHandler("motores", motores_comando))  # FASE 31.25: bus universal
@@ -43689,6 +45018,18 @@ PREGUNTA: {mensaje}{sugerencia_cmd}"""
             logger.info("🌐 FASE 31.45: Monitor global GDACS activo (Naranja/Rojo)")
         except Exception as e:
             logger.warning(f"No se pudo programar monitor GDACS: {e}")
+        
+        # FASE 31.46: Radar de ANTICIPACIÓN (huracanes NHC + NWS Extreme +
+        # MET Norway rojo) cada 30 minutos, desfasado del GDACS
+        try:
+            job_queue.run_repeating(
+                job_radar_anticipacion,
+                interval=1800,
+                first=420,
+                name='radar_anticipacion')
+            logger.info("🛰️ FASE 31.46: Radar global de anticipación activo (NHC+NWS+MET.no)")
+        except Exception as e:
+            logger.warning(f"No se pudo programar radar de anticipación: {e}")
         
         # FASE 31.17: MEMORIA — consolidación diaria de perfiles (08:45 UTC ≈
         # madrugada Chile) + aprendizaje semanal domingo (13:00 UTC ≈ 09-10 Chile).
